@@ -7,7 +7,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.32,<1",
     "pydantic-settings>=2.6,<3",
-    "python-multipart>=0.0.12",
+    "python-multipart>=0.0.12,<1",
     "pillow>=11,<12",
     "pillow-heif>=0.18,<1",
 ]

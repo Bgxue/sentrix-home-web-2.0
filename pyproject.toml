@@ -1,6 +1,7 @@
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+extend-exclude = ["docs/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -15,7 +16,7 @@ testpaths = ["apps/api/tests"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["apps/api/src/sentrix/domain", "apps/api/src/sentrix/application"]
+source = ["sentrix.domain", "sentrix.application"]
 
 [tool.coverage.report]
 fail_under = 85
