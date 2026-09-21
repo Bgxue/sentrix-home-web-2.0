@@ -9,6 +9,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.isort]
 known-first-party = ["sentrix"]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Body", "fastapi.Header", "fastapi.Path"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
