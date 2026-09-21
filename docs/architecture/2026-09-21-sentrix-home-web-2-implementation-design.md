@@ -218,7 +218,7 @@ sentrix.main    → 进程入口，只向下调用；与 api / application / dom
 契约共五条：`domain-purity`、`application-purity`、`api-transport-only`、
 `infrastructure-purity`、`layers`（实际内容以 `pyproject.toml` 的 `[tool.importlinter]` 为准）。
 
-例外通过 `ignore_imports` 声明，**每条必须带注释说明理由**，且 CI 打印例外条数作为腐化信号灯。
+例外通过 `ignore_imports` 声明，**每条必须带注释说明理由**。**注意：当前没有任何检查会统计例外条数**——`import-linter` 不提供该输出（本次修订前此处写的是「CI 打印例外条数作为腐化信号灯」，那是空头承诺）。若将来例外增多、需要把架构腐化变成可观测信号，应先实现统计，再写进文档。
 
 ### 2.4 相对原计划映射表的 8 处修正
 
