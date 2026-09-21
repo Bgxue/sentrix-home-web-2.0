@@ -155,6 +155,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.isort]
 known-first-party = ["sentrix"]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Body", "fastapi.Header", "fastapi.Path"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -879,12 +882,13 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+CAPABILITY_MAP = REPO_ROOT / "docs" / "refactor" / "capability-map.jsonl"
 
 
 def test_capability_map_entries_are_well_formed():
     lines = [
         json.loads(line)
-        for line in (REPO_ROOT / "docs/refactor/capability-map.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in CAPABILITY_MAP.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 
@@ -898,7 +902,7 @@ def test_capability_map_entries_are_well_formed():
 def test_frozen_capabilities_are_documented():
     frozen = [
         json.loads(line)
-        for line in (REPO_ROOT / "docs/refactor/capability-map.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in CAPABILITY_MAP.read_text(encoding="utf-8").splitlines()
         if line.strip() and json.loads(line)["origin_kind"] == "frozen"
     ]
     frozen_doc = (REPO_ROOT / "docs/refactor/frozen.md").read_text(encoding="utf-8")
@@ -1657,6 +1661,7 @@ git commit -m "docs(runbooks): record 153 service inventory after systemd takeov
 `apps/api/tests/unit/test_media_models.py`:
 
 ```python
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
@@ -1695,7 +1700,7 @@ def test_asset_is_immutable():
         created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         asset.status = AssetStatus.PROCESSED  # type: ignore[misc]
 ```
 
