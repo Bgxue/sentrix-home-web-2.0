@@ -1469,6 +1469,16 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+HEADER = "| 路径 | 职责 | 层 | 依赖谁 | 被谁依赖 |\n|---|---|---|---|---|\n"
+
+
+def run_checker(src_root: Path, doc: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(src_root), "--doc", str(doc)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_module_map_matches_real_imports():
@@ -1483,21 +1493,18 @@ def test_module_map_matches_real_imports():
 
 
 def test_checker_flags_undocumented_module(tmp_path):
-    fake_src = tmp_path / "src" / "sentrix"
-    fake_src.mkdir(parents=True)
-    (fake_src / "orphan.py").write_text("x = 1\n")
+    """--src 是 src/ 根目录，表格路径也相对它——断言钉住完整路径，别只钉文件名。"""
+    src_root = tmp_path / "src"
+    package = src_root / "sentrix"
+    package.mkdir(parents=True)
+    (package / "orphan.py").write_text("x = 1\n")
     doc = tmp_path / "module-map.md"
-    doc.write_text("| 路径 | 职责 | 层 |\n|---|---|---|\n", encoding="utf-8")
+    doc.write_text(HEADER, encoding="utf-8")
 
-    result = subprocess.run(
-        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(fake_src.parent), "--doc", str(doc)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
+    result = run_checker(src_root, doc)
 
     assert result.returncode == 1
-    assert "orphan.py" in result.stdout
+    assert "代码里有但 module-map 未记录: sentrix/orphan.py" in result.stdout
 
 
 def test_checker_flags_wrong_dependency_columns(tmp_path):
@@ -1506,28 +1513,22 @@ def test_checker_flags_wrong_dependency_columns(tmp_path):
     没有这一条，上面那条只证明了「文件集合」是真的在查，「依赖谁 / 被谁依赖」两列
     仍可能是恒真的摆设——而那正是本脚本存在的理由之一。
     """
-    src = tmp_path / "src"
-    package = src / "sentrix"
+    src_root = tmp_path / "src"
+    package = src_root / "sentrix"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "config.py").write_text('"""Config."""\n', encoding="utf-8")
     (package / "main.py").write_text("from sentrix.config import Settings\n", encoding="utf-8")
     doc = tmp_path / "module-map.md"
     doc.write_text(
-        "| 路径 | 职责 | 层 | 依赖谁 | 被谁依赖 |\n"
-        "|---|---|---|---|---|\n"
-        "| `sentrix/__init__.py` | 包标记 | — | — | — |\n"
-        "| `sentrix/config.py` | 配置 | — | — | — |\n"
-        "| `sentrix/main.py` | 入口 | — | — | — |\n",
+        HEADER
+        + "| `sentrix/__init__.py` | 包标记 | — | — | — |\n"
+        + "| `sentrix/config.py` | 配置 | — | — | — |\n"
+        + "| `sentrix/main.py` | 入口 | — | — | — |\n",
         encoding="utf-8",
     )
 
-    result = subprocess.run(
-        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(package), "--doc", str(doc)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
+    result = run_checker(src_root, doc)
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "sentrix/main.py: 「依赖谁」缺少 sentrix/config.py" in result.stdout
@@ -1539,23 +1540,14 @@ def test_checker_flags_row_with_missing_dependency_columns(tmp_path):
 
     跳过等于给依赖校验留后门：那行写什么都不会红，而文档又照样接受它。
     """
-    src = tmp_path / "src" / "sentrix"
-    src.mkdir(parents=True)
-    (src / "config.py").write_text('"""Config."""\n', encoding="utf-8")
+    src_root = tmp_path / "src"
+    package = src_root / "sentrix"
+    package.mkdir(parents=True)
+    (package / "config.py").write_text('"""Config."""\n', encoding="utf-8")
     doc = tmp_path / "module-map.md"
-    doc.write_text(
-        "| 路径 | 职责 | 层 | 依赖谁 | 被谁依赖 |\n"
-        "|---|---|---|---|---|\n"
-        "| `sentrix/config.py` | 配置 | — |\n",
-        encoding="utf-8",
-    )
+    doc.write_text(HEADER + "| `sentrix/config.py` | 配置 | — |\n", encoding="utf-8")
 
-    result = subprocess.run(
-        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(src), "--doc", str(doc)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
+    result = run_checker(src_root, doc)
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "sentrix/config.py: 行有 3 列，与表头的 5 列不一致" in result.stdout
@@ -1583,6 +1575,10 @@ Expected: FAIL — 脚本不存在
 （fastapi / sqlite3 / PIL 等）不进这两列。
 
 列数不足的行会被报错而不是跳过：跳过等于给依赖校验开后门——那行写什么都不会红。
+
+路径基准只有一份：``--src`` 传 **`src/` 根目录**（如 ``apps/api/src``），表格里写的也正是
+相对它的路径（如 ``sentrix/config.py``）。以前 ``--src`` 传的是包目录而输出相对其父目录，
+同一件事两个基准，调用方很容易传错而看不出来。
 """
 
 from __future__ import annotations
@@ -1594,7 +1590,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src" / "sentrix"
+DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
 DEFAULT_DOC = REPO_ROOT / "docs" / "architecture" / "module-map.md"
 EMPTY_CELL = "—"
 MIN_COLUMNS = 5  # 路径 / 职责 / 层 / 依赖谁 / 被谁依赖
@@ -1604,12 +1600,13 @@ CELL_PATH_RE = re.compile(r"`([^`]+)`")
 
 
 def relative(path: Path, src: Path) -> str:
-    return str(path.relative_to(src.parent)).replace("\\", "/")
+    """表格里写的路径形态：相对 ``src/`` 根目录，如 ``sentrix/config.py``。"""
+    return str(path.relative_to(src)).replace("\\", "/")
 
 
 def module_name(path: Path, src: Path) -> str:
     """文件路径 -> 绝对模块名；``__init__.py`` 归到包本身。"""
-    parts = list(path.relative_to(src.parent).with_suffix("").parts)
+    parts = list(path.relative_to(src).with_suffix("").parts)
     if parts[-1] == "__init__":
         parts.pop()
     return ".".join(parts)
@@ -1728,9 +1725,17 @@ def compare(path: str, column: str, real: set[str], documented: set[str], proble
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--src", default=str(DEFAULT_SRC))
-    parser.add_argument("--doc", default=str(DEFAULT_DOC))
+    parser = argparse.ArgumentParser(description="校验 module-map.md 与真实代码一致")
+    parser.add_argument(
+        "--src",
+        default=str(DEFAULT_SRC),
+        help="src/ 根目录（默认 apps/api/src）。表格里的路径相对它书写，如 sentrix/config.py",
+    )
+    parser.add_argument(
+        "--doc",
+        default=str(DEFAULT_DOC),
+        help="module-map.md 路径（默认 docs/architecture/module-map.md）",
+    )
     args = parser.parse_args()
 
     src = Path(args.src)

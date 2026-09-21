@@ -10,6 +10,10 @@
 （fastapi / sqlite3 / PIL 等）不进这两列。
 
 列数不足的行会被报错而不是跳过：跳过等于给依赖校验开后门——那行写什么都不会红。
+
+路径基准只有一份：``--src`` 传 **`src/` 根目录**（如 ``apps/api/src``），表格里写的也正是
+相对它的路径（如 ``sentrix/config.py``）。以前 ``--src`` 传的是包目录而输出相对其父目录，
+同一件事两个基准，调用方很容易传错而看不出来。
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src" / "sentrix"
+DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
 DEFAULT_DOC = REPO_ROOT / "docs" / "architecture" / "module-map.md"
 EMPTY_CELL = "—"
 MIN_COLUMNS = 5  # 路径 / 职责 / 层 / 依赖谁 / 被谁依赖
@@ -31,12 +35,13 @@ CELL_PATH_RE = re.compile(r"`([^`]+)`")
 
 
 def relative(path: Path, src: Path) -> str:
-    return str(path.relative_to(src.parent)).replace("\\", "/")
+    """表格里写的路径形态：相对 ``src/`` 根目录，如 ``sentrix/config.py``。"""
+    return str(path.relative_to(src)).replace("\\", "/")
 
 
 def module_name(path: Path, src: Path) -> str:
     """文件路径 -> 绝对模块名；``__init__.py`` 归到包本身。"""
-    parts = list(path.relative_to(src.parent).with_suffix("").parts)
+    parts = list(path.relative_to(src).with_suffix("").parts)
     if parts[-1] == "__init__":
         parts.pop()
     return ".".join(parts)
@@ -155,9 +160,17 @@ def compare(path: str, column: str, real: set[str], documented: set[str], proble
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--src", default=str(DEFAULT_SRC))
-    parser.add_argument("--doc", default=str(DEFAULT_DOC))
+    parser = argparse.ArgumentParser(description="校验 module-map.md 与真实代码一致")
+    parser.add_argument(
+        "--src",
+        default=str(DEFAULT_SRC),
+        help="src/ 根目录（默认 apps/api/src）。表格里的路径相对它书写，如 sentrix/config.py",
+    )
+    parser.add_argument(
+        "--doc",
+        default=str(DEFAULT_DOC),
+        help="module-map.md 路径（默认 docs/architecture/module-map.md）",
+    )
     args = parser.parse_args()
 
     src = Path(args.src)
