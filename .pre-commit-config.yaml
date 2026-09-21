@@ -1,0 +1,18 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: .venv/bin/ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: .venv/bin/ruff format
+        language: system
+        types: [python]
+      - id: doc-checks
+        name: capability-map + module-map
+        entry: bash -c '.venv/bin/python scripts/check_capability_map.py && .venv/bin/python scripts/check_module_map.py'
+        language: system
+        pass_filenames: false

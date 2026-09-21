@@ -1,0 +1,16 @@
+# 默认
+*                       @asus
+
+# 按模块划分（设计 §6.6）
+apps/api/src/sentrix/domain/media/         @asus
+apps/api/src/sentrix/domain/identities/    @asus
+apps/api/src/sentrix/domain/retrieval/     @asus
+apps/api/src/sentrix/domain/assistant/     @asus
+apps/api/src/sentrix/domain/family/        @asus
+apps/api/src/sentrix/domain/places/        @asus
+apps/api/src/sentrix/infrastructure/       @asus
+apps/api/src/sentrix/api/                  @asus
+apps/web/                                  @asus
+apps/photobench/                           @asus
+docs/adr/                                  @asus
+docs/refactor/capability-map.jsonl         @asus
