@@ -2490,7 +2490,7 @@ def jpeg_without_exif(tmp_path):
 
 
 def test_missing_exif_returns_empty(tmp_path, jpeg_without_exif):
-    captured_at, gps = PillowMetadataReader().read(jpeg_without_exif)
+    captured_at, gps, _ = PillowMetadataReader().read(jpeg_without_exif)
 
     assert captured_at is None
     assert gps is None
@@ -2507,7 +2507,7 @@ def test_gps_degrees_minutes_seconds_are_converted(tmp_path):
     }
     image.save(path, format="JPEG", exif=exif)
 
-    captured_at, gps = PillowMetadataReader().read(path)
+    captured_at, gps, _ = PillowMetadataReader().read(path)
 
     assert gps is not None
     assert gps.latitude == pytest.approx(18.7883, abs=1e-4)
@@ -2521,7 +2521,7 @@ def test_southern_and_western_hemispheres_are_negated(tmp_path):
     exif[34853] = {1: "S", 2: ((33, 1), (52, 1), (0, 1)), 3: "W", 4: ((151, 1), (12, 1), (0, 1))}
     image.save(path, format="JPEG", exif=exif)
 
-    _, gps = PillowMetadataReader().read(path)
+    _, gps, _ = PillowMetadataReader().read(path)
 
     assert gps.latitude == pytest.approx(-33.8667, abs=1e-3)
     assert gps.longitude == pytest.approx(-151.2, abs=1e-3)
@@ -2534,7 +2534,7 @@ def test_datetime_original_is_normalised_to_iso(tmp_path):
     exif[36867] = "2018:04:01 21:05:47"  # DateTimeOriginal
     image.save(path, format="JPEG", exif=exif)
 
-    captured_at, _ = PillowMetadataReader().read(path)
+    captured_at, _, _ = PillowMetadataReader().read(path)
 
     assert captured_at == datetime(2018, 4, 1, 21, 5, 47)
 
@@ -2543,7 +2543,7 @@ def test_corrupt_file_degrades_to_empty(tmp_path):
     path = tmp_path / "broken.jpg"
     path.write_bytes(b"not an image at all")
 
-    captured_at, gps = PillowMetadataReader().read(path)
+    captured_at, gps, _ = PillowMetadataReader().read(path)
 
     assert captured_at is None
     assert gps is None
