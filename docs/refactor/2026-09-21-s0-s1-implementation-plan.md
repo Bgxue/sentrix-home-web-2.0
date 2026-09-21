@@ -805,7 +805,9 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 def test_import_linter_contracts_are_declared():
     result = subprocess.run(
         [".venv/bin/lint-imports", "--contract", "domain-purity"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
 
     # lint-imports 把诊断写 stdout 而非 stderr，所以必须正面确认契约真的被找到了：
@@ -935,9 +937,7 @@ CAPABILITY_MAP = REPO_ROOT / "docs" / "refactor" / "capability-map.jsonl"
 
 def test_capability_map_entries_are_well_formed():
     lines = [
-        json.loads(line)
-        for line in CAPABILITY_MAP.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in CAPABILITY_MAP.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
     assert lines, "capability-map 不能为空"
@@ -962,22 +962,27 @@ def test_frozen_capabilities_are_documented():
 def test_checker_rejects_entry_with_missing_verification_file(tmp_path):
     bad = tmp_path / "capability-map.jsonl"
     bad.write_text(
-        json.dumps({
-            "capability": "不存在的验证",
-            "origin_kind": "migrated",
-            "source_commit": "2d2cee7c",
-            "source_path": "backend/app.py",
-            "source_symbol": "health",
-            "target_path": "apps/api/src/sentrix/api/routes/health.py",
-            "verification": "tests/contract/does_not_exist.py",
-            "status": "verified",
-        }) + "\n",
+        json.dumps(
+            {
+                "capability": "不存在的验证",
+                "origin_kind": "migrated",
+                "source_commit": "2d2cee7c",
+                "source_path": "backend/app.py",
+                "source_symbol": "health",
+                "target_path": "apps/api/src/sentrix/api/routes/health.py",
+                "verification": "tests/contract/does_not_exist.py",
+                "status": "verified",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
     result = subprocess.run(
         [".venv/bin/python", "scripts/check_capability_map.py", "--map", str(bad)],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
 
     assert result.returncode == 1
@@ -992,7 +997,9 @@ def test_real_capability_map_has_no_problems():
     """
     result = subprocess.run(
         [".venv/bin/python", "scripts/check_capability_map.py"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
 
     assert result.returncode == 0, result.stdout
@@ -1262,7 +1269,9 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 def test_module_map_matches_real_imports():
     result = subprocess.run(
         [".venv/bin/python", "scripts/check_module_map.py"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1276,10 +1285,10 @@ def test_checker_flags_undocumented_module(tmp_path):
     doc.write_text("| 路径 | 职责 | 层 |\n|---|---|---|\n", encoding="utf-8")
 
     result = subprocess.run(
-        [".venv/bin/python", "scripts/check_module_map.py",
-         "--src", str(fake_src.parent),
-         "--doc", str(doc)],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(fake_src.parent), "--doc", str(doc)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
 
     assert result.returncode == 1
@@ -1731,11 +1740,19 @@ from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType
 def test_asset_requires_known_media_type():
     with pytest.raises(ValueError, match="media_type"):
         Asset(
-            id="asset_1", scope_id="home-default", file_name="a.bin",
-            media_type="application", path="/tmp/a.bin", mime_type=None,
-            size_bytes=1, status=AssetStatus.QUEUED, content_sha256="x",
-            captured_at=None, captured_location=None,
-            created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+            id="asset_1",
+            scope_id="home-default",
+            file_name="a.bin",
+            media_type="application",
+            path="/tmp/a.bin",
+            mime_type=None,
+            size_bytes=1,
+            status=AssetStatus.QUEUED,
+            content_sha256="x",
+            captured_at=None,
+            captured_location=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
         )
 
 
@@ -1752,11 +1769,19 @@ def test_media_type_from_mime_prefers_mime_over_filename():
 
 def test_asset_is_immutable():
     asset = Asset(
-        id="asset_1", scope_id="home-default", file_name="a.jpg",
-        media_type=MediaType.IMAGE, path="/tmp/a.jpg", mime_type="image/jpeg",
-        size_bytes=1, status=AssetStatus.QUEUED, content_sha256="x",
-        captured_at=None, captured_location=None,
-        created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+        id="asset_1",
+        scope_id="home-default",
+        file_name="a.jpg",
+        media_type=MediaType.IMAGE,
+        path="/tmp/a.jpg",
+        mime_type="image/jpeg",
+        size_bytes=1,
+        status=AssetStatus.QUEUED,
+        content_sha256="x",
+        captured_at=None,
+        captured_location=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -2061,12 +2086,19 @@ from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRe
 def make_asset(asset_id="asset_1", sha="abc123", scope="home-default") -> Asset:
     now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
     return Asset(
-        id=asset_id, scope_id=scope, file_name="IMG_0001.HEIC", media_type=MediaType.IMAGE,
-        path=f"/data/media/{asset_id}_IMG_0001.HEIC", mime_type="image/heic", size_bytes=1234,
-        status=AssetStatus.QUEUED, content_sha256=sha,
+        id=asset_id,
+        scope_id=scope,
+        file_name="IMG_0001.HEIC",
+        media_type=MediaType.IMAGE,
+        path=f"/data/media/{asset_id}_IMG_0001.HEIC",
+        mime_type="image/heic",
+        size_bytes=1234,
+        status=AssetStatus.QUEUED,
+        content_sha256=sha,
         captured_at=datetime(2018, 4, 1, 21, 5, 47, tzinfo=UTC),
         captured_location=GpsPoint(18.7883, 98.9853),
-        created_at=now, updated_at=now,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -2330,12 +2362,20 @@ class SqliteAssetRepository:
                 " size_bytes, status, content_sha256, captured_at, gps_latitude, gps_longitude,"
                 " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    asset.id, asset.scope_id, asset.file_name, asset.media_type.value, asset.path,
-                    asset.mime_type, asset.size_bytes, asset.status.value, asset.content_sha256,
+                    asset.id,
+                    asset.scope_id,
+                    asset.file_name,
+                    asset.media_type.value,
+                    asset.path,
+                    asset.mime_type,
+                    asset.size_bytes,
+                    asset.status.value,
+                    asset.content_sha256,
                     asset.captured_at.isoformat() if asset.captured_at else None,
                     asset.captured_location.latitude if asset.captured_location else None,
                     asset.captured_location.longitude if asset.captured_location else None,
-                    asset.created_at.isoformat(), asset.updated_at.isoformat(),
+                    asset.created_at.isoformat(),
+                    asset.updated_at.isoformat(),
                 ),
             )
 
@@ -2358,8 +2398,7 @@ class SqliteAssetRepository:
     def find_by_hash(self, scope_id: str, content_sha256: str) -> Asset | None:
         with self._database.connect() as connection:
             row = connection.execute(
-                f"SELECT {_ASSET_COLUMNS} FROM assets WHERE scope_id = ? AND content_sha256 = ?"
-                " LIMIT 1",
+                f"SELECT {_ASSET_COLUMNS} FROM assets WHERE scope_id = ? AND content_sha256 = ? LIMIT 1",
                 (scope_id, content_sha256),
             ).fetchone()
         return _row_to_asset(row) if row else None
@@ -2382,11 +2421,14 @@ class SqliteObservationRepository:
                 "INSERT INTO observations (id, scope_id, asset_id, source_type, captured_at,"
                 " confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
-                    observation.id, observation.scope_id, observation.asset_id,
+                    observation.id,
+                    observation.scope_id,
+                    observation.asset_id,
                     observation.source_type,
                     observation.captured_at.isoformat() if observation.captured_at else None,
                     observation.confidence,
-                    observation.created_at.isoformat(), observation.updated_at.isoformat(),
+                    observation.created_at.isoformat(),
+                    observation.updated_at.isoformat(),
                 ),
             )
 
@@ -2400,8 +2442,11 @@ class SqliteObservationRepository:
         if not row:
             return None
         return Observation(
-            id=row["id"], scope_id=row["scope_id"], asset_id=row["asset_id"],
-            source_type=row["source_type"], captured_at=_parse_datetime(row["captured_at"]),
+            id=row["id"],
+            scope_id=row["scope_id"],
+            asset_id=row["asset_id"],
+            source_type=row["source_type"],
+            captured_at=_parse_datetime(row["captured_at"]),
             confidence=row["confidence"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -2592,8 +2637,10 @@ def test_gps_degrees_minutes_seconds_are_converted(tmp_path):
     image = Image.new("RGB", (16, 16), "white")
     exif = image.getexif()
     exif[34853] = {  # GPSInfo；度分秒在 EXIF 里是有理数，必须用 IFDRational
-        1: "N", 2: (IFDRational(18, 1), IFDRational(47, 1), IFDRational(1788, 100)),
-        3: "E", 4: (IFDRational(98, 1), IFDRational(59, 1), IFDRational(700, 100)),
+        1: "N",
+        2: (IFDRational(18, 1), IFDRational(47, 1), IFDRational(1788, 100)),
+        3: "E",
+        4: (IFDRational(98, 1), IFDRational(59, 1), IFDRational(700, 100)),
     }
     image.save(path, format="JPEG", exif=exif)
 
@@ -2609,8 +2656,10 @@ def test_southern_and_western_hemispheres_are_negated(tmp_path):
     image = Image.new("RGB", (16, 16), "white")
     exif = image.getexif()
     exif[34853] = {
-        1: "S", 2: (IFDRational(33, 1), IFDRational(52, 1), IFDRational(0, 1)),
-        3: "W", 4: (IFDRational(151, 1), IFDRational(12, 1), IFDRational(0, 1)),
+        1: "S",
+        2: (IFDRational(33, 1), IFDRational(52, 1), IFDRational(0, 1)),
+        3: "W",
+        4: (IFDRational(151, 1), IFDRational(12, 1), IFDRational(0, 1)),
     }
     image.save(path, format="JPEG", exif=exif)
 
@@ -2981,8 +3030,7 @@ class FakeAssets:
 
     def find_by_hash(self, scope_id, content_sha256):
         return next(
-            (a for a in self.rows.values()
-             if a.scope_id == scope_id and a.content_sha256 == content_sha256),
+            (a for a in self.rows.values() if a.scope_id == scope_id and a.content_sha256 == content_sha256),
             None,
         )
 
@@ -3032,7 +3080,9 @@ class FakeMetadata:
 def build(metadata=None):
     assets, observations, storage = FakeAssets(), FakeObservations(), FakeStorage()
     use_case = ImportAssets(
-        assets=assets, observations=observations, storage=storage,
+        assets=assets,
+        observations=observations,
+        storage=storage,
         metadata=metadata or FakeMetadata(),
     )
     return use_case, assets, observations, storage
@@ -3041,7 +3091,9 @@ def build(metadata=None):
 def test_import_creates_asset_and_observation():
     use_case, assets, observations, storage = build()
     request = ImportRequest(
-        scope_id="album1", file_name="IMG_0001.HEIC", content_type="image/heic",
+        scope_id="album1",
+        file_name="IMG_0001.HEIC",
+        content_type="image/heic",
         content=b"raw bytes",
     )
 
@@ -3059,7 +3111,10 @@ def test_import_creates_asset_and_observation():
 def test_identical_content_in_same_scope_is_deduplicated():
     use_case, assets, _, storage = build()
     request = ImportRequest(
-        scope_id="album1", file_name="a.jpg", content_type="image/jpeg", content=b"same",
+        scope_id="album1",
+        file_name="a.jpg",
+        content_type="image/jpeg",
+        content=b"same",
     )
 
     first = use_case.execute(request)
@@ -3074,10 +3129,12 @@ def test_identical_content_in_same_scope_is_deduplicated():
 def test_same_content_in_different_scopes_is_kept_separately():
     """1.0 的去重按 scope 隔离（fix(api): scope dedup in /api/ingest）。"""
     use_case, assets, _, _ = build()
-    use_case.execute(ImportRequest(
-        scope_id="album1", file_name="a.jpg", content_type="image/jpeg", content=b"same"))
-    use_case.execute(ImportRequest(
-        scope_id="album2", file_name="a.jpg", content_type="image/jpeg", content=b"same"))
+    use_case.execute(
+        ImportRequest(scope_id="album1", file_name="a.jpg", content_type="image/jpeg", content=b"same")
+    )
+    use_case.execute(
+        ImportRequest(scope_id="album2", file_name="a.jpg", content_type="image/jpeg", content=b"same")
+    )
 
     assert len(assets.rows) == 2
 
@@ -3087,8 +3144,9 @@ def test_metadata_is_carried_onto_the_asset():
     captured = datetime(2018, 4, 1, 21, 5, 47, tzinfo=UTC)
     use_case, assets, _, _ = build(FakeMetadata(captured, gps, "iPhone X"))
 
-    result = use_case.execute(ImportRequest(
-        scope_id="album1", file_name="a.jpg", content_type="image/jpeg", content=b"x"))
+    result = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="a.jpg", content_type="image/jpeg", content=b"x")
+    )
 
     asset = assets.get(result.asset_id)
     assert asset.captured_at == captured
@@ -3305,12 +3363,16 @@ def test_reimport_same_bytes_is_deduplicated(client: TestClient):
 
 
 def test_list_assets_for_scope(client: TestClient):
-    client.post("/api/v1/media/import",
-                files={"file": ("a.jpg", jpeg_bytes(), "image/jpeg")},
-                data={"scope_id": "album1"})
-    client.post("/api/v1/media/import",
-                files={"file": ("b.jpg", jpeg_bytes(color="red"), "image/jpeg")},
-                data={"scope_id": "album2"})
+    client.post(
+        "/api/v1/media/import",
+        files={"file": ("a.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"scope_id": "album1"},
+    )
+    client.post(
+        "/api/v1/media/import",
+        files={"file": ("b.jpg", jpeg_bytes(color="red"), "image/jpeg")},
+        data={"scope_id": "album2"},
+    )
 
     response = client.get("/api/v1/assets", params={"scope_id": "album1"})
 
@@ -3320,9 +3382,9 @@ def test_list_assets_for_scope(client: TestClient):
 
 def test_asset_file_returns_original_bytes(client: TestClient):
     payload = jpeg_bytes()
-    asset_id = client.post("/api/v1/media/import",
-                           files={"file": ("a.jpg", payload, "image/jpeg")},
-                           data={"scope_id": "album1"}).json()["asset_id"]
+    asset_id = client.post(
+        "/api/v1/media/import", files={"file": ("a.jpg", payload, "image/jpeg")}, data={"scope_id": "album1"}
+    ).json()["asset_id"]
 
     response = client.get(f"/api/v1/assets/{asset_id}/file")
 
@@ -3331,9 +3393,11 @@ def test_asset_file_returns_original_bytes(client: TestClient):
 
 
 def test_asset_preview_is_jpeg(client: TestClient):
-    asset_id = client.post("/api/v1/media/import",
-                           files={"file": ("a.jpg", jpeg_bytes(), "image/jpeg")},
-                           data={"scope_id": "album1"}).json()["asset_id"]
+    asset_id = client.post(
+        "/api/v1/media/import",
+        files={"file": ("a.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"scope_id": "album1"},
+    ).json()["asset_id"]
 
     response = client.get(f"/api/v1/assets/{asset_id}/preview")
 
