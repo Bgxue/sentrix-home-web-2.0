@@ -182,6 +182,79 @@ source = ["sentrix.domain", "sentrix.application"]
 [tool.coverage.report]
 fail_under = 85
 show_missing = true
+
+[tool.importlinter]
+root_packages = ["sentrix"]
+# domain-purity 的 forbidden_modules 里有 fastapi/sqlite3/PIL 等外部包，
+# 不开这个开关 import-linter 会直接拒绝加载配置（契约一个都注册不上）。
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "domain-purity"
+id = "domain-purity"
+type = "forbidden"
+source_modules = ["sentrix.domain"]
+# os / qdrant_client 在设计 §2.3 里被点名禁止，这里必须补齐——少一条就等于那张表
+# 只约束住了它列出的那几个包。
+forbidden_modules = [
+    "fastapi",
+    "sqlite3",
+    "PIL",
+    "httpx",
+    "uvicorn",
+    "os",
+    "qdrant_client",
+    "sentrix.infrastructure",
+    "sentrix.api",
+    "sentrix.application",
+    "sentrix.bootstrap",
+]
+
+[[tool.importlinter.contracts]]
+name = "application-purity"
+id = "application-purity"
+type = "forbidden"
+source_modules = ["sentrix.application"]
+forbidden_modules = [
+    "fastapi",
+    "sqlite3",
+    "PIL",
+    "httpx",
+    "sentrix.infrastructure",
+    "sentrix.api",
+    "sentrix.bootstrap",
+]
+
+[[tool.importlinter.contracts]]
+name = "api-transport-only"
+id = "api-transport-only"
+type = "forbidden"
+# 只查直接 import：api 必须经 bootstrap.container 取依赖，
+# 而 container 必然间接摸到 sqlite3/PIL/infrastructure——不关掉传递检查这条契约永远红。
+allow_indirect_imports = true
+source_modules = ["sentrix.api"]
+forbidden_modules = ["sqlite3", "PIL", "sentrix.infrastructure"]
+
+# infrastructure 与 bootstrap 原先不在任何契约里，等于两层无人约束。
+# infrastructure 只实现 domain 的 port，不许反向依赖上层。
+[[tool.importlinter.contracts]]
+name = "infrastructure-purity"
+id = "infrastructure-purity"
+type = "forbidden"
+source_modules = ["sentrix.infrastructure"]
+forbidden_modules = ["sentrix.api", "sentrix.application", "sentrix.bootstrap", "sentrix.main"]
+
+[[tool.importlinter.contracts]]
+name = "layers"
+id = "layers"
+type = "layers"
+# sentrix.main 也要在链上：它是进程入口，只该向下调用，不许被下层反向 import。
+layers = [
+    "sentrix.main",
+    "sentrix.api",
+    "sentrix.application",
+    "sentrix.domain",
+]
 ```
 
 - [ ] **Step 2b: 确认 `.gitignore` 内容**
@@ -910,9 +983,29 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+CONTRACT_COUNT = 5
 
 
-def test_import_linter_contracts_are_declared():
+def test_layering_contracts_all_hold():
+    """跑全量契约，并要求「一条都没坏」。
+
+    以前写的是 ``assert result.returncode in (0, 1)``——契约 BROKEN 时 returncode 正是 1，
+    三条断言全过，于是这条测试永远不会因分层被破坏而失败。
+    """
+    result = subprocess.run(
+        [".venv/bin/lint-imports"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"Contracts: {CONTRACT_COUNT} kept, 0 broken" in output, output
+
+
+def test_domain_purity_contract_is_addressable_by_name():
+    """契约能被按名寻址——配置读不到 / 契约名写错时上面那条会红，但这里定位更直接。"""
     result = subprocess.run(
         [".venv/bin/lint-imports", "--contract", "domain-purity"],
         cwd=REPO_ROOT,
@@ -920,12 +1013,9 @@ def test_import_linter_contracts_are_declared():
         text=True,
     )
 
-    # lint-imports 把诊断写 stdout 而非 stderr，所以必须正面确认契约真的被找到了：
-    # 配置读不到 / 契约名对不上 / TOML 写错，三者都会让 returncode=1 却不进 stderr。
     output = result.stdout + result.stderr
-    assert result.returncode in (0, 1), output
-    assert "domain-purity" in output, output
-    assert "Could not find contract" not in output, output
+    assert result.returncode == 0, output
+    assert "domain-purity KEPT" in output, output
 
 
 def test_domain_does_not_import_infrastructure():
@@ -944,7 +1034,7 @@ def test_domain_does_not_import_infrastructure():
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_architecture_rules.py -v`
-Expected: FAIL — `AssertionError: domain-purity`（`pyproject.toml` 里还没有 `[tool.importlinter]`，契约一个都没注册）
+Expected: FAIL — `AssertionError: Could not read any configuration.`（`pyproject.toml` 里还没有 `[tool.importlinter]`，契约一个都没注册，`lint-imports` 因此退出码非 0，断言 `returncode == 0` 先失败）
 
 - [ ] **Step 3: 声明规则**
 
@@ -1013,7 +1103,7 @@ layers = [
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_architecture_rules.py -v`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 5: 提交**
 

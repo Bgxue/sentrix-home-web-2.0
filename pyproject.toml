@@ -39,12 +39,16 @@ name = "domain-purity"
 id = "domain-purity"
 type = "forbidden"
 source_modules = ["sentrix.domain"]
+# os / qdrant_client 在设计 §2.3 里被点名禁止，这里必须补齐——少一条就等于那张表
+# 只约束住了它列出的那几个包。
 forbidden_modules = [
     "fastapi",
     "sqlite3",
     "PIL",
     "httpx",
     "uvicorn",
+    "os",
+    "qdrant_client",
     "sentrix.infrastructure",
     "sentrix.api",
     "sentrix.application",
@@ -76,11 +80,22 @@ allow_indirect_imports = true
 source_modules = ["sentrix.api"]
 forbidden_modules = ["sqlite3", "PIL", "sentrix.infrastructure"]
 
+# infrastructure 与 bootstrap 原先不在任何契约里，等于两层无人约束。
+# infrastructure 只实现 domain 的 port，不许反向依赖上层。
+[[tool.importlinter.contracts]]
+name = "infrastructure-purity"
+id = "infrastructure-purity"
+type = "forbidden"
+source_modules = ["sentrix.infrastructure"]
+forbidden_modules = ["sentrix.api", "sentrix.application", "sentrix.bootstrap", "sentrix.main"]
+
 [[tool.importlinter.contracts]]
 name = "layers"
 id = "layers"
 type = "layers"
+# sentrix.main 也要在链上：它是进程入口，只该向下调用，不许被下层反向 import。
 layers = [
+    "sentrix.main",
     "sentrix.api",
     "sentrix.application",
     "sentrix.domain",

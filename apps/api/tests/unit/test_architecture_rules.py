@@ -2,9 +2,29 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+CONTRACT_COUNT = 5
 
 
-def test_import_linter_contracts_are_declared():
+def test_layering_contracts_all_hold():
+    """跑全量契约，并要求「一条都没坏」。
+
+    以前写的是 ``assert result.returncode in (0, 1)``——契约 BROKEN 时 returncode 正是 1，
+    三条断言全过，于是这条测试永远不会因分层被破坏而失败。
+    """
+    result = subprocess.run(
+        [".venv/bin/lint-imports"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"Contracts: {CONTRACT_COUNT} kept, 0 broken" in output, output
+
+
+def test_domain_purity_contract_is_addressable_by_name():
+    """契约能被按名寻址——配置读不到 / 契约名写错时上面那条会红，但这里定位更直接。"""
     result = subprocess.run(
         [".venv/bin/lint-imports", "--contract", "domain-purity"],
         cwd=REPO_ROOT,
@@ -12,12 +32,9 @@ def test_import_linter_contracts_are_declared():
         text=True,
     )
 
-    # lint-imports 把诊断写 stdout 而非 stderr，所以必须正面确认契约真的被找到了：
-    # 配置读不到 / 契约名对不上 / TOML 写错，三者都会让 returncode=1 却不进 stderr。
     output = result.stdout + result.stderr
-    assert result.returncode in (0, 1), output
-    assert "domain-purity" in output, output
-    assert "Could not find contract" not in output, output
+    assert result.returncode == 0, output
+    assert "domain-purity KEPT" in output, output
 
 
 def test_domain_does_not_import_infrastructure():
