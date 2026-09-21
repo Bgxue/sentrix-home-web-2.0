@@ -8,6 +8,8 @@
 推出，「被谁依赖」是它的转置——两列都由脚本从同一份解析结果推导后比对，所以不存在
 「文档自称校验了、实际没人读」的列。只统计 `sentrix.*` 包内 import；stdlib 与第三方
 （fastapi / sqlite3 / PIL 等）不进这两列。
+
+列数不足的行会被报错而不是跳过：跳过等于给依赖校验开后门——那行写什么都不会红。
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src" / "sentrix"
 DEFAULT_DOC = REPO_ROOT / "docs" / "architecture" / "module-map.md"
 EMPTY_CELL = "—"
+MIN_COLUMNS = 5  # 路径 / 职责 / 层 / 依赖谁 / 被谁依赖
+HEADER_RE = re.compile(r"^\|\s*路径\s*\|")
 ROW_RE = re.compile(r"^\|\s*`([^`]+\.py)`\s*\|(.*)\|\s*$")
 CELL_PATH_RE = re.compile(r"`([^`]+)`")
 
@@ -95,6 +99,10 @@ def documented_paths(doc: Path) -> set[str]:
     return paths
 
 
+def row_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
 def parse_cell(path: str, column: str, cell: str, problems: list[str]) -> set[str]:
     """一格依赖列：要么是 `—`，要么是反引号路径用 `、` 分隔。"""
     if cell == EMPTY_CELL:
@@ -108,22 +116,34 @@ def parse_cell(path: str, column: str, cell: str, problems: list[str]) -> set[st
 
 
 def documented_edges(doc: Path) -> tuple[dict[str, set[str]], dict[str, set[str]], list[str]]:
-    """从表格解析「依赖谁」「被谁依赖」两列。"""
+    """从表格解析「依赖谁」「被谁依赖」两列（0 基下标 3 / 4）。"""
     deps: dict[str, set[str]] = {}
     dependents: dict[str, set[str]] = {}
     problems: list[str] = []
     text = doc.read_text(encoding="utf-8") if doc.exists() else ""
 
+    expected = MIN_COLUMNS
     for line in text.splitlines():
+        if HEADER_RE.match(line):
+            expected = len(row_cells(line))
+            if expected < MIN_COLUMNS:
+                problems.append(f"表头只有 {expected} 列，缺少「依赖谁」/「被谁依赖」——这两列不能被省略")
+            continue
+
         match = ROW_RE.match(line)
         if not match:
             continue
+
         path = match.group(1)
-        cells = [cell.strip() for cell in match.group(2).split("|")]
-        if len(cells) < 4:  # 表格没有依赖列
+        cells = row_cells(line)
+        if len(cells) != expected:
+            problems.append(f"{path}: 行有 {len(cells)} 列，与表头的 {expected} 列不一致")
             continue
-        deps[path] = parse_cell(path, "依赖谁", cells[2], problems)
-        dependents[path] = parse_cell(path, "被谁依赖", cells[3], problems)
+        if expected < MIN_COLUMNS:
+            continue  # 表头已经报错，这一行没有依赖列可读
+
+        deps[path] = parse_cell(path, "依赖谁", cells[3], problems)
+        dependents[path] = parse_cell(path, "被谁依赖", cells[4], problems)
     return deps, dependents, problems
 
 

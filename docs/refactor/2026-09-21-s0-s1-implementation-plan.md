@@ -1437,6 +1437,33 @@ def test_checker_flags_wrong_dependency_columns(tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "sentrix/main.py: 「依赖谁」缺少 sentrix/config.py" in result.stdout
     assert "sentrix/config.py: 「被谁依赖」缺少 sentrix/main.py" in result.stdout
+
+
+def test_checker_flags_row_with_missing_dependency_columns(tmp_path):
+    """列数不足的行必须报错，不能被整行跳过。
+
+    跳过等于给依赖校验留后门：那行写什么都不会红，而文档又照样接受它。
+    """
+    src = tmp_path / "src" / "sentrix"
+    src.mkdir(parents=True)
+    (src / "config.py").write_text('"""Config."""\n', encoding="utf-8")
+    doc = tmp_path / "module-map.md"
+    doc.write_text(
+        "| 路径 | 职责 | 层 | 依赖谁 | 被谁依赖 |\n"
+        "|---|---|---|---|---|\n"
+        "| `sentrix/config.py` | 配置 | — |\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(src), "--doc", str(doc)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "sentrix/config.py: 行有 3 列，与表头的 5 列不一致" in result.stdout
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1459,6 +1486,8 @@ Expected: FAIL — 脚本不存在
 推出，「被谁依赖」是它的转置——两列都由脚本从同一份解析结果推导后比对，所以不存在
 「文档自称校验了、实际没人读」的列。只统计 `sentrix.*` 包内 import；stdlib 与第三方
 （fastapi / sqlite3 / PIL 等）不进这两列。
+
+列数不足的行会被报错而不是跳过：跳过等于给依赖校验开后门——那行写什么都不会红。
 """
 
 from __future__ import annotations
@@ -1473,6 +1502,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src" / "sentrix"
 DEFAULT_DOC = REPO_ROOT / "docs" / "architecture" / "module-map.md"
 EMPTY_CELL = "—"
+MIN_COLUMNS = 5  # 路径 / 职责 / 层 / 依赖谁 / 被谁依赖
+HEADER_RE = re.compile(r"^\|\s*路径\s*\|")
 ROW_RE = re.compile(r"^\|\s*`([^`]+\.py)`\s*\|(.*)\|\s*$")
 CELL_PATH_RE = re.compile(r"`([^`]+)`")
 
@@ -1546,6 +1577,10 @@ def documented_paths(doc: Path) -> set[str]:
     return paths
 
 
+def row_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
 def parse_cell(path: str, column: str, cell: str, problems: list[str]) -> set[str]:
     """一格依赖列：要么是 `—`，要么是反引号路径用 `、` 分隔。"""
     if cell == EMPTY_CELL:
@@ -1559,22 +1594,34 @@ def parse_cell(path: str, column: str, cell: str, problems: list[str]) -> set[st
 
 
 def documented_edges(doc: Path) -> tuple[dict[str, set[str]], dict[str, set[str]], list[str]]:
-    """从表格解析「依赖谁」「被谁依赖」两列。"""
+    """从表格解析「依赖谁」「被谁依赖」两列（0 基下标 3 / 4）。"""
     deps: dict[str, set[str]] = {}
     dependents: dict[str, set[str]] = {}
     problems: list[str] = []
     text = doc.read_text(encoding="utf-8") if doc.exists() else ""
 
+    expected = MIN_COLUMNS
     for line in text.splitlines():
+        if HEADER_RE.match(line):
+            expected = len(row_cells(line))
+            if expected < MIN_COLUMNS:
+                problems.append(f"表头只有 {expected} 列，缺少「依赖谁」/「被谁依赖」——这两列不能被省略")
+            continue
+
         match = ROW_RE.match(line)
         if not match:
             continue
+
         path = match.group(1)
-        cells = [cell.strip() for cell in match.group(2).split("|")]
-        if len(cells) < 4:  # 表格没有依赖列
+        cells = row_cells(line)
+        if len(cells) != expected:
+            problems.append(f"{path}: 行有 {len(cells)} 列，与表头的 {expected} 列不一致")
             continue
-        deps[path] = parse_cell(path, "依赖谁", cells[2], problems)
-        dependents[path] = parse_cell(path, "被谁依赖", cells[3], problems)
+        if expected < MIN_COLUMNS:
+            continue  # 表头已经报错，这一行没有依赖列可读
+
+        deps[path] = parse_cell(path, "依赖谁", cells[3], problems)
+        dependents[path] = parse_cell(path, "被谁依赖", cells[4], problems)
     return deps, dependents, problems
 
 
@@ -1668,7 +1715,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 6: 提交**
 
@@ -2218,7 +2265,7 @@ Expected: `domain-purity` PASS（`domain/media/models.py` 只 import 标准库�
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 7: 提交**
 
@@ -2351,7 +2398,7 @@ Expected: 3 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 6: 提交**
 
@@ -2765,7 +2812,7 @@ Expected: 5 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 7: 提交**
 
@@ -2885,7 +2932,7 @@ Expected: 4 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 6: 提交**
 
@@ -3029,7 +3076,7 @@ Expected: 4 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 6: 提交**
 
@@ -3289,7 +3336,7 @@ Expected: 6 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 6: 提交**
 
@@ -3602,7 +3649,7 @@ Expected: 4 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 6: 提交**
 
@@ -4044,7 +4091,7 @@ Expected: 全部 PASS。若有 `api-transport-only` 失败，说明路由里出�
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 10: 提交**
 

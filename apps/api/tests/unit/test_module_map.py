@@ -65,3 +65,30 @@ def test_checker_flags_wrong_dependency_columns(tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "sentrix/main.py: 「依赖谁」缺少 sentrix/config.py" in result.stdout
     assert "sentrix/config.py: 「被谁依赖」缺少 sentrix/main.py" in result.stdout
+
+
+def test_checker_flags_row_with_missing_dependency_columns(tmp_path):
+    """列数不足的行必须报错，不能被整行跳过。
+
+    跳过等于给依赖校验留后门：那行写什么都不会红，而文档又照样接受它。
+    """
+    src = tmp_path / "src" / "sentrix"
+    src.mkdir(parents=True)
+    (src / "config.py").write_text('"""Config."""\n', encoding="utf-8")
+    doc = tmp_path / "module-map.md"
+    doc.write_text(
+        "| 路径 | 职责 | 层 | 依赖谁 | 被谁依赖 |\n"
+        "|---|---|---|---|---|\n"
+        "| `sentrix/config.py` | 配置 | — |\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [".venv/bin/python", "scripts/check_module_map.py", "--src", str(src), "--doc", str(doc)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "sentrix/config.py: 行有 3 列，与表头的 5 列不一致" in result.stdout
