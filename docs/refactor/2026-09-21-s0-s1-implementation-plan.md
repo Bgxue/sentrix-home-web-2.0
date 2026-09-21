@@ -1949,7 +1949,7 @@ class MediaStorage(Protocol):
 
     def read(self, asset_id: str) -> bytes: ...
 
-    def path_for(self, asset) -> Path: ...
+    def path_for(self, asset: Asset) -> Path: ...
 
 
 class MetadataReader(Protocol):
@@ -2438,6 +2438,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sentrix.domain.media.models import Asset
+
 
 def sanitise(file_name: str) -> str:
     """只保留基础名，并剔除会破坏 ``{asset_id}_{name}`` 拼接的字符。"""
@@ -2456,7 +2458,7 @@ class FileSystemMediaStorage:
         destination.write_bytes(content)
         return destination
 
-    def path_for(self, asset) -> Path:
+    def path_for(self, asset: Asset) -> Path:
         return Path(asset.path)
 
     def read(self, asset_id: str) -> bytes:
@@ -3008,6 +3010,7 @@ Expected: FAIL — `ModuleNotFoundError`
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -3051,7 +3054,7 @@ class ImportAssets:
         observations: ObservationRepository,
         storage: MediaStorage,
         metadata: MetadataReader,
-        clock=lambda: datetime.now(UTC),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets
         self._observations = observations
