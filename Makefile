@@ -51,7 +51,7 @@ ci: lint typecheck test check-docs arch coverage ## CI 门禁
 	@echo "ci: 全部通过"
 
 dev: ## 起 2.0 API（8191）
-	$(PY) -m uvicorn sentrix.main:app --host 0.0.0.0 --port 8191 --app-dir apps/api/src
+	$(PY) -m uvicorn --factory sentrix.main:create_app --host 0.0.0.0 --port 8191 --app-dir apps/api/src
 
 web-dev: ## 起 2.0 Web（4274）
 	cd apps/web && npm run dev -- --port 4274
