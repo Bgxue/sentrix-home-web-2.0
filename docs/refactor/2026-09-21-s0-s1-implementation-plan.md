@@ -239,8 +239,6 @@ git commit -m "chore(api): scaffold python package and workspace tooling"
 `apps/api/tests/unit/test_config.py`:
 
 ```python
-import pytest
-
 from sentrix.config import Settings
 
 
@@ -291,6 +289,7 @@ values disagreed with each other and with the code.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -308,7 +307,7 @@ class Settings(BaseSettings):
     vlm_base_url: str = "http://127.0.0.1:8100/v1"
     text_embedder_url: str = "http://127.0.0.1:8101"
 
-    def model_post_init(self, _context) -> None:  # noqa: D105
+    def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
 
     @computed_field  # type: ignore[prop-decorator]
@@ -339,6 +338,8 @@ def load_settings() -> Settings:
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_config.py -v`
 Expected: 3 passed
+
+> 注意：`config.py` 位于 `sentrix/` 顶层，**不在** mypy 的 `files = [".../domain", ".../application"]` 范围内，所以全量门禁的 `Success: no issues found in N source files` 不会覆盖它。本任务已单独验证 `mypy apps/api/src/sentrix/config.py` 通过。四层里 `infrastructure/` 与 `api/` 的类型检查边界是待议项，见 M1 重评估。
 
 - [ ] **Step 5: 提交**
 
