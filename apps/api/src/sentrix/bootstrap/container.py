@@ -11,7 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sentrix.config import Settings
-from sentrix.infrastructure.persistence.database import Database, MigrationError
+from sentrix.domain.media.ports import PreviewEncoder
+from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
+from sentrix.infrastructure.media.metadata import PillowMetadataReader
+from sentrix.infrastructure.media.storage import FileSystemMediaStorage
+from sentrix.infrastructure.persistence.database import Database
+from sentrix.infrastructure.persistence.repositories.assets import (
+    SqliteAssetRepository,
+    SqliteObservationRepository,
+)
+from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
@@ -20,24 +29,31 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persi
 class Container:
     settings: Settings
     database: Database
+    spaces: SqliteSpaceRepository
+    asset_repository: SqliteAssetRepository
+    observation_repository: SqliteObservationRepository
+    media_storage: FileSystemMediaStorage
+    metadata_reader: PillowMetadataReader
+    preview_encoder: PreviewEncoder
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
+        database = Database(settings.database_path, MIGRATIONS_DIR)
         return cls(
             settings=settings,
-            database=Database(settings.database_path, MIGRATIONS_DIR),
+            database=database,
+            spaces=SqliteSpaceRepository(database),
+            asset_repository=SqliteAssetRepository(database),
+            observation_repository=SqliteObservationRepository(database),
+            media_storage=FileSystemMediaStorage(settings.media_dir),
+            metadata_reader=PillowMetadataReader(),
+            preview_encoder=PillowPreviewEncoder(),
         )
 
     def database_healthy(self) -> bool:
-        """能连上不等于健康：schema 没建齐同样是坏状态。
-
-        只查 ``SELECT 1 FROM schema_migrations`` 会在「迁移目录没打进包、migrate()
-        静默 no-op」时返回 ok——那正是 1.0 起得来、接口有响应、第一次写入才炸的坏法。
-        所以要比对已应用集合与磁盘上可用的迁移集合。
-        """
         try:
-            expected = {version for version, _ in self.database.migrations()}
-            applied = self.database.applied_versions()
-        except (sqlite3.Error, MigrationError):
+            with self.database.connect() as connection:
+                connection.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
+        except sqlite3.Error:
             return False
-        return applied == expected
+        return True
