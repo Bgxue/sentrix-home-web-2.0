@@ -513,8 +513,6 @@ git commit -m "feat(persistence): add sqlite database with versioned migrations"
 ```python
 from fastapi.testclient import TestClient
 
-from sentrix.main import create_app
-
 
 def test_health_returns_ok(client: TestClient):
     response = client.get("/api/v1/health")
@@ -2040,6 +2038,8 @@ def test_ensure_is_idempotent(migrations_ready_db: Database):
 `apps/api/tests/conftest.py` 追加：
 
 ```python
+from pathlib import Path
+
 from sentrix.infrastructure.persistence.database import Database
 
 
@@ -2131,7 +2131,6 @@ CREATE TABLE ingest_batches (
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -2453,7 +2452,6 @@ from datetime import datetime
 import pytest
 from PIL import Image
 
-from sentrix.domain.media.models import GpsPoint
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 
 
@@ -2810,7 +2808,7 @@ import dataclasses
 from datetime import UTC, datetime
 
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
-from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
+from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType
 
 
 class FakeAssets:
@@ -3105,7 +3103,6 @@ git commit -m "feat(application): add import use case with scoped deduplication"
 
 ```python
 import io
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -3540,7 +3537,6 @@ CI 会用 --check 比对，防止实现偷偷偏离契约。
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
