@@ -284,6 +284,7 @@ apps/photobench/config/vllm_targets.json
 htmlcov/
 apps/web/node_modules/
 apps/web/dist/
+apps/api/build/
 /data/
 *.egg-info/
 ```
