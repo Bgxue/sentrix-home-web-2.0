@@ -1509,6 +1509,7 @@ git commit -m "chore: add make targets for lint, typecheck, test and doc checks"
 - Create: `.pre-commit-config.yaml`
 - Create: `.github/CODEOWNERS`
 - Create: `docs/adr/0001-four-layer-architecture.md`
+- Create: `docs/adr/0002-enable-layering-checks-from-s0.md`
 - Create: `docs/adr/README.md`
 
 - [ ] **Step 1: 写 pre-commit 配置**
@@ -1566,7 +1567,7 @@ docs/adr/                                  @asus
 docs/refactor/capability-map.jsonl         @asus
 ```
 
-- [ ] **Step 4: 写 ADR 目录与第一条决策记录**
+- [ ] **Step 4: 写 ADR 目录与前两条决策记录**
 
 `docs/adr/README.md`:
 
@@ -1576,7 +1577,8 @@ docs/refactor/capability-map.jsonl         @asus
 **只增不改**：已经写下的 ADR 不被修改。要推翻一个决策，新增一条 ADR 并在其中引用被
 取代的编号。
 
-编号规则 `NNNN-短横线标题.md`，依次递增，不复用编号。
+编号规则 `NNNN-短横线标题.md`，依次递增，不复用编号。取代关系在头部用 `取代：NNNN`
+标注（见 `0002-enable-layering-checks-from-s0.md`）。
 ```
 
 `docs/adr/0001-four-layer-architecture.md`:
@@ -1618,6 +1620,42 @@ M1（S0–S3）结束后并入 `make ci`。理由：前期架构仍在试，规�
   长期不跑，昂贵的测试必然烂掉
 - 负面：写新能力时每个约多花 10–30 分钟组织代码；存在"为分层而分层"的风险
   （1.0 的病是文件过大，不是抽象不足，2.0 要避免撞向另一个极端）
+```
+
+`docs/adr/0002-enable-layering-checks-from-s0.md`:
+
+```markdown
+# 0002. 分层检查从 S0 即启用，不再推迟到 M1
+
+日期：2026-09-21
+状态：已接受
+取代：0001 中的「分阶段启用」部分
+
+## 背景
+
+ADR 0001 决定分层规则「分阶段启用」：S0 只声明，M1（S0–S3）结束后才并入
+`make ci` 强制。当时的理由是：前期架构仍在探索，规则需要跟着调，过早强制会带来摩擦。
+
+## 变更原因
+
+该前提不再成立。S0–S1 的全部代码在落地前已经过完整验证，`make arch` 在终态即为
+`4 kept, 0 broken`——**代码本来就是合规的，强制不带来任何摩擦**。
+
+而推迟强制有实际代价：验证过程中发现的三个缺陷（import-linter 配置因缺
+`include_external_packages` 而根本加载不了、契约因 TOML 里无 `id` 而无法按名寻址、
+`api-transport-only` 因默认追传递链而永不可能满足）**没有一处**能被 `pytest` 或
+`make ci` 抓到——只有手工跑 `make arch` 才暴露。把这条防线推迟到 M1，意味着在盲区
+最大的时期把它关掉。
+
+## 决策
+
+`make ci` 从 S0 起即包含 `arch`。分层契约内容一字未改：四条契约、`ignore_imports`
+留空，全部与 ADR 0001 所述一致。
+
+## 后果
+
+- 正面：每一次 CI 都校验分层，架构约束不再依赖任何人记得手工跑 `make arch`
+- 负面：无。代码已验证合规，不存在需要适应期的存量违规
 ```
 
 - [ ] **Step 5: 提交**
