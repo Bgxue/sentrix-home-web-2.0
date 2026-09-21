@@ -18,12 +18,16 @@
 ```text
 apps/web -> /api/v1 -> apps/api
 apps/photobench -> /api/v1/evaluation -> apps/api
+services/model-manager -> managed vLLM profiles
+services/e2b-compat -> optional Ollama-compatible LoRA inference
 
 apps/api owns: SQLite, media storage, background jobs, model and vector adapters
 apps/photobench owns: datasets, run results, judges, benchmark orchestration
 ```
 
 主产品不得启动、停止或读取 PhotoBench。PhotoBench 不得读取主产品 Python 内部模块、SQLite 文件或日志；它只能使用版本化 HTTP 评测契约。
+
+`services/model-manager` 和 `services/e2b-compat` 也分别独立部署。主产品仅通过其版本化服务接口使用它们；模型进程的生命周期、锁、PID、显存采样或 LoRA 加载逻辑不得进入主产品 API 进程。
 
 ## 目录职责
 
@@ -32,6 +36,9 @@ apps/
   api/                    FastAPI product API
   web/                    React family-memory UI
   photobench/             internal benchmark product
+services/
+  model-manager/          independent vLLM profile lifecycle and telemetry API
+  e2b-compat/             optional local LoRA inference compatibility service
 packages/
   contracts/              OpenAPI artifact and generated TypeScript client
   shared/                 cross-app, non-domain utilities only
@@ -86,4 +93,3 @@ bootstrap/                configuration and dependency composition
 - Every public API is defined in OpenAPI first and has a contract test.
 - Destructive maintenance operations are explicit commands with dry-run and audit output.
 - Every retained behavior receives an ownership test before the original implementation is removed.
-
