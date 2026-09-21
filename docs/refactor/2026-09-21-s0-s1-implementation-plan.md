@@ -808,8 +808,12 @@ def test_import_linter_contracts_are_declared():
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
 
-    assert "domain-purity" not in result.stderr, result.stderr
-    assert result.returncode in (0, 1), result.stdout + result.stderr
+    # lint-imports 把诊断写 stdout 而非 stderr，所以必须正面确认契约真的被找到了：
+    # 配置读不到 / 契约名对不上 / TOML 写错，三者都会让 returncode=1 却不进 stderr。
+    output = result.stdout + result.stderr
+    assert result.returncode in (0, 1), output
+    assert "domain-purity" in output, output
+    assert "Could not find contract" not in output, output
 
 
 def test_domain_does_not_import_infrastructure():
@@ -828,7 +832,7 @@ def test_domain_does_not_import_infrastructure():
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_architecture_rules.py -v`
-Expected: FAIL — `lint-imports: --contract domain-purity` 不存在
+Expected: FAIL — `AssertionError: domain-purity`（`pyproject.toml` 里还没有 `[tool.importlinter]`，契约一个都没注册）
 
 - [ ] **Step 3: 声明规则**
 
