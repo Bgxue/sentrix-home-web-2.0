@@ -1027,7 +1027,7 @@ Expected: FAIL — 文件不存在
 
 强制三件事（设计 §7）：
 1. 每条 status=verified 的记录，verification 指向的文件必须真实存在
-2. 每个 target_path 只能属于一个 capability（防止重复覆盖）
+2. capability 名唯一：同一能力不能登记两次（一个文件实现多个能力是允许的）
 3. origin_kind=frozen 的记录必须在 frozen.md 里有理由
 """
 
@@ -1051,7 +1051,7 @@ def load(path: Path) -> list[dict]:
 def check(entries: list[dict]) -> list[str]:
     problems: list[str] = []
     frozen_text = FROZEN_DOC.read_text(encoding="utf-8") if FROZEN_DOC.exists() else ""
-    seen_targets: dict[str, str] = {}
+    seen_names: set[str] = set()
 
     for entry in entries:
         name = entry.get("capability", "<unnamed>")
@@ -1060,11 +1060,9 @@ def check(entries: list[dict]) -> list[str]:
         if entry.get("status") not in VALID_STATUS:
             problems.append(f"{name}: status 非法 {entry.get('status')!r}")
 
-        target = entry.get("target_path")
-        if target:
-            if target in seen_targets:
-                problems.append(f"{name}: target_path 与 {seen_targets[target]} 重复 -> {target}")
-            seen_targets[target] = name
+        if name in seen_names:
+            problems.append(f"{name}: capability 名重复，已在别处登记")
+        seen_names.add(name)
 
         if entry.get("status") == "verified":
             verification = entry.get("verification")
