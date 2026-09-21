@@ -956,6 +956,20 @@ def test_checker_rejects_entry_with_missing_verification_file(tmp_path):
 
     assert result.returncode == 1
     assert "does_not_exist.py" in result.stdout
+
+
+def test_real_capability_map_has_no_problems():
+    """拿仓库真实的 capability-map 跑一遍 checker——规则要在 pytest 里也生效。
+
+    上面那条用的是 tmp_path 造的假 map，只覆盖单条规则；没有这条，checker 的其它
+    规则就只在 `make check-docs` 里才执行，单元测试永远是绿的。
+    """
+    result = subprocess.run(
+        [".venv/bin/python", "scripts/check_capability_map.py"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stdout
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1096,7 +1110,7 @@ if __name__ == "__main__":
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_capability_map.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 7: 提交**
 
