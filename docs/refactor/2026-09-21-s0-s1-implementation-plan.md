@@ -3860,8 +3860,10 @@ git commit -m "feat(contracts): export openapi v1 spec with drift check"
 ## Task 22: Web 脚手架
 
 **Files:**
-- Create: `apps/web/package.json`、`apps/web/vite.config.ts`、`apps/web/tsconfig.json`、`apps/web/index.html`
-- Create: `apps/web/src/main.tsx`、`apps/web/src/App.tsx`、`apps/web/src/styles.css`
+- Create: `apps/web/package.json`、`apps/web/tsconfig.json`、`apps/web/index.html`（由 `npm create vite` 生成）
+- Create: `apps/web/vite.config.ts`（固定端口与 API 代理，见 Step 2）
+- Create: `apps/web/src/App.tsx`（**最小应用壳**；带样式的完整版在 Task 23 替换）
+- 其余入口（`apps/web/src/main.tsx`、`index.css` 等）沿用脚手架生成物，Task 23 再替换 `main.tsx`
 
 - [ ] **Step 1: 建脚手架**
 
@@ -3892,60 +3894,35 @@ export default defineConfig({
 
 - [ ] **Step 3: 写最小应用壳**
 
-`apps/web/src/App.tsx`:
+`apps/web/src/App.tsx`（**自包含**：不引用 Task 23 才建的 `AssetGrid` / `client`，否则此时 Vite 会报 unresolved import）：
 
 ```tsx
-import { useEffect, useState } from "react";
-
-import { AssetGrid } from "./features/library/AssetGrid";
-import { listAssets, type AssetSummary } from "./shared/api/client";
-
 export default function App() {
-  const [assets, setAssets] = useState<AssetSummary[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    listAssets("album1")
-      .then(setAssets)
-      .catch((cause: Error) => setError(cause.message));
-  }, []);
-
   return (
     <main className="app">
       <h1>Sentrix Home 2.0</h1>
-      {error ? <p className="error">{error}</p> : null}
-      <AssetGrid assets={assets} />
+      <p>脚手架就绪。</p>
     </main>
   );
 }
 ```
 
-`apps/web/src/main.tsx`:
+入口 `apps/web/src/main.tsx` **本任务不动**：沿用 Vite 脚手架生成的默认版本（它 import 的 `./index.css` 与 `./App` 都已存在）。带样式的入口在 Task 23 一并替换。
 
-```tsx
-import React from "react";
-import ReactDOM from "react-dom/client";
-
-import App from "./App";
-import "./styles.css";
-
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
-```
-
-- [ ] **Step 4: 验证能起**
+- [ ] **Step 4: 验证能起（且真的渲染）**
 
 ```bash
-cd apps/web && npm run dev -- --port 4274 &
+cd apps/web && npm run dev -- --port 4274 > /tmp/vite.log 2>&1 &
 sleep 5
-curl -sf -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4274/
+curl -sf -o /dev/null -w "index: %{http_code}\n" http://127.0.0.1:4274/
+curl -s http://127.0.0.1:4274/src/App.tsx | grep -q "Sentrix Home 2.0" && echo "App.tsx 已编译且含标题"
+grep -q "Failed to resolve import" /tmp/vite.log && echo "存在未解析 import" || echo "无未解析 import"
 kill %1
 ```
 
-Expected: `200`
+Expected: `index: 200`、`App.tsx 已编译且含标题`、`无未解析 import`
+
+> **为什么不去 grep `/` 返回的 HTML**：这是 SPA——Vite 对 `/` 返回的 index.html 里只有一个空的 `<div id="root">`，标题是 React 运行时渲染进去的，静态 HTML 里没有。真正能证明模块图解析成功的是 Vite 对 `/src/App.tsx` 的转换结果：有未解析 import 时它返回 500 而不是编译后的模块。
 
 - [ ] **Step 5: 提交**
 
@@ -3962,6 +3939,9 @@ git commit -m "feat(web): scaffold react + typescript + vite app on port 4274"
 - Create: `apps/web/src/shared/api/client.ts`
 - Create: `apps/web/src/features/library/AssetGrid.tsx`
 - Create: `apps/web/src/features/library/AssetDetail.tsx`
+- Create: `apps/web/src/styles.css`
+- Modify: `apps/web/src/App.tsx`（替换为接上 client 与 AssetGrid 的完整版）
+- Modify: `apps/web/src/main.tsx`（替换为引入 `styles.css` 的版本）
 
 - [ ] **Step 1: 写 client（保留 SSE 能力供 S3 使用）**
 
@@ -4076,7 +4056,51 @@ export function AssetDetail({ asset, onClose }: { asset: AssetSummary; onClose: 
 }
 ```
 
-- [ ] **Step 4: 写样式**
+- [ ] **Step 4: 写样式与应用入口**
+
+`apps/web/src/App.tsx`（**替换为**完整版：接上本任务刚建的 client 与 AssetGrid）：
+
+```tsx
+import { useEffect, useState } from "react";
+
+import { AssetGrid } from "./features/library/AssetGrid";
+import { listAssets, type AssetSummary } from "./shared/api/client";
+
+export default function App() {
+  const [assets, setAssets] = useState<AssetSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listAssets("album1")
+      .then(setAssets)
+      .catch((cause: Error) => setError(cause.message));
+  }, []);
+
+  return (
+    <main className="app">
+      <h1>Sentrix Home 2.0</h1>
+      {error ? <p className="error">{error}</p> : null}
+      <AssetGrid assets={assets} />
+    </main>
+  );
+}
+```
+
+`apps/web/src/main.tsx`（**替换为**：改引本项目样式表）：
+
+```tsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+
+import App from "./App";
+import "./styles.css";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+```
 
 `apps/web/src/styles.css`:
 
