@@ -402,7 +402,7 @@ sentrix-home-web2.0/data/
 
 - Python 3.11+、`pyproject.toml`、ruff（lint + format）、mypy strict（**整个 `sentrix` 包 + `scripts/`**；2026-09-21 校正，原写「仅 `domain/` + `application/`」——实测其余各层在 `--strict` 下本来就全绿，把已经干净的两层漏在门外没有收益）、pytest
 - TypeScript strict、ESLint + Prettier、Vite、Vitest
-- 统一入口：`make dev / test / lint / typecheck / arch / build / ci`
+- 统一入口（取自 `Makefile` 的 `.PHONY` 全集；`coverage` 是真实目标但未登记进 `.PHONY`）：`make help / install / lint / format / format-check / typecheck / arch / test / test-unit / test-contract / test-integration / coverage / check-docs / ci / ci-full / dev / web-dev`
 
 ### 6.2 分层强制
 
