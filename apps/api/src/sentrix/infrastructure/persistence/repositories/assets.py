@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -18,7 +19,7 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _row_to_asset(row) -> Asset:
+def _row_to_asset(row: sqlite3.Row) -> Asset:
     latitude, longitude = row["gps_latitude"], row["gps_longitude"]
     return Asset(
         id=row["id"],

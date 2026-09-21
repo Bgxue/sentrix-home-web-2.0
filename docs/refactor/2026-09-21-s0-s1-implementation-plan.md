@@ -175,6 +175,12 @@ python_version = "3.11"
 strict = true
 files = ["apps/api/src/sentrix", "scripts"]
 
+# 第三方包缺 stub / py.typed 是环境事实，不是本仓库代码的问题：集中在配置里表达，
+# 而不是在每个 import 上散落 # type: ignore——那会把「这里真的有问题」也一起静音。
+[[tool.mypy.overrides]]
+module = ["pillow_heif", "yaml"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["apps/api/tests"]
 addopts = "-q"
@@ -2803,6 +2809,7 @@ class SqliteSpaceRepository:
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -2819,7 +2826,7 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _row_to_asset(row) -> Asset:
+def _row_to_asset(row: sqlite3.Row) -> Asset:
     latitude, longitude = row["gps_latitude"], row["gps_longitude"]
     return Asset(
         id=row["id"],
@@ -3358,8 +3365,10 @@ Expected: FAIL — `ModuleNotFoundError`
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sentrix.domain.media.models import GpsPoint
 from sentrix.infrastructure.media.image_io import ensure_heif_support
@@ -3378,15 +3387,17 @@ GPS_LATITUDE_REF, GPS_LATITUDE = 1, 2
 GPS_LONGITUDE_REF, GPS_LONGITUDE = 3, 4
 
 
-def _rational(value) -> float:
+def _rational(value: Any) -> float:
     try:
         return float(value[0]) / float(value[1])
     except (TypeError, ValueError, ZeroDivisionError, IndexError):
         return float(value)
 
 
-def _degrees_minutes_seconds(values, *, negative_ref: str, ref_value: str) -> float:
-    degrees = sum(_rational(item) / (60**index) for index, item in enumerate(values))
+def _degrees_minutes_seconds(values: Sequence[object], *, negative_ref: str, ref_value: str) -> float:
+    # 60**index 在 typeshed 里是 Any（int.__pow__ 要覆盖负指数返回 float 的情形），
+    # 所以给 degrees 落一个显式标注，把实数类型钉住；表达式与运行结果都不变。
+    degrees: float = sum(_rational(item) / (60**index) for index, item in enumerate(values))
     if str(ref_value).upper() == negative_ref:
         degrees *= -1
     return degrees
@@ -3400,7 +3411,7 @@ _DATETIME_FORMATS = (
 )
 
 
-def _parse_exif_datetime(tags: dict) -> datetime | None:
+def _parse_exif_datetime(tags: dict[int, object]) -> datetime | None:
     raw = tags.get(DATETIME_ORIGINAL_TAG) or tags.get(DATETIME_TAG)
     if not raw:
         return None
@@ -3918,6 +3929,8 @@ Expected: FAIL — 404（路由还不存在）
 
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -3941,10 +3954,13 @@ class InvalidRequestError(DomainError):
     status_code = 400
 
 
-async def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
+async def domain_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+    # Starlette 的 add_exception_handler 要求第二参数是 Exception（函数参数逆变），
+    # 而这里注册的就是 DomainError；cast 零开销，运行时要拿到的仍然是 DomainError。
+    error = cast(DomainError, exc)
     return JSONResponse(
-        status_code=exc.status_code,
-        content={"code": exc.code, "message": exc.message, "detail": {}},
+        status_code=error.status_code,
+        content={"code": error.code, "message": error.message, "detail": {}},
     )
 ```
 
@@ -3955,13 +3971,16 @@ async def domain_error_handler(_request: Request, exc: DomainError) -> JSONRespo
 
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import Request
 
 from sentrix.bootstrap.container import Container
 
 
 def get_container(request: Request) -> Container:
-    return request.app.state.container
+    # app.state 是 Starlette 的动态属性，mypy 只看得见 Any；装进去的就是 Container。
+    return cast(Container, request.app.state.container)
 ```
 
 - [ ] **Step 4: 实现 schema 与路由**
@@ -4265,6 +4284,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -4272,7 +4292,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TARGET = REPO_ROOT / "packages" / "contracts" / "openapi" / "sentrix-v1.yaml"
 
 
-def current_spec() -> dict:
+def current_spec() -> dict[str, Any]:
     sys.path.insert(0, str(REPO_ROOT / "apps" / "api" / "src"))
     from sentrix.main import create_app
 

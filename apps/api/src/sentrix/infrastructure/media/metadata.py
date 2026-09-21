@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sentrix.domain.media.models import GpsPoint
 from sentrix.infrastructure.media.image_io import ensure_heif_support
@@ -27,15 +29,17 @@ GPS_LATITUDE_REF, GPS_LATITUDE = 1, 2
 GPS_LONGITUDE_REF, GPS_LONGITUDE = 3, 4
 
 
-def _rational(value) -> float:
+def _rational(value: Any) -> float:
     try:
         return float(value[0]) / float(value[1])
     except (TypeError, ValueError, ZeroDivisionError, IndexError):
         return float(value)
 
 
-def _degrees_minutes_seconds(values, *, negative_ref: str, ref_value: str) -> float:
-    degrees = sum(_rational(item) / (60**index) for index, item in enumerate(values))
+def _degrees_minutes_seconds(values: Sequence[object], *, negative_ref: str, ref_value: str) -> float:
+    # 60**index 在 typeshed 里是 Any（int.__pow__ 要覆盖负指数返回 float 的情形），
+    # 所以给 degrees 落一个显式标注，把实数类型钉住；表达式与运行结果都不变。
+    degrees: float = sum(_rational(item) / (60**index) for index, item in enumerate(values))
     if str(ref_value).upper() == negative_ref:
         degrees *= -1
     return degrees
@@ -49,7 +53,7 @@ _DATETIME_FORMATS = (
 )
 
 
-def _parse_exif_datetime(tags: dict) -> datetime | None:
+def _parse_exif_datetime(tags: dict[int, object]) -> datetime | None:
     raw = tags.get(DATETIME_ORIGINAL_TAG) or tags.get(DATETIME_TAG)
     if not raw:
         return None
