@@ -4380,6 +4380,10 @@ npm create vite@latest web -- --template react-ts
 cd web && npm install
 ```
 
+> 脚手架会带出 `src/App.css`、`src/index.css` 与 `src/assets/*`。Task 23 把 `App.tsx` /
+> `main.tsx` 换成自带样式表的版本后，这三者不再有任何 import 边（`vite build` 会忽略它们，
+> 但它们会进 git），**由 Task 23 一并删除**。
+
 - [ ] **Step 2: 固定端口与 API 代理**
 
 `apps/web/vite.config.ts`:
