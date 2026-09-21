@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sentrix.config import Settings
-from sentrix.infrastructure.persistence.database import Database
+from sentrix.infrastructure.persistence.database import Database, MigrationError
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
@@ -29,9 +29,15 @@ class Container:
         )
 
     def database_healthy(self) -> bool:
+        """能连上不等于健康：schema 没建齐同样是坏状态。
+
+        只查 ``SELECT 1 FROM schema_migrations`` 会在「迁移目录没打进包、migrate()
+        静默 no-op」时返回 ok——那正是 1.0 起得来、接口有响应、第一次写入才炸的坏法。
+        所以要比对已应用集合与磁盘上可用的迁移集合。
+        """
         try:
-            with self.database.connect() as connection:
-                connection.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
-        except sqlite3.Error:
+            expected = {version for version, _ in self.database.migrations()}
+            applied = self.database.applied_versions()
+        except (sqlite3.Error, MigrationError):
             return False
-        return True
+        return applied == expected

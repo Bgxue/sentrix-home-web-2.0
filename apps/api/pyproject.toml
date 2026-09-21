@@ -29,3 +29,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# 迁移脚本不是 .py，不加这条不会进 wheel。editable 安装读源码树看不出来，
+# 部署装 wheel 时 MIGRATIONS_DIR 会变成空目录——那正是 migrate() 过去静默 no-op 的分支。
+[tool.setuptools.package-data]
+sentrix = ["infrastructure/persistence/migrations/*.sql"]

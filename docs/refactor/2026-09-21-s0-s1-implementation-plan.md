@@ -133,6 +133,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# 迁移脚本不是 .py，不加这条不会进 wheel。editable 安装读源码树看不出来，
+# 部署装 wheel 时 MIGRATIONS_DIR 会变成空目录——那正是 migrate() 过去静默 no-op 的分支。
+[tool.setuptools.package-data]
+sentrix = ["infrastructure/persistence/migrations/*.sql"]
 ```
 
 `apps/api/src/sentrix/__init__.py`:
@@ -375,7 +380,9 @@ git commit -m "feat(config): add typed settings with derived paths"
 ```python
 import sqlite3
 
-from sentrix.infrastructure.persistence.database import Database
+import pytest
+
+from sentrix.infrastructure.persistence.database import Database, MigrationError
 
 
 def test_migrations_are_applied_once_and_recorded(tmp_path):
@@ -417,9 +424,23 @@ def test_failed_migration_rolls_back(tmp_path):
     assert applied == []
 
 
+def test_migrate_fails_when_no_migrations_are_found(tmp_path):
+    """有迁移执行器却一个 .sql 都没有，是硬错误，不是合法的空库。
+
+    静默 no-op 会建出一个只有 ``schema_migrations`` 的空库，让 ``database_healthy()``
+    那种「表能查通就算好」的判断报 ok。
+    """
+    db = Database(tmp_path / "t.db", migrations_dir=tmp_path / "migrations")
+    (tmp_path / "migrations").mkdir()
+
+    with pytest.raises(MigrationError):
+        db.migrate()
+
+
 def test_write_connection_uses_wal_and_busy_timeout(tmp_path):
     db = Database(tmp_path / "t.db", migrations_dir=tmp_path / "migrations")
     (tmp_path / "migrations").mkdir()
+    (tmp_path / "migrations" / "0001_a.sql").write_text("CREATE TABLE a (id TEXT PRIMARY KEY);")
     db.migrate()
 
     with db.connect() as conn:
@@ -455,6 +476,21 @@ from pathlib import Path
 BUSY_TIMEOUT_MS = 30_000
 
 
+class MigrationError(RuntimeError):
+    """迁移不可执行——宁可启动失败，也不静默跑出一个没有 schema 的库。"""
+
+
+def _statements(sql_text: str) -> list[str]:
+    """把迁移脚本切成语句，并丢掉整行注释。
+
+    不用 ``Connection.executescript``：它会先把挂起事务隐式 COMMIT 掉，那样
+    ``BEGIN IMMEDIATE`` 拿到的写锁会在脚本执行前就释放，串行化与回滚保护同时失效。
+    代价是这里不解析字符串字面量——迁移脚本里不要写含 ``;`` 的字符串常量。
+    """
+    lines = [line for line in sql_text.splitlines() if not line.strip().startswith("--")]
+    return [statement.strip() for statement in "\n".join(lines).split(";") if statement.strip()]
+
+
 class Database:
     def __init__(self, path: Path, migrations_dir: Path) -> None:
         self.path = Path(path)
@@ -471,8 +507,27 @@ class Database:
         finally:
             connection.close()
 
+    def migrations(self) -> list[tuple[str, Path]]:
+        """磁盘上的 ``(版本号, 脚本路径)``，按版本号排序。
+
+        目录不存在、或一个 ``.sql`` 都没有，都是硬错误：那说明部署漏了 package-data，
+        或迁移根本没被带上。放过去只会让服务带着空 schema 起来，直到第一次写入才炸。
+        """
+        if not self.migrations_dir.is_dir():
+            raise MigrationError(f"迁移目录不存在: {self.migrations_dir}")
+        scripts = sorted(self.migrations_dir.glob("*.sql"))
+        if not scripts:
+            raise MigrationError(f"迁移目录里没有任何 .sql: {self.migrations_dir}")
+        return [(script.stem.split("_", 1)[0], script) for script in scripts]
+
+    def applied_versions(self) -> set[str]:
+        with self.connect() as connection:
+            return {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+
     def migrate(self) -> list[str]:
+        pending = self.migrations()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
         applied: list[str] = []
         with self.connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
@@ -481,30 +536,35 @@ class Database:
                 " version TEXT PRIMARY KEY,"
                 " applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
             )
-            done = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
-            for script in sorted(self.migrations_dir.glob("*.sql")):
-                version = script.stem.split("_", 1)[0]
-                if version in done:
-                    continue
-                self._apply(connection, script, version)
-                applied.append(version)
+            for version, script in pending:
+                if self._apply(connection, script, version):
+                    applied.append(version)
         return applied
 
     @staticmethod
-    def _apply(connection: sqlite3.Connection, script: Path, version: str) -> None:
-        """一个迁移一个事务：脚本里的 DDL 与版本号要么一起留下，要么一起回滚。
+    def _apply(connection: sqlite3.Connection, script: Path, version: str) -> bool:
+        """一个迁移一个事务，且「读已应用集合」也在同一事务里。
 
-        不能写成 ``with connection: connection.executescript(...)``——executescript()
-        会先把挂起事务隐式 COMMIT 掉，那个回滚保护覆盖不到脚本里的 DDL，失败时表会残留。
-        所以事务边界由本函数显式建立，且 ``BEGIN`` 必须是脚本的第一条语句：executescript
-        不接受参数绑定，只能把 BEGIN 拼在脚本文本前；``version`` 仍走参数绑定。
+        ``BEGIN IMMEDIATE`` 先拿写锁再读：两个 worker 同时启动时，后到的会阻塞在锁上，
+        拿到锁时前一个已经提交，于是看见版本号已存在并跳过，而不是重复执行 DDL。
+        若改成在 autocommit 下先读、再另起事务写，就留下 TOCTOU 窗口，撞上
+        ``table ... already exists``。
         """
         previous = connection.isolation_level
         connection.isolation_level = None  # 关掉 sqlite3 的隐式事务，边界由本函数管
         try:
-            connection.executescript(f"BEGIN;\n{script.read_text(encoding='utf-8')}")
+            connection.execute("BEGIN IMMEDIATE")
+            done = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+            ).fetchone()
+            if done is not None:
+                connection.execute("COMMIT")
+                return False
+            for statement in _statements(script.read_text(encoding="utf-8")):
+                connection.execute(statement)
             connection.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
             connection.execute("COMMIT")
+            return True
         except BaseException:
             with suppress(sqlite3.OperationalError):  # BEGIN 就没成功时没有事务可回滚
                 connection.execute("ROLLBACK")
@@ -516,7 +576,7 @@ class Database:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_migrations.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 5: 提交**
 
@@ -542,8 +602,11 @@ git commit -m "feat(persistence): add sqlite database with versioned migrations"
 `apps/api/tests/integration/test_container.py`:
 
 ```python
-from sentrix.bootstrap.container import Container
+import pytest
+
+from sentrix.bootstrap.container import MIGRATIONS_DIR, Container
 from sentrix.config import Settings
+from sentrix.infrastructure.persistence.database import MigrationError
 
 
 def test_container_builds_all_adapters(tmp_path, monkeypatch):
@@ -563,6 +626,39 @@ def test_database_healthy_reports_false_when_dir_missing(tmp_path, monkeypatch):
     container = Container.build(settings)
 
     assert container.database_healthy() is False
+
+
+def test_migrate_fails_loudly_when_migrations_dir_is_missing(tmp_path, monkeypatch):
+    """定位不到迁移目录时必须炸。
+
+    静默 no-op 会让服务带着空 schema 起来，而 health 还会报 ok——1.0 那种
+    「起得来、第一次写入才崩」的坏法。
+    """
+    monkeypatch.setattr("sentrix.bootstrap.container.MIGRATIONS_DIR", tmp_path / "gone")
+    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path / "data"))
+    container = Container.build(Settings())
+
+    with pytest.raises(MigrationError):
+        container.database.migrate()
+
+
+def test_database_healthy_reports_false_when_migrations_are_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
+    container = Container.build(Settings())
+
+    # 还没跑 migrate()：表都不存在，健康检查不能报 ok
+    assert container.database_healthy() is False
+
+    container.database.migrate()
+    assert container.database_healthy() is True
+
+
+def test_shipped_migrations_directory_is_not_empty():
+    """打包漏掉 .sql 时 MIGRATIONS_DIR 会变成空目录——那正是静默 no-op 的分支。
+
+    editable 安装读的是源码树，所以这条拦不住 wheel 漏文件；真实验证见构建 wheel 的步骤。
+    """
+    assert sorted(MIGRATIONS_DIR.glob("*.sql")), f"{MIGRATIONS_DIR} 下没有任何 .sql 迁移"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -577,6 +673,10 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'sentrix.bootstrap.cont
 ```sql
 -- 记忆空间（相册域）。字段语义取自 1.0 backend/db.py:403 的 memory_spaces。
 -- 2.0 是空库起步，不迁移 1.0 数据。
+--
+-- 少了 1.0 的 source_path 列，是有意的：它在 1.0 只被写入（db.py:1392 的 INSERT /
+-- UPSERT），全仓没有任何 SELECT 读它，属于只写不读的死列；而且导入来源本就不该进记忆
+-- 模型（设计 §1.1 的硬约束「导入源不得写入记忆」）。
 CREATE TABLE memory_spaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -608,7 +708,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sentrix.config import Settings
-from sentrix.infrastructure.persistence.database import Database
+from sentrix.infrastructure.persistence.database import Database, MigrationError
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
@@ -626,18 +726,24 @@ class Container:
         )
 
     def database_healthy(self) -> bool:
+        """能连上不等于健康：schema 没建齐同样是坏状态。
+
+        只查 ``SELECT 1 FROM schema_migrations`` 会在「迁移目录没打进包、migrate()
+        静默 no-op」时返回 ok——那正是 1.0 起得来、接口有响应、第一次写入才炸的坏法。
+        所以要比对已应用集合与磁盘上可用的迁移集合。
+        """
         try:
-            with self.database.connect() as connection:
-                connection.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
-        except sqlite3.Error:
+            expected = {version for version, _ in self.database.migrations()}
+            applied = self.database.applied_versions()
+        except (sqlite3.Error, MigrationError):
             return False
-        return True
+        return applied == expected
 ```
 
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py -v`
-Expected: 2 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -773,7 +879,7 @@ Expected: 3 passed
 - [ ] **Step 5: 回归：容器未被破坏**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py apps/api/tests/contract/test_health.py -v`
-Expected: 5 passed
+Expected: 8 passed
 
 - [ ] **Step 6: 提交**
 

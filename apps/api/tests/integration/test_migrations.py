@@ -1,6 +1,8 @@
 import sqlite3
 
-from sentrix.infrastructure.persistence.database import Database
+import pytest
+
+from sentrix.infrastructure.persistence.database import Database, MigrationError
 
 
 def test_migrations_are_applied_once_and_recorded(tmp_path):
@@ -42,9 +44,23 @@ def test_failed_migration_rolls_back(tmp_path):
     assert applied == []
 
 
+def test_migrate_fails_when_no_migrations_are_found(tmp_path):
+    """有迁移执行器却一个 .sql 都没有，是硬错误，不是合法的空库。
+
+    静默 no-op 会建出一个只有 ``schema_migrations`` 的空库，让 ``database_healthy()``
+    那种「表能查通就算好」的判断报 ok。
+    """
+    db = Database(tmp_path / "t.db", migrations_dir=tmp_path / "migrations")
+    (tmp_path / "migrations").mkdir()
+
+    with pytest.raises(MigrationError):
+        db.migrate()
+
+
 def test_write_connection_uses_wal_and_busy_timeout(tmp_path):
     db = Database(tmp_path / "t.db", migrations_dir=tmp_path / "migrations")
     (tmp_path / "migrations").mkdir()
+    (tmp_path / "migrations" / "0001_a.sql").write_text("CREATE TABLE a (id TEXT PRIMARY KEY);")
     db.migrate()
 
     with db.connect() as conn:
