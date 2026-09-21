@@ -1170,7 +1170,7 @@ git commit -m "feat(refactor): add capability map, frozen list and validator"
 ```markdown
 # 1.0 行为基线
 
-基线提交 `2d2cee7cbf1023f5019baaa9061af9c4cf45afa`。
+基线提交 `2d2cee7cbf1023f5019b9aaa9061af9c4cf45afa`。
 2.0 重写时必须保持这些数值与规则不变，除非明确决策要改。
 
 ## 人脸
