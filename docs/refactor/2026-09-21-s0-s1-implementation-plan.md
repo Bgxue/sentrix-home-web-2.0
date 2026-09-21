@@ -19,7 +19,7 @@
 Python 3.11 可用性先确认（1.0 用的是 3.10）：
 
 ```bash
-python3.11 --version || echo "需要先装 python3.11"
+uv --version || echo "需要先装 uv"
 ```
 
 ## 文件结构
@@ -163,7 +163,8 @@ show_missing = true
 
 ```bash
 cd /home/asus/Github/sentrix-home-web2.0
-python3.11 -m venv .venv
+uv python install 3.11
+uv venv --python 3.11 --python-preference only-managed --clear --seed .venv
 .venv/bin/pip install -q -e "apps/api[dev]"
 ```
 
