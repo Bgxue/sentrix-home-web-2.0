@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration check-docs ci ci-full dev web-dev
+.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration coverage check-docs ci dev web-dev
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -39,8 +39,7 @@ test-integration: ## 集成测试
 test: ## 全部测试
 	.venv/bin/pytest -q
 
-# 已知状态：S1 Task 13–15 落地前既无 domain/application 代码也无测试，本目标预期为红
-# （coverage 报 "No data was collected"，并以 fail_under=85 失败）——不是环境或配置问题
+# S1 Task 13 已合入：domain/application 有代码，本目标实测 95.6%（阈值 85%），门禁为绿。
 coverage: ## domain + application 覆盖率门禁（设计 §6.4：≥85%）
 	.venv/bin/pytest --cov --cov-report=term-missing
 
@@ -50,13 +49,9 @@ check-docs: ## 文档防腐校验
 
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
-ci: lint format-check typecheck arch test check-docs ## CI 门禁（coverage 见 ci-full）
+# coverage 本身跑的就是全量测试，所以链上不再单列 test——同一套测试不必跑两遍。
+ci: lint format-check typecheck arch check-docs coverage ## CI 门禁
 	@echo "ci: 全部通过"
-
-# 一个长期恒红的 ci 会被所有人学会无视，所以把 coverage 拆到这里。
-# S1 Task 13 合入（domain/application 有代码）时把两者并回一个 ci。
-ci-full: ci coverage ## 含覆盖率门禁（当前预期为红）
-	@echo "ci-full: 全部通过"
 
 dev: ## 起 2.0 API（8191）
 	$(PY) -m uvicorn --factory sentrix.main:create_app --host 0.0.0.0 --port 8191 --app-dir apps/api/src

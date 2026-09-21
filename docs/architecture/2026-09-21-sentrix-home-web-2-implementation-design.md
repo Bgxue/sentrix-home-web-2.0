@@ -402,7 +402,7 @@ sentrix-home-web2.0/data/
 
 - Python 3.11+、`pyproject.toml`、ruff（lint + format）、mypy strict（**整个 `sentrix` 包 + `scripts/`**；2026-09-21 校正，原写「仅 `domain/` + `application/`」——实测其余各层在 `--strict` 下本来就全绿，把已经干净的两层漏在门外没有收益）、pytest
 - TypeScript strict、ESLint + Prettier、Vite、Vitest
-- 统一入口（取自 `Makefile` 的 `.PHONY` 全集；`coverage` 是真实目标但未登记进 `.PHONY`）：`make help / install / lint / format / format-check / typecheck / arch / test / test-unit / test-contract / test-integration / coverage / check-docs / ci / ci-full / dev / web-dev`
+- 统一入口（取自 `Makefile` 的 `.PHONY` 全集）：`make help / install / lint / format / format-check / typecheck / arch / test / test-unit / test-contract / test-integration / coverage / check-docs / ci / dev / web-dev`
 
 ### 6.2 分层强制
 
@@ -412,7 +412,7 @@ sentrix-home-web2.0/data/
 
 **契约集在 S0 内补全过一次**（见 2.3）：补上 `os` / `qdrant_client`、新增 `infrastructure-purity`、把 `sentrix.main` 并入 `layers`。原先 `infrastructure` 与 `bootstrap` 不在任何契约里，等于两层无人约束——「只声明」的那一版并不是最终形态。
 
-**门禁拆分**：`coverage` 在 S1 Task 13–15 落地前必然红，挂在 `make ci` 里只会让门禁长期恒红、被所有人学会无视。故 `ci`（当前应全绿）不含 `coverage`，`ci-full` 含；S1 Task 13 合入时并回一个 `ci`。
+**门禁拆分（已结束）**：`coverage` 在 S1 Task 13–15 落地前必然红，当时的做法是 `ci`（不含 `coverage`）与 `ci-full`（含）并存，避免门禁长期恒红、被所有人学会无视。S1 Task 13 已合入，`domain/` + `application/` 有代码、覆盖率实测 95.6%（阈值 85%），**两者已并回一个 `ci`，`ci-full` 已删除**。
 
 ### 6.3 数据库迁移
 
