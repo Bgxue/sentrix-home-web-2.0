@@ -152,6 +152,9 @@ extend-exclude = ["docs/"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["sentrix"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -1957,6 +1960,7 @@ git commit -m "feat(domain): add media ports and browser transcode rules"
 - Create: `apps/api/src/sentrix/infrastructure/persistence/repositories/__init__.py`（空文件）
 - Create: `apps/api/src/sentrix/infrastructure/persistence/repositories/assets.py`
 - Create: `apps/api/src/sentrix/infrastructure/persistence/repositories/spaces.py`
+- Modify: `apps/api/tests/conftest.py`（追加 `migrations_ready_db` fixture）
 - Test: `apps/api/tests/integration/test_asset_repository.py`
 
 - [ ] **Step 1: 写失败测试**
@@ -2035,12 +2039,28 @@ def test_ensure_is_idempotent(migrations_ready_db: Database):
     assert spaces.get("album1").name == "第一个相册"
 ```
 
-`apps/api/tests/conftest.py` 追加：
+`apps/api/tests/conftest.py` 替换为：
 
 ```python
 from pathlib import Path
 
+import pytest
+from fastapi.testclient import TestClient
+
+from sentrix.config import Settings
 from sentrix.infrastructure.persistence.database import Database
+from sentrix.main import create_app
+
+
+@pytest.fixture
+def settings(tmp_path, monkeypatch) -> Settings:
+    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
+    return Settings()
+
+
+@pytest.fixture
+def client(settings) -> TestClient:
+    return TestClient(create_app(settings))
 
 
 @pytest.fixture
@@ -2051,8 +2071,6 @@ def migrations_ready_db(tmp_path) -> Database:
     db.migrate()
     return db
 ```
-
-（文件顶部需 `from pathlib import Path`）
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -3284,9 +3302,10 @@ class AssetListResponse(BaseModel):
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
-from pathlib import Path
 
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
