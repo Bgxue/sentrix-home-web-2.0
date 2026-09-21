@@ -4225,8 +4225,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+# 这里刻意没有模块级 ``app = create_app()``：它会让任何 ``import sentrix.main``
+# （pytest 收集、脚本、类型检查）都带上副作用——在进程 CWD 下建出 data/、跑一次迁移。
+# 进程入口走工厂：``uvicorn --factory sentrix.main:create_app``（见 Makefile 的 dev）。
+# 理由与 Task 5 的定稿一致；本块曾残留该行（1076a7f 只改了 Task 5，漏改这里）。
 ```
+
+> **注意：本块刻意没有模块级 `app = create_app()`**——import 不该有副作用（理由见 Task 5 定稿：任何 `import sentrix.main` 都会在进程 CWD 下建出 `data/` 并跑一次迁移）。原稿残留在本块的该行是 `1076a7f` 漏改所致，执行时已按 Task 5 对齐删除。**不要补回去。**
 
 - [ ] **Step 7: 跑测试确认通过**
 
