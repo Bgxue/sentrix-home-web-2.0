@@ -169,6 +169,36 @@ fail_under = 85
 show_missing = true
 ```
 
+- [ ] **Step 2b: 确认 `.gitignore` 内容**
+
+`.gitignore` 必须包含（2.0 运行期产物 + 构建缓存 + 编辑器残留）：
+
+```gitignore
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+apps/photobench/datasets/
+apps/photobench/results/
+apps/photobench/logs/
+apps/photobench/config/judge_providers.json
+apps/photobench/config/runtime_connection.json
+apps/photobench/config/*.bak-*
+apps/photobench/config/vllm_targets.json
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+apps/web/node_modules/
+apps/web/dist/
+/data/
+*.egg-info/
+```
+
+注意 `data/` 必须写成 `/data/`（锚定到仓库根）。未锚定的 `data/` 会匹配任意层级的同名目录，将来 `apps/api/tests/fixtures/data/` 这类夹具会被静默忽略且 `git status` 无任何提示。
+
 - [ ] **Step 3: 建 venv 并安装**
 
 ```bash
@@ -192,7 +222,7 @@ Expected: `ruff` exit=0（`All checks passed!`）、`mypy` exit=0（`Success: no
 - [ ] **Step 5: 提交**
 
 ```bash
-git add pyproject.toml apps/api/pyproject.toml apps/api/src/sentrix/__init__.py .gitignore
+git add pyproject.toml apps/api/pyproject.toml apps/api/src/sentrix apps/api/tests .gitignore
 git commit -m "chore(api): scaffold python package and workspace tooling"
 ```
 
@@ -1366,6 +1396,8 @@ check-docs: ## 文档防腐校验
 	$(PY) scripts/check_capability_map.py
 	$(PY) scripts/check_module_map.py
 
+# 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
+# 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
 ci: lint typecheck test coverage check-docs ## CI 门禁（arch 待 M1 后加入）
 	@echo "ci: 全部通过"
 
