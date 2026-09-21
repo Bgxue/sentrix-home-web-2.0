@@ -789,7 +789,7 @@ git commit -m "feat(api): add v1 app assembly and health route"
 - Modify: `pyproject.toml`
 - Test: `apps/api/tests/unit/test_architecture_rules.py`
 
-> **注意**：按设计 §6.2，S0 只**声明**规则，M1 结束才在 CI 打开全量强制。本任务把规则写进配置并让它**可执行**，但不加入 `make ci`。
+> **注意**：设计 §6.2 原定「S0 只声明、M1 结束才在 CI 打开全量强制」，**已改为声明即启用**——终态实测四个契约 `4 kept, 0 broken`，代码本来就合规，强制不带来任何摩擦，没必要把这条防线推迟到 M1。本任务把规则写进配置，并**立即进 `make ci`**。
 
 - [ ] **Step 1: 写失败测试（验证规则本身存在且可跑）**
 
@@ -1472,7 +1472,7 @@ check-docs: ## 文档防腐校验
 
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
-ci: lint typecheck test coverage check-docs ## CI 门禁（arch 待 M1 后加入）
+ci: lint typecheck test coverage check-docs arch ## CI 门禁（arch 已启用）
 	@echo "ci: 全部通过"
 
 dev: ## 起 2.0 API（8191）
@@ -1487,10 +1487,10 @@ web-dev: ## 起 2.0 Web（4274）
 Run: `make lint && make typecheck && make test && make check-docs`
 Expected: 全部通过，无报错
 
-- [ ] **Step 3: 验证 arch 能跑（但不在 ci 里）**
+- [ ] **Step 3: 验证 arch（已在 ci 链上）**
 
 Run: `make arch`
-Expected: 输出各 contract 的检查结果。此时 `domain/` 下还没有会违规的文件，应全部 PASS
+Expected: 输出各 contract 的检查结果，四个契约全部 PASS。`arch` 已是 `make ci` 的一环，Step 2 的 `make ci` 也会跑到它。
 
 - [ ] **Step 4: 提交**
 
