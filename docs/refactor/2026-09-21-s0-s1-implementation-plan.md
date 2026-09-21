@@ -1871,7 +1871,7 @@ Expected: 2 passed
 - [ ] **Step 7: 提交**
 
 ```bash
-git add apps/api/src/sentrix/domain apps/api/tests/unit/test_media_models.py
+git add apps/api/src/sentrix/domain apps/api/tests/unit/test_media_models.py docs/architecture/module-map.md
 git commit -m "feat(domain): add asset and observation models"
 ```
 
@@ -2004,7 +2004,7 @@ Expected: 2 passed
 - [ ] **Step 6: 提交**
 
 ```bash
-git add apps/api/src/sentrix/domain/media/ports.py apps/api/tests/unit/test_media_ports.py
+git add apps/api/src/sentrix/domain/media/ports.py apps/api/tests/unit/test_media_ports.py docs/architecture/module-map.md
 git commit -m "feat(domain): add media ports and browser transcode rules"
 ```
 
@@ -2398,7 +2398,7 @@ Expected: 2 passed
 - [ ] **Step 7: 提交**
 
 ```bash
-git add apps/api/src/sentrix/infrastructure/persistence apps/api/tests/integration/test_asset_repository.py apps/api/tests/conftest.py
+git add apps/api/src/sentrix/infrastructure/persistence apps/api/tests/integration/test_asset_repository.py apps/api/tests/conftest.py docs/architecture/module-map.md
 git commit -m "feat(persistence): add media migration and sqlite repositories"
 ```
 
@@ -2518,7 +2518,7 @@ Expected: 2 passed
 - [ ] **Step 6: 提交**
 
 ```bash
-git add apps/api/src/sentrix/infrastructure/media apps/api/tests/integration/test_media_storage.py
+git add apps/api/src/sentrix/infrastructure/media apps/api/tests/integration/test_media_storage.py docs/architecture/module-map.md
 git commit -m "feat(media): add filesystem storage adapter"
 ```
 
@@ -2773,7 +2773,7 @@ Expected: 2 passed
 - [ ] **Step 6: 提交**
 
 ```bash
-git add apps/api/src/sentrix/infrastructure/media/metadata.py apps/api/tests/integration/test_metadata_reader.py
+git add apps/api/src/sentrix/infrastructure/media/metadata.py apps/api/tests/integration/test_metadata_reader.py docs/architecture/module-map.md
 git commit -m "feat(media): port exif/gps extraction with logging on failure"
 ```
 
@@ -2915,7 +2915,7 @@ Expected: 2 passed
 - [ ] **Step 6: 提交**
 
 ```bash
-git add apps/api/src/sentrix/infrastructure/media/image_io.py apps/api/tests/integration/test_image_io.py
+git add apps/api/src/sentrix/infrastructure/media/image_io.py apps/api/tests/integration/test_image_io.py docs/architecture/module-map.md
 git commit -m "feat(media): port image io with heic support and exif transpose"
 ```
 
@@ -3218,7 +3218,7 @@ Expected: 2 passed
 - [ ] **Step 6: 提交**
 
 ```bash
-git add apps/api/src/sentrix/application apps/api/tests/unit/test_import_assets.py
+git add apps/api/src/sentrix/application apps/api/tests/unit/test_import_assets.py docs/architecture/module-map.md
 git commit -m "feat(application): add import use case with scoped deduplication"
 ```
 
@@ -3654,7 +3654,7 @@ Expected: 2 passed
 - [ ] **Step 10: 提交**
 
 ```bash
-git add apps/api/src/sentrix/api apps/api/src/sentrix/bootstrap apps/api/src/sentrix/main.py apps/api/tests/contract/test_media_routes.py
+git add apps/api/src/sentrix/api apps/api/src/sentrix/bootstrap apps/api/src/sentrix/main.py apps/api/tests/contract/test_media_routes.py docs/architecture/module-map.md
 git commit -m "feat(api): add media import, listing and delivery endpoints"
 ```
 
