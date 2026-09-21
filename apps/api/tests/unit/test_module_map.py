@@ -40,6 +40,36 @@ def test_checker_flags_undocumented_module(tmp_path):
     assert "代码里有但 module-map 未记录: sentrix/orphan.py" in result.stdout
 
 
+def test_checker_rejects_the_package_dir_as_src_root(tmp_path):
+    """按旧约定把包目录当 --src 传，必须报错，不能静默换一套基准。
+
+    这是本脚本最危险的失败模式：基准换掉了，结论照给，人以为校验通过了。
+    传错时路径会整体丢掉 `sentrix/` 前缀，下面两条断言钉的就是这个错位形态。
+    """
+    src_root = tmp_path / "src"
+    package = src_root / "sentrix"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "config.py").write_text('"""Config."""\n', encoding="utf-8")
+    doc = tmp_path / "module-map.md"
+    doc.write_text(
+        HEADER
+        + "| `sentrix/__init__.py` | 包标记 | — | — | — |\n"
+        + "| `sentrix/config.py` | 配置 | — | — | — |\n",
+        encoding="utf-8",
+    )
+
+    correct = run_checker(src_root, doc)
+    assert correct.returncode == 0, correct.stdout + correct.stderr
+
+    wrong_base = run_checker(package, doc)
+
+    assert wrong_base.returncode == 1, wrong_base.stdout + wrong_base.stderr
+    assert "代码里有但 module-map 未记录: __init__.py" in wrong_base.stdout
+    assert "module-map 有但代码里不存在: sentrix/__init__.py" in wrong_base.stdout
+    assert "module-map 有但代码里不存在: sentrix/config.py" in wrong_base.stdout
+
+
 def test_checker_flags_wrong_dependency_columns(tmp_path):
     """反向验证：依赖列写错必须报红。
 
