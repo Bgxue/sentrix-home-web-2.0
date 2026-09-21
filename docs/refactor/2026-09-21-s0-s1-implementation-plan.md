@@ -1798,6 +1798,10 @@ class Asset:
     created_at: datetime
     updated_at: datetime
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.media_type, MediaType):
+            raise ValueError(f"未知 media_type: {self.media_type!r}")
+
 
 @dataclass(frozen=True, slots=True)
 class Observation:
