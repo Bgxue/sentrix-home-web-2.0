@@ -14,7 +14,8 @@
 
 采用 domain / application / infrastructure / api 四层，依赖方向单向：
 
-- `domain` 只依赖自己，禁止 fastapi / sqlite3 / PIL / httpx / os.getenv
+- `domain` 只依赖自己，禁止 fastapi / sqlite3 / qdrant_client / PIL / httpx / uvicorn / `os`
+  （**2026-09-21 校正：契约集实际范围**。此处原写「os.getenv」，实际契约禁的是**整个 `os`**，比原表述更宽——domain 取环境变量本身就是这条决策要禁的模式，留半个口子没有意义，纯类型用法走 `collections.abc`。同段所列也不是全集，完整范围见设计 §2.3。）
 - `application` 只依赖 `domain`，自己拥有事务
 - `infrastructure` 实现 domain 的 port，禁止被 domain 反向依赖
 - `api` 只做 HTTP 映射，禁止 SQL、文件系统、模型客户端

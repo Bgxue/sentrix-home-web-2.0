@@ -204,12 +204,19 @@ sentrix-home-web2.0/
 
 ```
 domain          → 只依赖 domain 自己
-                  禁止 fastapi / sqlite3 / qdrant_client / httpx / os.getenv
-application     → 只依赖 domain
-infrastructure  → 实现 domain 的 port；禁止被 domain 反向依赖
-api             → 只依赖 application；禁止 SQL、文件系统、模型客户端
+                  禁止 fastapi / sqlite3 / qdrant_client / httpx / uvicorn / PIL
+                  禁止 os（比「禁 os.getenv」更宽：取环境变量本身就是设计要禁的模式；
+                  纯类型用法走 collections.abc）
+application     → 只依赖 domain；禁止 fastapi / sqlite3 / PIL / httpx
+infrastructure  → 实现 domain 的 port；禁止被 domain 反向依赖，也禁止依赖任何上层
+                  （api / application / bootstrap / main）
+api             → 只依赖 application；禁止 SQL、文件系统、模型客户端（只查直接 import）
 bootstrap       → 唯一允许组装 infrastructure 的地方
+sentrix.main    → 进程入口，只向下调用；与 api / application / domain 同受 layers 链约束
 ```
+
+契约共五条：`domain-purity`、`application-purity`、`api-transport-only`、
+`infrastructure-purity`、`layers`（实际内容以 `pyproject.toml` 的 `[tool.importlinter]` 为准）。
 
 例外通过 `ignore_imports` 声明，**每条必须带注释说明理由**，且 CI 打印例外条数作为腐化信号灯。
 
@@ -393,7 +400,7 @@ sentrix-home-web2.0/data/
 
 ### 6.1 工具链
 
-- Python 3.11+、`pyproject.toml`、ruff（lint + format）、mypy strict（仅 `domain/` + `application/`）、pytest
+- Python 3.11+、`pyproject.toml`、ruff（lint + format）、mypy strict（**整个 `sentrix` 包 + `scripts/`**；2026-09-21 校正，原写「仅 `domain/` + `application/`」——实测其余各层在 `--strict` 下本来就全绿，把已经干净的两层漏在门外没有收益）、pytest
 - TypeScript strict、ESLint + Prettier、Vite、Vitest
 - 统一入口：`make dev / test / lint / typecheck / arch / build / ci`
 
@@ -401,7 +408,11 @@ sentrix-home-web2.0/data/
 
 见 2.3。**S0 即启用**：S0 就立规则文件、`ignore_imports` 留空，并直接把 `arch` 放进 `make ci` 全量强制。
 
-原定"分阶段启用"（S0 只立规则、M1 结束才强制），理由是"前期架构仍在试，规则需要跟着调"。**该前提已不成立**：终态实测四个契约 `4 kept, 0 broken`，代码本来就合规，强制不带来任何摩擦；而 S0–S1 恰恰是分层最容易被悄悄破坏、也最缺其它防线的阶段。故改为声明即启用。**分层规则本身不动**：规则条目一字未改，`ignore_imports` 仍留空。
+原定"分阶段启用"（S0 只立规则、M1 结束才强制），理由是"前期架构仍在试，规则需要跟着调"。**该前提已不成立**：终态实测 `5 kept, 0 broken`，代码本来就合规，强制不带来任何摩擦；而 S0–S1 恰恰是分层最容易被悄悄破坏、也最缺其它防线的阶段。故改为声明即启用。`ignore_imports` 仍留空。
+
+**契约集在 S0 内补全过一次**（见 2.3）：补上 `os` / `qdrant_client`、新增 `infrastructure-purity`、把 `sentrix.main` 并入 `layers`。原先 `infrastructure` 与 `bootstrap` 不在任何契约里，等于两层无人约束——「只声明」的那一版并不是最终形态。
+
+**门禁拆分**：`coverage` 在 S1 Task 13–15 落地前必然红，挂在 `make ci` 里只会让门禁长期恒红、被所有人学会无视。故 `ci`（当前应全绿）不含 `coverage`，`ci-full` 含；S1 Task 13 合入时并回一个 `ci`。
 
 ### 6.3 数据库迁移
 
