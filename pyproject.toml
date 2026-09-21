@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["apps/api/src/sentrix/domain", "apps/api/src/sentrix/application"]
+
+[tool.pytest.ini_options]
+testpaths = ["apps/api/tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["apps/api/src/sentrix/domain", "apps/api/src/sentrix/application"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true

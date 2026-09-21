@@ -9,3 +9,13 @@ apps/photobench/config/judge_providers.json
 apps/photobench/config/runtime_connection.json
 apps/photobench/config/*.bak-*
 apps/photobench/config/vllm_targets.json
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+apps/web/node_modules/
+apps/web/dist/
+data/
+*.egg-info/
