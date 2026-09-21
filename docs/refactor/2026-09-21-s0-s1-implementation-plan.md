@@ -1961,7 +1961,7 @@ def test_heic_needs_transcode_rule_lives_in_domain():
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_media_ports.py -v`
-Expected: FAIL — `ModuleNotFoundError`
+Expected: FAIL — `ImportError: cannot import name 'ports' from 'sentrix.domain.media'`（包已存在，只是还没有 `ports.py`）
 
 - [ ] **Step 3: 实现**
 
@@ -2456,7 +2456,7 @@ class SqliteObservationRepository:
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_asset_repository.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 更新 module-map**
 
