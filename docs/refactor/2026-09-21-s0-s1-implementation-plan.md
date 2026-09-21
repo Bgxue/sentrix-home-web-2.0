@@ -837,9 +837,13 @@ Expected: FAIL — `lint-imports: --contract domain-purity` 不存在
 ```toml
 [tool.importlinter]
 root_packages = ["sentrix"]
+# domain-purity 的 forbidden_modules 里有 fastapi/sqlite3/PIL 等外部包，
+# 不开这个开关 import-linter 会直接拒绝加载配置（契约一个都注册不上）。
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "domain-purity"
+id = "domain-purity"
 type = "forbidden"
 source_modules = ["sentrix.domain"]
 forbidden_modules = [
@@ -856,6 +860,7 @@ forbidden_modules = [
 
 [[tool.importlinter.contracts]]
 name = "application-purity"
+id = "application-purity"
 type = "forbidden"
 source_modules = ["sentrix.application"]
 forbidden_modules = [
@@ -870,12 +875,17 @@ forbidden_modules = [
 
 [[tool.importlinter.contracts]]
 name = "api-transport-only"
+id = "api-transport-only"
 type = "forbidden"
+# 只查直接 import：api 必须经 bootstrap.container 取依赖，
+# 而 container 必然间接摸到 sqlite3/PIL/infrastructure——不关掉传递检查这条契约永远红。
+allow_indirect_imports = true
 source_modules = ["sentrix.api"]
 forbidden_modules = ["sqlite3", "PIL", "sentrix.infrastructure"]
 
 [[tool.importlinter.contracts]]
 name = "layers"
+id = "layers"
 type = "layers"
 layers = [
     "sentrix.api",
