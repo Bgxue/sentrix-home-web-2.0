@@ -1845,7 +1845,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -2405,7 +2405,7 @@ Expected: `domain-purity` PASS（`domain/media/models.py` 只 import 标准库�
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 7: 提交**
 
@@ -2538,7 +2538,7 @@ Expected: 3 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -2952,7 +2952,7 @@ Expected: 5 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 7: 提交**
 
@@ -3072,7 +3072,7 @@ Expected: 4 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -3216,7 +3216,7 @@ Expected: 4 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -3476,7 +3476,7 @@ Expected: 6 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -3789,7 +3789,7 @@ Expected: 4 passed
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
@@ -4231,7 +4231,7 @@ Expected: 全部 PASS。若有 `api-transport-only` 失败，说明路由里出�
 把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个文件就红；**「依赖谁 / 被谁依赖」两列还必须与该文件真实的包内 import 一致**——`check_module_map.py` 用 `ast` 解析后逐条比对，少写、多写、以及与转置不符都会红。所以新文件的「依赖谁」，以及所有反过来依赖它的行的「被谁依赖」，要一起改对。
 
 Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 10: 提交**
 
