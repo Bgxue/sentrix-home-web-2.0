@@ -1178,18 +1178,18 @@ git commit -m "feat(refactor): add capability map, frozen list and validator"
 | 项 | 值 | 位置 |
 |---|---|---|
 | 在线匹配余弦阈值 | 0.30（硬编码，无 env 可配） | `backend/db.py:4815` |
-| 全局重聚类阈值 | 0.30 | `backend/face_clustering.py:69` |
-| 质量阈值 | 0.30 | `backend/face_clustering.py:69` |
+| 全局重聚类阈值 | 0.30 | `backend/face_clustering.py:67` |
+| 质量阈值 | 0.30 | `backend/face_clustering.py:67` |
 
 ## 检索融合
 
 | 项 | 值 | 位置 |
 |---|---|---|
 | 默认策略 | `weighted_rrf` | `configs/retrieval/defaults.json` |
-| RRF_K | 60 | `backend/retrieval/fusion.py:22` |
+| RRF_K | 60 | `backend/retrieval/fusion.py:21` |
 | anchor 加成 | +1.0 | `backend/retrieval/fusion.py:22` |
 | 通道权重 | visual 2.5 / lexical 1.0 / metadata 1.0 / entity 1.0 / text 0.5 / adjacency 0.5 | `backend/retrieval/fusion.py:37` |
-| adjacency | `kind="expander"`，默认关闭，`retrieve()` 恒返回空 | `backend/retrieval/adjacency.py:47` |
+| adjacency | `kind="expander"`，默认关闭，`retrieve()` 恒返回空 | `backend/retrieval/adjacency.py:34`、`:47` |
 
 ## 助手
 
@@ -1197,7 +1197,7 @@ git commit -m "feat(refactor): add capability map, frozen list and validator"
 |---|---|---|
 | 默认 profile | `goal_driven_candidate` | `backend/agent_runtime/profile.py` |
 | profile 预算 | 8 步 / 6 次调用 / 180s | `backend/agent_runtime/profile.py` |
-| `max_search_calls` 硬收敛 | 1 | `backend/agent_runtime/runtime.py:1913` |
+| `max_search_calls` 硬收敛 | 1 | `backend/agent_runtime/runtime.py:1895` |
 | 本地模型 max_tokens 上限 | min(1501, 4400 - prompt_tokens)，下限 64 | `backend/app.py:2680-2692` |
 
 ## 事件
