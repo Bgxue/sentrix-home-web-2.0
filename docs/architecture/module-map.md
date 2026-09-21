@@ -25,6 +25,8 @@
 | `sentrix/api/routes/__init__.py` | 包标记 | api | — | `sentrix/main.py` |
 | `sentrix/api/routes/health.py` | `GET /api/v1/health`，只做 HTTP 映射 | api | `sentrix/__init__.py` | `sentrix/main.py` |
 | `sentrix/domain/__init__.py` | 包标记 | domain | — | — |
+| `sentrix/domain/media/__init__.py` | 包标记 | domain | — | — |
+| `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | — |
 | `sentrix/application/__init__.py` | 包标记 | application | — | — |
 | `sentrix/infrastructure/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/persistence/__init__.py` | 包标记 | infrastructure | — | — |
