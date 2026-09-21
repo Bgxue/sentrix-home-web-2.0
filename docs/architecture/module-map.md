@@ -37,3 +37,4 @@
 | `sentrix/infrastructure/persistence/repositories/spaces.py` | 记忆空间的 SQLite 仓储（`MemorySpace` / `SqliteSpaceRepository`） | infrastructure | `sentrix/infrastructure/persistence/database.py` | — |
 | `sentrix/infrastructure/media/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/media/storage.py` | 文件系统媒体存储（`FileSystemMediaStorage` / `sanitise`），实现 domain 的 MediaStorage 端口 | infrastructure | `sentrix/domain/media/models.py` | — |
+| `sentrix/infrastructure/media/image_io.py` | HEIC 注册与 JPEG 预览编码（`ensure_heif_support` / `encode_jpeg_preview` / `PillowPreviewEncoder`） | infrastructure | — | — |
