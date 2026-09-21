@@ -21,7 +21,7 @@ format: ## ruff 自动修复
 typecheck: ## mypy strict（只查 domain + application）
 	.venv/bin/mypy
 
-arch: ## 分层契约（M1 结束后并入 ci）
+arch: ## 分层契约检查（已在 ci 链上）
 	.venv/bin/lint-imports
 
 test-unit: ## 单元测试
@@ -47,7 +47,7 @@ check-docs: ## 文档防腐校验
 
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
-ci: lint typecheck test coverage check-docs arch ## CI 门禁（arch 已启用）
+ci: lint typecheck test check-docs arch coverage ## CI 门禁
 	@echo "ci: 全部通过"
 
 dev: ## 起 2.0 API（8191）
