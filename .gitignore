@@ -1,0 +1,11 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+apps/photobench/datasets/
+apps/photobench/results/
+apps/photobench/logs/
+apps/photobench/config/judge_providers.json
+apps/photobench/config/runtime_connection.json
+apps/photobench/config/*.bak-*
+apps/photobench/config/vllm_targets.json
