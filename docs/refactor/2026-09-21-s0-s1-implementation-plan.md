@@ -525,16 +525,160 @@ git commit -m "feat(persistence): add sqlite database with versioned migrations"
 
 ---
 
-## Task 4: 迁移 0001 与 /api/v1/health
+## Task 4: 迁移 0001 与依赖装配容器
 
 **Files:**
 - Create: `apps/api/src/sentrix/infrastructure/persistence/migrations/0001_core.sql`
-- Create: `apps/api/src/sentrix/api/routes/health.py`
+- Create: `apps/api/src/sentrix/bootstrap/container.py`
+- Create: `apps/api/src/sentrix/bootstrap/__init__.py`（空文件）
+- Test: `apps/api/tests/integration/test_container.py`
+
+> 先建容器、后建应用：`main.py`（Task 5）依赖 `bootstrap.container`，反过来建会让 Task 4 收不了尾。
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/api/tests/integration/test_container.py`:
+
+```python
+from sentrix.bootstrap.container import Container
+from sentrix.config import Settings
+
+
+def test_container_builds_all_adapters(tmp_path, monkeypatch):
+    # conftest.py 要到 Task 5 才建，这里就地构造 Settings，不依赖 settings fixture
+    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
+    settings = Settings()
+    container = Container.build(settings)
+
+    assert container.settings is settings
+    assert container.database.path == settings.database_path
+    assert container.database.migrations_dir.name == "migrations"
+
+
+def test_database_healthy_reports_false_when_dir_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path / "gone"))
+    settings = Settings()
+    container = Container.build(settings)
+
+    assert container.database_healthy() is False
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'sentrix.bootstrap.container'`
+
+- [ ] **Step 3: 实现迁移 0001**
+
+`apps/api/src/sentrix/infrastructure/persistence/migrations/0001_core.sql`:
+
+```sql
+-- 记忆空间（相册域）。字段语义取自 1.0 backend/db.py:403 的 memory_spaces。
+-- 2.0 是空库起步，不迁移 1.0 数据。
+CREATE TABLE memory_spaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'household',
+    status TEXT NOT NULL DEFAULT 'active',
+    include_in_people INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_memory_spaces_status ON memory_spaces(status);
+```
+
+- [ ] **Step 4: 实现容器**
+
+`apps/api/src/sentrix/bootstrap/container.py`:
+
+```python
+"""The single wiring point.
+
+Nothing else in the codebase constructs an adapter.  Domain and application code
+receive ports; only this module knows which concrete class implements them.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+from sentrix.config import Settings
+from sentrix.infrastructure.persistence.database import Database
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
+
+
+@dataclass(frozen=True)
+class Container:
+    settings: Settings
+    database: Database
+
+    @classmethod
+    def build(cls, settings: Settings) -> Container:
+        return cls(
+            settings=settings,
+            database=Database(settings.database_path, MIGRATIONS_DIR),
+        )
+
+    def database_healthy(self) -> bool:
+        try:
+            with self.database.connect() as connection:
+                connection.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return False
+        return True
+```
+
+- [ ] **Step 5: 跑测试确认通过**
+
+Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add apps/api/src/sentrix/bootstrap \
+        apps/api/src/sentrix/infrastructure/persistence/migrations/0001_core.sql \
+        apps/api/tests/integration/test_container.py
+git commit -m "feat(bootstrap): add dependency container and core migration"
+```
+
+---
+
+## Task 5: 应用装配与 /api/v1/health
+
+**Files:**
 - Create: `apps/api/src/sentrix/main.py`
+- Create: `apps/api/src/sentrix/api/routes/health.py`
 - Create: `apps/api/src/sentrix/api/routes/__init__.py`、`apps/api/src/sentrix/api/__init__.py`（空文件）
+- Create: `apps/api/tests/conftest.py`
 - Test: `apps/api/tests/contract/test_health.py`
 
 - [ ] **Step 1: 写失败测试**
+
+`apps/api/tests/conftest.py`:
+
+```python
+import pytest
+from fastapi.testclient import TestClient
+
+from sentrix.config import Settings
+from sentrix.main import create_app
+
+
+@pytest.fixture
+def settings(tmp_path, monkeypatch) -> Settings:
+    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
+    return Settings()
+
+
+@pytest.fixture
+def client(settings) -> TestClient:
+    return TestClient(create_app(settings))
+```
 
 `apps/api/tests/contract/test_health.py`:
 
@@ -558,53 +702,12 @@ def test_no_unversioned_public_routes(client: TestClient):
     assert client.get("/api/health").status_code == 404
 ```
 
-`apps/api/tests/conftest.py`:
-
-```python
-import pytest
-from fastapi.testclient import TestClient
-
-from sentrix.config import Settings
-from sentrix.main import create_app
-
-
-@pytest.fixture
-def settings(tmp_path, monkeypatch) -> Settings:
-    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
-    return Settings()
-
-
-@pytest.fixture
-def client(settings) -> TestClient:
-    return TestClient(create_app(settings))
-```
-
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv/bin/pytest apps/api/tests/contract/test_health.py -v`
-Expected: FAIL — `ImportError: cannot import name 'create_app'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'sentrix.main'`
 
-- [ ] **Step 3: 实现迁移 0001**
-
-`apps/api/src/sentrix/infrastructure/persistence/migrations/0001_core.sql`:
-
-```sql
--- 记忆空间（相册域）。字段语义取自 1.0 backend/db.py:403 的 memory_spaces。
--- 2.0 是空库起步，不迁移 1.0 数据。
-CREATE TABLE memory_spaces (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'household',
-    status TEXT NOT NULL DEFAULT 'active',
-    include_in_people INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX idx_memory_spaces_status ON memory_spaces(status);
-```
-
-- [ ] **Step 4: 实现 health 路由与应用装配**
+- [ ] **Step 3: 实现 health 路由与应用装配**
 
 `apps/api/src/sentrix/api/routes/health.py`:
 
@@ -660,113 +763,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 app = create_app()
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/contract/test_health.py -v`
 Expected: 3 passed
+
+- [ ] **Step 5: 回归：容器未被破坏**
+
+Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py apps/api/tests/contract/test_health.py -v`
+Expected: 5 passed
 
 - [ ] **Step 6: 提交**
 
 ```bash
 git add apps/api/src/sentrix/api apps/api/src/sentrix/main.py \
-        apps/api/src/sentrix/infrastructure/persistence/migrations/0001_core.sql \
         apps/api/tests/contract apps/api/tests/conftest.py
-git commit -m "feat(api): add v1 app assembly, health route and core migration"
-```
-
----
-
-## Task 5: 依赖装配容器
-
-**Files:**
-- Create: `apps/api/src/sentrix/bootstrap/container.py`
-- Create: `apps/api/src/sentrix/bootstrap/__init__.py`（空文件）
-- Test: `apps/api/tests/integration/test_container.py`
-
-- [ ] **Step 1: 写失败测试**
-
-`apps/api/tests/integration/test_container.py`:
-
-```python
-from sentrix.bootstrap.container import Container
-from sentrix.config import Settings
-
-
-def test_container_builds_all_adapters(settings):
-    container = Container.build(settings)
-
-    assert container.settings is settings
-    assert container.database.path == settings.database_path
-    assert container.database.migrations_dir.name == "migrations"
-
-
-def test_database_healthy_reports_false_when_dir_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path / "gone"))
-    settings = Settings()
-    container = Container.build(settings)
-
-    assert container.database_healthy() is False
-```
-
-- [ ] **Step 2: 跑测试确认失败**
-
-Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'sentrix.bootstrap'`
-
-- [ ] **Step 3: 实现**
-
-`apps/api/src/sentrix/bootstrap/container.py`:
-
-```python
-"""The single wiring point.
-
-Nothing else in the codebase constructs an adapter.  Domain and application code
-receive ports; only this module knows which concrete class implements them.
-"""
-
-from __future__ import annotations
-
-import sqlite3
-from dataclasses import dataclass
-from pathlib import Path
-
-from sentrix.config import Settings
-from sentrix.infrastructure.persistence.database import Database
-
-MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
-
-
-@dataclass(frozen=True)
-class Container:
-    settings: Settings
-    database: Database
-
-    @classmethod
-    def build(cls, settings: Settings) -> Container:
-        return cls(
-            settings=settings,
-            database=Database(settings.database_path, MIGRATIONS_DIR),
-        )
-
-    def database_healthy(self) -> bool:
-        try:
-            with self.database.connect() as connection:
-                connection.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
-        except sqlite3.Error:
-            return False
-        return True
-```
-
-- [ ] **Step 4: 跑测试确认通过**
-
-Run: `.venv/bin/pytest apps/api/tests/integration/test_container.py apps/api/tests/contract/test_health.py -v`
-Expected: 5 passed
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add apps/api/src/sentrix/bootstrap apps/api/tests/integration/test_container.py
-git commit -m "feat(bootstrap): add dependency container as the single wiring point"
+git commit -m "feat(api): add v1 app assembly and health route"
 ```
 
 ---
