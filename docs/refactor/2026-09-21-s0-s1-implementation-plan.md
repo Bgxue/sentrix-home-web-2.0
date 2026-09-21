@@ -82,6 +82,15 @@ sentrix-home-web2.0/
 **Files:**
 - Create: `apps/api/pyproject.toml`
 - Create: `apps/api/src/sentrix/__init__.py`
+- Create: `apps/api/src/sentrix/domain/__init__.py`（空文件）
+- Create: `apps/api/src/sentrix/application/__init__.py`（空文件）
+- Create: `apps/api/src/sentrix/infrastructure/__init__.py`（空文件）
+- Create: `apps/api/src/sentrix/api/__init__.py`（空文件）
+- Create: `apps/api/src/sentrix/bootstrap/__init__.py`（空文件）
+- Create: `apps/api/tests/unit/.gitkeep`
+- Create: `apps/api/tests/contract/.gitkeep`
+- Create: `apps/api/tests/integration/.gitkeep`
+- Create: `apps/api/tests/e2e/.gitkeep`
 - Create: `pyproject.toml`（工作区级工具配置）
 
 - [ ] **Step 1: 创建包定义**
@@ -98,7 +107,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.32,<1",
     "pydantic-settings>=2.6,<3",
-    "python-multipart>=0.0.12",
+    "python-multipart>=0.0.12,<1",
     "pillow>=11,<12",
     "pillow-heif>=0.18,<1",
 ]
@@ -138,6 +147,7 @@ __version__ = "0.1.0"
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+extend-exclude = ["docs/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -152,7 +162,7 @@ testpaths = ["apps/api/tests"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["apps/api/src/sentrix/domain", "apps/api/src/sentrix/application"]
+source = ["sentrix.domain", "sentrix.application"]
 
 [tool.coverage.report]
 fail_under = 85
@@ -172,6 +182,12 @@ uv venv --python 3.11 --python-preference only-managed --clear --seed .venv
 
 Run: `.venv/bin/python -c "import sentrix; print(sentrix.__version__)"`
 Expected: `0.1.0`
+
+- [ ] **Step 4b: 验证刚配置的工具能跑**
+
+Run: `cd /home/asus/Github/sentrix-home-web2.0 && .venv/bin/ruff check . && .venv/bin/mypy && .venv/bin/pytest`
+Expected: `ruff` exit=0（`All checks passed!`）、`mypy` exit=0（`Success: no issues found in 2 source files`）、`pytest` exit=5（`no tests ran`）——此时只有 `.gitkeep`，尚无测试用例，Task 2 起转绿。
+说明：写配置的任务必须运行配置。仅验证 `import sentrix` 会绕过 `files` / `source` / `testpaths` 三个路径配置，而 mypy 对不存在的路径是**硬失败**（`errors prevented further checking`，exit=2），会让整个 S0 的类型检查形同虚设。
 
 - [ ] **Step 5: 提交**
 
@@ -1312,7 +1328,8 @@ help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
 
 install: ## 建 venv 并安装全部依赖
-	python3.11 -m venv .venv
+	uv python install 3.11
+	uv venv --python 3.11 --python-preference only-managed --clear --seed .venv
 	$(PIP) install -q -e "apps/api[dev]"
 
 lint: ## ruff 检查
@@ -1340,6 +1357,8 @@ test-integration: ## 集成测试
 test: ## 全部测试
 	.venv/bin/pytest -q
 
+# 已知状态：S1 Task 13–15 落地前既无 domain/application 代码也无测试，本目标预期为红
+# （coverage 报 "No data was collected"，并以 fail_under=85 失败）——不是环境或配置问题
 coverage: ## domain + application 覆盖率门禁（设计 §6.4：≥85%）
 	.venv/bin/pytest --cov --cov-report=term-missing
 
