@@ -8,6 +8,7 @@ values disagreed with each other and with the code.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,7 +26,7 @@ class Settings(BaseSettings):
     vlm_base_url: str = "http://127.0.0.1:8100/v1"
     text_embedder_url: str = "http://127.0.0.1:8101"
 
-    def model_post_init(self, _context) -> None:  # noqa: D105
+    def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
 
     @computed_field  # type: ignore[prop-decorator]
