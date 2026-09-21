@@ -46,6 +46,7 @@ coverage: ## domain + application 覆盖率门禁（设计 §6.4：≥85%）
 check-docs: ## 文档防腐校验
 	$(PY) scripts/check_capability_map.py
 	$(PY) scripts/check_module_map.py
+	$(PY) scripts/export_openapi.py --check
 
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。

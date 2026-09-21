@@ -1,0 +1,290 @@
+openapi: 3.1.0
+info:
+  title: Sentrix Home API
+  version: 0.1.0
+paths:
+  /api/v1/health:
+    get:
+      tags:
+      - health
+      summary: Health
+      operationId: health_api_v1_health_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+                title: Response Health Api V1 Health Get
+  /api/v1/media/import:
+    post:
+      tags:
+      - media
+      summary: Import Media
+      operationId: import_media_api_v1_media_import_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_import_media_api_v1_media_import_post'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assets:
+    get:
+      tags:
+      - media
+      summary: List Assets
+      operationId: list_assets_api_v1_assets_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: home-default
+          title: Scope Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 200
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assets/{asset_id}:
+    get:
+      tags:
+      - media
+      summary: Get Asset
+      operationId: get_asset_api_v1_assets__asset_id__get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetSummary'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assets/{asset_id}/file:
+    get:
+      tags:
+      - media
+      summary: Get Asset File
+      operationId: get_asset_file_api_v1_assets__asset_id__file_get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assets/{asset_id}/preview:
+    get:
+      tags:
+      - media
+      summary: Get Asset Preview
+      operationId: get_asset_preview_api_v1_assets__asset_id__preview_get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    AssetListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/AssetSummary'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: AssetListResponse
+    AssetSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        file_name:
+          type: string
+          title: File Name
+        media_type:
+          type: string
+          title: Media Type
+        mime_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mime Type
+        size_bytes:
+          type: integer
+          title: Size Bytes
+        status:
+          type: string
+          title: Status
+        captured_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured At
+        gps:
+          anyOf:
+          - additionalProperties:
+              type: number
+            type: object
+          - type: 'null'
+          title: Gps
+      type: object
+      required:
+      - id
+      - file_name
+      - media_type
+      - mime_type
+      - size_bytes
+      - status
+      - captured_at
+      - gps
+      title: AssetSummary
+    Body_import_media_api_v1_media_import_post:
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          title: File
+        scope_id:
+          type: string
+          title: Scope Id
+          default: home-default
+      type: object
+      required:
+      - file
+      title: Body_import_media_api_v1_media_import_post
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    ImportResponse:
+      properties:
+        asset_id:
+          type: string
+          title: Asset Id
+        observation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Observation Id
+        media_type:
+          type: string
+          title: Media Type
+        status:
+          type: string
+          title: Status
+        deduplicated:
+          type: boolean
+          title: Deduplicated
+      type: object
+      required:
+      - asset_id
+      - observation_id
+      - media_type
+      - status
+      - deduplicated
+      title: ImportResponse
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
