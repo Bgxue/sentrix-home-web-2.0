@@ -26,7 +26,7 @@
 | `sentrix/api/routes/health.py` | `GET /api/v1/health`，只做 HTTP 映射 | api | `sentrix/__init__.py` | `sentrix/main.py` |
 | `sentrix/domain/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/media/__init__.py` | 包标记 | domain | — | — |
-| `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | `sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/repositories/assets.py` |
+| `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | `sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/repositories/assets.py` |
 | `sentrix/domain/media/ports.py` | 领域端口（AssetRepository / MediaStorage / MetadataReader / PreviewEncoder）与浏览器转码规则 | domain | `sentrix/domain/media/models.py` | — |
 | `sentrix/application/__init__.py` | 包标记 | application | — | — |
 | `sentrix/infrastructure/__init__.py` | 包标记 | infrastructure | — | — |
@@ -37,4 +37,5 @@
 | `sentrix/infrastructure/persistence/repositories/spaces.py` | 记忆空间的 SQLite 仓储（`MemorySpace` / `SqliteSpaceRepository`） | infrastructure | `sentrix/infrastructure/persistence/database.py` | — |
 | `sentrix/infrastructure/media/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/media/storage.py` | 文件系统媒体存储（`FileSystemMediaStorage` / `sanitise`），实现 domain 的 MediaStorage 端口 | infrastructure | `sentrix/domain/media/models.py` | — |
-| `sentrix/infrastructure/media/image_io.py` | HEIC 注册与 JPEG 预览编码（`ensure_heif_support` / `encode_jpeg_preview` / `PillowPreviewEncoder`） | infrastructure | — | — |
+| `sentrix/infrastructure/media/image_io.py` | HEIC 注册与 JPEG 预览编码（`ensure_heif_support` / `encode_jpeg_preview` / `PillowPreviewEncoder`） | infrastructure | — | `sentrix/infrastructure/media/metadata.py` |
+| `sentrix/infrastructure/media/metadata.py` | EXIF / GPS / 设备抽取（`PillowMetadataReader`），失败降级为 None 并记日志 | infrastructure | `sentrix/domain/media/models.py`、`sentrix/infrastructure/media/image_io.py` | — |
