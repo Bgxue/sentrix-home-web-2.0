@@ -4,7 +4,7 @@
 
 | 能力 | 冻结理由 |
 |---|---|
-| 行程 trips | 表 0 行；`db.py:3253 derive_trip_candidates` 无生产调用者，只在 `test_entities.py` 跑 |
+| 行程 trips | 表 0 行；`db.py:3235 derive_trip_candidates` 无生产调用者，只在 `test_entities.py` 跑 |
 | 故事 stories | 表 0 行；`POST/PATCH/DELETE /api/stories` 零调用 |
 | 反馈 memory_feedback | 表 0 行 |
 | 关系假设 relationship_hypotheses | 表 0 行；decision 端点零调用 |
