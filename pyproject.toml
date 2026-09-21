@@ -12,10 +12,13 @@ known-first-party = ["sentrix"]
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Body", "fastapi.Header", "fastapi.Path"]
 
+# 边界扩到全包 + scripts：实测 infrastructure / api / bootstrap / main / config 在
+# --strict 下本来就是全绿，只查 domain + application 是把已经干净的两层漏在门外。
+# 这是对设计 §6.2 边界决定的变更（原定只查 domain + application）。
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["apps/api/src/sentrix/domain", "apps/api/src/sentrix/application"]
+files = ["apps/api/src/sentrix", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["apps/api/tests"]

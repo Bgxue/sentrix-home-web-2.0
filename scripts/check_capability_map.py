@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VALID_KINDS = {"migrated", "adapted", "NEW-2.0", "frozen"}
@@ -20,11 +21,11 @@ VALID_STATUS = {"verified", "pending", "frozen"}
 FROZEN_DOC = REPO_ROOT / "docs" / "refactor" / "frozen.md"
 
 
-def load(path: Path) -> list[dict]:
+def load(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def check(entries: list[dict]) -> list[str]:
+def check(entries: list[dict[str, Any]]) -> list[str]:
     problems: list[str] = []
     frozen_text = FROZEN_DOC.read_text(encoding="utf-8") if FROZEN_DOC.exists() else ""
     seen_names: set[str] = set()

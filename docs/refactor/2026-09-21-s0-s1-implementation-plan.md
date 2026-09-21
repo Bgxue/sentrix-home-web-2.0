@@ -167,10 +167,13 @@ known-first-party = ["sentrix"]
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Body", "fastapi.Header", "fastapi.Path"]
 
+# 边界扩到全包 + scripts：实测 infrastructure / api / bootstrap / main / config 在
+# --strict 下本来就是全绿，只查 domain + application 是把已经干净的两层漏在门外。
+# 这是对设计 §6.2 边界决定的变更（原定只查 domain + application）。
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["apps/api/src/sentrix/domain", "apps/api/src/sentrix/application"]
+files = ["apps/api/src/sentrix", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["apps/api/tests"]
@@ -304,7 +307,7 @@ Expected: `0.1.0`
 - [ ] **Step 4b: 验证刚配置的工具能跑**
 
 Run: `cd /home/asus/Github/sentrix-home-web2.0 && .venv/bin/ruff check . && .venv/bin/mypy && .venv/bin/pytest`
-Expected: `ruff` exit=0（`All checks passed!`）、`mypy` exit=0（`Success: no issues found in 2 source files`）、`pytest` exit=5（`no tests ran`）——此时只有 `.gitkeep`，尚无测试用例，Task 2 起转绿。
+Expected: `ruff` exit=0（`All checks passed!`）、`mypy` exit=0（`Success: no issues found in 15 source files`）、`pytest` exit=5（`no tests ran`）——此时只有 `.gitkeep`，尚无测试用例，Task 2 起转绿。
 说明：写配置的任务必须运行配置。仅验证 `import sentrix` 会绕过 `files` / `source` / `testpaths` 三个路径配置，而 mypy 对不存在的路径是**硬失败**（`errors prevented further checking`，exit=2），会让整个 S0 的类型检查形同虚设。
 
 - [ ] **Step 5: 提交**
@@ -427,7 +430,7 @@ def load_settings() -> Settings:
 Run: `.venv/bin/pytest apps/api/tests/unit/test_config.py -v`
 Expected: 3 passed
 
-> 注意：`config.py` 位于 `sentrix/` 顶层，**不在** mypy 的 `files = [".../domain", ".../application"]` 范围内，所以全量门禁的 `Success: no issues found in N source files` 不会覆盖它。本任务已单独验证 `mypy apps/api/src/sentrix/config.py` 通过。四层里 `infrastructure/` 与 `api/` 的类型检查边界是待议项，见 M1 重评估。
+> 注意：本任务写下的 `files = [".../domain", ".../application"]` 只覆盖两层。该边界后来在本轮已扩到**整个 `sentrix` 包 + `scripts`**（见 Task 1 的 `pyproject.toml` 终稿与 Task 10 的 `make typecheck`）：实测 `infrastructure` / `api` / `bootstrap` / `main` / `config` 在 `--strict` 下本来就是全绿，把已经干净的两层漏在门外没有收益。这是对设计 §6.2 边界决定的变更。
 
 - [ ] **Step 5: 提交**
 
@@ -1284,6 +1287,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VALID_KINDS = {"migrated", "adapted", "NEW-2.0", "frozen"}
@@ -1291,11 +1295,11 @@ VALID_STATUS = {"verified", "pending", "frozen"}
 FROZEN_DOC = REPO_ROOT / "docs" / "refactor" / "frozen.md"
 
 
-def load(path: Path) -> list[dict]:
+def load(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def check(entries: list[dict]) -> list[str]:
+def check(entries: list[dict[str, Any]]) -> list[str]:
     problems: list[str] = []
     frozen_text = FROZEN_DOC.read_text(encoding="utf-8") if FROZEN_DOC.exists() else ""
     seen_names: set[str] = set()
