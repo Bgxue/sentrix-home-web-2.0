@@ -2594,7 +2594,152 @@ git commit -m "feat(media): add filesystem storage adapter"
 
 ---
 
-## Task 17: EXIF / GPS 元数据适配
+## Task 17: 图片 IO 适配（HEIC + 预览）
+> 先建 `image_io.py` 再建 `metadata.py`：`metadata.py` 要在模块顶层 import `image_io.ensure_heif_support`，反过来建会让 Task 17 连测试都收集不了。
+
+
+**Files:**
+- Create: `apps/api/src/sentrix/infrastructure/media/image_io.py`
+- Test: `apps/api/tests/integration/test_image_io.py`
+
+> 移植自 1.0 `backend/image_io.py`，保留 `exif_transpose`（否则竖拍照片会躺倒）。
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/api/tests/integration/test_image_io.py`:
+
+```python
+from PIL import Image
+
+from sentrix.infrastructure.media.image_io import encode_jpeg_preview, ensure_heif_support
+
+
+def test_preview_is_jpeg_and_downscaled(tmp_path):
+    path = tmp_path / "big.jpg"
+    Image.new("RGB", (4000, 3000), "red").save(path, format="JPEG")
+
+    payload = encode_jpeg_preview(path, max_dimension=800, quality=80)
+
+    assert payload[:2] == b"\xff\xd8"  # JPEG SOI
+    with Image.open(tmp_path / "unused.jpg" if False else __import__("io").BytesIO(payload)) as image:
+        assert max(image.size) == 800
+
+
+def test_preview_preserves_small_images(tmp_path):
+    path = tmp_path / "small.jpg"
+    Image.new("RGB", (120, 90), "blue").save(path, format="JPEG")
+
+    payload = encode_jpeg_preview(path, max_dimension=1600, quality=85)
+
+    import io
+
+    with Image.open(io.BytesIO(payload)) as image:
+        assert image.size == (120, 90)
+
+
+def test_transparency_is_flattened_to_rgb(tmp_path):
+    path = tmp_path / "alpha.png"
+    Image.new("RGBA", (64, 64), (255, 0, 0, 128)).save(path, format="PNG")
+
+    payload = encode_jpeg_preview(path, max_dimension=1600, quality=85)
+
+    import io
+
+    with Image.open(io.BytesIO(payload)) as image:
+        assert image.mode == "RGB"
+
+
+def test_heif_registration_is_idempotent():
+    assert ensure_heif_support() in (True, False)
+    assert ensure_heif_support() in (True, False)
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `.venv/bin/pytest apps/api/tests/integration/test_image_io.py -v`
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 3: 实现**
+
+`apps/api/src/sentrix/infrastructure/media/image_io.py`:
+
+```python
+"""图片打开与预览编码。移植自 1.0 ``backend/image_io.py``。
+
+保留 ``ImageOps.exif_transpose``：真实相册里大量竖拍照片靠 EXIF Orientation 标记，
+不转置的话预览会躺倒。
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+_HEIF_REGISTERED = False
+
+
+def ensure_heif_support() -> bool:
+    """注册 pillow-heif，使 PIL 能打开 HEIC/HEIF。幂等。"""
+    global _HEIF_REGISTERED
+    if _HEIF_REGISTERED:
+        return True
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        _HEIF_REGISTERED = True
+        return True
+    except Exception:
+        log.warning("pillow_heif_unavailable heic 将无法导入")
+        return False
+
+
+def encode_jpeg_preview(path: Path, *, max_dimension: int = 1600, quality: int = 85) -> bytes:
+    from PIL import Image, ImageOps
+
+    ensure_heif_support()
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+        if max(image.size) > max_dimension:
+            image.thumbnail((max_dimension, max_dimension))
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=quality, optimize=True)
+        return output.getvalue()
+
+
+class PillowPreviewEncoder:
+    """把模块级函数适配成 domain 的 :class:`PreviewEncoder` 端口。"""
+
+    def encode_jpeg(self, path: Path, *, max_dimension: int, quality: int) -> bytes:
+        return encode_jpeg_preview(path, max_dimension=max_dimension, quality=quality)
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `.venv/bin/pytest apps/api/tests/integration/test_image_io.py -v`
+Expected: 4 passed
+
+- [ ] **Step 5: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add apps/api/src/sentrix/infrastructure/media/image_io.py apps/api/tests/integration/test_image_io.py docs/architecture/module-map.md
+git commit -m "feat(media): port image io with heic support and exif transpose"
+```
+
+
+---
+
+## Task 18: EXIF / GPS 元数据适配
 
 **Files:**
 - Create: `apps/api/src/sentrix/infrastructure/media/metadata.py`
@@ -2851,147 +2996,6 @@ git add apps/api/src/sentrix/infrastructure/media/metadata.py apps/api/tests/int
 git commit -m "feat(media): port exif/gps extraction with logging on failure"
 ```
 
----
-
-## Task 18: 图片 IO 适配（HEIC + 预览）
-
-**Files:**
-- Create: `apps/api/src/sentrix/infrastructure/media/image_io.py`
-- Test: `apps/api/tests/integration/test_image_io.py`
-
-> 移植自 1.0 `backend/image_io.py`，保留 `exif_transpose`（否则竖拍照片会躺倒）。
-
-- [ ] **Step 1: 写失败测试**
-
-`apps/api/tests/integration/test_image_io.py`:
-
-```python
-from PIL import Image
-
-from sentrix.infrastructure.media.image_io import encode_jpeg_preview, ensure_heif_support
-
-
-def test_preview_is_jpeg_and_downscaled(tmp_path):
-    path = tmp_path / "big.jpg"
-    Image.new("RGB", (4000, 3000), "red").save(path, format="JPEG")
-
-    payload = encode_jpeg_preview(path, max_dimension=800, quality=80)
-
-    assert payload[:2] == b"\xff\xd8"  # JPEG SOI
-    with Image.open(tmp_path / "unused.jpg" if False else __import__("io").BytesIO(payload)) as image:
-        assert max(image.size) == 800
-
-
-def test_preview_preserves_small_images(tmp_path):
-    path = tmp_path / "small.jpg"
-    Image.new("RGB", (120, 90), "blue").save(path, format="JPEG")
-
-    payload = encode_jpeg_preview(path, max_dimension=1600, quality=85)
-
-    import io
-
-    with Image.open(io.BytesIO(payload)) as image:
-        assert image.size == (120, 90)
-
-
-def test_transparency_is_flattened_to_rgb(tmp_path):
-    path = tmp_path / "alpha.png"
-    Image.new("RGBA", (64, 64), (255, 0, 0, 128)).save(path, format="PNG")
-
-    payload = encode_jpeg_preview(path, max_dimension=1600, quality=85)
-
-    import io
-
-    with Image.open(io.BytesIO(payload)) as image:
-        assert image.mode == "RGB"
-
-
-def test_heif_registration_is_idempotent():
-    assert ensure_heif_support() in (True, False)
-    assert ensure_heif_support() in (True, False)
-```
-
-- [ ] **Step 2: 跑测试确认失败**
-
-Run: `.venv/bin/pytest apps/api/tests/integration/test_image_io.py -v`
-Expected: FAIL — `ModuleNotFoundError`
-
-- [ ] **Step 3: 实现**
-
-`apps/api/src/sentrix/infrastructure/media/image_io.py`:
-
-```python
-"""图片打开与预览编码。移植自 1.0 ``backend/image_io.py``。
-
-保留 ``ImageOps.exif_transpose``：真实相册里大量竖拍照片靠 EXIF Orientation 标记，
-不转置的话预览会躺倒。
-"""
-
-from __future__ import annotations
-
-import io
-import logging
-from pathlib import Path
-
-log = logging.getLogger(__name__)
-
-_HEIF_REGISTERED = False
-
-
-def ensure_heif_support() -> bool:
-    """注册 pillow-heif，使 PIL 能打开 HEIC/HEIF。幂等。"""
-    global _HEIF_REGISTERED
-    if _HEIF_REGISTERED:
-        return True
-    try:
-        from pillow_heif import register_heif_opener
-
-        register_heif_opener()
-        _HEIF_REGISTERED = True
-        return True
-    except Exception:
-        log.warning("pillow_heif_unavailable heic 将无法导入")
-        return False
-
-
-def encode_jpeg_preview(path: Path, *, max_dimension: int = 1600, quality: int = 85) -> bytes:
-    from PIL import Image, ImageOps
-
-    ensure_heif_support()
-    with Image.open(path) as source:
-        image = ImageOps.exif_transpose(source).convert("RGB")
-        if max(image.size) > max_dimension:
-            image.thumbnail((max_dimension, max_dimension))
-        output = io.BytesIO()
-        image.save(output, format="JPEG", quality=quality, optimize=True)
-        return output.getvalue()
-
-
-class PillowPreviewEncoder:
-    """把模块级函数适配成 domain 的 :class:`PreviewEncoder` 端口。"""
-
-    def encode_jpeg(self, path: Path, *, max_dimension: int, quality: int) -> bytes:
-        return encode_jpeg_preview(path, max_dimension=max_dimension, quality=quality)
-```
-
-- [ ] **Step 4: 跑测试确认通过**
-
-Run: `.venv/bin/pytest apps/api/tests/integration/test_image_io.py -v`
-Expected: 4 passed
-
-- [ ] **Step 5: 更新 module-map**
-
-把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
-
-Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
-Expected: 2 passed
-
-- [ ] **Step 6: 提交**
-
-```bash
-git add apps/api/src/sentrix/infrastructure/media/image_io.py apps/api/tests/integration/test_image_io.py docs/architecture/module-map.md
-git commit -m "feat(media): port image io with heic support and exif transpose"
-```
 
 ---
 
