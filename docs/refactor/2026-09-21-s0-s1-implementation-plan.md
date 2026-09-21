@@ -22,7 +22,7 @@ Python 3.11 可用性先确认（1.0 用的是 3.10）：
 uv --version || echo "需要先装 uv"
 ```
 
-> **通用规则**：凡是新增或删除 `apps/api/src/sentrix/` 下 `.py` 文件的任务，都必须同步更新 `docs/architecture/module-map.md`。`test_module_map.py` 双向强校验——代码里有而文档里没有、文档里有而代码里没有，都会失败。
+> **通用规则**：从 Task 9 建立 `docs/architecture/module-map.md` **之后**，凡是新增或删除 `apps/api/src/sentrix/` 下 `.py` 文件的任务，都必须同步更新该表。`test_module_map.py` 双向强校验——代码里有而文档里没有、文档里有而代码里没有，都会失败。（Task 9 之前没有这张表，不适用。）
 
 ## 文件结构
 
@@ -1369,11 +1369,10 @@ if __name__ == "__main__":
 | `sentrix/bootstrap/__init__.py` | 包标记 | bootstrap | — | — |
 | `sentrix/bootstrap/container.py` | 唯一依赖装配点；只有这里构造适配器 | bootstrap | `config`、`infrastructure` | `main`、`api.deps` |
 | `sentrix/api/__init__.py` | 包标记 | api | — | — |
-| `sentrix/api/deps.py` | 从 `app.state.container` 取依赖 | api | `bootstrap` | `api.routes` |
-| `sentrix/api/errors.py` | 领域错误 → HTTP 状态映射 | api | `domain` | `main` |
 | `sentrix/api/routes/__init__.py` | 包标记 | api | — | `main` |
 | `sentrix/api/routes/health.py` | `GET /api/v1/health`，只做 HTTP 映射 | api | `config` | `main` |
 | `sentrix/domain/__init__.py` | 包标记 | domain | — | — |
+| `sentrix/application/__init__.py` | 包标记 | application | — | — |
 | `sentrix/infrastructure/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/persistence/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/persistence/database.py` | SQLite 连接工厂与版本化迁移执行器 | infrastructure | sqlite3 | `bootstrap` |
