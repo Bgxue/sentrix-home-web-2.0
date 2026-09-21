@@ -2824,6 +2824,13 @@ def encode_jpeg_preview(path: Path, *, max_dimension: int = 1600, quality: int =
         output = io.BytesIO()
         image.save(output, format="JPEG", quality=quality, optimize=True)
         return output.getvalue()
+
+
+class PillowPreviewEncoder:
+    """把模块级函数适配成 domain 的 :class:`PreviewEncoder` 端口。"""
+
+    def encode_jpeg(self, path: Path, *, max_dimension: int, quality: int) -> bytes:
+        return encode_jpeg_preview(path, max_dimension=max_dimension, quality=quality)
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -3455,12 +3462,12 @@ receive ports; only this module knows which concrete class implements them.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from sentrix.config import Settings
-from sentrix.infrastructure.media.image_io import encode_jpeg_preview
+from sentrix.domain.media.ports import PreviewEncoder
+from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.persistence.database import Database
@@ -3472,8 +3479,6 @@ from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRe
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
-PreviewEncoderFn = Callable[..., bytes]
-
 
 @dataclass(frozen=True)
 class Container:
@@ -3484,7 +3489,7 @@ class Container:
     observation_repository: SqliteObservationRepository
     media_storage: FileSystemMediaStorage
     metadata_reader: PillowMetadataReader
-    preview_encoder: PreviewEncoderFn
+    preview_encoder: PreviewEncoder
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -3497,7 +3502,7 @@ class Container:
             observation_repository=SqliteObservationRepository(database),
             media_storage=FileSystemMediaStorage(settings.media_dir),
             metadata_reader=PillowMetadataReader(),
-            preview_encoder=encode_jpeg_preview,
+            preview_encoder=PillowPreviewEncoder(),
         )
 
     def database_healthy(self) -> bool:
