@@ -982,7 +982,7 @@ git commit -m "feat(api): add v1 app assembly and health route"
 - Modify: `pyproject.toml`
 - Test: `apps/api/tests/unit/test_architecture_rules.py`
 
-> **注意**：设计 §6.2 原定「S0 只声明、M1 结束才在 CI 打开全量强制」，**已改为声明即启用**——终态实测四个契约 `4 kept, 0 broken`，代码本来就合规，强制不带来任何摩擦，没必要把这条防线推迟到 M1。本任务把规则写进配置，并**立即进 `make ci`**。
+> **注意**：设计 §6.2 原定「S0 只声明、M1 结束才在 CI 打开全量强制」，**已改为声明即启用**——终态实测五个契约 `5 kept, 0 broken`，代码本来就合规，强制不带来任何摩擦，没必要把这条防线推迟到 M1。本任务把规则写进配置，并**立即进 `make ci`**。
 
 - [ ] **Step 1: 写失败测试（验证规则本身存在且可跑）**
 
@@ -1940,7 +1940,7 @@ Expected: 全部通过，无报错
 - [ ] **Step 3: 验证 arch（已在 ci 链上）**
 
 Run: `make arch`
-Expected: 输出各 contract 的检查结果，四个契约全部 PASS。`arch` 已是 `make ci` 的一环，Step 2 的 `make ci` 也会跑到它。
+Expected: 输出各 contract 的检查结果，五个契约全部 PASS。`arch` 已是 `make ci` 的一环，Step 2 的 `make ci` 也会跑到它。
 
 - [ ] **Step 4: 提交**
 
@@ -2089,7 +2089,7 @@ ADR 0001 决定分层规则「分阶段启用」：S0 只声明，M1（S0–S3�
 ## 变更原因
 
 该前提不再成立。S0–S1 的全部代码在落地前已经过完整验证，`make arch` 在终态即为
-`4 kept, 0 broken`——**代码本来就是合规的，强制不带来任何摩擦**。
+`5 kept, 0 broken`——**代码本来就是合规的，强制不带来任何摩擦**。
 
 而推迟强制有实际代价：验证过程中发现的三个缺陷（import-linter 配置因缺
 `include_external_packages` 而根本加载不了、契约因 TOML 里无 `id` 而无法按名寻址、
