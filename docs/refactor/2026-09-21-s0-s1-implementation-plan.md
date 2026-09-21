@@ -2500,6 +2500,7 @@ from datetime import datetime
 
 import pytest
 from PIL import Image
+from PIL.TiffImagePlugin import IFDRational
 
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 
@@ -2523,9 +2524,9 @@ def test_gps_degrees_minutes_seconds_are_converted(tmp_path):
     path = tmp_path / "geo.jpg"
     image = Image.new("RGB", (16, 16), "white")
     exif = image.getexif()
-    exif[34853] = {  # GPSInfo
-        1: "N", 2: ((18, 1), (47, 1), (1788, 100)),
-        3: "E", 4: ((98, 1), (59, 1), (700, 100)),
+    exif[34853] = {  # GPSInfo；度分秒在 EXIF 里是有理数，必须用 IFDRational
+        1: "N", 2: (IFDRational(18, 1), IFDRational(47, 1), IFDRational(1788, 100)),
+        3: "E", 4: (IFDRational(98, 1), IFDRational(59, 1), IFDRational(700, 100)),
     }
     image.save(path, format="JPEG", exif=exif)
 
@@ -2540,7 +2541,10 @@ def test_southern_and_western_hemispheres_are_negated(tmp_path):
     path = tmp_path / "south.jpg"
     image = Image.new("RGB", (16, 16), "white")
     exif = image.getexif()
-    exif[34853] = {1: "S", 2: ((33, 1), (52, 1), (0, 1)), 3: "W", 4: ((151, 1), (12, 1), (0, 1))}
+    exif[34853] = {
+        1: "S", 2: (IFDRational(33, 1), IFDRational(52, 1), IFDRational(0, 1)),
+        3: "W", 4: (IFDRational(151, 1), IFDRational(12, 1), IFDRational(0, 1)),
+    }
     image.save(path, format="JPEG", exif=exif)
 
     _, gps, _ = PillowMetadataReader().read(path)
@@ -2569,6 +2573,20 @@ def test_corrupt_file_degrades_to_empty(tmp_path):
 
     assert captured_at is None
     assert gps is None
+
+
+def test_device_prefers_model_over_make(tmp_path):
+    """设备型号来自 EXIF；Make(271)/Model(272) 都在时取 Model（device = model or make）。"""
+    path = tmp_path / "device.jpg"
+    image = Image.new("RGB", (16, 16), "white")
+    exif = image.getexif()
+    exif[271] = "Apple"  # Make
+    exif[272] = "iPhone 12"  # Model
+    image.save(path, format="JPEG", exif=exif)
+
+    _, _, device = PillowMetadataReader().read(path)
+
+    assert device == "iPhone 12"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2701,7 +2719,7 @@ class PillowMetadataReader:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_metadata_reader.py -v`
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: 提交**
 
