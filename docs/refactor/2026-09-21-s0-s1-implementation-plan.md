@@ -22,6 +22,8 @@ Python 3.11 可用性先确认（1.0 用的是 3.10）：
 uv --version || echo "需要先装 uv"
 ```
 
+> **通用规则**：凡是新增或删除 `apps/api/src/sentrix/` 下 `.py` 文件的任务，都必须同步更新 `docs/architecture/module-map.md`。`test_module_map.py` 双向强校验——代码里有而文档里没有、文档里有而代码里没有，都会失败。
+
 ## 文件结构
 
 本计划锁定的文件（后续切片在此基础上生长）：
@@ -1847,7 +1849,14 @@ Expected: 4 passed
 Run: `make arch`
 Expected: `domain-purity` PASS（`domain/media/models.py` 只 import 标准库）
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 6: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add apps/api/src/sentrix/domain apps/api/tests/unit/test_media_models.py
@@ -1973,7 +1982,14 @@ class MediaTypeResolver(Protocol):
 Run: `.venv/bin/pytest apps/api/tests/unit/test_media_ports.py -v`
 Expected: 3 passed
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add apps/api/src/sentrix/domain/media/ports.py apps/api/tests/unit/test_media_ports.py
@@ -2360,7 +2376,14 @@ class SqliteObservationRepository:
 Run: `.venv/bin/pytest apps/api/tests/integration/test_asset_repository.py -v`
 Expected: 4 passed
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 6: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add apps/api/src/sentrix/infrastructure/persistence apps/api/tests/integration/test_asset_repository.py apps/api/tests/conftest.py
@@ -2473,7 +2496,14 @@ class FileSystemMediaStorage:
 Run: `.venv/bin/pytest apps/api/tests/integration/test_media_storage.py -v`
 Expected: 4 passed
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add apps/api/src/sentrix/infrastructure/media apps/api/tests/integration/test_media_storage.py
@@ -2721,7 +2751,14 @@ class PillowMetadataReader:
 Run: `.venv/bin/pytest apps/api/tests/integration/test_metadata_reader.py -v`
 Expected: 6 passed
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add apps/api/src/sentrix/infrastructure/media/metadata.py apps/api/tests/integration/test_metadata_reader.py
@@ -2856,7 +2893,14 @@ class PillowPreviewEncoder:
 Run: `.venv/bin/pytest apps/api/tests/integration/test_image_io.py -v`
 Expected: 4 passed
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add apps/api/src/sentrix/infrastructure/media/image_io.py apps/api/tests/integration/test_image_io.py
@@ -3152,7 +3196,14 @@ class ImportAssets:
 Run: `.venv/bin/pytest apps/api/tests/unit/test_import_assets.py -v`
 Expected: 4 passed
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add apps/api/src/sentrix/application apps/api/tests/unit/test_import_assets.py
@@ -3581,7 +3632,14 @@ Expected: 9 passed
 Run: `make arch`
 Expected: 全部 PASS。若有 `api-transport-only` 失败，说明路由里出现了 SQL 或直接构造适配器
 
-- [ ] **Step 9: 提交**
+- [ ] **Step 9: 更新 module-map**
+
+把本任务新建的每个 `.py` 按 Task 9 的表格格式补进 `docs/architecture/module-map.md`（路径 / 职责 / 层 / 依赖谁 / 被谁依赖）。`test_module_map.py` 会强校验，漏一个就红。
+
+Run: `.venv/bin/pytest apps/api/tests/unit/test_module_map.py -v`
+Expected: 2 passed
+
+- [ ] **Step 10: 提交**
 
 ```bash
 git add apps/api/src/sentrix/api apps/api/src/sentrix/bootstrap apps/api/src/sentrix/main.py apps/api/tests/contract/test_media_routes.py
