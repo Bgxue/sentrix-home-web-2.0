@@ -45,6 +45,15 @@ export function assetDisplayUrl(asset: AssetSummary): string {
   return assetFileUrl(asset.id);
 }
 
+/** 后端已经按 mime 决定过怎么交付；助手交付的照片只带回这些字段，走同一条判断。 */
+export function deliveredPhotoUrl(assetId: string, fileName: string): string {
+  const lowered = fileName.toLowerCase();
+  if (lowered.endsWith(".heic") || lowered.endsWith(".heif")) {
+    return assetPreviewUrl(assetId);
+  }
+  return assetFileUrl(assetId);
+}
+
 export interface SearchHit {
   asset: AssetSummary;
   score: number;
@@ -69,4 +78,82 @@ export async function searchAssets(
 ): Promise<SearchResponse> {
   const params = new URLSearchParams({ q: query, scope_id: scopeId, limit: String(limit) });
   return request<SearchResponse>(`/search?${params.toString()}`);
+}
+
+// ---- 助手 -------------------------------------------------------------------
+
+export interface ConversationSummary {
+  id: string;
+  scope_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string;
+}
+
+export interface AssistantProgressEvent {
+  text: string;
+  status: string;
+  stage: string;
+  step_index: number;
+  timestamp: string;
+  kind: string;
+  payload: Record<string, unknown>;
+}
+
+export interface AssistantAttachment {
+  handle: string;
+  asset_id: string;
+  file_name: string;
+}
+
+export interface AssistantRequirement {
+  id: string;
+  evidence_type: string;
+  description: string;
+  status: string;
+  satisfied_by: string[];
+  unmet_reason: string;
+}
+
+export interface AssistantCompleteEvent {
+  type: string;
+  turn_id: string;
+  status: string;
+  termination_reason: string;
+  answer: string;
+  attachments: AssistantAttachment[];
+  requirements: AssistantRequirement[];
+  error: string;
+}
+
+export async function createConversation(scopeId: string): Promise<ConversationSummary> {
+  return request<ConversationSummary>("/assistant/conversations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope_id: scopeId }),
+  });
+}
+
+export async function startTurn(
+  conversationId: string,
+  scopeId: string,
+  message: string,
+): Promise<{ turn_id: string; conversation_id: string; status: string }> {
+  return request(`/assistant/conversations/${conversationId}/turns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, scope_id: scopeId }),
+  });
+}
+
+/**
+ * 回合事件的 SSE 地址。
+ *
+ * 前端**只开这一条连接**：1.0 靠 700ms 轮询 ``GET /api/assistant/turn/{id}`` 拿进度，
+ * 产生了 668,490 次请求（占全部流量 73%）。2.0 的后端把进度事件也落了库，断线重连
+ * 由 ``Last-Event-ID`` 续上，所以前端没有任何理由再轮询。
+ */
+export function turnEventsUrl(turnId: string): string {
+  return `${BASE}/assistant/turns/${turnId}/events`;
 }
