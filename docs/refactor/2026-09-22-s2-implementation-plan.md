@@ -5525,10 +5525,11 @@ torch 2.14.0+cu130 / torchvision 0.29.0+cu130   cuda_avail True
   约束是 torch>=2.5,<3 / torchvision>=0.20,<1，上面是在该范围下解析到的当前版本，
   不是硬钉值；规划时的沙箱解析到的是 2.5.1+cu124。两个版本下 S2 的全部测试都通过。
 qdrant-client 1.19.1，自带 py.typed
-  注：「N warnings」这一项随 torch 版本变。torch 2.5.1（规划时沙箱）下 cn_clip 的
-  torch.load 会发一条 FutureWarning，所以 Task 28 起的门禁 Expected 写的是 3 warnings；
-  torch ≥ 2.6 把 weights_only 的默认值翻成 True，这条不再发，同一门禁只有 2 warnings。
-  差异恰好从 Task 28 开始（那时才引入 test_chinese_clip.py），Task 25–27 两版一致。
+  注：「N warnings」这一项随 torch 版本变，并随**模型加载次数**放大。torch 2.5.1（规划时
+  沙箱）下 cn_clip 的 torch.load 会发一条 FutureWarning，每加载一次模型发一条：Task 28
+  只加载一次（门禁 3 warnings），Task 33 的 e2e 每个用例各建一次真容器（10 warnings）。
+  torch ≥ 2.6 把 weights_only 的默认值翻成 True，这条不再发，同一门禁只剩 starlette 的
+  2 条。差异从 Task 28（引入 test_chinese_clip.py）开始，Task 25–27 两版一致。
 cn-clip 1.6.0，无 py.typed（需要 mypy override）
 ~/.cache/clip/clip_cn_vit-l-14.pt  1,625,135,766 字节
 chinese-clip 加载 3.1s，768 维；GPU 上单张图约 65ms（1,589 张 103s）
