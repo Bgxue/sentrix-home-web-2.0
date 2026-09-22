@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
+from sentrix.domain.memories.facts import Fact, FactStatus
 from sentrix.domain.places.models import (
     AdminArea,
     NearestPlace,
@@ -23,6 +24,7 @@ from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteObservationRepository,
 )
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
+from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 
 NOW = datetime(2017, 10, 5, 12, 0, 0, tzinfo=UTC)
 XIAOSHAN = GpsPoint(30.1839, 120.2642)
@@ -46,6 +48,11 @@ def places(migrations_ready_db: Database) -> SqliteAssetPlaceRepository:
 @pytest.fixture
 def events(migrations_ready_db: Database) -> SqliteEventRepository:
     return SqliteEventRepository(migrations_ready_db)
+
+
+@pytest.fixture
+def facts(migrations_ready_db: Database) -> SqliteFactRepository:
+    return SqliteFactRepository(migrations_ready_db)
 
 
 def add_asset(repo: SqliteAssetRepository, asset_id: str = "asset_1", **overrides) -> Asset:
@@ -411,3 +418,72 @@ def test_event_fold_on_missing_event_raises(events: SqliteEventRepository):
             aggregation_score=0.0,
             aggregation_breakdown={},
         )
+
+
+# ---- 事实 ------------------------------------------------------------------------
+
+
+def test_fact_insert_reinforce_and_status(facts: SqliteFactRepository):
+    created = facts.insert(
+        Fact(
+            id="fact_1",
+            scope_id="album1",
+            subject="妈妈",
+            predicate="去过",
+            object="赵县",
+            status=FactStatus.ACTIVE,
+            confidence=0.65,
+            evidence_ids=("obs_1",),
+            revision=1,
+        )
+    )
+    assert created.evidence_ids == ("obs_1",)
+    assert facts.active_for(scope_id="album1", subject="妈妈", predicate="去过") is not None
+
+    reinforced = facts.reinforce("fact_1", evidence_ids=("obs_1", "obs_2"), confidence=0.8)
+    assert reinforced.evidence_ids == ("obs_1", "obs_2")
+    assert reinforced.confidence == pytest.approx(0.8)
+
+    retracted = facts.set_status("fact_1", "retracted")
+    assert retracted.status is FactStatus.RETRACTED
+    assert facts.active_for(scope_id="album1", subject="妈妈", predicate="去过") is None
+
+
+def test_supersede_others_is_scoped(facts: SqliteFactRepository):
+    """1.0 的 ``confirm_fact`` 不带 scope，跨相册同名事实会被一起作废。2.0 收敛在本 scope。"""
+    for scope, fact_id in (("album1", "fact_a"), ("album2", "fact_b")):
+        facts.insert(
+            Fact(
+                id=fact_id,
+                scope_id=scope,
+                subject="妈妈",
+                predicate="去过",
+                object="赵县",
+                status=FactStatus.ACTIVE,
+                confidence=0.6,
+                evidence_ids=("obs_1",),
+                revision=1,
+            )
+        )
+    facts.insert(
+        Fact(
+            id="fact_pending",
+            scope_id="album1",
+            subject="妈妈",
+            predicate="去过",
+            object="保定",
+            status=FactStatus.PENDING,
+            confidence=0.7,
+            evidence_ids=("obs_9",),
+            revision=2,
+            supersedes_fact_id="fact_a",
+        )
+    )
+
+    changed = facts.supersede_others(
+        scope_id="album1", subject="妈妈", predicate="去过", keep_fact_id="fact_pending"
+    )
+
+    assert changed == 1
+    assert facts.get("fact_a").status is FactStatus.SUPERSEDED
+    assert facts.get("fact_b").status is FactStatus.ACTIVE
