@@ -12,7 +12,7 @@ export interface TurnStream {
   result: AssistantCompleteEvent | null;
   busy: boolean;
   error: string | null;
-  ask: (conversationId: string, scopeId: string, message: string) => Promise<void>;
+  ask: (conversationId: string, message: string) => Promise<void>;
 }
 
 /**
@@ -42,7 +42,7 @@ export function useTurnStream(): TurnStream {
   useEffect(() => close, [close]);
 
   const ask = useCallback(
-    async (conversationId: string, scopeId: string, message: string) => {
+    async (conversationId: string, message: string) => {
       close();
       finishedRef.current = false;
       setProgress([]);
@@ -52,7 +52,7 @@ export function useTurnStream(): TurnStream {
 
       let turnId: string;
       try {
-        const started = await startTurn(conversationId, scopeId, message);
+        const started = await startTurn(conversationId, message);
         turnId = started.turn_id;
       } catch (cause) {
         setError((cause as Error).message);

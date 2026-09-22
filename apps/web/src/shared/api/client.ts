@@ -135,15 +135,20 @@ export async function createConversation(scopeId: string): Promise<ConversationS
   });
 }
 
+/**
+ * 建一个回合。**不带 scope**：回合属于会话，scope 由后端从会话取。
+ *
+ * 前端曾经一路把 ``scopeId`` 传到这里。那是把「会话的 scope」这个后端事实又抄了一遍，
+ * 抄错的时候（省略、传旧值）后端会静默按错的 scope 检索，用户看到的是「搜不到」。
+ */
 export async function startTurn(
   conversationId: string,
-  scopeId: string,
   message: string,
 ): Promise<{ turn_id: string; conversation_id: string; status: string }> {
   return request(`/assistant/conversations/${conversationId}/turns`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, scope_id: scopeId }),
+    body: JSON.stringify({ message }),
   });
 }
 

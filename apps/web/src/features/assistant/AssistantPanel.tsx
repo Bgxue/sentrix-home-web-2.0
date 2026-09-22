@@ -63,7 +63,7 @@ export function AssistantPanel({ scopeId }: { scopeId: string }) {
       ...previous,
       { question, answer: "", attachments: [], status: "running", reason: "" },
     ]);
-    await ask(conversationId, scopeId, question);
+    await ask(conversationId, question);
   }
 
   return (
