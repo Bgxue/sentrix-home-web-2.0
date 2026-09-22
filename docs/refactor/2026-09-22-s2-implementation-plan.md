@@ -523,7 +523,7 @@ Expected:
 
 ```text
 ..........                                                               [100%]
-10 passed in 0.01s
+10 passed
 ```
 
 - [ ] **Step 5: 更新 module-map.md**
@@ -1265,7 +1265,7 @@ Expected:
 
 ```text
 ....................                                                     [100%]
-20 passed in 1.16s
+20 passed
 ```
 
 - [ ] **Step 8: 更新 module-map.md**
@@ -2107,7 +2107,7 @@ Expected:
 
 ```text
 ...........                                                              [100%]
-11 passed in 1.08s
+11 passed
 ```
 
 其中 `test_locked_directory_degrades_loudly` 会真的 fork 一个子进程占住目录再断言降级——那是本切片最不能省的一条。
@@ -2636,7 +2636,7 @@ Expected:
 
 ```text
 ............                                                             [100%]
-12 passed in 3.01s
+12 passed
 ```
 
 - [ ] **Step 7: 更新 module-map.md**
@@ -3689,7 +3689,7 @@ Expected:
 
 ```text
 ................                                                         [100%]
-16 passed in 2.45s
+16 passed
 ```
 
 - [ ] **Step 9: 重新导出 OpenAPI 契约**
@@ -4325,7 +4325,7 @@ Expected:
 
 ```text
 ............................                                             [100%]
-28 passed in 1.64s
+28 passed
 ```
 
 - [ ] **Step 6: 更新 module-map.md**
@@ -4833,7 +4833,7 @@ Expected:
 
 ```text
 .........                                                                [100%]
-9 passed in 2.18s
+9 passed
 ```
 
 - [ ] **Step 6: 重新导出 OpenAPI 契约**
@@ -5154,11 +5154,11 @@ Expected:
 
 ```text
 Found 0 warnings and 0 errors.
-Finished in 25ms on 8 files with 116 rules using 32 threads.
+Finished on 8 files with 116 rules using 32 threads.
 vite v8.3.0 building client environment for production...
 ✓ 21 modules transformed.
 dist/assets/index-DGdUseF4.js   223.98 kB │ gzip: 70.45 kB
-✓ built in 69ms
+✓ built
 ```
 
 - [ ] **Step 5: 全量门禁**
@@ -5395,7 +5395,7 @@ Expected:
 
 ```text
 .......                                                                  [100%]
-7 passed in 15.31s
+7 passed
 ```
 
 （这一步没有"红灯"：它是把前四个任务已经各自验过的能力串起来。真正的红灯在前面每个任务里。）
@@ -5531,7 +5531,8 @@ qdrant-client 1.19.1，自带 py.typed
   cn_clip 的 torch.load 发一条 FutureWarning，且每加载一次模型发一条（规划时 Task 28
   是 3 条，Task 33 的 e2e 每个用例各建一次真容器，放大到多条）；torch ≥ 2.6 把
   weights_only 默认值翻成 True 后这条不再发。与版本无关的固定项只有 starlette 那 2 条。
-  判定只看 passed 数与覆盖率。
+  同理，Expected 里**不写耗时**（``in X.XXs`` / ``in XXms``）：它是机器负载、GPU 状态
+  与首次加载的函数，不是被测行为。判定只看 passed 数、覆盖率与错误文本。
 cn-clip 1.6.0，无 py.typed（需要 mypy override）
 ~/.cache/clip/clip_cn_vit-l-14.pt  1,625,135,766 字节
 chinese-clip 加载 3.1s，768 维；GPU 上单张图约 65ms（1,589 张 103s）
