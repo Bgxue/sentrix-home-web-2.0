@@ -44,3 +44,29 @@ export function assetDisplayUrl(asset: AssetSummary): string {
   }
   return assetFileUrl(asset.id);
 }
+
+export interface SearchHit {
+  asset: AssetSummary;
+  score: number;
+  channels: Record<string, number>;
+  raw_scores: Record<string, number>;
+}
+
+export interface SearchResponse {
+  query: string;
+  backend: string;
+  degraded: boolean;
+  degraded_reason: string;
+  authoritative_vectors: number;
+  items: SearchHit[];
+}
+
+/** 按内容词检索。后端负责嵌入、召回与融合，前端不做任何相关性计算。 */
+export async function searchAssets(
+  query: string,
+  scopeId: string,
+  limit = 20,
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q: query, scope_id: scopeId, limit: String(limit) });
+  return request<SearchResponse>(`/search?${params.toString()}`);
+}
