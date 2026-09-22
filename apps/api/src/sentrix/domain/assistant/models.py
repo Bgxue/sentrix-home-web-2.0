@@ -59,7 +59,6 @@ class TerminationReason(StrEnum):
 
     ANSWERED = "answered"
     ANSWERED_WITH_GAP = "answered_with_gap"
-    EMPTY_ANSWER = "empty_answer"
     NO_TOOL_CALL_STOPPED = "no_tool_call_stopped"
     TOOL_BUDGET_EXHAUSTED = "tool_budget_exhausted"
     STEP_BUDGET_EXHAUSTED = "step_budget_exhausted"
@@ -67,6 +66,18 @@ class TerminationReason(StrEnum):
     MODEL_ERROR = "model_error"
     GUARD_BLOCKED = "guard_blocked"
     CANCELLED = "cancelled"
+    # 1.0 ``_classify_termination`` 的 ``parse_failure``：模型这一轮没给出可用的动作/回答。
+    # 2.0 曾经把它单列成 ``empty_answer``，但 1.0 的 25,112 条轨迹里没有任何一条以
+    # ``complete`` 交付过空答案（1,464 条空答案全部是 status=error/partial 的模型调用失败），
+    # 也就是说 1.0 从来没有把「空回答」当成一个独立的结局——它把这类情况归进 parse_failure。
+    # 照 1.0 的口径并回来，不再自造一个 1.0 没有的终止原因。
+    PARSE_FAILURE = "parse_failure"
+    # 1.0 ``_detect_policy_refusal`` 那条出口。1.0 提前 return 绕过了收尾分类器，于是
+    # ``termination_reason`` 留成空串（库里 212 条空串正好就是这 212 条 policy_refusal）；
+    # 行为不变，只是给它一个名字。
+    POLICY_REFUSAL = "policy_refusal"
+    # 1.0 ``goal_planner`` 的 ``planner_call_error`` 走到最后就是 ``planner_blocked``。
+    PLANNER_BLOCKED = "planner_blocked"
 
 
 class ProgressStage(StrEnum):

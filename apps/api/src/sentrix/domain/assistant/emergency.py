@@ -55,7 +55,10 @@ def fallback_answer(
 _REASON_LABEL: dict[TerminationReason, str] = {
     TerminationReason.ANSWERED: "已完成",
     TerminationReason.ANSWERED_WITH_GAP: "有未取到的证据",
-    TerminationReason.EMPTY_ANSWER: "模型没有给出回答",
+    # 1.0 的 emergency 尾句用词就是「输出无法解析」（``emergency.py`` 的 ``_REASON_TAIL``）。
+    TerminationReason.PARSE_FAILURE: "输出无法解析",
+    TerminationReason.POLICY_REFUSAL: "政策拒答",
+    TerminationReason.PLANNER_BLOCKED: "无法可靠规划证据需求",
     TerminationReason.NO_TOOL_CALL_STOPPED: "未取证就作答",
     TerminationReason.TOOL_BUDGET_EXHAUSTED: "工具调用预算用尽",
     TerminationReason.STEP_BUDGET_EXHAUSTED: "模型步数用尽",

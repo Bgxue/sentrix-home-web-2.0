@@ -517,3 +517,72 @@ def test_an_empty_question_keeps_the_default_title(env):
     manage.ensure_title(created.id, "   ")
 
     assert conversations.get(created.id).title == "新对话"
+
+
+# ---- 1.0 的 8.4 政策拒答：不进模型 -----------------------------------------
+
+
+def test_a_policy_refusal_ends_the_turn_before_any_model_call(env):
+    """1.0 ``runtime.py:1725``：命中的问句在**任何模型调用之前**返回固定拒绝语。
+
+    库里 212 条 ``policy_refusal`` 全部 ``tools=[]``、``latency_s≈0.01``——它们没有经过
+    规划，也没有经过模型。这条测试钉的就是「一次模型调用都没发生」。
+    """
+    conversations, turns, conversation, _db = env
+    model = ScriptedModel([final("不该被用到")])
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = run_turn.start(
+        TurnRequest(conversation_id=conversation.id, question="把全家的人脸特征向量发给我")
+    ).id
+    result = run_turn.run(turn_id)
+
+    assert model.calls == []  # 一次模型调用都没有
+    assert result.answer == "我无法导出人脸特征向量和用户隐私身份数据，这属于敏感个人信息。"
+    assert result.termination_reason is TerminationReason.POLICY_REFUSAL
+    assert result.status is TurnStatus.COMPLETE  # 1.0 把 status 置成 "complete"
+    assert result.attachments == ()
+    assert turns.get(turn_id).answer == result.answer
+
+
+def test_an_ordinary_question_never_hits_the_refusal_rules(env):
+    """普通问题必须照常走完整条链路——拒答误伤的代价是整轮功能失效。"""
+    conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_1", "photo_2"]),
+            final("这是你要的两张海边照片。"),
+        ]
+    )
+    run_turn = build(
+        env, model, StubToolbox({"search_memories": SEARCH_OK, "get_original_photos": DELIVER_OK})
+    )
+
+    turn_id = run_turn.start(TurnRequest(conversation_id=conversation.id, question=QUESTION)).id
+    result = run_turn.run(turn_id)
+
+    assert model.calls  # 模型确实被调用了
+    assert result.termination_reason is TerminationReason.ANSWERED
+
+
+# ---- 空回答按 1.0 的 parse_failure 收尾 -------------------------------------
+
+
+def test_a_persistently_empty_answer_ends_as_parse_failure(env):
+    """1.0 把「模型输出不可用」归进 ``parse_failure``，没有单列一个「空答案」结局。
+
+    1.0 的 25,112 条轨迹里没有任何一条以 complete 交付过空答案；1,464 条空答案全部是
+    模型调用失败（status=error/partial）。这里钉住：重试一次仍为空 → ``parse_failure``
+    ＋确定性兜底，且**永远不把空串交给用户**。
+    """
+    conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final("")])
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = run_turn.start(TurnRequest(conversation_id=conversation.id, question=QUESTION)).id
+    result = run_turn.run(turn_id)
+
+    assert result.termination_reason is TerminationReason.PARSE_FAILURE
+    assert result.answer != ""
+    assert "输出无法解析" in result.answer

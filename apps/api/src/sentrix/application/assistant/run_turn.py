@@ -53,6 +53,7 @@ from sentrix.domain.assistant.models import (
     TurnRecord,
     TurnStatus,
 )
+from sentrix.domain.assistant.policy import detect_policy_refusal
 from sentrix.domain.assistant.ports import ChatModel, ConversationRepository, TurnRepository
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
@@ -75,11 +76,11 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 # 这些门禁拦第二次时不再放行——把内部标识交付给用户是安全边界，不是风格问题。
 HARD_GUARD_CODES = frozenset({"internal_reference_leak"})
 
-# 模型返回空回答时给它的一句提醒。实测 8100 上的 gemma4（IQ3_XXS 量化）在工具往返之后
-# 会直接吐 EOS——``finish_reason="stop"``、1 个 completion token、content 为空。它与
-# 请求形状无关（带不带 tools、content 是 null 还是空串、温度 0 到 1、有没有 note 字段都
-# 复现过），是模型/模板层面的行为。循环必须能接住：提醒一次，再空就诚实兜底。
-EMPTY_ANSWER_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
+# 模型这一轮没给出可用输出时给它的一句提醒。1.0 对这类输入走的是**解析重试**
+# （``runtime.py`` 的 ``parse_retries``：模型输出解析不出 action 就带着原因再问一次，
+# 用完重试次数才以 ``parse_failure`` 收尾），而不是另立一个终止原因。这里照 1.0 的口径：
+# 提醒一次，再空就按 ``PARSE_FAILURE`` 收尾，用确定性兜底把已有证据说清楚。
+PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
 
 
 class TurnNotFoundError(LookupError):
@@ -199,32 +200,37 @@ class RunTurn:
                 question=record.question,
                 profile=self._profile,
             ),
-            ledger=EvidenceLedger(
-                scope_id=record.scope_id,
-                requirements=list(plan_requirements(record.question)),
-            ),
+            ledger=EvidenceLedger(scope_id=record.scope_id, requirements=[]),
             emit=emit,
         )
-        self._publish(
-            session,
-            session.state.emit(
-                ProgressStage.PLANNING,
-                ProgressStatus.COMPLETE,
-                "已确认需要哪些证据。",
-                kind="plan",
-                payload={"requirements": list(session.ledger.as_payload())},
-            ),
-        )
 
+        # 1.0 ``runtime.py:1725``：政策拒答在**任何模型调用之前**返回固定的拒绝语——
+        # 不规划、不调工具、不进模型。位置也照搬（在规划之前）。
+        refusal = detect_policy_refusal(record.question)
         answer = ""
-        try:
-            answer = self._converse(session, record)
-        except Exception:
-            # 兜底不是「错误处理」，是「绝不让收尾原因落空」：任何未预料的异常也必须以
-            # 一个有名字的原因结束，而不是留下一个半开的回合。
-            log.exception("回合执行中抛出未预料的异常: %s", turn_id)
-            session.state.finish(TerminationReason.MODEL_ERROR)
-            answer = emergency.clarify_answer(TerminationReason.MODEL_ERROR)
+        if refusal is not None:
+            session.state.finish(TerminationReason.POLICY_REFUSAL)
+            answer = refusal
+        else:
+            session.ledger.requirements = list(plan_requirements(record.question))
+            self._publish(
+                session,
+                session.state.emit(
+                    ProgressStage.PLANNING,
+                    ProgressStatus.COMPLETE,
+                    "已确认需要哪些证据。",
+                    kind="plan",
+                    payload={"requirements": list(session.ledger.as_payload())},
+                ),
+            )
+            try:
+                answer = self._converse(session, record)
+            except Exception:
+                # 兜底不是「错误处理」，是「绝不让收尾原因落空」：任何未预料的异常也
+                # 必须以一个有名字的原因结束，而不是留下一个半开的回合。
+                log.exception("回合执行中抛出未预料的异常: %s", turn_id)
+                session.state.finish(TerminationReason.MODEL_ERROR)
+                answer = emergency.clarify_answer(TerminationReason.MODEL_ERROR)
 
         reason = session.state.termination_reason or session.state.finish(TerminationReason.MODEL_ERROR)
         status = _status_for(reason)
@@ -322,7 +328,8 @@ class RunTurn:
         state = session.state
         answer = reply.content.strip()
         if not answer:
-            if state.block_guard_code("empty_answer"):
+            # 1.0 的 ``parse_retries``：输出不可用就带着原因再问一次，用完次数才收尾。
+            if state.block_guard_code("parse_failure"):
                 self._publish(
                     session,
                     state.emit(
@@ -330,14 +337,15 @@ class RunTurn:
                         ProgressStatus.RUNNING,
                         "模型这次没给出内容，再问一次…",
                         kind="guard",
-                        payload={"code": "empty_answer"},
+                        payload={"code": "parse_failure"},
                     ),
                 )
-                session.pending_reminder = EMPTY_ANSWER_NUDGE
+                session.pending_reminder = PARSE_FAILURE_NUDGE
                 return None
-            # 提醒过仍然是空的。已经取到的证据不能被丢掉——用确定性的方式把事实说清楚。
-            state.finish(TerminationReason.EMPTY_ANSWER)
-            return self._stop(session, TerminationReason.EMPTY_ANSWER)
+            # 重试过仍然是空的。已经取到的证据不能被丢掉——用确定性的方式把事实说清楚。
+            # 终止原因用 1.0 的 ``parse_failure``，不自造一个 1.0 没有的「空答案」。
+            state.finish(TerminationReason.PARSE_FAILURE)
+            return self._stop(session, TerminationReason.PARSE_FAILURE)
 
         verdict = self._guard.check(
             answer=answer,
@@ -505,7 +513,9 @@ class RunTurn:
 
 
 def _status_for(reason: TerminationReason) -> TurnStatus:
-    if reason is TerminationReason.ANSWERED:
+    # 1.0 的 policy_refusal 出口把 status 置成 ``"complete"``（``runtime.py:1728``）：
+    # 拒绝是一次正确的完成，不是失败。照搬。
+    if reason in {TerminationReason.ANSWERED, TerminationReason.POLICY_REFUSAL}:
         return TurnStatus.COMPLETE
     if reason is TerminationReason.CANCELLED:
         return TurnStatus.CANCELLED
