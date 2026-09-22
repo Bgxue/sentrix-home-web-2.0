@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     def preview_dir(self) -> Path:
         return self.data_dir / "previews"
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def qdrant_dir(self) -> Path:
+        """派生向量索引的目录。
+
+        **必须由 data_dir 派生**，不允许单独配路径。1.0 的 ``data/qdrant`` 被 8091
+        进程以 flock 独占（嵌入式 Qdrant 的目录只能一个进程用），2.0 若指过去，
+        第二个实例起不来——而且是那种「起了、只是检索悄悄降级成全表扫」的坏法。
+        派生自 data_dir 意味着换数据目录就整体换，不存在「只把索引指到 1.0」的口子。
+        """
+        return self.data_dir / "qdrant"
+
     def ensure_directories(self) -> None:
         for path in (self.data_dir, self.media_dir, self.preview_dir):
             path.mkdir(parents=True, exist_ok=True)

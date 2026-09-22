@@ -22,6 +22,7 @@ from sentrix.infrastructure.persistence.repositories.assets import (
 )
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
+from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
@@ -37,6 +38,7 @@ class Container:
     metadata_reader: PillowMetadataReader
     preview_encoder: PreviewEncoder
     vector_repository: SqliteVectorRepository
+    vector_index: QdrantVectorIndex
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -51,6 +53,7 @@ class Container:
             metadata_reader=PillowMetadataReader(),
             preview_encoder=PillowPreviewEncoder(),
             vector_repository=SqliteVectorRepository(database),
+            vector_index=QdrantVectorIndex(settings.qdrant_dir),
         )
 
     def database_healthy(self) -> bool:

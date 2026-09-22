@@ -76,8 +76,20 @@ class VectorRepository(Protocol):
     def count(self, *, space: str) -> int: ...
 
 
+class VectorIndexUnavailable(RuntimeError):
+    """派生索引不可用（目录被占用、权限、磁盘满）。
+
+    这是**预期内**的失败，所以必须是一个调用方能按类型捕获的异常，而不是
+    「返回 0 / 返回空列表」——后者在调用点看不出区别，1.0 的静默降级就是这么来的。
+    """
+
+
 class VectorIndex(Protocol):
-    """派生向量索引。缺席不是错误，但必须被看见。"""
+    """派生向量索引。缺席不是错误，但必须被看见。
+
+    ``upsert`` / ``search`` / ``count`` 在索引不可用时抛 ``VectorIndexUnavailable``，
+    由 application 层决定是回退到权威存储还是把错误暴露出去——适配器不替它决定。
+    """
 
     def upsert(self, records: Sequence[VectorRecord]) -> int: ...
 
@@ -90,6 +102,8 @@ class VectorIndex(Protocol):
         scope_id: str | None = None,
         model_name: str | None = None,
     ) -> Sequence[VectorHit]: ...
+
+    def count(self, *, space: str, model_name: str | None = None) -> int: ...
 
     def status(self) -> VectorIndexStatus: ...
 
