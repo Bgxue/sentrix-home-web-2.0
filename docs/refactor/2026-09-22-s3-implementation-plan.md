@@ -6663,7 +6663,7 @@ Run: `.venv/bin/pytest apps/api/tests/integration/test_run_turn.py -p no:warning
 Expected:
 
 ```text
-20 passed
+21 passed
 ```
 
 - [ ] **Step 5: 更新 module-map.md**
@@ -9190,7 +9190,7 @@ REPLY finish='stop' content='我为您检索到了三张与“海边”相关的
 | 39 | `pytest apps/api/tests/integration/test_chat_client.py apps/api/tests/integration/test_turn_event_broker.py` | `20 passed` |
 | 40 | `pytest apps/api/tests/integration/test_assistant_toolbox.py` | `16 passed` |
 | 41 | `pytest apps/api/tests/integration/test_run_turn.py` | `21 passed` |
-| 42 | `pytest apps/api/tests/contract/test_assistant_routes.py` | `14 passed` |
+| 42 | `pytest apps/api/tests/contract/test_assistant_routes.py` | `13 passed` |
 | 43 | `pytest apps/api/tests/contract/test_assistant_events.py` | `13 passed` |
 | 44 | `cd apps/web && npx tsc -b && npx oxlint` | `Found 0 warnings and 0 errors.` |
 | 45 | `pytest apps/api/tests/e2e/test_assistant_turn.py` | `6 passed` |
