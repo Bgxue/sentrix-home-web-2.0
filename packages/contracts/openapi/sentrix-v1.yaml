@@ -367,6 +367,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assistant/turns/{turn_id}/events:
+    get:
+      tags:
+      - assistant
+      summary: Turn Events
+      description: '回合事件的 SSE 流。跑完即关，不需要前端再问一次状态。
+
+
+        订阅顺序是**先读库、再订阅内存流**：库里是所有已经落盘的事件（断线重连与迟到加入
+
+        都能补），内存流是此刻还没落盘的增量。两边按 ``step_index`` 去重。'
+      operationId: turn_events_api_v1_assistant_turns__turn_id__events_get
+      parameters:
+      - name: turn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Turn Id
+      - name: Last-Event-ID
+        in: header
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Last-Event-Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:

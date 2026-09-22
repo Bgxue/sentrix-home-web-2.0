@@ -1,24 +1,37 @@
 """助手端点。只做 HTTP 映射，回合的一切规则在 domain / application 层。
 
-会话的增删改查，以及「建一个回合并立刻返回 turn_id」——执行放在工作线程里，
-回合先落库（``pending``）再由事件流订阅。
+SSE 的形状与设计 §4.3 一致，沿用 1.0 已验证的两类事件：``progress`` 与 ``complete``。
+与 1.0 的三处刻意差异：
+
+1. **事件带 ``id:``，且断线可从 ``Last-Event-ID`` 续。** 1.0 的 ``sent`` 是闭包局部变量，
+   每次重连都归零并把全部历史重发一遍（``app.py:2982``）。2.0 的 ``step_index`` 在回合内
+   单调递增，正好当事件 id 用。
+2. **``complete`` 帧不再重发整条进度数组。** 1.0 把它又塞了一遍（``app.py:2989``）。
+3. **回合终态是真实的。** 1.0 把模型失败、超时、guard 拦截全部压成 ``status="complete"``
+   （``app.py:3433``），只有未捕获的 Python 异常才是 ``error``，前端拿到的每一个失败都是
+   一个「成功」的帧。2.0 的 ``status`` 直接来自 ``TurnStatus``。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.assistant import (
     AttachmentSummary,
+    CompleteEventPayload,
     ConversationDetailResponse,
     ConversationListResponse,
     ConversationSummary,
     CreateConversationRequest,
     MessageSummary,
+    ProgressEventPayload,
     RenameConversationRequest,
     StartTurnRequest,
     StartTurnResponse,
@@ -33,11 +46,13 @@ from sentrix.application.assistant.run_turn import (
 from sentrix.application.assistant.tools import AssistantToolbox
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.bootstrap.container import Container
-from sentrix.domain.assistant.models import Conversation, TurnRecord
+from sentrix.domain.assistant.models import Conversation, ProgressEvent, TurnRecord
 
 log = logging.getLogger("sentrix.api.assistant")
 
 router = APIRouter(tags=["assistant"])
+
+SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 def _conversation_summary(conversation: Conversation) -> ConversationSummary:
@@ -201,3 +216,87 @@ def start_turn(
 
     threading.Thread(target=worker, name=f"turn-{record.id}", daemon=True).start()
     return StartTurnResponse(turn_id=record.id, conversation_id=conversation_id, status=record.status.value)
+
+
+def _format_progress(event: ProgressEvent) -> str:
+    data = ProgressEventPayload(
+        text=event.text,
+        status=event.status.value,
+        stage=event.stage.value,
+        step_index=event.step_index,
+        timestamp=event.timestamp,
+        kind=event.kind,
+        payload=dict(event.payload),
+    ).model_dump()
+    return f"id: {event.step_index}\nevent: progress\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _format_complete(record: TurnRecord) -> str:
+    data = CompleteEventPayload(
+        turn_id=record.id,
+        status=record.status.value,
+        termination_reason=record.termination_reason,
+        answer=record.answer,
+        attachments=[
+            AttachmentSummary(handle=item.handle, asset_id=item.asset_id, file_name=item.file_name)
+            for item in record.attachments
+        ],
+        requirements=[dict(item) for item in record.requirements],
+    ).model_dump()
+    return f"event: complete\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _resume_index(last_event_id: str) -> int:
+    try:
+        return max(0, int(last_event_id))
+    except (TypeError, ValueError):
+        return 0
+
+
+@router.get("/assistant/turns/{turn_id}/events")
+async def turn_events(
+    turn_id: str,
+    request: Request,
+    last_event_id: str = Header(default="", alias="Last-Event-ID"),
+    container: Container = Depends(get_container),
+) -> StreamingResponse:
+    """回合事件的 SSE 流。跑完即关，不需要前端再问一次状态。
+
+    订阅顺序是**先读库、再订阅内存流**：库里是所有已经落盘的事件（断线重连与迟到加入
+    都能补），内存流是此刻还没落盘的增量。两边按 ``step_index`` 去重。
+    """
+    if container.turn_repository.get(turn_id) is None:
+        raise HTTPException(status_code=404, detail="turn not found")
+
+    turns = container.turn_repository
+    broker = container.turn_event_broker
+    cursor = _resume_index(last_event_id)
+
+    async def body() -> AsyncIterator[str]:
+        nonlocal cursor
+        for stored in turns.events_after(turn_id, cursor):
+            cursor = stored.step_index
+            yield _format_progress(stored)
+
+        record = turns.get(turn_id)
+        if record is not None and record.status.is_terminal:
+            yield _format_complete(record)
+            return
+
+        async for event in broker.subscribe(turn_id):
+            if await request.is_disconnected():
+                return
+            if event is None:
+                break
+            if event.step_index <= cursor:
+                # 数据库那一轮已经发过了。broker 的 backlog 从回合一开始就记，
+                # 重叠是正常的，靠 step_index 去重。
+                continue
+            cursor = event.step_index
+            yield _format_progress(event)
+
+        record = turns.get(turn_id)
+        if record is not None:
+            yield _format_complete(record)
+
+    return StreamingResponse(body(), media_type="text/event-stream", headers=SSE_HEADERS)
