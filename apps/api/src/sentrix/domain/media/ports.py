@@ -7,6 +7,7 @@ domain；具体怎么解码由 infrastructure 实现。
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -43,6 +44,31 @@ class ObservationRepository(Protocol):
     def add(self, observation: Observation) -> None: ...
 
     def get(self, observation_id: str) -> Observation | None: ...
+
+    def list_by_asset(self, asset_id: str) -> Sequence[Observation]: ...
+
+    def list_scope(self, scope_id: str, *, limit: int) -> Sequence[Observation]: ...
+
+    def enrich(self, observation_id: str, *, semantics: ObservationSemantics) -> Observation: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationSemantics:
+    """一次语义富集写进 Observation 的字段集合。
+
+    单独一个 DTO 而不是一长串关键字参数：``enrich`` 的调用方（VLM 观察器与测试假件）
+    要能一次把整包语义构造出来，也方便断言「写了哪些、没写哪些」。
+    ``revision`` 由仓储自增，不由调用方给——它是版本号，不是内容。
+    """
+
+    caption: str = ""
+    place: str = ""
+    activity: str = ""
+    event_type: str = ""
+    ocr_text: str = ""
+    objects: tuple[str, ...] = ()
+    clothing: tuple[str, ...] = ()
+    confidence: float = 0.0
 
 
 class MediaStorage(Protocol):

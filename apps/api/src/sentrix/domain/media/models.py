@@ -105,7 +105,15 @@ class Asset:
 
 @dataclass(frozen=True, slots=True)
 class Observation:
-    """一次导入对资产抽取出的原始观察结果。"""
+    """一次导入对资产抽取出的观察结果。
+
+    S4 把 1.0 散在 ``observations.*_json`` 里的语义字段提升成正式成员：词法索引与
+    事件打分都直接读它们，读之前先去解析一个 JSON blob 是 1.0 反复出错的地方
+    （``MetadataRetriever`` 的 place 预筛就因为拿到的是 JSON 字符串而整条失效）。
+
+    ``revision`` 是**词法投影的过期依据**：同一条 Observation 被重新富集时要能区分
+    「同一版本重跑」与「新版本覆盖」，1.0 没有这个字段，投影只能删了重插。
+    """
 
     id: str
     scope_id: str
@@ -115,3 +123,20 @@ class Observation:
     confidence: float
     created_at: datetime
     updated_at: datetime
+    caption: str = ""
+    place: str = ""
+    activity: str = ""
+    event_type: str = ""
+    ocr_text: str = ""
+    objects: tuple[str, ...] = ()
+    clothing: tuple[str, ...] = ()
+    revision: int = 1
+
+    def __post_init__(self) -> None:
+        if self.revision < 1:
+            raise ValueError(f"revision 从 1 开始，收到 {self.revision}")
+
+    @property
+    def has_semantics(self) -> bool:
+        """VLM 语义是否已经落上。1.0 用「caption 非空」当这个判据。"""
+        return bool(self.caption or self.place or self.activity or self.event_type)

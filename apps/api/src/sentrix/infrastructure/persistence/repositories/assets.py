@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
 
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
+from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.infrastructure.persistence.database import Database
 
 _ASSET_COLUMNS = (
@@ -100,6 +102,43 @@ class SqliteAssetRepository:
             )
 
 
+_OBSERVATION_COLUMNS = (
+    "id, scope_id, asset_id, source_type, captured_at, confidence, caption, place, activity,"
+    " event_type, ocr_text, objects_json, clothing_json, revision, created_at, updated_at"
+)
+
+
+def _json_list(value: str | None) -> tuple[str, ...]:
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(item) for item in parsed if isinstance(item, (str, int, float)))
+
+
+def row_to_observation(row: sqlite3.Row) -> Observation:
+    return Observation(
+        id=row["id"],
+        scope_id=row["scope_id"],
+        asset_id=row["asset_id"],
+        source_type=row["source_type"],
+        captured_at=_parse_datetime(row["captured_at"]),
+        confidence=row["confidence"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        caption=row["caption"] or "",
+        place=row["place"],
+        activity=row["activity"],
+        event_type=row["event_type"],
+        ocr_text=row["ocr_text"] or "",
+        objects=_json_list(row["objects_json"]),
+        clothing=_json_list(row["clothing_json"]),
+        revision=row["revision"],
+    )
+
+
 class SqliteObservationRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -108,7 +147,9 @@ class SqliteObservationRepository:
         with self._database.connect() as connection, connection:
             connection.execute(
                 "INSERT INTO observations (id, scope_id, asset_id, source_type, captured_at,"
-                " confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                " confidence, caption, place, activity, event_type, ocr_text, objects_json,"
+                " clothing_json, revision, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     observation.id,
                     observation.scope_id,
@@ -116,6 +157,14 @@ class SqliteObservationRepository:
                     observation.source_type,
                     observation.captured_at.isoformat() if observation.captured_at else None,
                     observation.confidence,
+                    observation.caption,
+                    observation.place,
+                    observation.activity,
+                    observation.event_type,
+                    observation.ocr_text,
+                    json.dumps(list(observation.objects), ensure_ascii=False),
+                    json.dumps(list(observation.clothing), ensure_ascii=False),
+                    observation.revision,
                     observation.created_at.isoformat(),
                     observation.updated_at.isoformat(),
                 ),
@@ -124,19 +173,53 @@ class SqliteObservationRepository:
     def get(self, observation_id: str) -> Observation | None:
         with self._database.connect() as connection:
             row = connection.execute(
-                "SELECT id, scope_id, asset_id, source_type, captured_at, confidence,"
-                " created_at, updated_at FROM observations WHERE id = ?",
-                (observation_id,),
+                f"SELECT {_OBSERVATION_COLUMNS} FROM observations WHERE id = ?", (observation_id,)
             ).fetchone()
-        if not row:
-            return None
-        return Observation(
-            id=row["id"],
-            scope_id=row["scope_id"],
-            asset_id=row["asset_id"],
-            source_type=row["source_type"],
-            captured_at=_parse_datetime(row["captured_at"]),
-            confidence=row["confidence"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
+        return row_to_observation(row) if row else None
+
+    def list_by_asset(self, asset_id: str) -> Sequence[Observation]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_OBSERVATION_COLUMNS} FROM observations WHERE asset_id = ?"
+                " ORDER BY created_at DESC",
+                (asset_id,),
+            ).fetchall()
+        return [row_to_observation(row) for row in rows]
+
+    def list_scope(self, scope_id: str, *, limit: int) -> Sequence[Observation]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_OBSERVATION_COLUMNS} FROM observations WHERE scope_id = ?"
+                " ORDER BY created_at DESC LIMIT ?",
+                (scope_id, limit),
+            ).fetchall()
+        return [row_to_observation(row) for row in rows]
+
+    def enrich(self, observation_id: str, *, semantics: ObservationSemantics) -> Observation:
+        """写入 VLM 语义并把 ``revision`` 加一。
+
+        ``revision`` 自增而不是由调用方给：它是**版本号**，两个并发富集如果各自带一个
+        自认为正确的号，投影的过期判断就会退化成比大小。自增在 SQL 里是原子的。
+        """
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE observations SET caption = ?, place = ?, activity = ?, event_type = ?,"
+                " ocr_text = ?, objects_json = ?, clothing_json = ?,"
+                " confidence = MAX(confidence, ?), revision = revision + 1,"
+                " updated_at = datetime('now') WHERE id = ?",
+                (
+                    semantics.caption,
+                    semantics.place,
+                    semantics.activity,
+                    semantics.event_type,
+                    semantics.ocr_text,
+                    json.dumps(list(semantics.objects), ensure_ascii=False),
+                    json.dumps(list(semantics.clothing), ensure_ascii=False),
+                    float(semantics.confidence),
+                    observation_id,
+                ),
+            )
+        enriched = self.get(observation_id)
+        if enriched is None:
+            raise KeyError(observation_id)
+        return enriched
