@@ -123,12 +123,16 @@ class Container:
     def build(cls, settings: Settings) -> Container:
         database = Database(settings.database_path, MIGRATIONS_DIR)
         observations = SqliteObservationRepository(database)
-        lexical = SqliteLexicalIndex(database, observations)
+        assets = SqliteAssetRepository(database)
+        asset_places = SqliteAssetPlaceRepository(database)
+        # 词法投影的 geo/time/file 锚点取自 asset 与 asset_places（不是 observation），
+        # 所以写侧要先把这两个仓储拿在手上。
+        lexical = SqliteLexicalIndex(database, observations, assets=assets, places=asset_places)
         return cls(
             settings=settings,
             database=database,
             spaces=SqliteSpaceRepository(database),
-            asset_repository=SqliteAssetRepository(database),
+            asset_repository=assets,
             observation_repository=observations,
             media_storage=FileSystemMediaStorage(settings.media_dir),
             metadata_reader=PillowMetadataReader(),
@@ -140,7 +144,7 @@ class Container:
                 admin=PyGeoCNAdminResolver(),
                 nearest=GeoNamesNearestResolver(settings.geo_dir),
             ),
-            asset_place_repository=SqliteAssetPlaceRepository(database),
+            asset_place_repository=asset_places,
             place_aliases=load_place_aliases(),
             event_repository=SqliteEventRepository(database),
             fact_repository=SqliteFactRepository(database),

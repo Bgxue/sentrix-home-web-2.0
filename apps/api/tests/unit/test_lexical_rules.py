@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from sentrix.domain.retrieval.lexical import (
+    ANCHOR_CONFIDENCE,
+    ANCHOR_FIELD_TYPES,
+    ANCHOR_SOURCE_TYPES,
     EXACT_BOOST,
+    anchor_terms,
     file_stem_is_indexable,
     fts_content,
     normalize_text,
@@ -98,3 +102,54 @@ def test_file_stem_excludes_event_covers_and_keyframes():
 )
 def test_time_anchor_tokens(captured: str, expected: tuple[str, ...]):
     assert time_anchor_tokens(captured) == expected
+
+
+# ---- asset 级锚点（1.0 ``retrieval_indexes.py:225-245``） ---------------------------------
+
+PLACE_TEXT = "浙江省 杭州市 萧山区 赵州镇 大石桥村"
+
+
+def test_anchor_terms_cover_geo_time_and_file():
+    """三类锚点各自的值与来源（``source_type`` 是「这行从哪来」的凭证）。"""
+    terms = anchor_terms(
+        file_name="IMG_1234.HEIC", captured_at="2017-10-05T12:30:00+00:00", place_text=PLACE_TEXT
+    )
+
+    assert {term.field_type for term in terms} == set(ANCHOR_FIELD_TYPES)
+    assert {term.confidence for term in terms} == {ANCHOR_CONFIDENCE}
+    assert {(term.field_type, term.source_type) for term in terms} == {
+        (field_type, ANCHOR_SOURCE_TYPES[field_type]) for field_type in ANCHOR_FIELD_TYPES
+    }
+    assert {term.normalized_value for term in terms} == {
+        "浙江省",
+        "杭州市",
+        "萧山区",
+        "赵州镇",
+        "大石桥村",
+        "2017",
+        "2017-10",
+        "2017-10-05",
+        "img_1234",
+    }
+
+
+def test_anchor_terms_never_contain_coordinates():
+    """``geo`` 取的每一段都来自 ``Place.searchable_text()``，坐标进不来。
+
+    1.0 把 ``label`` 整串写进索引，而它在 PyGeoCN 那条路上可能退化成坐标串
+    （``_event_display_place`` 专门用正则挡这件事）。
+    """
+    terms = anchor_terms(file_name="", captured_at="", place_text="浙江省 杭州市 萧山区")
+
+    assert [term.normalized_value for term in terms] == ["浙江省", "杭州市", "萧山区"]
+
+
+def test_anchor_terms_skip_event_covers_and_keyframes():
+    """事件封面与视频关键帧的文件名不是用户内容（1.0 ``:245``）。"""
+    assert anchor_terms(file_name="event_event_abc.jpg", captured_at="", place_text="") == ()
+    assert anchor_terms(file_name="kf_0007.jpg", captured_at="", place_text="") == ()
+    assert anchor_terms(file_name="", captured_at="", place_text="") == ()
+
+
+def test_anchor_terms_skip_a_capture_date_that_is_too_short():
+    assert anchor_terms(file_name="", captured_at="2017-1", place_text="") == ()

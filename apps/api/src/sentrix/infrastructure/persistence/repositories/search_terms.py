@@ -18,8 +18,15 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sentrix.domain.media.models import Observation
-from sentrix.domain.media.ports import ObservationRepository
-from sentrix.domain.retrieval.lexical import FIELD_SOURCES, fts_content, normalize_text
+from sentrix.domain.media.ports import AssetRepository, ObservationRepository
+from sentrix.domain.places.ports import AssetPlaceRepository
+from sentrix.domain.retrieval.lexical import (
+    FIELD_SOURCES,
+    AnchorTerm,
+    anchor_terms,
+    fts_content,
+    normalize_text,
+)
 from sentrix.infrastructure.persistence.database import Database
 
 # 1.0 ``rebuild_all`` 用的是 ``list_observations(limit=10_000)``（``:272``）。同一个上限：
@@ -47,9 +54,21 @@ def _values(raw: object) -> tuple[str, ...]:
 class SqliteLexicalIndex:
     """实现 ``LexicalIndex`` 与 ``LexicalSearch`` 两个端口。"""
 
-    def __init__(self, database: Database, observations: ObservationRepository) -> None:
+    def __init__(
+        self,
+        database: Database,
+        observations: ObservationRepository,
+        *,
+        assets: AssetRepository,
+        places: AssetPlaceRepository,
+    ) -> None:
         self._database = database
         self._observations = observations
+        # 锚点列（geo / time / file）的值来自 **asset** 而不是 observation，所以写侧必须
+        # 拿得到 asset 与它解析出的地点。两个都是必填：缺了它们只会静默少写三列，
+        # 而那正是这一版要修的缺陷（见 ``docs/refactor/s4-deviations.md`` §7）。
+        self._assets = assets
+        self._places = places
 
     # ---- 写入 ----------------------------------------------------------------
 
@@ -86,8 +105,7 @@ class SqliteLexicalIndex:
                 )
         return len(rows)
 
-    @staticmethod
-    def _term_rows(observation: Observation, now: str) -> list[tuple[object, ...]]:
+    def _term_rows(self, observation: Observation, now: str) -> list[tuple[object, ...]]:
         rows: list[tuple[object, ...]] = []
         for field_type, value in _observation_terms(observation):
             rows.append(
@@ -105,7 +123,41 @@ class SqliteLexicalIndex:
                     now,
                 )
             )
+        for term in self._anchor_terms(observation):
+            rows.append(
+                (
+                    _new_id(),
+                    observation.id,
+                    observation.asset_id,
+                    observation.scope_id,
+                    term.field_type,
+                    term.normalized_value,
+                    term.confidence,
+                    term.source_type,
+                    observation.revision,
+                    now,
+                    now,
+                )
+            )
         return rows
+
+    def _anchor_terms(self, observation: Observation) -> tuple[AnchorTerm, ...]:
+        """1.0 ``retrieval_indexes.py:225-245``：从 asset 的 file_name / captured_at 与
+        解析出的地点生成 geo / time / file 三列锚点。
+
+        调用时点与 1.0 相同（写在 ``refresh_from_observation`` 里），而导入路径的
+        「地点解析 → 观察 → 词法投影」顺序保证这里读得到 ``asset_places`` 那一行
+        （``import_assets.py`` 的模块注释把顺序写成了硬约束）。
+        """
+        asset = self._assets.get(observation.asset_id)
+        if asset is None:
+            return ()
+        place = self._places.get(observation.asset_id)
+        return anchor_terms(
+            file_name=asset.file_name,
+            captured_at=asset.captured_at.isoformat() if asset.captured_at else "",
+            place_text=place.searchable_text() if place is not None else "",
+        )
 
     def rebuild_scope(self, scope_id: str) -> int:
         """按 scope 重建。**先按 scope 删**，不清整表。

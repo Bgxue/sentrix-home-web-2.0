@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 # 1.0 ``retrieval_indexes.py:20``。``person_bridge`` 在 2.0 不建（身份层属于 S5），
 # 其余七个字段一字不差。
@@ -135,3 +136,42 @@ def time_anchor_tokens(captured_at: str) -> tuple[str, ...]:
         if value and value not in parts:
             parts.append(value)
     return tuple(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorTerm:
+    """一条 asset 级锚点：观察文本里不存在、但必须能被词法命中的那几列。"""
+
+    field_type: str
+    normalized_value: str
+    source_type: str
+    confidence: float
+
+
+def anchor_terms(*, file_name: str, captured_at: str, place_text: str) -> tuple[AnchorTerm, ...]:
+    """1.0 ``retrieval_indexes.py:225-245`` 的 ``_asset_anchor_rows``。
+
+    这三类锚点是**同一件事的三面**：``caption`` 是场景描述，里面既没有地名、也没有日期、
+    也没有文件名，于是「按地名找照片」「按日期找照片」在词法通道上无从命中。1.0 为此
+    在写投影时额外插了 ``geo`` / ``time`` / ``file`` 三列（``:198-222`` 那条调用链）。
+
+    三处的取值与 1.0 一致：
+
+    - ``geo`` 取 ``Place.searchable_text()`` 的每一段（省 / 市 / 区县 / 乡镇 / 村庄），
+      **不含 GPS 坐标**——1.0 的 ``label`` 在 PyGeoCN 那条路上可能退化成坐标串，
+      2.0 不给坐标进入这个词的机会；
+    - ``time`` 取 ``time_anchor_tokens``（整串短于 7 个字符就不给）；
+    - ``file`` 取文件名去扩展名，``event_event_*`` / ``kf_*`` 前缀不建（那不是用户内容）。
+    """
+    terms: list[AnchorTerm] = []
+    for value in dict.fromkeys(part for part in str(place_text or "").split() if part):
+        terms.append(AnchorTerm("geo", normalize_text(value), ANCHOR_SOURCE_TYPES["geo"], ANCHOR_CONFIDENCE))
+    for value in time_anchor_tokens(captured_at):
+        terms.append(
+            AnchorTerm("time", normalize_text(value), ANCHOR_SOURCE_TYPES["time"], ANCHOR_CONFIDENCE)
+        )
+    name = str(file_name or "")
+    if file_stem_is_indexable(name):
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        terms.append(AnchorTerm("file", normalize_text(stem), ANCHOR_SOURCE_TYPES["file"], ANCHOR_CONFIDENCE))
+    return tuple(terms)

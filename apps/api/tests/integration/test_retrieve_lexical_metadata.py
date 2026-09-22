@@ -34,7 +34,7 @@ def repos(migrations_ready_db: Database):
     assets = SqliteAssetRepository(migrations_ready_db)
     observations = SqliteObservationRepository(migrations_ready_db)
     places = SqliteAssetPlaceRepository(migrations_ready_db)
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
     return {
         "assets": assets,
         "observations": observations,

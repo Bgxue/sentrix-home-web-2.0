@@ -89,7 +89,7 @@ def library(migrations_ready_db: Database, tmp_path: Path):
     observations = SqliteObservationRepository(migrations_ready_db)
     places = SqliteAssetPlaceRepository(migrations_ready_db)
     vectors = SqliteVectorRepository(migrations_ready_db)
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
 
     media = tmp_path / "media"
     media.mkdir()
@@ -248,15 +248,16 @@ def test_a_single_channel_hit_keeps_the_visual_weight_from_the_baseline(library)
 def test_the_metadata_channel_keeps_its_anchor_boost(library):
     """metadata 是 anchor 通道：命中即 ``1.0/(60+名次) + 1.0``。
 
-    A 同时被 metadata（地点条件）与视觉命中，两条通道都要算进去。锚点加成只加一次，
-    不管候选被几条通道召回。
+    A 被三条通道同时命中——地点条件进 metadata、地点锚点进 lexical、查询向量进视觉——
+    锚点加成只加一次，不管候选被几条通道召回。这条也顺带钉住「锚点列真的写进了词法
+    投影」：锚点没接线的那一版里，lexical 不会出现在这个字典里。
     """
     result = build(library).execute(EvidenceRequest(text="萧山区", scope_id=SCOPE, limit=3, place="萧山区"))
 
     top = result.hits[0]
     assert top.asset_id == "asset_a"
-    assert channels_of(top) == {"metadata": 1, "visual_ann": 1}
-    assert top.score == pytest.approx(1.0 / 61 + 2.5 / 61 + 1.0)
+    assert channels_of(top) == {"metadata": 1, "lexical": 1, "visual_ann": 1}
+    assert top.score == pytest.approx(1.0 / 61 + 1.0 / 61 + 2.5 / 61 + 1.0)
 
 
 def test_metadata_stays_silent_without_a_positive_condition(library):

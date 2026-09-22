@@ -99,18 +99,17 @@ def toolbox(migrations_ready_db, tmp_path):
         )
 
     observations = SqliteObservationRepository(migrations_ready_db)
-    # 四条召回通道与 HTTP 端点用的是同一套编排（1.0 里两个入口共用同一个 Kernel）。
+    places = SqliteAssetPlaceRepository(migrations_ready_db)
+    # 三条召回通道与 HTTP 端点用的是同一套编排（1.0 里两个入口共用同一个 Kernel）。
     # 这个夹具不落 Observation，所以词法与元数据两条通道恒空——被测的是工具的信息
     # 边界，不是召回；通道自己的行为在 test_retrieve_evidence.py。
     build = AssistantToolbox(
         retrieval=RetrieveEvidence(
             visual=RetrieveVisual(embedder=ScriptedEmbedder(), vectors=vectors, index=None),
-            lexical=RetrieveLexical(index=SqliteLexicalIndex(migrations_ready_db, observations)),
-            metadata=RetrieveMetadata(
-                assets=assets,
-                places=SqliteAssetPlaceRepository(migrations_ready_db),
-                aliases=EMPTY_ALIASES,
+            lexical=RetrieveLexical(
+                index=SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
             ),
+            metadata=RetrieveMetadata(assets=assets, places=places, aliases=EMPTY_ALIASES),
         ),
         assets=assets,
         result_sets=result_sets,

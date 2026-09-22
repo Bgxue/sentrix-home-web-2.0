@@ -494,11 +494,11 @@ def test_supersede_others_is_scoped(facts: SqliteFactRepository):
 
 
 def test_lexical_refresh_writes_terms_and_fts(
-    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
 ):
     add_asset(assets)
     observation = add_observation(observations)
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
 
     written = index.refresh_from_observation(observation)
 
@@ -508,22 +508,22 @@ def test_lexical_refresh_writes_terms_and_fts(
 
 
 def test_lexical_single_character_query_returns_nothing(
-    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
 ):
     add_asset(assets)
     observation = add_observation(observations)
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
     index.refresh_from_observation(observation)
 
     assert index.search_fts("色", scope_id="album1", limit=10) == []
 
 
 def test_lexical_exact_assets_requires_full_equality(
-    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
 ):
     add_asset(assets)
     observation = add_observation(observations, place="萧山区")
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
     index.refresh_from_observation(observation)
 
     assert index.exact_assets("萧山区", scope_id="album1") == frozenset({"asset_1"})
@@ -531,12 +531,12 @@ def test_lexical_exact_assets_requires_full_equality(
 
 
 def test_lexical_refresh_drops_terms_removed_by_re_enrichment(
-    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
 ):
     """重新富集把 objects 收敛掉之后，旧词条必须消失——增量更新做不到这件事。"""
     add_asset(assets)
     observation = add_observation(observations)
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
     index.refresh_from_observation(observation)
     assert index.search_fts("长椅", scope_id="album1", limit=10)
 
@@ -552,14 +552,14 @@ def test_lexical_refresh_drops_terms_removed_by_re_enrichment(
 
 
 def test_lexical_rebuild_scope_does_not_wipe_other_scopes(
-    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
 ):
     """1.0 的 scoped rebuild 会先清空整张 FTS 再只补一个 scope。"""
     add_asset(assets, "asset_1")
     add_asset(assets, "asset_2", scope_id="album2")
     add_observation(observations, "obs_1", asset_id="asset_1", scope_id="album1")
     add_observation(observations, "obs_2", asset_id="asset_2", scope_id="album2", place="秦皇岛市")
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
     index.rebuild_scope("album1")
     index.rebuild_scope("album2")
 
@@ -573,15 +573,76 @@ def test_lexical_rebuild_scope_does_not_wipe_other_scopes(
 
 
 def test_lexical_count_is_scoped(
-    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
 ):
     add_asset(assets, "asset_1")
     add_asset(assets, "asset_2", scope_id="album2")
     add_observation(observations, "obs_1", asset_id="asset_1", scope_id="album1")
     add_observation(observations, "obs_2", asset_id="asset_2", scope_id="album2")
-    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
     index.refresh_from_observation(observations.get("obs_1"))
     index.refresh_from_observation(observations.get("obs_2"))
 
     assert index.count("album1") > 0
     assert index.count("album1") < index.count()
+
+
+def test_lexical_refresh_writes_the_asset_anchors(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
+):
+    """观察文本里没有的地名 / 日期 / 文件名要单独建锚（1.0 ``retrieval_indexes.py:198-245``）。
+
+    没有这三列，「按日期找照片」「按真实地名找照片」在词法通道上无从命中——``caption``
+    是场景描述，``2017-10-05`` 与 ``萧山区`` 都不在里面。
+    """
+    add_asset(assets)
+    add_observation(observations)
+    places.save(
+        asset_id="asset_1",
+        scope_id="album1",
+        gps=XIAOSHAN,
+        place=Place(
+            admin=AdminArea("浙江省", "杭州市", "萧山区"),
+            nearest=NearestPlace("赵州镇", "大石桥村", 270.0),
+            precision=PlacePrecision.DISTRICT,
+            source=PlaceSource.PYGEOCN,
+            gps=XIAOSHAN,
+            confidence=0.9,
+        ),
+    )
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
+
+    index.refresh_from_observation(observations.get("obs_1"))
+
+    assert dict(index.search_fts("2017-10-05", scope_id="album1", limit=10))["asset_1"] > 0
+    assert dict(index.search_fts("萧山区", scope_id="album1", limit=10))["asset_1"] > 0
+    assert dict(index.search_fts("asset_1", scope_id="album1", limit=10))["asset_1"] > 0
+    with migrations_ready_db.connect() as connection:
+        rows = connection.execute(
+            "SELECT field_type, source_type, normalized_value FROM observation_search_terms"
+            " WHERE field_type IN ('geo', 'time', 'file')"
+        ).fetchall()
+    assert {(row["field_type"], row["source_type"]) for row in rows} == {
+        ("geo", "asset_geo"),
+        ("time", "asset_time"),
+        ("file", "asset_file"),
+    }
+    # 坐标不许进这个词：1.0 的 ``label`` 在 PyGeoCN 那条路上可能退化成坐标串。
+    assert all("," not in row["normalized_value"] for row in rows)
+
+
+def test_without_a_resolved_place_there_is_no_geo_anchor(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets, places
+):
+    """反向：地点没解析出来就不写 geo 行——不写一行空地点，也不拿坐标顶上。
+
+    日期与文件名锚点与地点无关，仍然要写。
+    """
+    add_asset(assets)
+    add_observation(observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
+
+    index.refresh_from_observation(observations.get("obs_1"))
+
+    assert index.search_fts("萧山区", scope_id="album1", limit=10) == []
+    assert dict(index.search_fts("2017-10-05", scope_id="album1", limit=10))["asset_1"] > 0
