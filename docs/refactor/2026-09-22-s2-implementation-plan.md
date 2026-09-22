@@ -5521,7 +5521,9 @@ curl -s "http://127.0.0.1:8391/api/v1/search?q=%E6%A1%A5&scope_id=album1&limit=1
 ### 环境事实（规划时实测）
 
 ```text
-torch 2.5.1+cu124   cuda_avail True        （沙箱 venv 里新装）
+torch 2.14.0+cu130 / torchvision 0.29.0+cu130   cuda_avail True
+  约束是 torch>=2.5,<3 / torchvision>=0.20,<1，上面是在该范围下解析到的当前版本，
+  不是硬钉值；规划时的沙箱解析到的是 2.5.1+cu124。两个版本下 S2 的全部测试都通过。
 qdrant-client 1.19.1，自带 py.typed
 cn-clip 1.6.0，无 py.typed（需要 mypy override）
 ~/.cache/clip/clip_cn_vit-l-14.pt  1,625,135,766 字节
