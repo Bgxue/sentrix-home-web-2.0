@@ -44,7 +44,8 @@ S0–S1 用了 Task 1–24，全局连续。S2 顺着往下排：**Task 25–33*
 
 远端仓库 `/home/asus/Github/sentrix-home-web2.0`，分支 `psh2.0`，起点提交 `456f6b3`（S1 结束时的工作树干净）。
 
-S2 会往 `apps/api` 的依赖里加四个包，第一次装比较慢（torch 约 2.5GB）：
+S2 会往 `apps/api` 的依赖里加四个包：`qdrant-client` 在 **Task 27**（它第一次需要它的地方）声明，
+`torch` / `torchvision` / `cn-clip` 在 **Task 28** 声明。第一次装比较慢（torch 约 2.5GB）：
 
 ```bash
 cd /home/asus/Github/sentrix-home-web2.0 && .venv/bin/pip install -e "apps/api[dev]"
@@ -1317,6 +1318,7 @@ ci: 全部通过
 - Create: `apps/api/src/sentrix/infrastructure/vector/qdrant_index.py`
 - Create: `apps/api/tests/integration/test_qdrant_index.py`
 - Modify: `apps/api/src/sentrix/config.py`
+- Modify: `apps/api/pyproject.toml`（声明 `qdrant-client`）
 - Modify: `apps/api/src/sentrix/bootstrap/container.py`
 - Modify: `apps/api/src/sentrix/domain/retrieval/ports.py`（补 `VectorIndexUnavailable`）
 - Modify: `apps/api/src/sentrix/domain/retrieval/__init__.py`（导出 `VectorIndexUnavailable`）
@@ -1935,7 +1937,22 @@ class QdrantVectorIndex:
         )
 ```
 
-- [ ] **Step 5: config 加 `qdrant_dir`**
+- [ ] **Step 5: 依赖声明与安装**
+
+`qdrant-client` 是**本任务自己的**依赖：`qdrant_index.py` 直接 import 它。
+它不属于 Task 28——Task 28 只负责 `torch` / `torchvision` / `cn-clip` 三项。
+声明必须在跑绿灯之前落地，否则从零照计划执行到这里会缺包。
+
+`apps/api/pyproject.toml` 的 `dependencies` 追加一项：
+
+```toml
+    # 嵌入式 Qdrant 做派生索引；权威始终是 SQLite 的 memory_vectors。
+    "qdrant-client>=1.12,<2",
+```
+
+Run: `.venv/bin/pip install -e "apps/api[dev]"`
+
+- [ ] **Step 6: config 加 `qdrant_dir`**
 
 `apps/api/src/sentrix/config.py`（**替换为**）:
 
@@ -2007,7 +2024,7 @@ def load_settings() -> Settings:
     return Settings()
 ```
 
-- [ ] **Step 6: 容器装配**
+- [ ] **Step 7: 容器装配**
 
 把 `container.py` 改成（相对 Task 26 只多了 `vector_index` 一项）：
 
@@ -2082,7 +2099,7 @@ class Container:
 ```
 
 
-- [ ] **Step 7: 运行测试，确认绿灯**
+- [ ] **Step 8: 运行测试，确认绿灯**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_qdrant_index.py -p no:warnings`
 
@@ -2095,7 +2112,7 @@ Expected:
 
 其中 `test_locked_directory_degrades_loudly` 会真的 fork 一个子进程占住目录再断言降级——那是本切片最不能省的一条。
 
-- [ ] **Step 8: 更新 module-map.md**
+- [ ] **Step 9: 更新 module-map.md**
 
 加入两行：
 
@@ -2116,13 +2133,13 @@ Expected:
 Run: `.venv/bin/python scripts/check_module_map.py`
 Expected: `module-map: 0 个问题`
 
-- [ ] **Step 9: 登记能力**
+- [ ] **Step 10: 登记能力**
 
 ```json
 {"capability":"Qdrant 派生向量索引","origin_kind":"adapted","source_commit":"2d2cee7c","source_path":"backend/qdrant_memory.py","source_symbol":"QdrantMemoryIndex.upsert","target_path":"apps/api/src/sentrix/infrastructure/vector/qdrant_index.py","verification":"apps/api/tests/integration/test_qdrant_index.py","status":"verified"}
 ```
 
-- [ ] **Step 10: 全量门禁**
+- [ ] **Step 11: 全量门禁**
 
 Run: `make ci`
 
@@ -2337,7 +2354,7 @@ ERROR apps/api/tests/unit/test_scheme.py
 
 - [ ] **Step 3: 依赖与类型检查配置**
 
-`apps/api/pyproject.toml` 的 `dependencies` 追加四项：
+`apps/api/pyproject.toml` 的 `dependencies` 追加三项：
 
 ```toml
     # 视觉记忆是**进程内**推理（设计 §2.2：模型适配属于 apps/api，进程生命周期
@@ -2346,8 +2363,6 @@ ERROR apps/api/tests/unit/test_scheme.py
     "torch>=2.5,<3",
     "torchvision>=0.20,<1",
     "cn-clip>=1.6,<2",
-    # 嵌入式 Qdrant 做派生索引；权威始终是 SQLite 的 memory_vectors。
-    "qdrant-client>=1.12,<2",
 ```
 
 仓库根 `pyproject.toml` 的 mypy overrides 改成：
