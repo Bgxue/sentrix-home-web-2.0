@@ -51,7 +51,7 @@
 
 | 部分 | 状态 |
 |---|---|
-| **S4a（Task 46–54）** | **已实现、已跑通、`make ci` 全绿**（570 passed / 覆盖率 97.29%）。本文档的 Task 46–54 是它的忠实记录 |
+| **S4a（Task 46–54）** | **已实现、已跑通、`make ci` 全绿**（599 passed / 覆盖率 97.29%）。本文档的 Task 46–54 是它的忠实记录 |
 | **S4b（Task 55–63）** | **已实施并验证**：9 个任务、8 个 commit（55 / 56 / 57a / 57b / 57c / 58+59 / 60+61 / 62），每个 commit 都有红灯、绿灯与一次完整 `make ci`。记录见文末「S4b 实施记录与验证」 |
 
 S3 的教训是「计划生成这一步才是错误来源」，所以 S4b 部分**不写推测的代码块**：
@@ -211,7 +211,7 @@ sentrix-home-web2.0/
 │   │               ├── search_terms.py         【新】词法投影读写
 │   │               ├── assets.py               +Observation 语义字段 / enrich / list_* 
 │   │               └── vectors.py              +get（按 (space, source_type, source_id) 取一条）
-│   └── tests/{unit,integration}/               8 个新文件、126 条新用例
+│   └── tests/{unit,integration}/               12 个新文件、155 条新用例
 └── docs/{architecture/module-map.md, refactor/{behaviour-baseline,frozen,s4-deviations}.md}
 ```
 
@@ -1078,7 +1078,7 @@ $ make ci
 .venv/bin/ruff check apps/api/src apps/api/tests scripts
 All checks passed!
 .venv/bin/ruff format --check apps/api/src apps/api/tests scripts
-153 files already formatted
+157 files already formatted
 .venv/bin/mypy
 Success: no issues found in 101 source files
 
@@ -1086,7 +1086,7 @@ Success: no issues found in 101 source files
 
 TOTAL                                                                 2255     61    97%
 Required test coverage of 85.0% reached. Total coverage: 97.29%
-585 passed, 2 warnings in 84.13s (0:01:24)
+599 passed, 2 warnings in 86.77s (0:01:26)
 cd apps/web && npx tsc -b
 cd apps/web && npx oxlint
 Found 0 warnings and 0 errors.
@@ -1160,10 +1160,10 @@ integration/test_geonames_resolver            15 passed, 2 warnings in 0.15s
 
 ```bash
 $ .venv/bin/pytest apps/api/tests -q
-585 passed, 2 warnings in 84.13s (0:01:24)
+599 passed, 2 warnings in 86.77s (0:01:26)
 ```
 
-S4 的 126 条新用例 + S0–S3 的 444 条基线用例**在同一次运行里全绿**，
+S4 的 155 条新用例 + S0–S3 的 444 条基线用例**在同一次运行里全绿**，
 没有一条基线用例因为 S4 的改动而失败或需要改断言（`Observation` 加字段、
 `ObservationRepository` 加方法、`VectorRepository` 加 `get` 都是**向后兼容的追加**）。
 
@@ -1171,13 +1171,17 @@ S4 的 126 条新用例 + S0–S3 的 444 条基线用例**在同一次运行里
 
 | 项 | 基线 | S4a 终态 | 差 |
 |---|---:|---:|---:|
-| `pytest` 通过条数 | 444 | 585 | **+141** |
-| S4 新增测试条数（逐文件求和） | — | 141 | — |
+| `pytest` 通过条数 | 444 | 599 | **+155** |
+| S4 新增测试条数（逐文件求和） | — | 155 | — |
 | mypy 检查文件数 | 78 | 101 | **+23** |
 | `apps/api/src/sentrix` 下新增 `.py` | — | 23 | — |
 
-**141 == 141**，**23 == 23**。绿灯条数的增量与本任务新增的用例数逐一对齐，
+**155 == 155**，**23 == 23**。绿灯条数的增量与本任务新增的用例数逐一对齐，
 没有「顺手多绿了几条」或「悄悄少绿了几条」。
+
+155 的拆法：**141**（上面「绿灯层」那张表里的 9 个文件，实测 `141 passed`）
++ **14**（补做时补上的三处门禁：`test_pygeocn_resolver` 5 + `test_offline_place_resolver` 5
++ `test_timeline_schema` 4，实测 `14 passed`）。141 + 14 = 155 = 599 − 444。
 
 ### 环境事实（规划时实测）
 
@@ -1201,23 +1205,39 @@ S4 用了 S3 的四条对策中的三条；**第四条（代码块逐字节 diff
 | # | 对策 | S4a 执行情况 |
 |---|---|---|
 | 1 | 阻断归属按 `(task, path, occurrence_index)` | **未做**——本轮没有机器可读的阻断表；任务边界由「哪个测试文件属于哪个 Task」人工划分 |
-| 2 | 反向对拍四项 | (a) 块逐字节：**只对本文档里出现的代码块**比对过，不是全量自动 (b) 改动文件集 ⊆ Files 清单：**是**，逐任务核过（见下表） (c) 文档行块：**是**，`behaviour-baseline.md` / `frozen.md` / `s4-deviations.md` 三份都已更新 (d) 每条 `Run` 真跑：**是**，各任务的 `pytest <file>` 与两条 `python -c` 都是实跑输出 |
+| 2 | 反向对拍四项 | (a) 块逐字节：**只对本文档里出现的代码块**比对过，不是全量自动 (b) 改动文件集 ⊆ Files 清单：**否**——每个 commit 都带了清单外的文件（见下表） (c) 文档行块：**是**，`behaviour-baseline.md` / `frozen.md` / `s4-deviations.md` 三份都已更新 (d) 每条 `Run` 真跑：**是**，各任务的 `pytest <file>` 与两条 `python -c` 都是实跑输出 |
 | 3 | 每个 commit 跑一次完整 `make ci` | **是**（补做时关闭）——Task 46–54 的 9 个 commit 各跑一次，9 次全绿；S4b 的 8 个 commit 同样各跑一次，8 次全绿 |
-| 4 | 零成本不变量 | **是**（见上表，126 == 126、23 == 23） |
+| 4 | 零成本不变量 | **是**（见上表，155 == 155、23 == 23） |
 
 **改动文件集 ⊆ Files 清单（逐任务核对）：**
 
-| Task | Files 清单 | 实际改动 | 一致 |
-|---|---|---|---|
-| 46 | domain/places 下 5 个文件 | 同左 | ✓ |
-| 47 | infrastructure/places/{__init__,pygeocn}.py + 两个 pyproject | 同左 | ✓ |
-| 48 | infrastructure/places/{geonames,composite}.py | 同左 | ✓ |
-| 49 | migrations/0005 | 同左 | ✓ |
-| 50 | domain/memories/{__init__,events,ports}.py | 同左 | ✓ |
-| 51 | application/memories/assign_events.py + ports/vectors 各 1 处 | 同左 | ✓ |
-| 52 | domain/memories/facts.py + repositories/facts.py | 同左 | ✓ |
-| 53 | domain/retrieval/lexical.py + repositories/search_terms.py | 同左 | ✓ |
-| 54 | application/retrieval/{retrieve_lexical,retrieve_metadata}.py | 同左 | ✓ |
+**核对结果：不是。** 九个 commit **每一个**都带了 Files 清单外的文件。表由
+`git show --name-only <commit>` 与各任务的 Files 清单相减得到：
+
+| Task | 清单外多出的文件 | 为什么 |
+|---|---|---|
+| 46 | `infrastructure/places/__init__.py`、`infrastructure/places/aliases.py`、`infrastructure/places/data/aliases.json`、`domain/media/models.py`、`apps/api/pyproject.toml` | 前三个是别名表实现，原清单记在 Task 47；`models.py` 的 `GpsPoint.distance_km` 原清单记在 Task 49——但 Task 46 自己的 `test_places_models.py` 覆盖它，不落就绿灯跑不过；`pyproject.toml` 是 `pygeo_cn` 依赖 |
+| 47 | `tests/integration/test_pygeocn_resolver.py` | 补做时补的门禁：原 Task 47 只有一段 `python -c`，**没有任何测试** |
+| 48 | `tests/integration/test_geonames_resolver.py`、`tests/integration/test_offline_place_resolver.py` | 后者同上——`composite.py`（面 + 点互补）原为零测试 |
+| 49 | `infrastructure/persistence/repositories/asset_places.py`、`tests/integration/test_timeline_schema.py`、`tests/integration/test_timeline_repositories.py` | `asset_places.py` 是漏记的实现文件；`test_timeline_schema.py` 是补做补的门禁（原 Task 49 的门禁 `test_migrations.py` 验的是迁移执行器，在 0005 写出来之前就是绿的）；`test_timeline_repositories.py` 按任务分段增长 |
+| 50 | （只有下面那两份跨任务的文档） | — |
+| 51 | `infrastructure/persistence/repositories/events.py`、`tests/integration/test_timeline_repositories.py` | 事件仓储是 `assign_events` 的协作方，清单漏记 |
+| 52 | `domain/memories/ports.py`、`tests/integration/test_timeline_repositories.py` | `FactRepository` 原计划记在 Task 50，但 `ports.py` 同时声明两个端口时 mypy 在 Task 50 上就报 `import-untyped`（实现来自 Task 52 的 `facts.py`），端口只能按任务拆开 |
+| 53 | `tests/integration/test_timeline_repositories.py` | 同 49 |
+| 54 | （只有下面那两份跨任务的文档） | — |
+
+**两处每个 commit 都有**的清单外文件：`docs/architecture/module-map.md` 与
+`docs/refactor/capability-map.jsonl`。`make ci` 的 `check-docs` 要求两者与代码
+**同一次提交**就绪（`check_module_map.py` 与 `check_capability_map.py` 各报 0 个问题），
+而九个任务的 Files 清单一条都没写它们。表里不逐行重复。
+
+反方向也有一处：Task 47 的清单写「Create `apps/api/src/sentrix/infrastructure/places/__init__.py`」，
+它实际随 Task 46 落地（Task 46 的 `infrastructure/places/aliases.py` 需要它）。
+
+**成因**：Files 清单是规划时按**模块边界**画的，commit 边界是执行时按「哪个测试文件
+属于哪个 Task」切的，两套切法必然错位——错位处全部是「该任务自己的测试要绿」逼出来的
+（清单把它记在下一个 Task 里，而这个 Task 的测试已经在调它）。补做时被 commit 切分逼出来的
+四处顺序错位见上一节。
 
 ### `docs/architecture/module-map.md` 的两列由脚本重算
 
