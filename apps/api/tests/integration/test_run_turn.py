@@ -54,14 +54,27 @@ class ScriptedModel:
         replies: Sequence[ModelReply | Exception],
         *,
         planner: object = None,
+        judge: object = None,
     ) -> None:
         self._replies = list(replies)
         self._planner = planner_reply("photo_set", "delivered_photo") if planner is None else planner
+        self._judge = judge_reply() if judge is None else judge
         self.calls: list[Sequence[ChatMessage]] = []
         self.planner_calls: list[Sequence[ChatMessage]] = []
+        self.judge_calls: list[Sequence[ChatMessage]] = []
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
         if not tools:
+            # 规划与 L2 评审都不带工具，靠 system 提示词区分——两条提示词的开头就写着
+            # 各自在做什么。
+            system = messages[0].content if messages else ""
+            if JUDGE_MARKER in system:
+                self.judge_calls.append(list(messages))
+                if isinstance(self._judge, Exception):
+                    raise self._judge
+                if isinstance(self._judge, PlannerScript):
+                    return ModelReply(content=self._judge.next(), finish_reason="stop")
+                return self._judge  # type: ignore[return-value]
             self.planner_calls.append(list(messages))
             if isinstance(self._planner, Exception):
                 raise self._planner
@@ -105,6 +118,20 @@ def tool_call(name: str, call_id: str, **arguments: object) -> ModelReply:
         finish_reason="tool_calls",
         tool_calls=(ToolCall(call_id=call_id, name=name, arguments_json=json.dumps(arguments)),),
     )
+
+
+JUDGE_MARKER = "事实一致性评审"
+PLANNER_MARKER = "你正在规划家庭记忆任务"
+
+
+def judge_reply(*problems: tuple[str, str], faithful: bool | None = None) -> ModelReply:
+    """L2 评审的裁决。不给问题就是「忠实」。"""
+    verdict = {
+        "faithful": faithful if faithful is not None else not problems,
+        "problems": [{"type": kind, "detail": detail} for kind, detail in problems],
+        "reason": "测试裁决",
+    }
+    return ModelReply(content=json.dumps(verdict, ensure_ascii=False), finish_reason="stop")
 
 
 class PlannerScript:
@@ -701,3 +728,88 @@ def test_the_ledger_comes_from_the_plans_declaration(env):
         "delivered_photo",
         "person_profile",
     ]
+
+
+# ---- L2 语义评审：1.0 judge.py 的调用口径 ------------------------------------
+
+
+def test_an_unfaithful_answer_is_pushed_back_once_then_released(env):
+    """L2 判出事实性问题 → 带着评审意见重写一次；第二次放行（每问只评审一次）。
+
+    1.0 ``runtime.py:2753-2800``：评审一次、回灌意见、模型改口后放行并标
+    ``l2_soft_release``。这里钉的是「只评审一次」与「放行的是改写后的回答」。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final("相册里有 5 张海边的照片。"),
+            final("相册里有 2 张海边的照片。"),
+        ],
+        judge=PlannerScript(
+            [
+                judge_reply(("contradiction", "工具确认 2 张，回答写 5 张")).content,
+                judge_reply().content,
+            ]
+        ),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert len(model.judge_calls) == 1  # 每问只评审一次
+    assert result.answer == "相册里有 2 张海边的照片。"
+    assert any("工具确认 2 张" in message.content for message in model.calls[-1])
+
+
+def test_a_failing_judge_lets_the_answer_through(env):
+    """L2 挂了就放行——1.0 ``judge.py:195-198`` 的 fail-open。
+
+    评审是兜底不是门槛：它自己挂了不该把一轮正常的回答也带走。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final("这是你要的海边照片。"),
+        ],
+        judge=RuntimeError("评审端点挂了"),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "这是你要的海边照片。"
+
+
+def test_the_judge_is_not_called_without_tool_results(env):
+    """没有工具结果就没有可核对的事实——1.0 的调用条件里有 ``task.tool_results``。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final("你好，我可以帮你找照片。")], judge=RuntimeError("不该被调用"))
+    run_turn = build(env, model, StubToolbox())
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert model.judge_calls == []
+    assert result.answer == "你好，我可以帮你找照片。"
+
+
+def test_only_missing_disclosure_does_not_block_the_answer(env):
+    """``missing_disclosure`` 只是披露建议（severity=style），不拦事实正确的回答。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final("这是你要的海边照片。"),
+        ],
+        judge=judge_reply(("missing_disclosure", "没有说明只是候选")),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "这是你要的海边照片。"

@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sentrix.application.assistant.goal_planner import GoalPlanner
+from sentrix.application.assistant.judge import FaithfulnessJudge
 from sentrix.application.assistant.tools import (
     AssistantToolbox,
     DeliveredPhotos,
@@ -128,6 +129,8 @@ class _Session:
     emit: Callable[[ProgressEvent], None] | None = None
     delivered: DeliveredPhotos = field(default_factory=DeliveredPhotos)
     search_returned_nothing: bool = False
+    # 1.0 ``runtime.py:2759`` 的 ``l2_faithfulness_checked``：每问只评审一次。
+    judged: bool = False
     # 门禁拦下时写给模型的提醒，由主循环作为一条 user 消息加回去。
     pending_reminder: str = ""
 
@@ -151,6 +154,8 @@ class RunTurn:
         self._guard = FinalGuard()
         # 规划是一次模型调用，与主循环同一个端点（1.0 也是同一个 ``chat_fn``）。
         self._planner = GoalPlanner(model)
+        # L2 语义评审：与主循环同一个端点（1.0 也是同一个 chat_fn）。
+        self._judge = FaithfulnessJudge(model)
 
     # ---- 建回合 -------------------------------------------------------------
 
@@ -325,7 +330,7 @@ class RunTurn:
                 return self._stop(session, TerminationReason.MODEL_ERROR)
 
             if not reply.wants_tools:
-                answer = self._judge_answer(session, reply)
+                answer = self._judge_answer(session, messages, reply)
                 if answer is not None:
                     return answer
                 messages.append(ChatMessage(ChatRole.USER, session.pending_reminder))
@@ -338,7 +343,9 @@ class RunTurn:
                 session.search_returned_nothing = session.search_returned_nothing or empty
                 messages.append(ChatMessage(ChatRole.TOOL, text, tool_call_id=call.call_id))
 
-    def _judge_answer(self, session: _Session, reply: ModelReply) -> str | None:
+    def _judge_answer(
+        self, session: _Session, messages: Sequence[ChatMessage], reply: ModelReply
+    ) -> str | None:
         """返回 ``None`` 表示这次不是最终回答（继续循环），返回字符串表示最终答案。
 
         被门禁拦下时返回 ``None`` 并把提醒写进对话——调用方负责 ``continue``。
@@ -370,6 +377,9 @@ class RunTurn:
             facts=GuardFacts.from_state(state),
         )
         if verdict.passed:
+            if self._review_with_l2(session, messages, answer):
+                # 与门禁拦下同一条路：调用方把 pending_reminder 加回对话后继续循环。
+                return None
             state.finish(
                 TerminationReason.ANSWERED_WITH_GAP
                 if answered_with_gap(session.ledger)
@@ -402,6 +412,37 @@ class RunTurn:
         )
         session.pending_reminder = verdict.message
         return None
+
+    def _review_with_l2(self, session: _Session, messages: Sequence[ChatMessage], answer: str) -> bool:
+        """L2 语义评审。返回 ``True`` 表示「继续循环，重新作答」。
+
+        调用条件与 1.0 ``runtime.py:2753`` 一致：L1 已通过（能走到这里就是）、本轮有工具
+        结果、还有模型步、本回合没评审过。评审本身也计一个模型步——它花的是同一份预算。
+
+        只有**事实性**问题（编造/矛盾/漏报/过度声称）才退回重写；``missing_disclosure``
+        只是披露建议，不拦事实正确的回答（1.0 ``judge.py:174-176`` 的 severity 分层）。
+        """
+        state = session.state
+        if session.judged or not state.records or not state.can_step():
+            return False
+        session.judged = True
+        state.model_steps += 1
+        verdict = self._judge.review(query=state.question, answer=answer, transcript=messages)
+        if verdict.faithful or not verdict.truth_problems:
+            return False
+        state.phase = FINALIZING
+        self._publish(
+            session,
+            state.emit(
+                ProgressStage.RECOVERING,
+                ProgressStatus.RUNNING,
+                verdict.reminder,
+                kind="judge",
+                payload={"code": "l2_unfaithful"},
+            ),
+        )
+        session.pending_reminder = verdict.reminder
+        return True
 
     def _run_tool(self, session: _Session, call: ToolCall) -> tuple[str, tuple[Attachment, ...], bool]:
         """执行一次工具调用，返回 ``(发回模型的 JSON, 本次交付, 检索是否为空)``。"""
