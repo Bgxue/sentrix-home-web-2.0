@@ -144,3 +144,13 @@ def test_metadata_round_trips(repository: SqliteVectorRepository):
     hits = repository.search_exact(space="visual", vector=(1.0, 0.0, 0.0), limit=5)
 
     assert hits[0].metadata == {"observation_id": "obs_1"}
+
+
+def test_count_filters_by_model_name(repository: SqliteVectorRepository):
+    """应用层要拿这个口径去和 Qdrant 的 collection 计数比对，必须能按模型过滤。"""
+    repository.upsert(record("asset_new", (1.0, 0.0, 0.0), model_name=MODEL))
+    repository.upsert(record("asset_old", (1.0, 0.0, 0.0), model_name="ViT-B-32"))
+
+    assert repository.count(space="visual") == 2
+    assert repository.count(space="visual", model_name=MODEL) == 1
+    assert repository.count(space="visual", model_name="不存在") == 0

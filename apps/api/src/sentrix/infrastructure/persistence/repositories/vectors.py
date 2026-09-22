@@ -88,11 +88,19 @@ class SqliteVectorRepository:
             ).fetchone()
         return row is not None
 
-    def count(self, *, space: str) -> int:
+    def count(self, *, space: str, model_name: str | None = None) -> int:
+        """按 (space, 可选 model) 计数。
+
+        模型维度必须可选且**默认不过滤**：应用层要用同一个口径去和 Qdrant 的
+        collection 计数比对，两边只要有一边多带了过滤条件，比对就恒不成立。
+        """
+        sql = "SELECT COUNT(*) FROM memory_vectors WHERE space = ?"
+        params: list[Any] = [space]
+        if model_name:
+            sql += " AND model_name = ?"
+            params.append(model_name)
         with self._database.connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) FROM memory_vectors WHERE space = ?", (space,)
-            ).fetchone()
+            row = connection.execute(sql, tuple(params)).fetchone()
         return int(row[0]) if row else 0
 
     def search_exact(
