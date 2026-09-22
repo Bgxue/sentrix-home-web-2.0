@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sentrix.config import Settings
+from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.main import create_app
@@ -34,6 +35,26 @@ class FakeVisualEmbedder:
         return self._vector(text)
 
 
+class FakeVlmObserver:
+    """契约测试用的确定性观察器。
+
+    真观察器会打 8100 上的 llama-server（本机确实在跑 1.0 的那一个）。契约测试要验的是
+    HTTP 映射与导入链的接线，不是模型；真链路的验收在 tests/e2e。
+    """
+
+    model_id = "fake-vlm"
+
+    def observe(self, path):
+        return ObservationSemantics(
+            caption="一张测试图",
+            place="测试地点",
+            activity="测试活动",
+            event_type="测试事件",
+            objects=("测试物体",),
+            confidence=0.65,
+        )
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Settings:
     monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
@@ -48,7 +69,9 @@ def client(settings) -> TestClient:
     其余装配路径（真 SQLite、真迁移、真 Qdrant）保持原样。
     """
     app = create_app(settings)
-    app.state.container = dataclasses.replace(app.state.container, visual_embedder=FakeVisualEmbedder())
+    app.state.container = dataclasses.replace(
+        app.state.container, visual_embedder=FakeVisualEmbedder(), vlm_observer=FakeVlmObserver()
+    )
     return TestClient(app)
 
 

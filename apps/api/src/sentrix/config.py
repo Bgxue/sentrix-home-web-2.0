@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     chat_model_name: str = "gemma4-qat-iq3xxs"
     chat_timeout_s: float = 120.0
 
+    # 视觉观察走同一个 llama-server 的同一个别名（multimodal 可用）。
+    vlm_model_name: str = "gemma4-qat-iq3xxs"
+    # 一张图最多 3 次调用（首轮 / 补全 / 中文化），每次是一次带图的推理，比纯文本慢得多；
+    # 整册导入是**串行**的（单卡 GPU），所以这个超时按单次调用算，不是按一张图算。
+    vlm_timeout_s: float = 180.0
+
     def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
 

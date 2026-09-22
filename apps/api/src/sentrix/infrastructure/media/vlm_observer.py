@@ -1,0 +1,203 @@
+"""8100 上的视觉观察器（OpenAI 兼容 ``/v1``，multimodal）。
+
+三段结构逐段对应 1.0 ``backend/model_clients.py:1130-1198`` 的 ``analyze_image``：
+
+1. **首轮**：要 caption / activity / place / event_type 这些**自然语言**观察，
+   加上 objects / clothing / ocr_text；
+2. **补全**：首轮只回了分类字段、没有任何自然语言字段时，补问一次；
+3. **中文化**：结果里出现拉丁文字时，把整包观察规范化成简体中文。
+
+**上限 3 次模型调用，串行，同一段不重试**（1.0 的 ``analyze_image`` 也是三次
+``self.chat``）。单卡 GPU 上整册导入是串行的，这个上限就是「一张图最多占用多少次
+推理」的答案。
+
+**明确不搬**（见 ``s4-deviations.md``）：
+
+- 1.0 的 semantic 受控词表（地点 / 物品 / 氛围三个主类体系）——那是 S6 的精读；
+- ``detail``（visible_details / regions / text_blocks / uncertainties）——同上，
+  2.0 的 ``Observation`` 没有 ``detail`` 字段（S4 不建 ``_terms_from_detail``）；
+- 模型自报的 ``facts``——事实由 ``maintain_fact`` 规则决定，不由模型自报（S5）。
+
+模型不可用、HTTP 失败、返回的不是 JSON——一律返回 ``None``：观察是**增强**，
+不是导入的前置条件。1.0 在 ``pipeline`` 里也是这么收尾的（异常吞掉、留下无向量的资产）。
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from sentrix.domain.media.ports import ObservationSemantics
+from sentrix.infrastructure.assistant.chat_client import MAX_ANSWER_TOKENS
+
+log = logging.getLogger(__name__)
+
+# 1.0 ``model_clients.py:1130-1198``：首轮 + 补全 + 中文化，三段三调用。
+MAX_MODEL_CALLS = 3
+
+# 1.0 ``normalize_confidence(parsed.get("confidence"), 0.65)``——提示词不要求模型给
+# confidence，所以它是一个常数而不是模型输出。
+OBSERVATION_CONFIDENCE = 0.65
+
+_LANGUAGE_FIELDS = ("caption", "activity", "place", "event_type")
+_TEXT_FIELDS = ("caption", "activity", "place", "event_type", "ocr_text")
+_LIST_FIELDS = ("objects", "clothing")
+_COPY_FIELDS = (*_TEXT_FIELDS, *_LIST_FIELDS)
+
+_LATIN_RE = re.compile(r"[A-Za-z]{2,}")
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+_OBSERVE_PROMPT = """你是家庭记忆观察器。仅根据图片抽取可验证的观察，不猜测姓名。
+严格返回简体中文 JSON 对象，不要解释。不要输出 GPS 坐标、经纬度、文件名或路径。
+字段固定为：caption、activity、place、event_type、objects、clothing、ocr_text。
+caption 是画面里看到什么（160 字内）；activity 是正在发生什么（40 字内）；
+place 是语义地点，例如家中客厅、餐厅、公园（40 字内）；event_type 40 字内；
+objects 是可见物品（最多 40 项）；clothing 是可见衣物（最多 12 项）；
+ocr_text 是图中文字（1000 字内）。caption、activity、place、event_type 必须**同时**
+给出自然语言描述，画面能判断时不要留空；确实看不清才用空字符串或空数组。"""
+
+_RECOVERY_PROMPT = """首轮结果缺少自然语言观察，请补齐可验证的观察。只根据图片，不猜测姓名，不输出坐标。
+严格返回简体中文 JSON：caption（160 字内）、activity（40 字内）、place（语义地点，40 字内）、
+event_type（40 字内）、objects（最多 40 项）、clothing（最多 12 项）、ocr_text（1000 字内）。
+画面确实看不清才留空；不要只返回分类字段。"""
+
+_CANONICAL_PROMPT = """把下面的家庭图片观察规范化为简体中文 JSON。只翻译和整理已有内容，
+不新增人物、物体、活动或事实，不猜测姓名。保留字段 caption、activity、place、event_type、
+objects、clothing、ocr_text。\n原始观察："""
+
+
+def _encode_image(path: Path) -> str | None:
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        log.warning("观察用的图片读不了: %s (%s)", path, error)
+        return None
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+
+
+def _text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _as_text_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item).strip() for item in value]
+    else:
+        items = [str(value).strip()] if value else []
+    return tuple(item for item in items if item)
+
+
+def parse_json_object(text: str) -> dict[str, Any] | None:
+    """从模型回复里取出一个 JSON 对象；取不到返回 ``None``。
+
+    只做两件事：先试整串，再试第一个 ``{...}`` 块。1.0 的
+    ``parse_json_response`` 还要补花括号、补引号、删尾随逗号（``runtime.py:1586-1661``），
+    那套修复器是为「让模型在正文里写 action JSON」服务的；这里少一层，
+    解析不出来就当这次观察没拿到。
+    """
+    stripped = text.strip()
+    for candidate in (stripped, *(_JSON_OBJECT_RE.findall(stripped))):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def semantics_from_payload(payload: dict[str, Any]) -> ObservationSemantics:
+    """把模型返回的对象收敛成 ``ObservationSemantics``。纯函数，便于单独测。"""
+    return ObservationSemantics(
+        caption=_text(payload.get("caption")),
+        place=_text(payload.get("place")),
+        activity=_text(payload.get("activity")),
+        event_type=_text(payload.get("event_type")),
+        ocr_text=_text(payload.get("ocr_text")),
+        objects=_as_text_tuple(payload.get("objects")),
+        clothing=_as_text_tuple(payload.get("clothing")),
+        confidence=OBSERVATION_CONFIDENCE,
+    )
+
+
+class OpenAIVlmObserver:
+    """实现 ``VlmObserver`` 端口。模型进程的生命周期不归 2.0 管。"""
+
+    def __init__(self, base_url: str, model: str, *, timeout_s: float = 180.0) -> None:
+        self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
+        self._model = model
+        self._timeout = timeout_s
+
+    @property
+    def model_id(self) -> str:
+        return self._model
+
+    def observe(self, path: Path) -> ObservationSemantics | None:
+        image = _encode_image(Path(path))
+        if image is None:
+            return None
+
+        parsed = self._chat(_OBSERVE_PROMPT, image)
+        calls = 1
+        if parsed is None:
+            return None
+
+        if not any(_text(parsed.get(field)) for field in _LANGUAGE_FIELDS) and not parsed.get("objects"):
+            recovered = self._chat(_RECOVERY_PROMPT, image)
+            calls += 1
+            if recovered is not None:
+                for key in _COPY_FIELDS:
+                    if recovered.get(key) not in (None, "", []):
+                        parsed[key] = recovered[key]
+
+        scalar = " ".join(_text(parsed.get(field)) for field in _TEXT_FIELDS)
+        if calls < MAX_MODEL_CALLS and _LATIN_RE.search(scalar):
+            canonical = self._chat(_CANONICAL_PROMPT + json.dumps(parsed, ensure_ascii=False), None)
+            if canonical is not None:
+                parsed = {
+                    **parsed,
+                    **{key: value for key, value in canonical.items() if value not in (None, "", [])},
+                }
+
+        return semantics_from_payload(parsed)
+
+    def _chat(self, prompt: str, image: str | None) -> dict[str, Any] | None:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if image is not None:
+            content.append({"type": "image_url", "image_url": {"url": image}})
+        body = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": MAX_ANSWER_TOKENS,
+        }
+        try:
+            response = httpx.post(self._endpoint, json=body, timeout=self._timeout)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            log.warning("视觉观察调用失败，本次观察跳过: %s", error)
+            return None
+        return parse_json_object(_first_content(payload))
+
+
+def _first_content(payload: object) -> str:
+    """取 ``choices[0].message.content``。取不到返回空串——由 ``parse_json_object`` 判负。"""
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return ""
+    return _text(message.get("content"))

@@ -29,6 +29,7 @@ from sentrix.domain.media.ports import (
     MetadataReader,
     ObservationRepository,
     PreviewEncoder,
+    VlmObserver,
 )
 from sentrix.domain.memories.ports import EventRepository, FactRepository
 from sentrix.domain.places.aliases import PlaceAliases
@@ -46,6 +47,7 @@ from sentrix.infrastructure.assistant.identity import NoIdentityDirectory
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
+from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.asset_places import SqliteAssetPlaceRepository
@@ -108,6 +110,7 @@ class Container:
     lexical_search: LexicalSearch
 
     chat_model: ChatModel
+    vlm_observer: VlmObserver
     conversation_repository: ConversationRepository
     turn_repository: TurnRepository
     result_set_repository: ResultSetRepository
@@ -147,6 +150,11 @@ class Container:
                 settings.vlm_base_url,
                 settings.chat_model_name,
                 timeout_s=settings.chat_timeout_s,
+            ),
+            vlm_observer=OpenAIVlmObserver(
+                settings.vlm_base_url,
+                settings.vlm_model_name,
+                timeout_s=settings.vlm_timeout_s,
             ),
             conversation_repository=SqliteConversationRepository(database),
             turn_repository=SqliteTurnRepository(database),

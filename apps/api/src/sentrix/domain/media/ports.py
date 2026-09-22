@@ -71,6 +71,23 @@ class ObservationSemantics:
     confidence: float = 0.0
 
 
+class VlmObserver(Protocol):
+    """一张图 → 一次视觉观察。**最多 3 次模型调用**（首轮 / 补全 / 中文化），串行。
+
+    1.0 的三段结构在 ``backend/model_clients.py:1130-1198`` 的 ``analyze_image``。
+    2.0 保留同一结构与同一上限，但只落 ``ObservationSemantics`` 的七个字段——
+    1.0 的 semantic 受控词表与 ``detail`` 属于 S6 的精读。
+
+    模型不可用、读不了图、返回的不是 JSON——一律返回 ``None``。观察是**增强**，
+    不是导入的前置条件。
+    """
+
+    @property
+    def model_id(self) -> str: ...
+
+    def observe(self, path: Path) -> ObservationSemantics | None: ...
+
+
 class AssetObserver(Protocol):
     """把一张已导入的 Asset 变成一次语义观察，并把结果写回 Observation。
 

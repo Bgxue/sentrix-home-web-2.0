@@ -11,6 +11,7 @@ from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
+from sentrix.application.media.observe_asset import ObserveAsset
 from sentrix.application.memories.assign_events import AssignEvents, EventVisualSimilarity
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
@@ -104,8 +105,14 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
         place_indexer=IndexAssetPlace(
             resolver=container.place_resolver, places=container.asset_place_repository
         ),
-        # 观察器随 Task 57a 接上：视觉观察是**可选增强**，缺它时导入链照样跑完整条。
-        observer=None,
+        observer=(
+            ObserveAsset(
+                observer=container.vlm_observer,
+                observations=container.observation_repository,
+            )
+            if observe
+            else None
+        ),
         event_assigner=lambda observation: _event_id(assigner, observation),
         lexical_index=container.lexical_index,
     )
