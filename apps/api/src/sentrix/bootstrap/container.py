@@ -30,7 +30,16 @@ from sentrix.domain.media.ports import (
     ObservationRepository,
     PreviewEncoder,
 )
-from sentrix.domain.retrieval.ports import VectorIndex, VectorRepository, VisualEmbedder
+from sentrix.domain.memories.ports import EventRepository, FactRepository
+from sentrix.domain.places.aliases import PlaceAliases
+from sentrix.domain.places.ports import AssetPlaceRepository, PlaceResolver
+from sentrix.domain.retrieval.ports import (
+    LexicalIndex,
+    LexicalSearch,
+    VectorIndex,
+    VectorRepository,
+    VisualEmbedder,
+)
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
 from sentrix.infrastructure.assistant.identity import NoIdentityDirectory
@@ -39,6 +48,7 @@ from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
 from sentrix.infrastructure.persistence.database import Database
+from sentrix.infrastructure.persistence.repositories.asset_places import SqliteAssetPlaceRepository
 from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
     SqliteObservationRepository,
@@ -46,10 +56,17 @@ from sentrix.infrastructure.persistence.repositories.assets import (
 from sentrix.infrastructure.persistence.repositories.conversations import (
     SqliteConversationRepository,
 )
+from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
+from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
+from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
 from sentrix.infrastructure.persistence.repositories.turns import SqliteTurnRepository
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
+from sentrix.infrastructure.places.aliases import load_place_aliases
+from sentrix.infrastructure.places.composite import OfflinePlaceResolver
+from sentrix.infrastructure.places.geonames import GeoNamesNearestResolver
+from sentrix.infrastructure.places.pygeocn import PyGeoCNAdminResolver
 from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
@@ -76,6 +93,20 @@ class Container:
     vector_index: VectorIndex
     visual_embedder: VisualEmbedder
 
+    # 时间线（S4）。地点是纯离线的：区县走 PyGeoCN 的面，乡镇/村庄走 GeoNames 的
+    # 最近邻点，运行时零网络依赖。
+    place_resolver: PlaceResolver
+    asset_place_repository: AssetPlaceRepository
+    # 例外：`PlaceAliases` 是 domain 的数据，不是端口的实现——它由 infrastructure 从
+    # 包内数据文件读进来（那是唯一的 IO 边界），而读文件这件事不能发生在 api 层。
+    place_aliases: PlaceAliases
+    event_repository: EventRepository
+    fact_repository: FactRepository
+    # 词法投影的写侧与读侧由同一个 SQLite 适配器实现（它是同一张投影表的两个方向），
+    # 这里按两个端口分别声明：调用方在类型上就看得出自己只需要其中一侧。
+    lexical_index: LexicalIndex
+    lexical_search: LexicalSearch
+
     chat_model: ChatModel
     conversation_repository: ConversationRepository
     turn_repository: TurnRepository
@@ -88,18 +119,30 @@ class Container:
     @classmethod
     def build(cls, settings: Settings) -> Container:
         database = Database(settings.database_path, MIGRATIONS_DIR)
+        observations = SqliteObservationRepository(database)
+        lexical = SqliteLexicalIndex(database, observations)
         return cls(
             settings=settings,
             database=database,
             spaces=SqliteSpaceRepository(database),
             asset_repository=SqliteAssetRepository(database),
-            observation_repository=SqliteObservationRepository(database),
+            observation_repository=observations,
             media_storage=FileSystemMediaStorage(settings.media_dir),
             metadata_reader=PillowMetadataReader(),
             preview_encoder=PillowPreviewEncoder(),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
             visual_embedder=ChineseClipVisualEmbedder(),
+            place_resolver=OfflinePlaceResolver(
+                admin=PyGeoCNAdminResolver(),
+                nearest=GeoNamesNearestResolver(settings.geo_dir),
+            ),
+            asset_place_repository=SqliteAssetPlaceRepository(database),
+            place_aliases=load_place_aliases(),
+            event_repository=SqliteEventRepository(database),
+            fact_repository=SqliteFactRepository(database),
+            lexical_index=lexical,
+            lexical_search=lexical,
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
                 settings.chat_model_name,

@@ -62,8 +62,19 @@ class Settings(BaseSettings):
         """
         return self.data_dir / "qdrant"
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def geo_dir(self) -> Path:
+        """GeoNames dump 的目录（``*.txt`` / ``*.zip``）。
+
+        **同样由 data_dir 派生**，且**不进版本控制**：官方子集 35 MB、全量 402 MB，
+        放进仓库是拿源码托管当数据分发。部署方按 ``docs/runbooks/geonames-data.md``
+        把文件放到这里，``GeoNamesNearestResolver`` 扫该目录。
+        """
+        return self.data_dir / "geo"
+
     def ensure_directories(self) -> None:
-        for path in (self.data_dir, self.media_dir, self.preview_dir):
+        for path in (self.data_dir, self.media_dir, self.preview_dir, self.geo_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 
