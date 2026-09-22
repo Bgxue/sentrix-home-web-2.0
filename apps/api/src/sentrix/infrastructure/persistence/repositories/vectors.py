@@ -88,6 +88,36 @@ class SqliteVectorRepository:
             ).fetchone()
         return row is not None
 
+    def get(
+        self,
+        *,
+        space: str,
+        source_type: str,
+        source_id: str,
+        model_name: str | None = None,
+    ) -> VectorRecord | None:
+        sql = f"SELECT {_COLUMNS} FROM memory_vectors WHERE space = ? AND source_type = ? AND source_id = ?"
+        params: list[Any] = [space, source_type, source_id]
+        if model_name:
+            sql += " AND model_name = ?"
+            params.append(model_name)
+        # 1.0 ``db.py:2085`` 就是 ``ORDER BY updated_at DESC LIMIT 1``。同一 asset 被
+        # 重新嵌入过之后库里会有多条，取最新的那条才是当前模型的向量。
+        sql += " ORDER BY updated_at DESC LIMIT 1"
+        with self._database.connect() as connection:
+            row = connection.execute(sql, tuple(params)).fetchone()
+        if row is None:
+            return None
+        return VectorRecord(
+            scope_id=row["scope_id"],
+            space=row["space"],
+            source_type=row["source_type"],
+            source_id=row["source_id"],
+            model_name=row["model_name"],
+            vector=tuple(_decode_list(row["vector_json"])),
+            metadata=_decode_map(row["metadata_json"]),
+        )
+
     def count(self, *, space: str, model_name: str | None = None) -> int:
         """按 (space, 可选 model) 计数。
 

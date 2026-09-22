@@ -65,6 +65,21 @@ class VectorRepository(Protocol):
 
     def has_vector(self, *, space: str, source_type: str, source_id: str, model_name: str) -> bool: ...
 
+    def get(
+        self,
+        *,
+        space: str,
+        source_type: str,
+        source_id: str,
+        model_name: str | None = None,
+    ) -> VectorRecord | None:
+        """取一条权威向量。``model_name`` 为空时取最近更新的一条。
+
+        事件归并读它算视觉相似度（1.0 ``db.py:2082-2110`` 的那条 SQL：
+        ``ORDER BY updated_at DESC LIMIT 1``）。
+        """
+        ...
+
     def search_exact(
         self,
         *,
