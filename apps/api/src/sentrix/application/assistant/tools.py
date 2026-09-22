@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sentrix.application.retrieval.retrieve_visual import RetrieveVisual, VisualSearchRequest
+from sentrix.application.retrieval.retrieve_evidence import EvidenceRequest, RetrieveEvidence
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
@@ -76,7 +76,7 @@ class AssistantToolbox:
     def __init__(
         self,
         *,
-        retrieval: RetrieveVisual,
+        retrieval: RetrieveEvidence,
         assets: AssetRepository,
         result_sets: ResultSetRepository,
         people: PersonDirectory,
@@ -107,7 +107,7 @@ class AssistantToolbox:
             return _failure("empty_query", "query 不能为空，请用用户问题里的实词。")
 
         result = self._retrieval.execute(
-            VisualSearchRequest(text=query, scope_id=scope_id, limit=_clamp_limit(arguments.get("limit")))
+            EvidenceRequest(text=query, scope_id=scope_id, limit=_clamp_limit(arguments.get("limit")))
         )
         result_set = ResultSet(
             id=f"rs_{uuid.uuid4().hex[:12]}",

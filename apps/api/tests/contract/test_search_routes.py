@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from sentrix.config import Settings
+from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
 from sentrix.main import create_app
 
@@ -166,3 +167,79 @@ def test_blank_query_is_rejected(scripted_client: TestClient):
 def test_limit_is_bounded(scripted_client: TestClient):
     assert scripted_client.get("/api/v1/search", params={"q": "红色", "limit": 0}).status_code == 422
     assert scripted_client.get("/api/v1/search", params={"q": "红色", "limit": 1000}).status_code == 422
+
+
+# ---- 三条通道进同一个 fuse -------------------------------------------------------
+
+
+class WordObserver:
+    """确定性观察器：文件名里的词就是这张图的语义。
+
+    契约测试要验的是「词法通道有没有进融合」，不是模型——语义由测试直接指定，
+    真链路的验收在 tests/e2e。**单张上传走快路径不接观察器**，所以词法通道要靠整册
+    导入喂（``media.py`` 的 ``build_import_assets(observe=...)``）。
+    """
+
+    model_id = "scripted-vlm"
+
+    def observe(self, path: Path) -> ObservationSemantics:
+        word = Path(path).stem
+        return ObservationSemantics(caption=word, place=word, activity=word, objects=(word,), confidence=0.65)
+
+
+@pytest.fixture
+def album(tmp_path: Path) -> Path:
+    directory = tmp_path / "album"
+    directory.mkdir()
+    (directory / "海边.jpg").write_bytes(jpeg_bytes("red"))
+    (directory / "雪山.jpg").write_bytes(jpeg_bytes("green"))
+    return directory
+
+
+@pytest.fixture
+def channel_client(settings: Settings, album: Path) -> TestClient:
+    """视觉把「雪山」排第一（查询词映射到绿色向量），词法把「海边」排第一。"""
+    red, green = jpeg_bytes("red"), jpeg_bytes("green")
+    app = create_app(settings)
+    app.state.container = dataclasses.replace(
+        app.state.container,
+        visual_embedder=ScriptedEmbedder(
+            images={red: RED, green: GREEN}, texts={"海边": GREEN, "雪山": GREEN}
+        ),
+        vlm_observer=WordObserver(),
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/imports", json={"directory": str(album), "scope_id": "album1", "limit": 10}
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["imported"] == 2, response.text
+    return client
+
+
+def test_the_lexical_channel_is_fused_into_the_endpoint(channel_client: TestClient):
+    """词法把视觉排在第二的那张顶到第一：``1.0/61 + 2.5/62 > 2.5/61``。
+
+    没有这条通道时这里是「雪山.jpg」在第一位——``test_search_ranks_the_matching_photo_first``
+    钉的就是单通道时的形状。
+    """
+    items = channel_client.get("/api/v1/search", params={"q": "海边", "scope_id": "album1"}).json()["items"]
+
+    assert items[0]["asset"]["file_name"] == "海边.jpg"
+    assert items[0]["channels"] == {"visual_ann": 2, "lexical": 1}
+    assert items[0]["score"] == pytest.approx(1.0 / 61 + 2.5 / 62)
+
+
+def test_the_endpoint_reports_only_the_channels_that_exist(channel_client: TestClient):
+    """entity / text_ann 在 2.0 还没有类：它们不出现在 ``channels`` 里，也不报空。
+
+    1.0 的缺通道就是「不在 retriever 列表里」（``retrieval/__init__.py:79-84``）。
+    metadata 是第三条，但它只在有正向结构化条件时才给召回信号，而 S4 的端点没有
+    这类参数（硬条件属于 S6）——所以这里也不该出现。
+    """
+    items = channel_client.get("/api/v1/search", params={"q": "海边", "scope_id": "album1"}).json()["items"]
+
+    assert {channel for item in items for channel in item["channels"]} == {
+        "visual_ann",
+        "lexical",
+    }

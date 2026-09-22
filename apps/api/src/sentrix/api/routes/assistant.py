@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 
 from sentrix.api.deps import get_container
 from sentrix.api.routes.media import deliver_asset
+from sentrix.api.routes.search import build_retrieve_evidence
 from sentrix.api.schemas.assistant import (
     AttachmentSummary,
     CompleteEventPayload,
@@ -55,7 +56,6 @@ from sentrix.application.assistant.run_turn import (
     TurnRequest,
 )
 from sentrix.application.assistant.tools import AssistantToolbox
-from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.bootstrap.container import Container
 from sentrix.domain.assistant.models import Conversation, ProgressEvent, TurnRecord
 
@@ -101,12 +101,11 @@ def _run_turn(container: Container) -> RunTurn:
         model=container.chat_model,
         conversations=container.conversation_repository,
         turns=container.turn_repository,
+        # ``search_memories`` 走的是与 ``GET /api/v1/search`` 同一套多路召回：
+        # 1.0 的两个入口（HTTP 侧与 ``agent_runtime/tools.py``）都是同一个
+        # ``EvidenceRetrievalKernel``，只有一份融合排名。
         toolbox=AssistantToolbox(
-            retrieval=RetrieveVisual(
-                embedder=container.visual_embedder,
-                vectors=container.vector_repository,
-                index=container.vector_index,
-            ),
+            retrieval=build_retrieve_evidence(container),
             assets=container.asset_repository,
             result_sets=container.result_set_repository,
             people=container.person_directory,
