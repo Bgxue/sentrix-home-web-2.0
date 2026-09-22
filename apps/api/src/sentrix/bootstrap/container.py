@@ -21,6 +21,7 @@ from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteObservationRepository,
 )
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
+from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
@@ -35,6 +36,7 @@ class Container:
     media_storage: FileSystemMediaStorage
     metadata_reader: PillowMetadataReader
     preview_encoder: PreviewEncoder
+    vector_repository: SqliteVectorRepository
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -48,6 +50,7 @@ class Container:
             media_storage=FileSystemMediaStorage(settings.media_dir),
             metadata_reader=PillowMetadataReader(),
             preview_encoder=PillowPreviewEncoder(),
+            vector_repository=SqliteVectorRepository(database),
         )
 
     def database_healthy(self) -> bool:
