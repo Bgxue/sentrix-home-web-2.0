@@ -58,6 +58,10 @@ ls -la ~/.cache/clip/clip_cn_vit-l-14.pt    # 1,625,135,766 字节
 
 > **通用规则（文档同步）**：凡是新增或删除 `apps/api/src/sentrix/` 下 `.py` 文件的任务，都必须同步更新 `docs/architecture/module-map.md` 中该文件的**整行**——路径 / 职责 / 层 / **依赖谁** / **被谁依赖**。两列依赖由 `scripts/check_module_map.py` 用 `ast` 解析真实 import 后校验：少写、多写、与转置不符都会红。加了新文件而**没有**改被它依赖的旧行的「被谁依赖」列，同样会红——这是最容易漏的一步。
 >
+>
+> **通用规则（包的 `__init__.py` 也是一条边）**：`scripts/check_module_map.py` 用 `ast` 解析包内 import，`import sentrix.domain.retrieval.scheme` 这类**子模块导入会被同时记成两条依赖**——`sentrix/domain/retrieval/scheme.py` **和** `sentrix/domain/retrieval/__init__.py`（导入子模块必然先执行包的 `__init__`，而 `__init__` 自己也有 import）。所以新文件只要落在某个包下，被它依赖的那两行「被谁依赖」列就**都要加**：少加包 `__init__.py` 那行同样会红。
+>
+> 例：Task 28 的 `sentrix/infrastructure/models/chinese_clip.py` 只写了 `from sentrix.domain.retrieval import scheme` 一行，但 `sentrix/domain/retrieval/__init__.py` 与 `sentrix/domain/retrieval/scheme.py` **两行**的「被谁依赖」都要记它。
 > **通用规则（能力登记）**：每个新能力在 `docs/refactor/capability-map.jsonl` 里加一条记录，`status=verified` 时 `verification` 指向的测试文件必须真实存在（`scripts/check_capability_map.py` 会查）。本切片新增 9 条。
 >
 > **通用规则（OpenAPI）**：改了路由或 schema 就重新导出 `packages/contracts/openapi/sentrix-v1.yaml`（`scripts/export_openapi.py`），`make ci` 里带 `--check`。Task 29 与 Task 31 各需要一次。
@@ -3669,10 +3673,8 @@ Run: `.venv/bin/pytest apps/api/tests/unit/test_index_visual.py apps/api/tests/c
 Expected:
 
 ```text
-........                                                                 [100%]
-8 passed in 0.01s
-........                                                                 [100%]
-8 passed in 1.93s
+................                                                         [100%]
+16 passed in 2.45s
 ```
 
 - [ ] **Step 9: 重新导出 OpenAPI 契约**
@@ -4307,8 +4309,8 @@ Run: `.venv/bin/pytest apps/api/tests/unit/test_retrieve_visual.py apps/api/test
 Expected:
 
 ```text
-................                                                         [100%]
-16 passed in 0.01s
+............................                                             [100%]
+28 passed in 1.64s
 ```
 
 - [ ] **Step 6: 更新 module-map.md**
