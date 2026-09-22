@@ -789,10 +789,18 @@ Run: `.venv/bin/pytest apps/api/tests/integration/test_vector_repository.py apps
 Expected:
 
 ```text
-E   ModuleNotFoundError: No module named 'sentrix.infrastructure.persistence.repositories.vectors'
-apps/api/src/sentrix/bootstrap/container.py:24: in <module>
-    from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
-E   ModuleNotFoundError: No module named 'sentrix.infrastructure.persistence.repositories.vectors'
+____ ERROR collecting apps/api/tests/integration/test_vector_repository.py _____
+apps/api/tests/integration/test_vector_repository.py:7: in <module>
+    from sentrix.domain.retrieval.ports import VectorRecord
+E   ModuleNotFoundError: No module named 'sentrix.domain.retrieval.ports'
+___________ ERROR collecting apps/api/tests/unit/test_similarity.py ____________
+apps/api/tests/unit/test_similarity.py:7: in <module>
+    from sentrix.domain.retrieval.similarity import cosine_similarity, dimension_matches
+E   ModuleNotFoundError: No module named 'sentrix.domain.retrieval.similarity'
+=========================== short test summary info ============================
+ERROR apps/api/tests/integration/test_vector_repository.py
+ERROR apps/api/tests/unit/test_similarity.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
 ```
 
 - [ ] **Step 3: 写迁移文件**
@@ -1251,8 +1259,8 @@ Run: `.venv/bin/pytest apps/api/tests/integration/test_vector_repository.py apps
 Expected:
 
 ```text
-.....................                                                    [100%]
-21 passed in 1.26s
+....................                                                     [100%]
+20 passed in 1.16s
 ```
 
 - [ ] **Step 8: 更新 module-map.md**
