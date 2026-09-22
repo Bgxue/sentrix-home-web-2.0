@@ -1348,7 +1348,7 @@ S4a 的 +155 与逐任务用例数逐一对齐；S4b 的 +80（6+7+15+18+14+10+0
 | 58+59 | `a22d4d1` | `apps/api/src/sentrix/api/routes/timeline.py`<br>`apps/api/src/sentrix/api/schemas/timeline.py`<br>`apps/api/src/sentrix/application/memories/read_timeline.py`<br>`apps/api/src/sentrix/main.py`<br>`apps/api/tests/contract/test_timeline_routes.py` |
 | 60+61 | `bf641f1` | `apps/web/src/App.tsx`<br>`apps/web/src/features/timeline/Timeline.tsx`<br>`apps/web/src/shared/api/client.ts` |
 | 62 | `29eb6c1` | `apps/api/tests/e2e/test_album_timeline.py` |
-| 63 | `81bfb7d` |  |
+| 63 | `d40b984` | `apps/web/src/features/timeline/Timeline.tsx`<br>`docs/refactor/2026-09-22-s4-implementation-plan.md`<br>`docs/refactor/s4-deviations.md`<br>`docs/runbooks/geonames-data.md` |
 
 ## Task 62 的红灯
 

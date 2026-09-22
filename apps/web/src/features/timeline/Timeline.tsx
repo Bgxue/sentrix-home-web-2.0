@@ -34,35 +34,59 @@ function mergeDays(current: TimelineDay[], incoming: TimelineDay[]): TimelineDay
 }
 
 export function Timeline({ scopeId }: { scopeId: string }) {
-  const [days, setDays] = useState<TimelineDay[]>([]);
-  const [total, setTotal] = useState(0);
   const [place, setPlace] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState<{ key: string; days: TimelineDay[]; total: number } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<TimelinePhoto | null>(null);
   const sentinel = useRef<HTMLDivElement | null>(null);
-  const loaded = days.reduce((sum, day) => sum + day.events.length, 0);
 
-  const load = useCallback(
-    async (offset: number, replace: boolean) => {
-      setLoading(true);
-      try {
-        const page = await fetchTimeline(scopeId, offset, PAGE_SIZE, place);
-        setTotal(page.total);
-        setDays((current) => (replace ? page.days : mergeDays(current, page.days)));
-        setError(null);
-      } catch (cause) {
-        setError((cause as Error).message);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [scopeId, place],
-  );
+  const key = `${scopeId}\u0000${place}`;
+  // 「首屏还在加载」是**推导**出来的：当前这组筛选条件的页面还没到，就是加载中。
+  // 用一个 state 去记它就得在 effect 里同步 setState，那会级联渲染
+  // （oxlint 的 react(set-state-in-effect) 报的就是这件事，它给的解法正是
+  // 「derive the value during render」）。
+  const loading = loaded === null || loaded.key !== key;
+  const days = loaded && loaded.key === key ? loaded.days : [];
+  const total = loaded && loaded.key === key ? loaded.total : 0;
+  const shown = days.reduce((sum, day) => sum + day.events.length, 0);
 
+  // 首屏与筛选变化：整体替换。setState 只发生在 then/catch 回调里。
   useEffect(() => {
-    void load(0, true);
-  }, [load]);
+    let alive = true;
+    fetchTimeline(scopeId, 0, PAGE_SIZE, place)
+      .then((response) => {
+        if (alive) {
+          setLoaded({ key, days: response.days, total: response.total });
+          setError(null);
+        }
+      })
+      .catch((cause: Error) => {
+        if (alive) {
+          setError(cause.message);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [scopeId, place, key]);
+
+  // 无限滚动：只追加下一页。这个回调由 IntersectionObserver 触发，不是 effect 体。
+  const loadMore = useCallback(async () => {
+    if (loaded === null || loaded.key !== key) {
+      return;
+    }
+    setLoadingMore(true);
+    try {
+      const response = await fetchTimeline(scopeId, shown, PAGE_SIZE, place);
+      setLoaded({ key, days: mergeDays(loaded.days, response.days), total: response.total });
+      setError(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [key, loaded, place, scopeId, shown]);
 
   useEffect(() => {
     const node = sentinel.current;
@@ -70,13 +94,13 @@ export function Timeline({ scopeId }: { scopeId: string }) {
       return;
     }
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting) && !loading && loaded < total) {
-        void load(loaded, false);
+      if (entries.some((entry) => entry.isIntersecting) && !loading && !loadingMore && shown < total) {
+        void loadMore();
       }
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [load, loading, loaded, total]);
+  }, [loadMore, loading, loadingMore, shown, total]);
 
   return (
     <section className="timeline">
@@ -90,7 +114,7 @@ export function Timeline({ scopeId }: { scopeId: string }) {
           onChange={(event) => setPlace(event.target.value)}
         />
         <span className="timeline-count">
-          {loaded} / {total} 个事件
+          {shown} / {total} 个事件
         </span>
       </div>
       {error ? <p className="error">{error}</p> : null}
@@ -118,7 +142,7 @@ export function Timeline({ scopeId }: { scopeId: string }) {
         </div>
       ))}
       <div ref={sentinel} className="timeline-sentinel">
-        {loading ? "加载中…" : null}
+        {loading || loadingMore ? "加载中…" : null}
       </div>
       {open ? (
         <div className="timeline-overlay" role="presentation" onClick={() => setOpen(null)}>
