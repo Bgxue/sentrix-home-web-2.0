@@ -25,11 +25,17 @@ from sentrix.main import create_app
 
 
 class ScriptedChatModel:
+    """主循环按剧本回话；规划（``tools`` 为空）走 ``planner_reply``，不消耗剧本。"""
+
     def __init__(self, replies: Sequence[ModelReply]) -> None:
         self._replies = list(replies)
         self.calls = 0
+        self.planner_calls = 0
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
+        if not tools:
+            self.planner_calls += 1
+            return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
         self.calls += 1
         return self._replies[min(self.calls - 1, len(self._replies) - 1)]
 
@@ -46,8 +52,38 @@ def tool_call(name: str, call_id: str, **arguments: object) -> ModelReply:
     )
 
 
+def planner_reply(*evidence_types: str, goal: str = "看海边的照片") -> ModelReply:
+    """规划那次模型调用的回复。
+
+    规划与主循环共用同一个模型端口（1.0 也是同一个 ``chat_fn``），测试里靠 ``tools`` 区分：
+    规划带空元组，主循环带四个工具。
+    """
+    declaration = {
+        "action": "declare",
+        "declaration": {
+            "goal": goal,
+            "requirements": [
+                {"id": f"req_{index + 1}", "evidence_type": item, "description": f"需要 {item}"}
+                for index, item in enumerate(evidence_types)
+            ],
+        },
+    }
+    return ModelReply(content=json.dumps(declaration, ensure_ascii=False), finish_reason="stop")
+
+
 class FailingModel:
+    """整个端点都挂了——规划与主循环一起失败。"""
+
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
+        raise RuntimeError("端点挂了")
+
+
+class DiesAfterPlanning:
+    """规划照常，进主循环就挂。"""
+
+    def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
+        if not tools:
+            return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
         raise RuntimeError("端点挂了")
 
 
@@ -198,9 +234,27 @@ def test_the_complete_frame_does_not_repeat_the_progress_array(client: TestClien
     assert [item["status"] for item in complete["requirements"]] == ["open", "open"]
 
 
-def test_a_model_failure_is_reported_as_failed_not_complete(settings):
-    """1.0 把模型失败压成 ``status="complete"``，只有未捕获的 Python 异常才是 error。"""
+def test_a_dead_endpoint_is_reported_as_planner_blocked(settings):
+    """端点整个挂掉时，失败发生在**规划**这一步——1.0 也是这么记的。
+
+    1.0 ``runtime.py:1828``：``planner_call_error`` 走到最后就是 ``planner_blocked``，
+    status 是 ``partial``，answer 是「当前问题的证据需求无法可靠规划，因此暂时无法确认。」
+    （生产库里 2,126 条轨迹的原文）。1.0 的毛病不在这里——它把这类失败也压成了
+    ``status="complete"``，2.0 如实报成 ``partial``。
+    """
     client = build_client(settings, FailingModel())
+    _conversation_id, turn_id = run_turn(client)
+
+    complete = read_events(client, turn_id)[-1]["data"]
+
+    assert complete["status"] == "partial"
+    assert complete["termination_reason"] == "planner_blocked"
+    assert complete["answer"] == "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
+
+
+def test_a_model_that_dies_after_planning_is_reported_as_failed(settings):
+    """规划成功、主循环才挂时，才是 ``failed`` / ``model_error``。"""
+    client = build_client(settings, DiesAfterPlanning())
     _conversation_id, turn_id = run_turn(client)
 
     complete = read_events(client, turn_id)[-1]["data"]

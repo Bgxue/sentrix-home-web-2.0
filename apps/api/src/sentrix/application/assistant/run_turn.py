@@ -15,10 +15,12 @@ SQLite、预算计数与十几条软门禁。2.0 的划分是：
 
 1. **``termination_reason`` 落空**：``TurnResult.termination_reason`` 的类型就是枚举，
    收尾只走 ``_finish`` 一个出口，循环外还有一层兜底防止将来有人加了新出口却忘了声明原因。
-2. **零工具调用**：规划永远至少给一条证据需求（``intent.plan_requirements``），门禁在
-   需求还开着时拦一次最终答案。1.0 的规划允许「零需求」，而 JIT 提示词会因此直接告诉
-   模型「当前没有待确认的证据需求……可直接输出 final」（``jit_prompt.py:200``）。
-3. **``planner_call_error``**：S3 的规划是纯函数，没有模型调用，也就不存在调用失败。
+2. **零工具调用**：规划要求至少一条证据需求（``intent.MIN_REQUIREMENTS``）。1.0 的规划
+   允许「零需求」，而 JIT 提示词会因此直接告诉模型「当前没有待确认的证据需求……可直接
+   输出 final」（``jit_prompt.py:200``）——1.0 实测 29.3% 的回合一次工具都没调。
+3. **``planner_call_error``**：审计过的那 1,974 条全部落在模型端点不可用的黑障窗口里
+   （见 ``domain/assistant/intent.py``），所以规划照 1.0 仍然是一次模型调用；端点真挂了
+   就以 ``planner_blocked`` 收场，而不是靠规则猜出一组需求继续往下跑。
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from sentrix.application.assistant.goal_planner import GoalPlanner
 from sentrix.application.assistant.tools import (
     AssistantToolbox,
     DeliveredPhotos,
@@ -39,7 +42,6 @@ from sentrix.application.assistant.tools import (
 from sentrix.domain.assistant import emergency
 from sentrix.domain.assistant.evidence_ledger import EvidenceLedger
 from sentrix.domain.assistant.final_guard import FinalGuard, GuardFacts, answered_with_gap
-from sentrix.domain.assistant.intent import plan_requirements
 from sentrix.domain.assistant.models import (
     Attachment,
     ChatMessage,
@@ -78,6 +80,10 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 # 用完重试次数才以 ``parse_failure`` 收尾），而不是另立一个终止原因。这里照 1.0 的口径：
 # 提醒一次，再空就按 ``PARSE_FAILURE`` 收尾，用确定性兜底把已有证据说清楚。
 PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
+
+# 规划失败（1.0 ``planner_call_error`` / ``invalid_planner_action`` 的收尾）。文案是 1.0
+# 生产轨迹里那句话，逐字：``data/sentrix.db`` 里 2,126 条 ``planner_blocked`` 的 answer。
+PLANNER_BLOCKED_ANSWER = "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
 
 
 class TurnNotFoundError(LookupError):
@@ -143,6 +149,8 @@ class RunTurn:
         self._profile = profile
         self._policy = ToolPolicy()
         self._guard = FinalGuard()
+        # 规划是一次模型调用，与主循环同一个端点（1.0 也是同一个 ``chat_fn``）。
+        self._planner = GoalPlanner(model)
 
     # ---- 建回合 -------------------------------------------------------------
 
@@ -209,25 +217,38 @@ class RunTurn:
             session.state.finish(TerminationReason.POLICY_REFUSAL)
             answer = refusal
         else:
-            session.ledger.requirements = list(plan_requirements(record.question))
-            self._publish(
-                session,
-                session.state.emit(
-                    ProgressStage.PLANNING,
-                    ProgressStatus.COMPLETE,
-                    "已确认需要哪些证据。",
-                    kind="plan",
-                    payload={"requirements": list(session.ledger.as_payload())},
-                ),
+            history = "\n".join(
+                f"{message.role.value}: {message.content}"
+                for message in self._conversations.history_for_prompt(record.conversation_id, HISTORY_LIMIT)
+                if message.turn_id != record.id
             )
-            try:
-                answer = self._converse(session, record)
-            except Exception:
-                # 兜底不是「错误处理」，是「绝不让收尾原因落空」：任何未预料的异常也
-                # 必须以一个有名字的原因结束，而不是留下一个半开的回合。
-                log.exception("回合执行中抛出未预料的异常: %s", turn_id)
-                session.state.finish(TerminationReason.MODEL_ERROR)
-                answer = emergency.clarify_answer(TerminationReason.MODEL_ERROR)
+            planned = self._planner.declare(record.question, scope_id=record.scope_id, history=history)
+            if not planned.ok:
+                # 1.0 ``runtime.py:1828``：规划不出来就以 planner_blocked 收场，不再往下走。
+                # 拿一条编出来的需求去检索，比诚实地说规划失败更糟。
+                log.warning("规划失败: turn=%s reason=%s", turn_id, planned.fallback_reason)
+                session.state.finish(TerminationReason.PLANNER_BLOCKED)
+                answer = PLANNER_BLOCKED_ANSWER
+            else:
+                session.ledger.requirements = list(planned.requirements or ())
+                self._publish(
+                    session,
+                    session.state.emit(
+                        ProgressStage.PLANNING,
+                        ProgressStatus.COMPLETE,
+                        "已确认需要哪些证据。",
+                        kind="plan",
+                        payload={"requirements": list(session.ledger.as_payload())},
+                    ),
+                )
+                try:
+                    answer = self._converse(session, record)
+                except Exception:
+                    # 兜底不是「错误处理」，是「绝不让收尾原因落空」：任何未预料的异常也
+                    # 必须以一个有名字的原因结束，而不是留下一个半开的回合。
+                    log.exception("回合执行中抛出未预料的异常: %s", turn_id)
+                    session.state.finish(TerminationReason.MODEL_ERROR)
+                    answer = emergency.clarify_answer(TerminationReason.MODEL_ERROR)
 
         reason = session.state.termination_reason or session.state.finish(TerminationReason.MODEL_ERROR)
         status = _status_for(reason)

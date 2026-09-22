@@ -19,11 +19,17 @@ from sentrix.main import create_app
 
 
 class ScriptedChatModel:
+    """主循环按剧本回话；规划（``tools`` 为空）走 ``planner_reply``，不消耗剧本。"""
+
     def __init__(self, replies: Sequence[ModelReply]) -> None:
         self._replies = list(replies)
         self.calls = 0
+        self.planner_calls = 0
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
+        if not tools:
+            self.planner_calls += 1
+            return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
         assert [spec.name for spec in tools] == [spec.name for spec in TOOL_SPECS]
         self.calls += 1
         return self._replies[min(self.calls - 1, len(self._replies) - 1)]
@@ -39,6 +45,25 @@ def tool_call(name: str, call_id: str, **arguments: object) -> ModelReply:
         finish_reason="tool_calls",
         tool_calls=(ToolCall(call_id=call_id, name=name, arguments_json=json.dumps(arguments)),),
     )
+
+
+def planner_reply(*evidence_types: str, goal: str = "看海边的照片") -> ModelReply:
+    """规划那次模型调用的回复。
+
+    规划与主循环共用同一个模型端口（1.0 也是同一个 ``chat_fn``），测试里靠 ``tools`` 区分：
+    规划带空元组，主循环带四个工具。
+    """
+    declaration = {
+        "action": "declare",
+        "declaration": {
+            "goal": goal,
+            "requirements": [
+                {"id": f"req_{index + 1}", "evidence_type": item, "description": f"需要 {item}"}
+                for index, item in enumerate(evidence_types)
+            ],
+        },
+    }
+    return ModelReply(content=json.dumps(declaration, ensure_ascii=False), finish_reason="stop")
 
 
 @pytest.fixture

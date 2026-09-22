@@ -43,13 +43,31 @@ QUESTION = "给我看看在海边的照片"
 
 
 class ScriptedModel:
-    """按剧本回话的模型。剧本用完还继续要，就返回最后一条。"""
+    """按剧本回话的模型。剧本用完还继续要，就返回最后一条。
 
-    def __init__(self, replies: Sequence[ModelReply | Exception]) -> None:
+    规划（``tools`` 为空）走 ``planner_reply``，**不消耗剧本**——剧本描述的是工具循环那
+    一段。要单独考察规划时用 ``planner=`` 显式给（值或异常）。
+    """
+
+    def __init__(
+        self,
+        replies: Sequence[ModelReply | Exception],
+        *,
+        planner: object = None,
+    ) -> None:
         self._replies = list(replies)
+        self._planner = planner_reply("photo_set", "delivered_photo") if planner is None else planner
         self.calls: list[Sequence[ChatMessage]] = []
+        self.planner_calls: list[Sequence[ChatMessage]] = []
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
+        if not tools:
+            self.planner_calls.append(list(messages))
+            if isinstance(self._planner, Exception):
+                raise self._planner
+            if isinstance(self._planner, PlannerScript):
+                return ModelReply(content=self._planner.next(), finish_reason="stop")
+            return self._planner  # type: ignore[return-value]
         self.calls.append(list(messages))
         assert [spec.name for spec in tools] == [spec.name for spec in TOOL_SPECS]
         reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
@@ -87,6 +105,35 @@ def tool_call(name: str, call_id: str, **arguments: object) -> ModelReply:
         finish_reason="tool_calls",
         tool_calls=(ToolCall(call_id=call_id, name=name, arguments_json=json.dumps(arguments)),),
     )
+
+
+class PlannerScript:
+    """规划那一次调用按顺序回话（与主循环的剧本分开）。"""
+
+    def __init__(self, replies: Sequence[str]) -> None:
+        self._replies = list(replies)
+
+    def next(self) -> str:
+        return self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
+
+
+def planner_reply(*evidence_types: str, goal: str = "看海边的照片") -> ModelReply:
+    """规划那次模型调用的回复。
+
+    规划与主循环共用同一个模型端口（1.0 也是同一个 ``chat_fn``），测试里靠 ``tools`` 区分：
+    规划带空元组，主循环带四个工具。
+    """
+    declaration = {
+        "action": "declare",
+        "declaration": {
+            "goal": goal,
+            "requirements": [
+                {"id": f"req_{index + 1}", "evidence_type": item, "description": f"需要 {item}"}
+                for index, item in enumerate(evidence_types)
+            ],
+        },
+    }
+    return ModelReply(content=json.dumps(declaration, ensure_ascii=False), finish_reason="stop")
 
 
 SEARCH_OK = ToolOutcome(
@@ -596,3 +643,61 @@ def test_a_persistently_empty_answer_ends_as_parse_failure(env):
     assert result.termination_reason is TerminationReason.PARSE_FAILURE
     assert result.answer != ""
     assert "输出无法解析" in result.answer
+
+
+# ---- 规划：1.0 goal_planner 的失败与重试 ------------------------------------
+
+
+def test_a_planner_that_cannot_be_reached_ends_as_planner_blocked(env):
+    """``planner_call_error`` 的收尾：1.0 ``runtime.py:1828`` 的 ``planner_blocked``。
+
+    文案是生产轨迹里的原文（``data/sentrix.db`` 里 2,126 条 ``planner_blocked`` 的 answer）。
+    拿一条编出来的需求继续往下检索，比诚实地说「规划不出来」更糟。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final("不该被用到")], planner=RuntimeError("connection refused"))
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = start(run_turn, conversation)
+    result = run_turn.run(turn_id)
+
+    assert model.calls == []  # 主循环一次都没进
+    assert result.answer == "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
+    assert result.termination_reason is TerminationReason.PLANNER_BLOCKED
+    assert result.status is TurnStatus.PARTIAL
+
+
+def test_a_garbled_plan_is_retried_with_the_error_fed_back(env):
+    """规划被解析不出来时带错误回灌重试——1.0 的 ``_correction_hint`` 就是干这个的。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [final("这是你要的照片。")],
+        planner=PlannerScript(["我不会规划。", planner_reply("photo_set").content]),
+    )
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = start(run_turn, conversation)
+    result = run_turn.run(turn_id)
+
+    assert len(model.planner_calls) == 2
+    assert "无法被解析" in model.planner_calls[1][-1].content
+    assert result.answer == "这是你要的照片。"
+
+
+def test_the_ledger_comes_from_the_plans_declaration(env):
+    """账本里的需求就是模型声明的那几条——不是按问句关键词猜出来的。"""
+    _conversations, turns, conversation, _db = env
+    model = ScriptedModel(
+        [final("这是你要的照片。")],
+        planner=planner_reply("photo_set", "delivered_photo", "person_profile"),
+    )
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = start(run_turn, conversation)
+    result = run_turn.run(turn_id)
+
+    assert [item["evidence_type"] for item in result.requirements] == [
+        "photo_set",
+        "delivered_photo",
+        "person_profile",
+    ]
