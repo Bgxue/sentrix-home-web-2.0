@@ -2,6 +2,10 @@
 
 Nothing else in the codebase constructs an adapter.  Domain and application code
 receive ports; only this module knows which concrete class implements them.
+
+字段一律按 **domain 端口** 声明。写在类型上的端口才是可替换性的凭证：只写在
+``build()`` 里的替换能力，调用方看不见，于是很容易顺手用上协议之外的方法。
+这条不变量由 ``apps/api/tests/unit/test_container_wiring.py`` 钉住。
 """
 
 from __future__ import annotations
@@ -11,7 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sentrix.config import Settings
-from sentrix.domain.media.ports import PreviewEncoder
+from sentrix.domain.media.ports import (
+    AssetRepository,
+    MediaStorage,
+    MetadataReader,
+    ObservationRepository,
+    PreviewEncoder,
+)
+from sentrix.domain.retrieval.ports import VectorIndex, VectorRepository, VisualEmbedder
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
@@ -31,16 +42,23 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persi
 @dataclass(frozen=True)
 class Container:
     settings: Settings
+
+    # 例外：共享连接工厂，不是任何一个端口的实现（多个仓储共用同一个连接来源），
+    # 且 database_healthy() 直接需要它。domain 里没有「数据库池」这个概念可依。
     database: Database
+
+    # 例外：目前没有任何 application / api 消费者，为它补端口是投机抽象。
+    # 记忆空间的用例落地时，把 MemorySpace 一并迁进 domain 再补 SpaceRepository。
     spaces: SqliteSpaceRepository
-    asset_repository: SqliteAssetRepository
-    observation_repository: SqliteObservationRepository
-    media_storage: FileSystemMediaStorage
-    metadata_reader: PillowMetadataReader
+
+    asset_repository: AssetRepository
+    observation_repository: ObservationRepository
+    media_storage: MediaStorage
+    metadata_reader: MetadataReader
     preview_encoder: PreviewEncoder
-    vector_repository: SqliteVectorRepository
-    vector_index: QdrantVectorIndex
-    visual_embedder: ChineseClipVisualEmbedder
+    vector_repository: VectorRepository
+    vector_index: VectorIndex
+    visual_embedder: VisualEmbedder
 
     @classmethod
     def build(cls, settings: Settings) -> Container:

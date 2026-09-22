@@ -11,6 +11,19 @@
 两列只记 `sentrix` 包内的模块关系；stdlib 与第三方（fastapi / sqlite3 / pydantic 等）
 不进这两列。
 
+## 装配点按端口声明
+
+上面两条管的是「谁不许 import 谁」；还有一条配套的不变量管「装配时必须按接口拿」：
+**`Container` 的每个字段都按 domain 端口声明，不写 infrastructure 的具体类。**
+写在类型上的端口才是可替换性的凭证——只写在 `build()` 里的替换能力，调用方看不见，
+很容易顺手用上协议之外的方法，于是「可插拔」只剩一句口头承诺。
+
+这条由 `apps/api/tests/unit/test_container_wiring.py` 在 `make ci` 里强制。
+当前例外两条，理由同时写在 `container.py` 的字段旁与测试的例外表里：
+`database`（共享连接工厂，不是端口的实现，且 `database_healthy()` 直接需要它）、
+`spaces`（尚无 application / api 消费者，补端口属投机抽象；等记忆空间的用例落地时，
+把 `MemorySpace` 一并迁进 domain 再补 `SpaceRepository`）。
+
 列含义：**层** = domain / application / infrastructure / api / bootstrap ·
 **依赖谁** 与 **被谁依赖** 写 `src/` 下的相对路径，空集写 `—`，多项用 `、` 分隔。
 
@@ -20,7 +33,7 @@
 | `sentrix/config.py` | 类型化配置；`data_dir` 是唯一可配根，其余路径派生 | — | — | `sentrix/bootstrap/container.py`、`sentrix/main.py` |
 | `sentrix/main.py` | FastAPI 装配与 v1 路由注册；进程入口 | — | `sentrix/__init__.py`、`sentrix/api/errors.py`、`sentrix/api/routes/__init__.py`、`sentrix/api/routes/health.py`、`sentrix/api/routes/media.py`、`sentrix/api/routes/search.py`、`sentrix/bootstrap/container.py`、`sentrix/config.py` | — |
 | `sentrix/bootstrap/__init__.py` | 包标记 | bootstrap | — | — |
-| `sentrix/bootstrap/container.py` | 唯一依赖装配点；只有这里构造适配器 | bootstrap | `sentrix/config.py`、`sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/image_io.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/models/chinese_clip.py`、`sentrix/infrastructure/persistence/database.py`、`sentrix/infrastructure/persistence/repositories/assets.py`、`sentrix/infrastructure/persistence/repositories/spaces.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` | `sentrix/api/deps.py`、`sentrix/api/routes/media.py`、`sentrix/api/routes/search.py`、`sentrix/main.py` |
+| `sentrix/bootstrap/container.py` | 唯一依赖装配点；只有这里构造适配器 | bootstrap | `sentrix/config.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/infrastructure/media/image_io.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/models/chinese_clip.py`、`sentrix/infrastructure/persistence/database.py`、`sentrix/infrastructure/persistence/repositories/assets.py`、`sentrix/infrastructure/persistence/repositories/spaces.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` | `sentrix/api/deps.py`、`sentrix/api/routes/media.py`、`sentrix/api/routes/search.py`、`sentrix/main.py` |
 | `sentrix/api/__init__.py` | 包标记 | api | — | — |
 | `sentrix/api/deps.py` | `get_container`：路由从 `app.state` 取装配好的容器，不自己构造 | api | `sentrix/bootstrap/container.py` | `sentrix/api/routes/media.py`、`sentrix/api/routes/search.py` |
 | `sentrix/api/errors.py` | 领域错误基类与 `DomainError` → HTTP 的映射 | api | — | `sentrix/main.py` |
@@ -37,7 +50,7 @@
 | `sentrix/domain/media/ports.py` | 领域端口（AssetRepository / MediaStorage / MetadataReader / PreviewEncoder）与浏览器转码规则 | domain | `sentrix/domain/media/models.py` | `sentrix/application/media/import_assets.py`、`sentrix/bootstrap/container.py` |
 | `sentrix/domain/retrieval/__init__.py` | 包标记与检索域导出 | domain | `sentrix/domain/retrieval/fusion.py`、`sentrix/domain/retrieval/models.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/domain/retrieval/similarity.py` | `sentrix/application/retrieval/index_visual.py`、`sentrix/application/retrieval/retrieve_visual.py`、`sentrix/infrastructure/models/chinese_clip.py` |
 | `sentrix/domain/retrieval/models.py` | 候选命中 `CandidateHit` 与融合结果 `FusedCandidate`；分值不是裸 float | domain | — | `sentrix/application/retrieval/retrieve_visual.py`、`sentrix/domain/retrieval/__init__.py`、`sentrix/domain/retrieval/fusion.py` |
-| `sentrix/domain/retrieval/ports.py` | 向量端口：`VectorRepository`（权威）/ `VectorIndex`（派生镜像）/ `VisualEmbedder`（跨模态），以及 `VectorRecord` / `VectorHit` / `VectorIndexStatus` | domain | `sentrix/domain/media/models.py` | `sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/application/retrieval/retrieve_visual.py`、`sentrix/domain/retrieval/__init__.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` |
+| `sentrix/domain/retrieval/ports.py` | 向量端口：`VectorRepository`（权威）/ `VectorIndex`（派生镜像）/ `VisualEmbedder`（跨模态），以及 `VectorRecord` / `VectorHit` / `VectorIndexStatus` | domain | `sentrix/domain/media/models.py` | `sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/application/retrieval/retrieve_visual.py`、`sentrix/bootstrap/container.py`、`sentrix/domain/retrieval/__init__.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` |
 | `sentrix/domain/retrieval/similarity.py` | 余弦相似度与维度一致性判定；1.0 把它埋在 `MemoryStore._cosine` 里，精确回退与主路径各算一套 | domain | — | `sentrix/domain/retrieval/__init__.py`、`sentrix/infrastructure/persistence/repositories/vectors.py` |
 | `sentrix/domain/retrieval/scheme.py` | 钉死的嵌入方案常量（模型名/维度/space）；不读 env，2.0 不提供切换开关 | domain | — | `sentrix/application/retrieval/index_visual.py`、`sentrix/application/retrieval/retrieve_visual.py`、`sentrix/infrastructure/models/chinese_clip.py` |
 | `sentrix/domain/retrieval/fusion.py` | 加权 RRF 融合与证据分级；权重/RRF_K/anchor 加成来自行为基线 | domain | `sentrix/domain/retrieval/models.py` | `sentrix/application/retrieval/retrieve_visual.py`、`sentrix/domain/retrieval/__init__.py` |
