@@ -504,6 +504,117 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/timeline:
+    get:
+      tags:
+      - timeline
+      summary: Read Timeline
+      operationId: read_timeline_api_v1_timeline_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: home-default
+          title: Scope Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      - name: place
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 60
+          description: 地点筛选，服务端按地点/行政区匹配
+          default: ''
+          title: Place
+        description: 地点筛选，服务端按地点/行政区匹配
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelineResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/events/{event_id}:
+    get:
+      tags:
+      - timeline
+      summary: Get Event
+      operationId: get_event_api_v1_events__event_id__get
+      parameters:
+      - name: event_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Event Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelineEvent'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/imports:
+    post:
+      tags:
+      - timeline
+      summary: Import Album
+      description: '整册导入。**同步执行**：2.0 没有任务队列，装作异步只会把「跑到哪了」藏起来。
+
+
+        整册导入要串行走模型调用，所以这个请求会跑很久——客户端的超时必须自己调大，
+
+        这一点写在 ``docs/runbooks/geonames-data.md`` 的相邻章节（导入一节）。'
+      operationId: import_album_api_v1_imports_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImportBatchRequest'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportBatchResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -722,6 +833,76 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    ImportBatchRequest:
+      properties:
+        directory:
+          type: string
+          maxLength: 4096
+          minLength: 1
+          title: Directory
+        scope_id:
+          type: string
+          title: Scope Id
+          default: home-default
+        limit:
+          type: integer
+          maximum: 1000.0
+          minimum: 1.0
+          title: Limit
+          default: 200
+      type: object
+      required:
+      - directory
+      title: ImportBatchRequest
+      description: 整册导入。``directory`` 是**服务端**路径——相册在服务器上，不在浏览器里。
+    ImportBatchResponse:
+      properties:
+        scope_id:
+          type: string
+          title: Scope Id
+        directory:
+          type: string
+          title: Directory
+        imported:
+          type: integer
+          title: Imported
+        deduplicated:
+          type: integer
+          title: Deduplicated
+        events:
+          type: integer
+          title: Events
+        lexical_terms:
+          type: integer
+          title: Lexical Terms
+        failures:
+          items:
+            $ref: '#/components/schemas/ImportFailure'
+          type: array
+          title: Failures
+      type: object
+      required:
+      - scope_id
+      - directory
+      - imported
+      - deduplicated
+      - events
+      - lexical_terms
+      - failures
+      title: ImportBatchResponse
+    ImportFailure:
+      properties:
+        file_name:
+          type: string
+          title: File Name
+        reason:
+          type: string
+          title: Reason
+      type: object
+      required:
+      - file_name
+      - reason
+      title: ImportFailure
     ImportResponse:
       properties:
         asset_id:
@@ -933,6 +1114,126 @@ components:
       - conversation_id
       - status
       title: StartTurnResponse
+    TimelineDay:
+      properties:
+        date:
+          type: string
+          title: Date
+        events:
+          items:
+            $ref: '#/components/schemas/TimelineEvent'
+          type: array
+          title: Events
+      type: object
+      required:
+      - date
+      - events
+      title: TimelineDay
+    TimelineEvent:
+      properties:
+        id:
+          type: string
+          title: Id
+        title:
+          type: string
+          title: Title
+        event_type:
+          type: string
+          title: Event Type
+        time_start:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Time Start
+        time_end:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Time End
+        admin_district:
+          type: string
+          title: Admin District
+        place:
+          type: string
+          title: Place
+        activity:
+          type: string
+          title: Activity
+        summary:
+          type: string
+          title: Summary
+        confidence:
+          type: number
+          title: Confidence
+        photos:
+          items:
+            $ref: '#/components/schemas/TimelinePhoto'
+          type: array
+          title: Photos
+      type: object
+      required:
+      - id
+      - title
+      - event_type
+      - time_start
+      - time_end
+      - admin_district
+      - place
+      - activity
+      - summary
+      - confidence
+      - photos
+      title: TimelineEvent
+    TimelinePhoto:
+      properties:
+        asset_id:
+          type: string
+          title: Asset Id
+        file_name:
+          type: string
+          title: File Name
+        captured_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured At
+        place:
+          type: string
+          title: Place
+      type: object
+      required:
+      - asset_id
+      - file_name
+      - captured_at
+      - place
+      title: TimelinePhoto
+    TimelineResponse:
+      properties:
+        scope_id:
+          type: string
+          title: Scope Id
+        total:
+          type: integer
+          title: Total
+        offset:
+          type: integer
+          title: Offset
+        limit:
+          type: integer
+          title: Limit
+        days:
+          items:
+            $ref: '#/components/schemas/TimelineDay'
+          type: array
+          title: Days
+      type: object
+      required:
+      - scope_id
+      - total
+      - offset
+      - limit
+      - days
+      title: TimelineResponse
     TurnPollResponse:
       properties:
         turn_id:

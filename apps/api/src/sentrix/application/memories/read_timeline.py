@@ -94,13 +94,23 @@ class ReadTimeline:
         scope_id: str | None = None,
         limit: int = DEFAULT_LIMIT,
         offset: int = 0,
+        place: str = "",
     ) -> TimelineResult:
+        """按 scope 取一页事件并按天分组。
+
+        ``place`` 是**服务端**的地点筛选（计划 Task 61）：前端只把用户输入原样传过来。
+        匹配发生在 SQL 里（``place`` / ``admin_district`` 的子串），不是取回来再过滤——
+        否则每一页的条数会随筛选条件变化，分页就说不清「还有没有下一页」。
+        """
         target_scope = scope_id or DEFAULT_SCOPE_ID
         page_size = max(1, min(int(limit), MAX_LIMIT))
         start = max(0, int(offset))
         events = list(
             self._events.list_by_scope(
-                target_scope, limit=min(EVENT_SCAN_LIMIT, start + page_size), offset=start
+                target_scope,
+                limit=min(EVENT_SCAN_LIMIT, start + page_size),
+                offset=start,
+                place=place,
             )
         )[:page_size]
 
@@ -114,7 +124,7 @@ class ReadTimeline:
         return TimelineResult(
             scope_id=target_scope,
             days=tuple(TimelineDay(date=day.date, events=tuple(day.events)) for day in days),
-            total=self._events.count_by_scope(target_scope),
+            total=self._events.count_by_scope(target_scope, place=place),
             offset=start,
             limit=page_size,
         )
