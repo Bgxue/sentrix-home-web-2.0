@@ -23,7 +23,7 @@ files = ["apps/api/src/sentrix", "scripts"]
 # 第三方包缺 stub / py.typed 是环境事实，不是本仓库代码的问题：集中在配置里表达，
 # 而不是在每个 import 上散落 # type: ignore——那会把「这里真的有问题」也一起静音。
 [[tool.mypy.overrides]]
-module = ["pillow_heif", "yaml"]
+module = ["pillow_heif", "yaml", "cn_clip", "cn_clip.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

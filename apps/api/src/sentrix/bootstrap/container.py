@@ -15,6 +15,7 @@ from sentrix.domain.media.ports import PreviewEncoder
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
+from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
@@ -39,6 +40,7 @@ class Container:
     preview_encoder: PreviewEncoder
     vector_repository: SqliteVectorRepository
     vector_index: QdrantVectorIndex
+    visual_embedder: ChineseClipVisualEmbedder
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -54,6 +56,7 @@ class Container:
             preview_encoder=PillowPreviewEncoder(),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
+            visual_embedder=ChineseClipVisualEmbedder(),
         )
 
     def database_healthy(self) -> bool:
