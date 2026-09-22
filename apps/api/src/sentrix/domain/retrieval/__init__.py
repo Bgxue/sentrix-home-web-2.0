@@ -10,6 +10,7 @@ from sentrix.domain.retrieval.fusion import (
 )
 from sentrix.domain.retrieval.models import CandidateHit, FusedCandidate
 from sentrix.domain.retrieval.ports import (
+    AssetVisualIndexer,
     VectorHit,
     VectorIndex,
     VectorIndexStatus,
@@ -17,6 +18,7 @@ from sentrix.domain.retrieval.ports import (
     VectorRecord,
     VectorRepository,
     VisualEmbedder,
+    VisualIndexOutcome,
 )
 from sentrix.domain.retrieval.similarity import cosine_similarity, dimension_matches
 
@@ -24,6 +26,7 @@ __all__ = [
     "ANCHOR_BOOST",
     "DEFAULT_CHANNEL_WEIGHTS",
     "RRF_K",
+    "AssetVisualIndexer",
     "CandidateHit",
     "FusedCandidate",
     "VectorHit",
@@ -33,6 +36,7 @@ __all__ = [
     "VectorRecord",
     "VectorRepository",
     "VisualEmbedder",
+    "VisualIndexOutcome",
     "cosine_similarity",
     "dimension_matches",
     "evidence_class_for",

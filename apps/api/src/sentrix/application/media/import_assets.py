@@ -1,9 +1,17 @@
-"""导入用例：把一次上传变成 Asset + Observation。
+"""导入用例：把一次上传变成 Asset + Observation（+ 视觉向量）。
 
 业务规则（都来自 1.0 的既有行为）：
 - 内容 SHA-256 去重，**按 scope 隔离**，不跨相册去重
 - 去重命中时不重复落盘
 - 拍摄时间与 GPS 来自 EXIF，抽不到就留空，**不阻断导入**
+
+S2 追加一条：**导入即向量化**（1.0 ``pipeline.py`` 的 ``_commit_fast_image`` 同样
+时机）。``visual_indexer`` 是可选协作者——不传就退化成纯导入，这样单元测试与不关心
+视觉记忆的调用方都不必构造嵌入器。
+
+去重命中时**仍然调一次 indexer**：索引本身是幂等的（已有向量直接返回），所以这条
+路径的真实作用是「补上第一次没能写成的向量」。1.0 有过 223 张图没有任何视觉向量
+却毫无征兆的记录，重新导入是使用者唯一能想到的补救动作，它必须真的有效。
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ from sentrix.domain.media.ports import (
     MetadataReader,
     ObservationRepository,
 )
+from sentrix.domain.retrieval.ports import AssetVisualIndexer
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +46,7 @@ class ImportResult:
     media_type: MediaType
     status: AssetStatus
     deduplicated: bool
+    indexed: bool = False
 
 
 def _new_id(prefix: str) -> str:
@@ -53,12 +63,14 @@ class ImportAssets:
         observations: ObservationRepository,
         storage: MediaStorage,
         metadata: MetadataReader,
+        visual_indexer: AssetVisualIndexer | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets
         self._observations = observations
         self._storage = storage
         self._metadata = metadata
+        self._visual_indexer = visual_indexer
         self._clock = clock
 
     def execute(self, request: ImportRequest) -> ImportResult:
@@ -73,6 +85,7 @@ class ImportAssets:
                 media_type=existing.media_type,
                 status=existing.status,
                 deduplicated=True,
+                indexed=self._index_visual(existing),
             )
 
         asset_id = _new_id("asset")
@@ -118,4 +131,10 @@ class ImportAssets:
             media_type=media_type,
             status=asset.status,
             deduplicated=False,
+            indexed=self._index_visual(asset),
         )
+
+    def _index_visual(self, asset: Asset) -> bool:
+        if self._visual_indexer is None:
+            return False
+        return self._visual_indexer.index(asset).indexed

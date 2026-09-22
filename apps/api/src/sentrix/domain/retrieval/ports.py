@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from sentrix.domain.media.models import Asset
+
 
 @dataclass(frozen=True, slots=True)
 class VectorRecord:
@@ -108,15 +110,36 @@ class VectorIndex(Protocol):
     def status(self) -> VectorIndexStatus: ...
 
 
+@dataclass(frozen=True, slots=True)
+class VisualIndexOutcome:
+    """一次视觉索引的结果。三个字段让「没索引上」和「为什么」都能一路传到接口。"""
+
+    indexed: bool
+    mirrored: bool = False
+    reason: str = ""
+
+
+class AssetVisualIndexer(Protocol):
+    """把一张 Asset 变成视觉记忆。导入用例依赖它，不依赖具体的嵌入器/索引。"""
+
+    def index(self, asset: Asset) -> VisualIndexOutcome: ...
+
+
 class VisualEmbedder(Protocol):
     """跨模态视觉嵌入：同一空间里的文本查询向量与图像向量。
 
     只管两个方向，不带设备、批次、模型元数据——``model_id`` 与 ``dimension``
     是索引兼容性校验的全部依据。
+
+    这两个成员声明成只读 property 而不是裸属性：适配器的实现是 property，
+    mypy 的 ``arg-type`` 不允许一个只读 property 去满足「可写变量」的协议约定。
     """
 
-    model_id: str
-    dimension: int
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def dimension(self) -> int: ...
 
     def embed_image(self, path: Path) -> Sequence[float]: ...
 

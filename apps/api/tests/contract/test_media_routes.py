@@ -3,6 +3,8 @@ import io
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from sentrix.domain.retrieval.scheme import IMAGE_MODEL
+
 
 def jpeg_bytes(size=(64, 48), color="green") -> bytes:
     buffer = io.BytesIO()
@@ -84,3 +86,41 @@ def test_asset_preview_is_jpeg(client: TestClient):
 def test_missing_asset_is_404(client: TestClient):
     assert client.get("/api/v1/assets/asset_nope").status_code == 404
     assert client.get("/api/v1/assets/asset_nope/file").status_code == 404
+
+
+def test_import_reports_and_writes_the_visual_vector(client: TestClient):
+    """导入成功必须真的留下视觉向量，并且这件事在响应里看得见。
+
+    1.0 的同类失败（223 张图没有任何视觉向量）在接口上完全没有痕迹，只能事后
+    手工清点；``indexed`` 就是补上的那个痕迹。
+    """
+    body = client.post(
+        "/api/v1/media/import",
+        files={"file": ("a.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"scope_id": "album1"},
+    ).json()
+
+    assert body["indexed"] is True
+
+    container = client.app.state.container
+    assert (
+        container.vector_repository.has_vector(
+            space="visual",
+            source_type="asset",
+            source_id=body["asset_id"],
+            model_name=IMAGE_MODEL,
+        )
+        is True
+    )
+
+
+def test_reimport_does_not_duplicate_the_visual_vector(client: TestClient):
+    payload = jpeg_bytes()
+    for _ in range(2):
+        client.post(
+            "/api/v1/media/import",
+            files={"file": ("a.jpg", payload, "image/jpeg")},
+            data={"scope_id": "album1"},
+        )
+
+    assert client.app.state.container.vector_repository.count(space="visual") == 1

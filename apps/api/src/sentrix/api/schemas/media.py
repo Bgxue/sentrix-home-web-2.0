@@ -9,6 +9,9 @@ class ImportResponse(BaseModel):
     media_type: str
     status: str
     deduplicated: bool
+    # 有没有真的写成视觉向量。1.0 的「导入成功但没有向量」在接口上完全不可见，
+    # 只能在事后手工清点库里少了多少条才发现。
+    indexed: bool
 
 
 class AssetSummary(BaseModel):

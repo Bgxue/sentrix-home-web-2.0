@@ -254,6 +254,9 @@ components:
         deduplicated:
           type: boolean
           title: Deduplicated
+        indexed:
+          type: boolean
+          title: Indexed
       type: object
       required:
       - asset_id
@@ -261,6 +264,7 @@ components:
       - media_type
       - status
       - deduplicated
+      - indexed
       title: ImportResponse
     ValidationError:
       properties:

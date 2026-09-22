@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
+from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
 from sentrix.domain.media.models import Asset
 
@@ -51,6 +52,11 @@ async def import_media(
         observations=container.observation_repository,
         storage=container.media_storage,
         metadata=container.metadata_reader,
+        visual_indexer=IndexAssetVisual(
+            embedder=container.visual_embedder,
+            vectors=container.vector_repository,
+            index=container.vector_index,
+        ),
     )
     result = use_case.execute(
         ImportRequest(
@@ -66,6 +72,7 @@ async def import_media(
         media_type=result.media_type.value,
         status=result.status.value,
         deduplicated=result.deduplicated,
+        indexed=result.indexed,
     )
 
 
