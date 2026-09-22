@@ -410,6 +410,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assistant/turns/{turn_id}:
+    get:
+      tags:
+      - assistant
+      summary: Get Turn
+      description: 'B3.4：轮询异步回合的实时进度与最终结果（1.0 ``app.py:2938`` 的契约）。
+
+
+        这条端点给的是**与 SSE 完全等价**的信息：同样的进度事件、同样的终态载荷。浏览器的
+
+        主路径仍然是那条 SSE（``useTurnStream`` 先开 ``EventSource``，断了才回退到这里，
+
+        与 1.0 ``src/app.js:1482`` 的顺序一致）；``EventSource`` 用不了的调用方——评测机、
+
+        脚本、CI——只有这一条路。'
+      operationId: get_turn_api_v1_assistant_turns__turn_id__get
+      parameters:
+      - name: turn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Turn Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnPollResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -499,6 +535,54 @@ components:
       required:
       - file
       title: Body_import_media_api_v1_media_import_post
+    CompleteEventPayload:
+      properties:
+        type:
+          type: string
+          title: Type
+          default: complete
+        turn_id:
+          type: string
+          title: Turn Id
+        status:
+          type: string
+          title: Status
+        termination_reason:
+          type: string
+          title: Termination Reason
+        answer:
+          type: string
+          title: Answer
+        attachments:
+          items:
+            $ref: '#/components/schemas/AttachmentSummary'
+          type: array
+          title: Attachments
+        requirements:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Requirements
+        error:
+          type: string
+          title: Error
+          default: ''
+      type: object
+      required:
+      - turn_id
+      - status
+      - termination_reason
+      - answer
+      - attachments
+      - requirements
+      title: CompleteEventPayload
+      description: '``complete`` 事件的 ``data``。
+
+
+        与 1.0 的一处刻意差异：**不再把整条 ``public_progress`` 又塞一遍**。1.0 的 ``complete``
+
+        帧把已经逐条发过的进度事件完整重发（``app.py:2989``），是纯粹的带宽浪费。'
     ConversationDetailResponse:
       properties:
         conversation:
@@ -636,6 +720,45 @@ components:
       - turn_id
       - created_at
       title: MessageSummary
+    ProgressEventPayload:
+      properties:
+        text:
+          type: string
+          title: Text
+        status:
+          type: string
+          title: Status
+        stage:
+          type: string
+          title: Stage
+        step_index:
+          type: integer
+          title: Step Index
+        timestamp:
+          type: string
+          title: Timestamp
+        kind:
+          type: string
+          title: Kind
+          default: status
+        payload:
+          additionalProperties: true
+          type: object
+          title: Payload
+      type: object
+      required:
+      - text
+      - status
+      - stage
+      - step_index
+      - timestamp
+      title: ProgressEventPayload
+      description: '``progress`` 事件的 ``data``。
+
+
+        字段集沿用 1.0（``runtime.py:1664-1687``），并补上 ``kind`` 与 ``payload``。
+
+        ``step_index`` 同时是 SSE 的 ``id:`` 值，于是 ``Last-Event-ID`` 断线续传天然可用。'
     RenameConversationRequest:
       properties:
         title:
@@ -743,6 +866,49 @@ components:
       - conversation_id
       - status
       title: StartTurnResponse
+    TurnPollResponse:
+      properties:
+        turn_id:
+          type: string
+          title: Turn Id
+        status:
+          type: string
+          title: Status
+        public_progress:
+          items:
+            $ref: '#/components/schemas/ProgressEventPayload'
+          type: array
+          title: Public Progress
+        result:
+          anyOf:
+          - $ref: '#/components/schemas/CompleteEventPayload'
+          - type: 'null'
+        error:
+          type: string
+          title: Error
+          default: ''
+      type: object
+      required:
+      - turn_id
+      - status
+      - public_progress
+      title: TurnPollResponse
+      description: '``GET /api/v1/assistant/turns/{turn_id}`` 的响应——1.0 ``app.py:2938``
+        的 B3.4 契约。
+
+
+        形状照抄 1.0：``turn_id`` / ``status`` / ``public_progress``，终态时多一个 ``result``
+
+        （就是 SSE 的 ``complete`` 载荷），失败时 ``error`` 里带上原因。
+
+
+        为什么这条端点在 2.0 必须存在：SSE 是浏览器专用的（``EventSource``），非浏览器调用方
+
+        只能轮询。1.0 的 ``services/photobench`` 就是靠 ``wait_for_assistant_turn`` 每 0.5 秒
+
+        打这条端点（``benchmark_orchestrator.py:881``）把一个回合跑完的——8091 访问日志里
+
+        ``GET /api/assistant/turn/{id}`` 被调了 668,552 次，而 SSE 端点只有 62 次。'
     TurnSummary:
       properties:
         id:

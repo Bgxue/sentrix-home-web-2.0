@@ -109,3 +109,22 @@ class CompleteEventPayload(BaseModel):
     attachments: list[AttachmentSummary]
     requirements: list[dict[str, Any]]
     error: str = ""
+
+
+class TurnPollResponse(BaseModel):
+    """``GET /api/v1/assistant/turns/{turn_id}`` 的响应——1.0 ``app.py:2938`` 的 B3.4 契约。
+
+    形状照抄 1.0：``turn_id`` / ``status`` / ``public_progress``，终态时多一个 ``result``
+    （就是 SSE 的 ``complete`` 载荷），失败时 ``error`` 里带上原因。
+
+    为什么这条端点在 2.0 必须存在：SSE 是浏览器专用的（``EventSource``），非浏览器调用方
+    只能轮询。1.0 的 ``services/photobench`` 就是靠 ``wait_for_assistant_turn`` 每 0.5 秒
+    打这条端点（``benchmark_orchestrator.py:881``）把一个回合跑完的——8091 访问日志里
+    ``GET /api/assistant/turn/{id}`` 被调了 668,552 次，而 SSE 端点只有 62 次。
+    """
+
+    turn_id: str
+    status: str
+    public_progress: list[ProgressEventPayload]
+    result: CompleteEventPayload | None = None
+    error: str = ""

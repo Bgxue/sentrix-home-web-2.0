@@ -152,13 +152,27 @@ export async function startTurn(
   });
 }
 
-/**
- * 回合事件的 SSE 地址。
- *
- * 前端**只开这一条连接**：1.0 靠 700ms 轮询 ``GET /api/assistant/turn/{id}`` 拿进度，
- * 产生了 668,490 次请求（占全部流量 73%）。2.0 的后端把进度事件也落了库，断线重连
- * 由 ``Last-Event-ID`` 续上，所以前端没有任何理由再轮询。
- */
+/** 回合事件的 SSE 地址。浏览器侧的主路径，与 1.0 ``src/api.js:66`` 同形。 */
 export function turnEventsUrl(turnId: string): string {
   return `${BASE}/assistant/turns/${turnId}/events`;
+}
+
+export interface AssistantTurnPoll {
+  turn_id: string;
+  status: string;
+  public_progress: AssistantProgressEvent[];
+  result: AssistantCompleteEvent | null;
+  error: string;
+}
+
+/**
+ * 轮询一个回合的状态——1.0 ``src/api.js:64`` 的 ``assistantTurnPoll``，同一条契约。
+ *
+ * 浏览器侧只在 SSE 断掉之后用它（``useTurnStream``，与 1.0 ``src/app.js:1482`` 的
+ * 「优先 SSE、EventSource 不可用时回退」同一个顺序）。它同时也是 ``EventSource``
+ * 用不了的调用方的唯一一条路——1.0 的 ``services/photobench`` 就是靠它跑完每个回合的
+ * （``benchmark_orchestrator.py:881`` 每 0.5 秒一次，8091 日志里 668,552 次）。
+ */
+export async function pollTurn(turnId: string): Promise<AssistantTurnPoll> {
+  return request<AssistantTurnPoll>(`/assistant/turns/${encodeURIComponent(turnId)}`);
 }

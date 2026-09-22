@@ -10,6 +10,15 @@ SSE 的形状与设计 §4.3 一致，沿用 1.0 已验证的两类事件：``pr
 3. **回合终态是真实的。** 1.0 把模型失败、超时、guard 拦截全部压成 ``status="complete"``
    （``app.py:3433``），只有未捕获的 Python 异常才是 ``error``，前端拿到的每一个失败都是
    一个「成功」的帧。2.0 的 ``status`` 直接来自 ``TurnStatus``。
+
+**轮询端点是 1.0 的公开契约，不是它前端走歪了。** S3 曾经把 ``GET /api/assistant/turn/{id}``
+删掉，理由写的是「1.0 的前端一 onerror 就永久降级成 700ms 轮询，于是轮询成了主路径」。
+审计推翻了这条理由：SSE 端点在 1.0 是**能用的**（同一份 SSE 契约 2.0 原样沿用），而 66 万次
+轮询的调用方不是浏览器——``services/photobench`` 的 ``wait_for_assistant_turn``
+（``benchmark_orchestrator.py:881``）是个 ``time.sleep(0.5)`` 的轮询循环，``EventSource``
+对它不可用。8091 访问日志里 ``GET /api/assistant/turn/{id}`` 668,552 次、
+``.../events`` 只有 62 次，而且轮询请求是十几个 ``turn_id`` 交替紧密打出来的，中间没有任何
+浏览器 UI 流量——那是评测机的形状，不是人的形状。于是这里把端点搬回来。
 """
 
 from __future__ import annotations
@@ -35,6 +44,7 @@ from sentrix.api.schemas.assistant import (
     RenameConversationRequest,
     StartTurnRequest,
     StartTurnResponse,
+    TurnPollResponse,
     TurnSummary,
 )
 from sentrix.application.assistant.manage_conversations import ManageConversations
@@ -220,8 +230,10 @@ def start_turn(
     return StartTurnResponse(turn_id=record.id, conversation_id=conversation_id, status=record.status.value)
 
 
-def _format_progress(event: ProgressEvent) -> str:
-    data = ProgressEventPayload(
+def _progress_payload(event: ProgressEvent) -> ProgressEventPayload:
+    """进度事件的载荷。SSE 的 ``progress`` 帧与轮询端的 ``public_progress`` 共用一份——
+    两条传输路径给出的事件形状必须逐字相同，否则「回退到轮询」就不再是等价降级。"""
+    return ProgressEventPayload(
         text=event.text,
         status=event.status.value,
         stage=event.stage.value,
@@ -229,12 +241,12 @@ def _format_progress(event: ProgressEvent) -> str:
         timestamp=event.timestamp,
         kind=event.kind,
         payload=dict(event.payload),
-    ).model_dump()
-    return f"id: {event.step_index}\nevent: progress\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    )
 
 
-def _format_complete(record: TurnRecord) -> str:
-    data = CompleteEventPayload(
+def _complete_payload(record: TurnRecord) -> CompleteEventPayload:
+    """终态载荷。SSE 的 ``complete`` 帧与轮询端的 ``result`` 共用。"""
+    return CompleteEventPayload(
         turn_id=record.id,
         status=record.status.value,
         termination_reason=record.termination_reason,
@@ -244,7 +256,16 @@ def _format_complete(record: TurnRecord) -> str:
             for item in record.attachments
         ],
         requirements=[dict(item) for item in record.requirements],
-    ).model_dump()
+    )
+
+
+def _format_progress(event: ProgressEvent) -> str:
+    data = _progress_payload(event).model_dump()
+    return f"id: {event.step_index}\nevent: progress\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _format_complete(record: TurnRecord) -> str:
+    data = _complete_payload(record).model_dump()
     return f"event: complete\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
@@ -302,3 +323,33 @@ async def turn_events(
             yield _format_complete(record)
 
     return StreamingResponse(body(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+# 失败态在轮询响应里也要给出一句原因——1.0 的调用方读的就是 ``error`` 或 ``reason``
+# （``benchmark_orchestrator.py:900``）。2.0 没有单独的 error 字段可读，用终止原因代替。
+_FAILED_STATUSES = frozenset({"failed", "blocked"})
+
+
+@router.get("/assistant/turns/{turn_id}")
+def get_turn(turn_id: str, container: Container = Depends(get_container)) -> TurnPollResponse:
+    """B3.4：轮询异步回合的实时进度与最终结果（1.0 ``app.py:2938`` 的契约）。
+
+    这条端点给的是**与 SSE 完全等价**的信息：同样的进度事件、同样的终态载荷。浏览器的
+    主路径仍然是那条 SSE（``useTurnStream`` 先开 ``EventSource``，断了才回退到这里，
+    与 1.0 ``src/app.js:1482`` 的顺序一致）；``EventSource`` 用不了的调用方——评测机、
+    脚本、CI——只有这一条路。
+    """
+    record = container.turn_repository.get(turn_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="turn not found")
+
+    terminal = record.status.is_terminal
+    return TurnPollResponse(
+        turn_id=turn_id,
+        status=record.status.value,
+        public_progress=[
+            _progress_payload(event) for event in container.turn_repository.events_after(turn_id, 0)
+        ],
+        result=_complete_payload(record) if terminal else None,
+        error=record.termination_reason if record.status.value in _FAILED_STATUSES else "",
+    )

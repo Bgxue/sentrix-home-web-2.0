@@ -1,12 +1,14 @@
-"""``GET /api/v1/assistant/turns/{id}/events`` 的 SSE 契约。
+"""``GET /api/v1/assistant/turns/{id}/events`` 的 SSE 契约与 ``GET .../{id}`` 的轮询契约。
 
 事件形状沿用 1.0 已验证的两类（``app.py:2986`` / ``:2997``）：``progress`` 与 ``complete``。
 本文件钉住的是 2.0 相对 1.0 的四处修正：
 
-1. 前端不需要轮询就能拿到全过程（1.0 的 ``GET /api/assistant/turn/{id}`` 被调 668,490 次）；
-2. 事件带 ``id:``，断线可以从 ``Last-Event-ID`` 续（1.0 每次重连都从头重发）；
-3. ``complete`` 帧不再把整条进度数组重复一遍（1.0 ``app.py:2989``）；
-4. ``status`` 是真实的终态（1.0 把模型失败、超时、guard 拦截全部压成 ``complete``）。
+1. 事件带 ``id:``，断线可以从 ``Last-Event-ID`` 续（1.0 每次重连都从头重发）；
+2. ``complete`` 帧不再把整条进度数组重复一遍（1.0 ``app.py:2989``）；
+3. ``status`` 是真实的终态（1.0 把模型失败、超时、guard 拦截全部压成 ``complete``）；
+4. 浏览器不必轮询就能拿到全过程。**但轮询端点照搬了回来**——1.0 的 668,552 次轮询来自
+   ``services/photobench`` 的 ``wait_for_assistant_turn``（非浏览器，``EventSource`` 不可用），
+   而不是 1.0 前端的 ``onerror`` 降级；把端点删掉只会让所有非浏览器调用方没法用。
 """
 
 from __future__ import annotations
@@ -94,17 +96,17 @@ def client(settings) -> TestClient:
 
 
 def test_the_stream_ends_by_itself_after_complete(client: TestClient):
-    """一次请求拿完全过程——这就是「前端不轮询」的全部含义。
+    """一次请求拿完全过程——浏览器侧的主路径。
 
-    反向断言：1.0 那个被调了 66 万次的轮询端点 ``GET /api/assistant/turn/{id}``
-    在 2.0 里**不存在**。留着它，前端迟早会回去轮询。
+    轮询端点**同时存在**（见文件末尾的 ``test_the_polling_endpoint_*``）：它不是「回退」，
+    而是 ``EventSource`` 用不了的调用方唯一的路。1.0 的 8091 访问日志里这条端点被调了
+    668,552 次、SSE 只有 62 次，调用方是 ``services/photobench`` 的轮询循环，不是浏览器。
     """
     _conversation_id, turn_id = run_turn(client)
 
     events = read_events(client, turn_id)
 
     assert events[-1]["event"] == "complete"
-    assert client.get(f"/api/v1/assistant/turns/{turn_id}").status_code == 404
 
 
 def test_progress_events_carry_the_designed_field_set(client: TestClient):
@@ -308,3 +310,64 @@ def test_a_finished_turn_is_visible_in_the_conversation_detail(client: TestClien
     assert detail["messages"][1]["content"] == "这是一句回答。"
     assert detail["turns"][0]["status"] == "partial"
     assert detail["turns"][0]["termination_reason"] == "answered_with_gap"
+
+
+# ---- 轮询端点：1.0 app.py:2938 的 B3.4 契约 ---------------------------------
+
+
+def test_the_polling_endpoint_returns_the_1_0_shape(client: TestClient):
+    """``GET /api/v1/assistant/turns/{id}`` 的字段集与 1.0 一致：
+
+    ``turn_id`` / ``status`` / ``public_progress``，终态时多一个 ``result``。
+    """
+    _conversation_id, turn_id = run_turn(client)
+
+    body = client.get(f"/api/v1/assistant/turns/{turn_id}").json()
+
+    assert body["turn_id"] == turn_id
+    assert body["status"] in {
+        "pending",
+        "running",
+        "complete",
+        "partial",
+        "failed",
+        "blocked",
+        "cancelled",
+    }
+    assert isinstance(body["public_progress"], list)
+
+
+def test_the_polling_endpoint_carries_the_same_payload_as_the_complete_frame(client: TestClient):
+    """轮询拿到的终态载荷必须与 SSE 的 ``complete`` 帧**逐字段相同**。
+
+    两条传输给出不同的答案，「回退到轮询」就不再是等价降级——1.0 的
+    ``wait_for_assistant_turn`` 读的正是 ``state["result"]``。
+    """
+    _conversation_id, turn_id = run_turn(client)
+
+    complete = [item for item in read_events(client, turn_id) if item["event"] == "complete"][-1]
+    polled = client.get(f"/api/v1/assistant/turns/{turn_id}").json()
+
+    assert polled["status"] == complete["data"]["status"]
+    assert polled["result"] == complete["data"]
+
+
+def test_the_polling_endpoint_is_404_for_an_unknown_turn(client: TestClient):
+    assert client.get("/api/v1/assistant/turns/turn_does_not_exist").status_code == 404
+
+
+def test_the_polling_endpoint_answers_a_running_turn_without_a_result(client: TestClient):
+    """回合还没跑完时 ``result`` 缺席——1.0 的调用方靠这个判断「继续等」。"""
+    conversation = client.post("/api/v1/assistant/conversations", json={"scope_id": "album1"}).json()
+    started = client.post(
+        f"/api/v1/assistant/conversations/{conversation['id']}/turns",
+        json={"message": "给我看看在海边的照片"},
+    ).json()
+
+    body = client.get(f"/api/v1/assistant/turns/{started['turn_id']}").json()
+
+    # 工作线程可能已经跑完（脚本模型不慢），但两种状态都必须是自洽的。
+    if body["status"] in {"pending", "running"}:
+        assert body["result"] is None
+    else:
+        assert body["result"] is not None
