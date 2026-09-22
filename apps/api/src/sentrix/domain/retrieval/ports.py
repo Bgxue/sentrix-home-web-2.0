@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from sentrix.domain.media.models import Asset
+from sentrix.domain.media.models import Asset, Observation
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +56,45 @@ class VectorIndexStatus:
     available: bool
     degraded: bool = False
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LexicalTerm:
+    """``observation_search_terms`` 的一行。``field_type`` 见 domain/retrieval/lexical.py。"""
+
+    observation_id: str
+    asset_id: str
+    scope_id: str
+    field_type: str
+    normalized_value: str
+    confidence: float
+    source_type: str
+    source_revision: int
+
+
+class LexicalIndex(Protocol):
+    """词法投影的写入侧。**派生表**：可整表重建，每一行追得回某条 Observation 的某个 revision。
+
+    1.0 把这两个方法放在 ``RetrievalIndex`` 一个类里（``retrieval_indexes.py:105-294``）。
+    2.0 只声明 S4 真正会调的两件事：按 observation 增量刷新、按 scope 全量重建。
+    1.0 的 ``search``（LIKE 子串回退）不移植——那是 FTS5 缺席时的降级路径，而
+    ``make ci`` 已经在实测 FTS5 可用（``sqlite3`` 自带），留一条永不执行的降级分支
+    只会让人以为它被验证过。
+    """
+
+    def refresh_from_observation(self, observation: Observation) -> int: ...
+
+    def rebuild_scope(self, scope_id: str) -> int: ...
+
+    def count(self, scope_id: str | None = None) -> int: ...
+
+
+class LexicalSearch(Protocol):
+    """词法投影的读取侧。``token_hits`` 是 ``asset_id → 命中 token 数``。"""
+
+    def search_fts(self, query: str, *, scope_id: str | None, limit: int) -> Sequence[tuple[str, int]]: ...
+
+    def exact_assets(self, whole_query: str, *, scope_id: str | None) -> frozenset[str]: ...
 
 
 class VectorRepository(Protocol):

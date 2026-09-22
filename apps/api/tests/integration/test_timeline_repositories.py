@@ -25,6 +25,7 @@ from sentrix.infrastructure.persistence.repositories.assets import (
 )
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
+from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
 
 NOW = datetime(2017, 10, 5, 12, 0, 0, tzinfo=UTC)
 XIAOSHAN = GpsPoint(30.1839, 120.2642)
@@ -487,3 +488,100 @@ def test_supersede_others_is_scoped(facts: SqliteFactRepository):
     assert changed == 1
     assert facts.get("fact_a").status is FactStatus.SUPERSEDED
     assert facts.get("fact_b").status is FactStatus.ACTIVE
+
+
+# ---- 词法投影 --------------------------------------------------------------------
+
+
+def test_lexical_refresh_writes_terms_and_fts(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+):
+    add_asset(assets)
+    observation = add_observation(observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations)
+
+    written = index.refresh_from_observation(observation)
+
+    assert written > 0
+    hits = dict(index.search_fts("拍照", scope_id="album1", limit=10))
+    assert hits == {"asset_1": 1}
+
+
+def test_lexical_single_character_query_returns_nothing(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+):
+    add_asset(assets)
+    observation = add_observation(observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index.refresh_from_observation(observation)
+
+    assert index.search_fts("色", scope_id="album1", limit=10) == []
+
+
+def test_lexical_exact_assets_requires_full_equality(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+):
+    add_asset(assets)
+    observation = add_observation(observations, place="萧山区")
+    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index.refresh_from_observation(observation)
+
+    assert index.exact_assets("萧山区", scope_id="album1") == frozenset({"asset_1"})
+    assert index.exact_assets("萧山", scope_id="album1") == frozenset()
+
+
+def test_lexical_refresh_drops_terms_removed_by_re_enrichment(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+):
+    """重新富集把 objects 收敛掉之后，旧词条必须消失——增量更新做不到这件事。"""
+    add_asset(assets)
+    observation = add_observation(observations)
+    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index.refresh_from_observation(observation)
+    assert index.search_fts("长椅", scope_id="album1", limit=10)
+
+    from sentrix.domain.media.ports import ObservationSemantics
+
+    enriched = observations.enrich(
+        observation.id, semantics=ObservationSemantics(caption="只有相机", objects=("相机",))
+    )
+    index.refresh_from_observation(enriched)
+
+    assert index.search_fts("长椅", scope_id="album1", limit=10) == []
+    assert index.search_fts("相机", scope_id="album1", limit=10)
+
+
+def test_lexical_rebuild_scope_does_not_wipe_other_scopes(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+):
+    """1.0 的 scoped rebuild 会先清空整张 FTS 再只补一个 scope。"""
+    add_asset(assets, "asset_1")
+    add_asset(assets, "asset_2", scope_id="album2")
+    add_observation(observations, "obs_1", asset_id="asset_1", scope_id="album1")
+    add_observation(observations, "obs_2", asset_id="asset_2", scope_id="album2", place="秦皇岛市")
+    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index.rebuild_scope("album1")
+    index.rebuild_scope("album2")
+
+    index.rebuild_scope("album1")
+
+    # 断言的是**另一个 scope 的行还在**，不是命中几个 token——「秦皇岛」会拆成
+    # 整串 + 两个 bigram，具体命中数属于 tokenization 的事，不是这条用例要验的。
+    hits = index.search_fts("秦皇岛", scope_id="album2", limit=10)
+    assert hits and hits[0][0] == "asset_2"
+    assert index.search_fts("秦皇岛", scope_id="album1", limit=10) == []
+
+
+def test_lexical_count_is_scoped(
+    migrations_ready_db: Database, observations: SqliteObservationRepository, assets
+):
+    add_asset(assets, "asset_1")
+    add_asset(assets, "asset_2", scope_id="album2")
+    add_observation(observations, "obs_1", asset_id="asset_1", scope_id="album1")
+    add_observation(observations, "obs_2", asset_id="asset_2", scope_id="album2")
+    index = SqliteLexicalIndex(migrations_ready_db, observations)
+    index.refresh_from_observation(observations.get("obs_1"))
+    index.refresh_from_observation(observations.get("obs_2"))
+
+    assert index.count("album1") > 0
+    assert index.count("album1") < index.count()
