@@ -5479,13 +5479,13 @@ curl -s "http://127.0.0.1:8391/api/v1/search?q=%E6%A1%A5&scope_id=album1&limit=1
 
 ## 已知边界与不做的事
 
-| 项 | 说明 |
-|---|---|
-| 没有相关性阈值 | 见 Task 31。校准层（`NeutralProbe` / per-space 阈值）属于 S6 |
-| 删资产不清向量 | `memory_vectors` 与 Qdrant 里的行会留下。检索侧会丢弃找不到资产的命中并记日志（产品硬约束第 5 条：只返回**可打开的**原图） |
-| 向量只增不改 | 换模型意味着重建索引。2.0 不提供"用另一套模型再嵌一遍"的路径——那正是 1.0 出问题的地方 |
-| 导入是同步的 | 一张图 GPU 约 65ms（实测 1,589 张 103 秒）。批量导入大相册会阻塞请求，S4 再谈后台作业 |
-| 没有 HNSW | 设计里 `data/ann/` 是另一条索引路径，本切片只用 Qdrant + SQLite 精确回扫 |
+| 项 | 说明 | 核实（对实现） |
+|---|---|---|
+| 没有相关性阈值 | 见 Task 31。校准层（`NeutralProbe` / per-space 阈值）属于 S6 | ✅ 全仓无 `threshold` / `min_score` / `cutoff` / `NeutralProbe` |
+| 删资产不清向量 | `memory_vectors` 与 Qdrant 里的行会留下。检索侧会丢弃找不到资产的命中并记日志（产品硬约束第 5 条：只返回**可打开的**原图） | ✅ 丢弃+留痕在 `api/routes/search.py`（`asset_repository.get` 为 `None` → `log.warning` + `continue`）；全仓无删除端点、无 `delete`/`remove` 方法，所以「留下」目前无从触发 |
+| 向量只增不改 | 换模型意味着重建索引。2.0 不提供"用另一套模型再嵌一遍"的路径——那正是 1.0 出问题的地方 | ✅ `index_visual.py` 的 `has_vector` → `already_indexed` 短路（重复导入不重嵌）；`scheme.py` 不读 env，没有换模型的入口 |
+| 导入是同步的 | 一张图 GPU 约 65ms（实测 1,589 张 103 秒）。批量导入大相册会阻塞请求，S4 再谈后台作业 | ✅ `media.py` 的 `async def import_media` 只 `await` 读文件，随后直接调用同步的 `use_case.execute`，无 `to_thread` / `run_in_threadpool`——确实占着事件循环 |
+| 没有 HNSW | 设计里 `data/ann/` 是另一条索引路径，本切片只用 Qdrant + SQLite 精确回扫 | ✅ 全仓无 `data/ann` / `.hnsw` 的代码路径，只在解释 1.0 行为的 docstring 里出现 |
 
 ## 验证记录
 
@@ -5542,6 +5542,8 @@ qdrant-client 1.19.1，自带 py.typed
 cn-clip 1.6.0，无 py.typed（需要 mypy override）
 ~/.cache/clip/clip_cn_vit-l-14.pt  1,625,135,766 字节
 chinese-clip 加载 3.1s，768 维；GPU 上单张图约 65ms（1,589 张 103s）
+  ⚠ 这一行的三个数是**规划时在隔离副本上、torch 2.5.1+cu124 下**测的；本机解析到 2.14.0+cu130
+  后未重测。拿它们做性能预期前，先在目标机上重测一次。
 Qdrant 本地模式第二个进程打开同一目录：
   RuntimeError: Storage folder <path> is already accessed by another instance of Qdrant client.
 ```
