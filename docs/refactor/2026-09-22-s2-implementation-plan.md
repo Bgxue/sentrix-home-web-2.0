@@ -335,7 +335,7 @@ ERROR apps/api/tests/unit/test_fusion.py
 `apps/api/src/sentrix/domain/retrieval/__init__.py`:
 
 ```python
-"""检索域：查询契约、候选融合、向量端口与相似度。纯规则，零 IO。"""
+"""检索域：查询契约、候选融合与排序规则。纯规则，零 IO。"""
 
 from sentrix.domain.retrieval.fusion import (
     ANCHOR_BOOST,
@@ -346,36 +346,13 @@ from sentrix.domain.retrieval.fusion import (
     weighted_rrf_score,
 )
 from sentrix.domain.retrieval.models import CandidateHit, FusedCandidate
-from sentrix.domain.retrieval.ports import (
-    AssetVisualIndexer,
-    VectorHit,
-    VectorIndex,
-    VectorIndexStatus,
-    VectorIndexUnavailable,
-    VectorRecord,
-    VectorRepository,
-    VisualEmbedder,
-    VisualIndexOutcome,
-)
-from sentrix.domain.retrieval.similarity import cosine_similarity, dimension_matches
 
 __all__ = [
     "ANCHOR_BOOST",
     "DEFAULT_CHANNEL_WEIGHTS",
     "RRF_K",
-    "AssetVisualIndexer",
     "CandidateHit",
     "FusedCandidate",
-    "VectorHit",
-    "VectorIndex",
-    "VectorIndexStatus",
-    "VectorIndexUnavailable",
-    "VectorRecord",
-    "VectorRepository",
-    "VisualEmbedder",
-    "VisualIndexOutcome",
-    "cosine_similarity",
-    "dimension_matches",
     "evidence_class_for",
     "fuse",
     "weighted_rrf_score",
@@ -754,16 +731,6 @@ def test_metadata_round_trips(repository: SqliteVectorRepository):
     hits = repository.search_exact(space="visual", vector=(1.0, 0.0, 0.0), limit=5)
 
     assert hits[0].metadata == {"observation_id": "obs_1"}
-
-
-def test_count_filters_by_model_name(repository: SqliteVectorRepository):
-    """应用层要拿这个口径去和 Qdrant 的 collection 计数比对，必须能按模型过滤。"""
-    repository.upsert(record("asset_new", (1.0, 0.0, 0.0), model_name=MODEL))
-    repository.upsert(record("asset_old", (1.0, 0.0, 0.0), model_name="ViT-B-32"))
-
-    assert repository.count(space="visual") == 2
-    assert repository.count(space="visual", model_name=MODEL) == 1
-    assert repository.count(space="visual", model_name="不存在") == 0
 ```
 `apps/api/tests/unit/test_similarity.py`:
 
@@ -1331,7 +1298,7 @@ ci: 全部通过
 
 ## Task 27: Qdrant 派生索引适配器
 
-**依赖：** Task 26（`VectorIndex` 端口与 `VectorIndexUnavailable` 已定义）。
+**依赖：** Task 26（`VectorIndex` 端口已定义）；Step 1 在本任务补 `VectorIndexUnavailable`。
 
 **Files:**
 - Create: `apps/api/src/sentrix/infrastructure/vector/__init__.py`
@@ -1339,6 +1306,8 @@ ci: 全部通过
 - Create: `apps/api/tests/integration/test_qdrant_index.py`
 - Modify: `apps/api/src/sentrix/config.py`
 - Modify: `apps/api/src/sentrix/bootstrap/container.py`
+- Modify: `apps/api/src/sentrix/domain/retrieval/ports.py`（补 `VectorIndexUnavailable`）
+- Modify: `apps/api/src/sentrix/domain/retrieval/__init__.py`（导出 `VectorIndexUnavailable`）
 - Modify: `docs/architecture/module-map.md`
 - Modify: `docs/refactor/capability-map.jsonl`
 
@@ -1348,7 +1317,186 @@ ci: 全部通过
 
 另外两处与 1.0 的差异：collection 按 `(space, model, dimension)` 分而不是按 scope 分（1.0 在生产上长到 634 个 collection）；`status()` / `count()` 是端口的一部分，让"索引落后于权威"可判定（1.0 的 `data/ann/visual.hnsw` 只有 1,170 条而真实 10,590 条，就是因为没人比对过这两个数）。
 
-- [ ] **Step 1: 先写失败测试**
+- [ ] **Step 1: 在 ports.py 补 `VectorIndexUnavailable`**
+
+`VectorIndexUnavailable` 是「派生索引不可用」这个**预期内失败**的类型化出口。
+它必须在适配器之前定义好——下一步的测试就从 `ports` 里 import 它，而不是从适配器里，
+所以缺了它红灯会变成 `ImportError` 而不是 `ModuleNotFoundError`，指错方向。
+
+`apps/api/src/sentrix/domain/retrieval/ports.py`（**替换为**）:
+
+```python
+"""检索域端口：权威向量存储、派生向量索引、视觉嵌入器。
+
+三者的分工是 1.0 已经验证过的契约，2.0 原样保留：
+
+- ``VectorRepository`` 是**权威**（SQLite 里的 memory_vectors），写入必须先到它；
+- ``VectorIndex`` 是**派生镜像**（Qdrant），可重建、可缺席；
+- 索引缺席或锁被占用时，检索必须回退到权威存储，并把「正在降级」这件事报出去。
+
+1.0 的教训是降级被写进了日志但没人看：Qdrant 目录锁被 8091 独占时，第二个进程
+只打印一行 ``vector search degrades to SQLite full scans``，接口照常返回空结果。
+所以这里的 ``VectorIndexStatus`` 是端口的一部分，降级原因必须能一路传到 HTTP 响应。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class VectorRecord:
+    """一条待写入的向量。``(space, source_type, source_id, model_name)`` 唯一。"""
+
+    scope_id: str
+    space: str
+    source_type: str
+    source_id: str
+    model_name: str
+    vector: tuple[float, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def dimension(self) -> int:
+        return len(self.vector)
+
+
+@dataclass(frozen=True, slots=True)
+class VectorHit:
+    source_id: str
+    scope_id: str
+    source_type: str
+    model_name: str
+    score: float
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class VectorIndexStatus:
+    """索引健康度。``degraded`` 为真时必须是可行动的信息，不是一个布尔摆设。"""
+
+    backend: str
+    available: bool
+    degraded: bool = False
+    reason: str = ""
+
+
+class VectorRepository(Protocol):
+    """权威向量存储。SQLite 是唯一实现，也是索引重建的数据来源。"""
+
+    def upsert(self, record: VectorRecord) -> None: ...
+
+    def has_vector(self, *, space: str, source_type: str, source_id: str, model_name: str) -> bool: ...
+
+    def search_exact(
+        self,
+        *,
+        space: str,
+        vector: Sequence[float],
+        limit: int,
+        scope_id: str | None = None,
+        model_name: str | None = None,
+    ) -> Sequence[VectorHit]: ...
+
+    def count(self, *, space: str) -> int: ...
+
+
+class VectorIndexUnavailable(RuntimeError):
+    """派生索引不可用（目录被占用、权限、磁盘满）。
+
+    这是**预期内**的失败，所以必须是一个调用方能按类型捕获的异常，而不是
+    「返回 0 / 返回空列表」——后者在调用点看不出区别，1.0 的静默降级就是这么来的。
+    """
+
+
+class VectorIndex(Protocol):
+    """派生向量索引。缺席不是错误，但必须被看见。
+
+    ``upsert`` / ``search`` / ``count`` 在索引不可用时抛 ``VectorIndexUnavailable``，
+    由 application 层决定是回退到权威存储还是把错误暴露出去——适配器不替它决定。
+    """
+
+    def upsert(self, records: Sequence[VectorRecord]) -> int: ...
+
+    def search(
+        self,
+        *,
+        space: str,
+        vector: Sequence[float],
+        limit: int,
+        scope_id: str | None = None,
+        model_name: str | None = None,
+    ) -> Sequence[VectorHit]: ...
+
+    def count(self, *, space: str, model_name: str | None = None) -> int: ...
+
+    def status(self) -> VectorIndexStatus: ...
+
+
+class VisualEmbedder(Protocol):
+    """跨模态视觉嵌入：同一空间里的文本查询向量与图像向量。
+
+    只管两个方向，不带设备、批次、模型元数据——``model_id`` 与 ``dimension``
+    是索引兼容性校验的全部依据。
+    """
+
+    model_id: str
+    dimension: int
+
+    def embed_image(self, path: Path) -> Sequence[float]: ...
+
+    def embed_query(self, text: str) -> Sequence[float]: ...
+```
+`apps/api/src/sentrix/domain/retrieval/__init__.py`（**替换为**）:
+
+```python
+"""检索域：查询契约、候选融合、向量端口与相似度。纯规则，零 IO。"""
+
+from sentrix.domain.retrieval.fusion import (
+    ANCHOR_BOOST,
+    DEFAULT_CHANNEL_WEIGHTS,
+    RRF_K,
+    evidence_class_for,
+    fuse,
+    weighted_rrf_score,
+)
+from sentrix.domain.retrieval.models import CandidateHit, FusedCandidate
+from sentrix.domain.retrieval.ports import (
+    VectorHit,
+    VectorIndex,
+    VectorIndexStatus,
+    VectorIndexUnavailable,
+    VectorRecord,
+    VectorRepository,
+    VisualEmbedder,
+)
+from sentrix.domain.retrieval.similarity import cosine_similarity, dimension_matches
+
+__all__ = [
+    "ANCHOR_BOOST",
+    "DEFAULT_CHANNEL_WEIGHTS",
+    "RRF_K",
+    "CandidateHit",
+    "FusedCandidate",
+    "VectorHit",
+    "VectorIndex",
+    "VectorIndexStatus",
+    "VectorIndexUnavailable",
+    "VectorRecord",
+    "VectorRepository",
+    "VisualEmbedder",
+    "cosine_similarity",
+    "dimension_matches",
+    "evidence_class_for",
+    "fuse",
+    "weighted_rrf_score",
+]
+```
+
+- [ ] **Step 2: 先写失败测试**
 
 `apps/api/tests/integration/test_qdrant_index.py`:
 
@@ -1533,7 +1681,7 @@ def test_2_0_qdrant_dir_is_not_1_0_s(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert settings.qdrant_dir != Path("/home/asus/Github/Sentrix-Home-Web/data/qdrant")
 ```
 
-- [ ] **Step 2: 运行测试，确认红灯**
+- [ ] **Step 3: 运行测试，确认红灯**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_qdrant_index.py -q -p no:warnings`
 
@@ -1545,7 +1693,7 @@ ERROR apps/api/tests/integration/test_qdrant_index.py
 !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
 ```
 
-- [ ] **Step 3: 写适配器**
+- [ ] **Step 4: 写适配器**
 
 `apps/api/src/sentrix/infrastructure/vector/__init__.py`:
 
@@ -1775,7 +1923,7 @@ class QdrantVectorIndex:
         )
 ```
 
-- [ ] **Step 4: config 加 `qdrant_dir`**
+- [ ] **Step 5: config 加 `qdrant_dir`**
 
 `apps/api/src/sentrix/config.py`（**替换为**）:
 
@@ -1847,7 +1995,7 @@ def load_settings() -> Settings:
     return Settings()
 ```
 
-- [ ] **Step 5: 容器装配**
+- [ ] **Step 6: 容器装配**
 
 把 `container.py` 改成（相对 Task 26 只多了 `vector_index` 一项）：
 
@@ -1922,7 +2070,7 @@ class Container:
 ```
 
 
-- [ ] **Step 6: 运行测试，确认绿灯**
+- [ ] **Step 7: 运行测试，确认绿灯**
 
 Run: `.venv/bin/pytest apps/api/tests/integration/test_qdrant_index.py -p no:warnings`
 
@@ -1935,7 +2083,7 @@ Expected:
 
 其中 `test_locked_directory_degrades_loudly` 会真的 fork 一个子进程占住目录再断言降级——那是本切片最不能省的一条。
 
-- [ ] **Step 7: 更新 module-map.md**
+- [ ] **Step 8: 更新 module-map.md**
 
 加入两行：
 
@@ -1944,18 +2092,25 @@ Expected:
 | `sentrix/infrastructure/vector/qdrant_index.py` | `QdrantVectorIndex`：嵌入式 Qdrant 派生索引；目录被占用时抛 `VectorIndexUnavailable` 而不是静默降级 | infrastructure | `sentrix/domain/retrieval/ports.py` | `sentrix/bootstrap/container.py` |
 ```
 
+并**改旧行**（反向依赖，漏改就红）：
+
+```markdown
+| `sentrix/bootstrap/container.py` | 唯一依赖装配点；只有这里构造适配器 | bootstrap | `sentrix/config.py`、`sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/image_io.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/database.py`、`sentrix/infrastructure/persistence/repositories/assets.py`、`sentrix/infrastructure/persistence/repositories/spaces.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` | `sentrix/api/deps.py`、`sentrix/api/routes/media.py`、`sentrix/main.py` |
+| `sentrix/domain/retrieval/ports.py` | 向量端口：`VectorRepository`（权威）/ `VectorIndex`（派生镜像）/ `VisualEmbedder`（跨模态），以及 `VectorRecord` / `VectorHit` / `VectorIndexStatus` | domain | — | `sentrix/domain/retrieval/__init__.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` |
+```
+
 并改旧行：`sentrix/domain/retrieval/ports.py` 的「被谁依赖」加上 `sentrix/infrastructure/vector/qdrant_index.py`；`sentrix/bootstrap/container.py` 的「依赖谁」加上 `sentrix/infrastructure/vector/qdrant_index.py`。
 
 Run: `.venv/bin/python scripts/check_module_map.py`
 Expected: `module-map: 0 个问题`
 
-- [ ] **Step 8: 登记能力**
+- [ ] **Step 9: 登记能力**
 
 ```json
 {"capability":"Qdrant 派生向量索引","origin_kind":"adapted","source_commit":"2d2cee7c","source_path":"backend/qdrant_memory.py","source_symbol":"QdrantMemoryIndex.upsert","target_path":"apps/api/src/sentrix/infrastructure/vector/qdrant_index.py","verification":"apps/api/tests/integration/test_qdrant_index.py","status":"verified"}
 ```
 
-- [ ] **Step 9: 全量门禁**
+- [ ] **Step 10: 全量门禁**
 
 Run: `make ci`
 
@@ -2464,7 +2619,7 @@ Expected:
 ```markdown
 | `sentrix/domain/retrieval/scheme.py` | 钉死的嵌入方案常量（模型名/维度/space）；不读 env，2.0 不提供切换开关 | domain | — | `sentrix/infrastructure/models/chinese_clip.py` |
 | `sentrix/infrastructure/models/__init__.py` | 包标记 | infrastructure | — | — |
-| `sentrix/infrastructure/models/chinese_clip.py` | `ChineseClipVisualEmbedder`：进程内 Chinese-CLIP 视觉嵌入，GPU 优先、可退 CPU | infrastructure | `sentrix/domain/retrieval/scheme.py`、`sentrix/infrastructure/media/image_io.py` | `sentrix/bootstrap/container.py` |
+| `sentrix/infrastructure/models/chinese_clip.py` | `ChineseClipVisualEmbedder`：进程内 Chinese-CLIP 视觉嵌入，GPU 优先、可退 CPU | infrastructure | `sentrix/domain/retrieval/__init__.py`、`sentrix/domain/retrieval/scheme.py`、`sentrix/infrastructure/media/image_io.py` | `sentrix/bootstrap/container.py` |
 ```
 
 并改旧行：`sentrix/domain/retrieval/__init__.py` 的「被谁依赖」加 `sentrix/infrastructure/models/chinese_clip.py`；`sentrix/infrastructure/media/image_io.py` 的「被谁依赖」加 `sentrix/infrastructure/models/chinese_clip.py`；`sentrix/bootstrap/container.py` 的「依赖谁」加 `sentrix/infrastructure/models/chinese_clip.py`。
@@ -4123,7 +4278,11 @@ class RetrieveVisual:
 
 ```python
     def count(self, *, space: str, model_name: str | None = None) -> int:
-        # 应用层要拿这个口径去和 Qdrant 的 collection 计数比对
+        """按 (space, 可选 model) 计数。
+
+        模型维度必须可选且**默认不过滤**：应用层要用同一个口径去和 Qdrant 的
+        collection 计数比对，两边只要有一边多带了过滤条件，比对就恒不成立。
+        """
         sql = "SELECT COUNT(*) FROM memory_vectors WHERE space = ?"
         params: list[Any] = [space]
         if model_name:
@@ -4185,6 +4344,7 @@ ci: 全部通过
 - Create: `apps/api/src/sentrix/api/schemas/search.py`
 - Create: `apps/api/src/sentrix/api/routes/search.py`
 - Create: `apps/api/tests/contract/test_search_routes.py`
+- Modify: `apps/api/src/sentrix/api/routes/media.py`（`_to_summary` → `to_summary`）
 - Modify: `apps/api/src/sentrix/main.py`
 - Modify: `packages/contracts/openapi/sentrix-v1.yaml`（重新导出）
 - Modify: `docs/architecture/module-map.md`
