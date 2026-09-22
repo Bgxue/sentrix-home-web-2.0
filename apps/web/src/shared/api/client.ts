@@ -80,6 +80,61 @@ export async function searchAssets(
   return request<SearchResponse>(`/search?${params.toString()}`);
 }
 
+export interface TimelinePhoto {
+  asset_id: string;
+  file_name: string;
+  captured_at: string | null;
+  place: string;
+}
+
+export interface TimelineEvent {
+  id: string;
+  title: string;
+  event_type: string;
+  time_start: string | null;
+  time_end: string | null;
+  admin_district: string;
+  place: string;
+  activity: string;
+  summary: string;
+  confidence: number;
+  photos: TimelinePhoto[];
+}
+
+export interface TimelineDay {
+  date: string;
+  events: TimelineEvent[];
+}
+
+export interface TimelineResponse {
+  scope_id: string;
+  total: number;
+  offset: number;
+  limit: number;
+  days: TimelineDay[];
+}
+
+/**
+ * 时间线。**地点筛选走后端**：前端只把用户输入原样传过去，不解析任何地名。
+ *
+ * `place` 为空时不传这个参数——「用户没筛」与「用户筛了一个空串」是两件事。
+ */
+export async function fetchTimeline(
+  scopeId: string,
+  offset = 0,
+  limit = 20,
+  place = "",
+): Promise<TimelineResponse> {
+  const params = new URLSearchParams({
+    scope_id: scopeId,
+    offset: String(offset),
+    limit: String(limit),
+  });
+  if (place) {
+    params.set("place", place);
+  }
+  return request<TimelineResponse>(`/timeline?${params.toString()}`);
+}
 // ---- 助手 -------------------------------------------------------------------
 
 export interface ConversationSummary {

@@ -4,11 +4,15 @@ import { AssistantPanel } from "./features/assistant/AssistantPanel";
 import { AssetGrid } from "./features/library/AssetGrid";
 import { SearchBox } from "./features/search/SearchBox";
 import { SearchResults } from "./features/search/SearchResults";
+import { Timeline } from "./features/timeline/Timeline";
 import { listAssets, type AssetSummary, type SearchResponse } from "./shared/api/client";
 
 const SCOPE_ID = "album1";
 
+type View = "timeline" | "library";
+
 export default function App() {
+  const [view, setView] = useState<View>("timeline");
   const [assets, setAssets] = useState<AssetSummary[]>([]);
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -22,11 +26,21 @@ export default function App() {
   return (
     <main className="app">
       <h1>Sentrix Home 2.0</h1>
+      <nav className="views">
+        <button type="button" onClick={() => setView("timeline")} aria-pressed={view === "timeline"}>
+          时间线
+        </button>
+        <button type="button" onClick={() => setView("library")} aria-pressed={view === "library"}>
+          全部照片
+        </button>
+      </nav>
       <AssistantPanel scopeId={SCOPE_ID} />
       <SearchBox scopeId={SCOPE_ID} onResults={setResults} />
       {error ? <p className="error">{error}</p> : null}
       {results ? (
         <SearchResults response={results} onClose={() => setResults(null)} />
+      ) : view === "timeline" ? (
+        <Timeline scopeId={SCOPE_ID} />
       ) : (
         <AssetGrid assets={assets} />
       )}
