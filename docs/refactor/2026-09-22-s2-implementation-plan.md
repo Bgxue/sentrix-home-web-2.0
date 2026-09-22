@@ -5491,33 +5491,39 @@ curl -s "http://127.0.0.1:8391/api/v1/search?q=%E6%A1%A5&scope_id=album1&limit=1
 
 以下是在隔离副本 `/home/asus/s2verify/repo` 上实际跑出来的，不是承诺。
 
+> **这是某一次实测的快照，不是现行断言。** 权威来源是各任务的 commit：**红灯**用
+> 「前一任务 commit + 本任务的全部 `tests/` 文件」的重建树跑（Task 27 还要先补上它
+> Step 1 的 `ports.py`），**绿灯**用该任务自己的 commit 跑。执行时要对照的是任务正文里的
+> `Expected:` 块；本表只用于回顾「当时红成什么样、绿成什么样」，两者对不上时以正文与
+> commit 为准。
+
 ### 每个任务的红灯（只留测试、去掉实现）
 
 | 任务 | 命令 | exit | 观察到的失败 |
 |---|---|---:|---|
 | 25 | `pytest apps/api/tests/unit/test_fusion.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.domain.retrieval'` |
-| 26 | `pytest tests/integration/test_vector_repository.py tests/unit/test_similarity.py` | 4 | `ModuleNotFoundError: No module named 'sentrix...repositories.vectors'`（经 `bootstrap/container.py`） |
+| 26 | `pytest apps/api/tests/integration/test_vector_repository.py apps/api/tests/unit/test_similarity.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.domain.retrieval.ports'` / `…retrieval.similarity` |
 | 27 | `pytest apps/api/tests/integration/test_qdrant_index.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.infrastructure.vector'` |
-| 28 | `pytest tests/integration/test_chinese_clip.py tests/unit/test_scheme.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.domain.retrieval.scheme'` |
+| 28 | `pytest apps/api/tests/integration/test_chinese_clip.py apps/api/tests/unit/test_scheme.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.domain.retrieval.scheme'` / `ImportError: cannot import name 'scheme'` |
 | 29 | `pytest apps/api/tests/unit/test_index_visual.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.application.retrieval'` |
 | 29（契约层） | `pytest apps/api/tests/contract/test_media_routes.py` | 1 | `FAILED …::test_import_reports_and_writes_the_visual_vector` / `…::test_reimport_does_not_duplicate_the_visual_vector` |
 | 30 | `pytest apps/api/tests/unit/test_retrieve_visual.py` | 2 | `ModuleNotFoundError: No module named 'sentrix.application.retrieval.retrieve_visual'` |
-| 31 | `pytest apps/api/tests/contract/test_search_routes.py` | 1 | `assert 404 == 200`、`KeyError: 'items'`、3 条 FAILED |
-| 32 | `cd apps/web && npx tsc -b` | 2 | `error TS2307: Cannot find module './features/search/SearchBox'` / `'./features/search/SearchResults'` |
+| 31 | `pytest apps/api/tests/contract/test_search_routes.py` | 1 | `assert 404 == 200`、`KeyError: 'items'`、9 条 FAILED |
+| 32 | `cd apps/web && npx tsc -b` | 2 | `TS2305` ×3（`searchAssets` / `SearchResponse` / `SearchResponse`）＋ `TS7006: Parameter 'item' implicitly has an 'any' type` |
 
 ### 每个任务的绿灯（终态树上重跑一遍）
 
 | 任务 | 命令 | 结果 |
 |---|---|---|
-| 25 | `pytest apps/api/tests/unit/test_fusion.py` | `10 passed in 0.01s` |
-| 26 | `pytest tests/integration/test_vector_repository.py tests/unit/test_similarity.py` | `21 passed in 1.26s` |
-| 27 | `pytest apps/api/tests/integration/test_qdrant_index.py` | `11 passed in 1.08s` |
-| 28 | `pytest tests/integration/test_chinese_clip.py tests/unit/test_scheme.py` | `12 passed in 3.01s` |
-| 29 | `pytest apps/api/tests/unit/test_index_visual.py` + `contract/test_media_routes.py` | `8 passed` + `8 passed in 1.93s` |
-| 30 | `pytest apps/api/tests/unit/test_retrieve_visual.py` | `16 passed in 0.01s` |
-| 31 | `pytest apps/api/tests/contract/test_search_routes.py` | `9 passed in 2.18s` |
+| 25 | `pytest apps/api/tests/unit/test_fusion.py` | `10 passed` |
+| 26 | `pytest apps/api/tests/integration/test_vector_repository.py apps/api/tests/unit/test_similarity.py` | `20 passed` |
+| 27 | `pytest apps/api/tests/integration/test_qdrant_index.py` | `11 passed` |
+| 28 | `pytest apps/api/tests/integration/test_chinese_clip.py apps/api/tests/unit/test_scheme.py` | `12 passed` |
+| 29 | `pytest apps/api/tests/unit/test_index_visual.py apps/api/tests/contract/test_media_routes.py` | `16 passed` |
+| 30 | `pytest apps/api/tests/unit/test_retrieve_visual.py apps/api/tests/integration/test_vector_repository.py` | `28 passed` |
+| 31 | `pytest apps/api/tests/contract/test_search_routes.py` | `9 passed` |
 | 32 | `cd apps/web && npx tsc -b && npx oxlint` | `Found 0 warnings and 0 errors.` |
-| 33 | `pytest apps/api/tests/e2e/test_visual_search.py` | `7 passed in 15.31s` |
+| 33 | `pytest apps/api/tests/e2e/test_visual_search.py` | `7 passed` |
 | 全部 | `make ci` | `5 kept, 0 broken` · `0 个问题` · `openapi 契约一致` · `161 passed` · `coverage 97.65%` · `ci: 全部通过` |
 
 ### 环境事实（规划时实测）
