@@ -38,7 +38,7 @@ from sentrix.application.assistant.tools import (
 )
 from sentrix.domain.assistant import emergency
 from sentrix.domain.assistant.evidence_ledger import EvidenceLedger
-from sentrix.domain.assistant.final_guard import FinalGuard, answered_with_gap
+from sentrix.domain.assistant.final_guard import FinalGuard, GuardFacts, answered_with_gap
 from sentrix.domain.assistant.intent import plan_requirements
 from sentrix.domain.assistant.models import (
     Attachment,
@@ -72,9 +72,6 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 - 工具没给到的信息就说不知道，不要编造。
 - handle（photo_1 这类）只在调用工具时使用，不要写进给用户的回答里。
 - 用户用中文提问，就用中文回答。"""
-
-# 这些门禁拦第二次时不再放行——把内部标识交付给用户是安全边界，不是风格问题。
-HARD_GUARD_CODES = frozenset({"internal_reference_leak"})
 
 # 模型这一轮没给出可用输出时给它的一句提醒。1.0 对这类输入走的是**解析重试**
 # （``runtime.py`` 的 ``parse_retries``：模型输出解析不出 action 就带着原因再问一次，
@@ -349,9 +346,7 @@ class RunTurn:
 
         verdict = self._guard.check(
             answer=answer,
-            ledger=session.ledger,
-            state=state,
-            search_returned_nothing=session.search_returned_nothing,
+            facts=GuardFacts.from_state(state),
         )
         if verdict.passed:
             state.finish(
@@ -361,12 +356,15 @@ class RunTurn:
             )
             return answer
 
-        repeated = not state.block_guard_code(verdict.code)
-        if repeated and verdict.code in HARD_GUARD_CODES:
-            # 安全边界不做第二次让步：宁可给一句确定性的兜底，也不把内部标识交付出去。
+        if verdict.hard:
+            # 1.0 ``runtime.py:2784-2791``：硬拦不重试，直接走确定性兜底——把内部标识或
+            # 别人的相册交付给用户是安全边界，不给第二次机会。
             state.finish(TerminationReason.GUARD_BLOCKED)
             return self._stop(session, TerminationReason.GUARD_BLOCKED)
-        if repeated:
+
+        if not state.block_guard_code(verdict.code):
+            # truth 级只重试一次（1.0 的 ``max_guard_retries = 1``），第二次放行并如实
+            # 标注成「有未取到的证据」——再拦下去只会把模型步烧光。
             state.finish(TerminationReason.ANSWERED_WITH_GAP)
             return answer
 

@@ -264,51 +264,24 @@ def test_history_is_replayed_to_the_model_without_duplicating_the_question(env):
 # ---- 门禁 -------------------------------------------------------------------
 
 
-def test_the_delivery_gate_pushes_the_model_to_hand_over_the_photos(env):
-    """实测 8100：问「给我看看在海边的照片」，模型检索一次之后直接给文字，一张图都没有。
+def test_answering_without_delivering_is_answered_with_a_gap(env):
+    """用户要图、模型只回文字时，**1.0 的门禁不会拦**——这一轮如实标成带缺口收尾。
 
-    门禁拦一次、提醒它调 get_original_photos，然后才放行。
+    S3 曾经在这里加过一条「证据门」（只要还有开着的需求就拦）。1.0 没有这条规则，
+    它最接近的是 ``delivery_contradiction``：要「真的调过交付工具、且它返回 0 张」加上
+    「最后一次检索把结果取完」两个条件同时成立。这里钉住的就是 1.0 的实际行为——
+    只检索不交付，是 ``ANSWERED_WITH_GAP``，不是被拦下来重试。
+
+    拦住「用户要图却一张都没交付」这件事在 S3 由别的东西负责：规划把
+    ``delivered_photo`` 列成一条证据需求（``intent.plan_requirements``），收尾时账本上
+    它还开着，于是 ``answered_with_gap`` / ``answered_with_gap`` 的终态与
+    ``requirements[].status == "open"`` 如实反映出来——不假装这一轮是完整交付。
     """
     _conversations, _turns, conversation, _db = env
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
             final("我找到了两张在海边的照片。"),
-            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_1"]),
-            final("这是你要的照片。"),
-        ]
-    )
-    toolbox = StubToolbox(
-        {
-            "search_memories": SEARCH_OK,
-            "get_original_photos": ToolOutcome(
-                observation={"result_set_id": "rs_1", "delivered": 1, "rejected": []},
-                model_visible={"result_set_id": "rs_1", "delivered": 1, "rejected": []},
-                attachments=(Attachment(handle="photo_1", asset_id="asset_1", file_name="a.jpg"),),
-            ),
-        }
-    )
-    run_turn = build(env, model, toolbox)
-    turn_id = start(run_turn, conversation)
-
-    result = run_turn.run(turn_id)
-
-    assert result.answer == "这是你要的照片。"
-    assert [item.asset_id for item in result.attachments] == ["asset_1"]
-    assert ("get_original_photos", {"result_set_id": "rs_1", "handles": ["photo_1"]}) in toolbox.calls
-
-
-def test_a_model_that_keeps_refusing_to_deliver_is_let_through_with_a_gap(env):
-    """门禁只提醒一次：提醒过就放行，并如实标注这一轮带着缺口收尾。
-
-    1.0 的零检索拦截没有标志位，模型坚持不调工具就会一直被拦到预算耗尽。
-    """
-    _conversations, _turns, conversation, _db = env
-    model = ScriptedModel(
-        [
-            tool_call("search_memories", "c1", query="海边"),
-            final("我找到了两张在海边的照片。"),
-            final("就是这两张，您可以点开看。"),
         ]
     )
     run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
@@ -316,11 +289,48 @@ def test_a_model_that_keeps_refusing_to_deliver_is_let_through_with_a_gap(env):
 
     result = run_turn.run(turn_id)
 
-    assert result.answer == "就是这两张，您可以点开看。"
+    assert result.answer == "我找到了两张在海边的照片。"
     assert result.termination_reason is TerminationReason.ANSWERED_WITH_GAP
     assert result.status is TurnStatus.PARTIAL
     assert result.attachments == ()
+    assert [item["status"] for item in result.requirements] == ["satisfied", "open"]
+
+
+def test_a_delivery_that_delivers_nothing_ends_with_a_gap(env):
+    """交付工具一张都没交出去时，1.0 的门禁**不会**拦——缺口由账本如实标出来。
+
+    这条测试同时说明一件事：1.0 的 ``delivery_contradiction`` 在 S3 的工具形状下够不着。
+    它要求 ``delivered_count`` 是**整数 0**（真的调过交付工具、且它返回 0 张），而 S3 的
+    ``get_original_photos`` 在交不出去时返回的是失败（``bad_handle``），记录的
+    ``status`` 是 ``error``，``GuardFacts.from_state`` 会跳过它、``delivered_count``
+    保持 ``None``。规则照搬了，触发它的输入还没出现——与 ``all_requested_but_has_more``
+    缺 ``result_mode`` 是同一类情况。
+    """
+    _conversations, _turns, conversation, _db = env
+    empty_delivery = ToolOutcome(
+        observation={"failure_reason": "bad_handle"},
+        model_visible={"error": "bad_handle", "message": "这些 handle 都不在当前结果集里。"},
+        failure_reason="bad_handle",
+    )
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_9"]),
+            final("我找到了两张海边的照片，但没能把原图交出来。"),
+        ]
+    )
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, "get_original_photos": empty_delivery})
+    run_turn = build(env, model, toolbox)
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
     assert len(model.calls) == 3
+    assert result.answer == "我找到了两张海边的照片，但没能把原图交出来。"
+    assert result.attachments == ()
+    assert result.status is TurnStatus.PARTIAL
+    assert result.termination_reason is TerminationReason.ANSWERED_WITH_GAP
+    assert [item["status"] for item in result.requirements] == ["satisfied", "open"]
 
 
 def test_an_empty_search_cannot_be_reported_as_a_hit(env):
