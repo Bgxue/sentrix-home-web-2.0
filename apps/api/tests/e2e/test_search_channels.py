@@ -34,7 +34,6 @@ from sentrix.domain.retrieval import scheme
 from sentrix.main import create_app
 
 ALBUM = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
-GEO = Path("/home/asus/s4verify/repo/data/geo")
 SCOPE = "album1"
 
 
@@ -80,18 +79,34 @@ def photos() -> list[Path]:
     return sorted(list(ALBUM.glob("*.jpg")) + list(ALBUM.glob("*.JPG")))
 
 
+def geo_sources() -> list[Path]:
+    """部署方按 ``docs/runbooks/geonames-data.md`` 装进 ``$SENTRIX_DATA_DIR/geo`` 的数据。
+
+    同 ``test_album_timeline.py``：取**配置里的那一个数据目录**（默认即仓库根的
+    ``data/geo``），且必须在夹具改写 ``SENTRIX_DATA_DIR`` 之前取。扫描规则与
+    ``GeoNamesNearestResolver`` 一致。缺数据时跳过并说明原因——锚点的值来自真地点解析，
+    没有 GeoNames 就没有 ``nearest`` 那一级，这条用例验不了。
+    """
+    directory = Settings().geo_dir
+    sources = sorted(
+        path for path in directory.glob("*") if path.is_file() and path.suffix.lower() in {".txt", ".zip"}
+    )
+    if not sources:
+        pytest.skip(f"GeoNames 数据不可用（见 docs/runbooks/geonames-data.md）: {directory}")
+    return sources
+
+
 @pytest.fixture(scope="module")
 def album_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:
     """整册导入一次，整个模块共用（53 张图 + 真 GeoNames 索引，逐用例重建太慢）。"""
     expected = photos()
-    if not GEO.is_dir():
-        pytest.skip(f"GeoNames 数据不可用（见 docs/runbooks/geonames-data.md）: {GEO}")
+    sources = geo_sources()
     previous = os.environ.get("SENTRIX_DATA_DIR")
     os.environ["SENTRIX_DATA_DIR"] = str(tmp_path_factory.mktemp("search-channels"))
     try:
         settings = Settings()
         settings.ensure_directories()
-        for source in sorted(GEO.glob("*.zip")):
+        for source in sources:
             os.symlink(source, settings.geo_dir / source.name)
         app = create_app(settings)
         app.state.container = dataclasses.replace(

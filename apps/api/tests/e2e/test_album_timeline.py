@@ -31,7 +31,6 @@ from sentrix.domain.retrieval import scheme
 from sentrix.main import create_app
 
 ALBUM = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
-GEO = Path("/home/asus/s4verify/repo/data/geo")
 
 EXPECTED_DAYS = {
     "2017-11-05",
@@ -105,15 +104,33 @@ def photos() -> list[Path]:
     return sorted(list(ALBUM.glob("*.jpg")) + list(ALBUM.glob("*.JPG")))
 
 
+def geo_sources() -> list[Path]:
+    """部署方按 ``docs/runbooks/geonames-data.md`` 装进 ``$SENTRIX_DATA_DIR/geo`` 的数据。
+
+    取的是**配置里的那一个数据目录**（默认即仓库根的 ``data/geo``），不是测试自己的
+    临时目录——**必须在夹具改写 ``SENTRIX_DATA_DIR`` 之前取**，改完之后那个目录是空的，
+    拿不到任何东西。扫描规则与 ``GeoNamesNearestResolver`` 一致。
+
+    没有数据就跳过并说明原因：地点解析是这条用例的验收对象，缺数据时它验不了，
+    但缺数据不是「代码坏了」——服务本身没有 GeoNames 也照常启动（只少最细那一级）。
+    """
+    directory = Settings().geo_dir
+    sources = sorted(
+        path for path in directory.glob("*") if path.is_file() and path.suffix.lower() in {".txt", ".zip"}
+    )
+    if not sources:
+        pytest.skip(f"GeoNames 数据不可用（见 docs/runbooks/geonames-data.md）: {directory}")
+    return sources
+
+
 @pytest.fixture
 def album_client(tmp_path, monkeypatch) -> TestClient:
     """真 SQLite、真迁移、真地点解析；模型换成假件。"""
-    if not GEO.is_dir():
-        pytest.skip(f"GeoNames 数据不可用（见 docs/runbooks/geonames-data.md）: {GEO}")
+    sources = geo_sources()
     monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
     settings = Settings()
     settings.ensure_directories()
-    for source in sorted(GEO.glob("*.zip")):
+    for source in sources:
         os.symlink(source, settings.geo_dir / source.name)
     app = create_app(settings)
     app.state.container = dataclasses.replace(
