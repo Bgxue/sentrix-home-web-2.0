@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration coverage check-docs ci dev web-dev
+.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration coverage check-docs web-check ci dev web-dev
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -51,8 +51,19 @@ check-docs: ## 文档防腐校验
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
 # coverage 本身跑的就是全量测试，所以链上不再单列 test——同一套测试不必跑两遍。
-ci: lint format-check typecheck arch check-docs coverage ## CI 门禁
+# web-check 排在链尾：后端检查更快、失败信息更直接，前端构建最慢也最该放在最后。
+ci: lint format-check typecheck arch check-docs coverage web-check ## CI 门禁
 	@echo "ci: 全部通过"
+
+# 前端门禁。类型检查必须用 `tsc -b`，不能用 `tsc --noEmit`：apps/web/tsconfig.json 是
+# {"files": [], "references": [...]} 结构，普通 tsc 不遍历 project references，
+# `npx tsc --noEmit --listFiles` 实测命中 0 个文件、恒 exit 0——它看起来在检查，其实永远通过。
+# 三件事分开跑而不是 `npm run build`：类型 / lint / 构建的失败信息各自直接，
+# 且 `npx vite build` 省掉 build 脚本里那次重复的 tsc -b。
+web-check: ## 前端门禁：tsc -b + oxlint + vite build
+	cd apps/web && npx tsc -b
+	cd apps/web && npx oxlint
+	cd apps/web && npx vite build
 
 dev: ## 起 2.0 API（8191）
 	$(PY) -m uvicorn --factory sentrix.main:create_app --host 0.0.0.0 --port 8191 --app-dir apps/api/src

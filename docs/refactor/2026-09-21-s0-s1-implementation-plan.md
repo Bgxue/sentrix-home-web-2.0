@@ -1873,7 +1873,7 @@ git commit -m "feat(docs): add self-validating module map"
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration coverage check-docs ci dev web-dev
+.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration coverage check-docs web-check ci dev web-dev
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -1922,7 +1922,7 @@ check-docs: ## 文档防腐校验
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
 # coverage 本身跑的就是全量测试，所以链上不再单列 test——同一套测试不必跑两遍。
-ci: lint format-check typecheck arch check-docs coverage ## CI 门禁
+ci: lint format-check typecheck arch check-docs coverage web-check ## CI 门禁
 	@echo "ci: 全部通过"
 
 dev: ## 起 2.0 API（8191）
@@ -1930,7 +1930,21 @@ dev: ## 起 2.0 API（8191）
 
 web-dev: ## 起 2.0 Web（4274）
 	cd apps/web && npm run dev -- --port 4274
+
+# 前端门禁。类型检查必须用 `tsc -b`，不能用 `tsc --noEmit`：apps/web/tsconfig.json 是
+# {"files": [], "references": [...]} 结构，普通 tsc 不遍历 project references，
+# `npx tsc --noEmit --listFiles` 命中 0 个文件、恒 exit 0——看起来在检查，其实永远通过。
+web-check: ## 前端门禁：tsc -b + oxlint + vite build
+	cd apps/web && npx tsc -b
+	cd apps/web && npx oxlint
+	cd apps/web && npx vite build
 ```
+
+> **门禁完整性（2026-09-22 补）**：`web-check` 是本计划写成之后补上的，`ci` 链当时全是后端，
+> `apps/web` 挂掉了 `make ci` 照样全绿——这是设计 §6.5 明确要求「前端 `tsc + eslint + vitest`」
+> 却一直没落地的一环。同时修掉一个空检查：类型检查**必须用 `tsc -b`**，`tsc --noEmit` 在本仓库
+> 因为 `apps/web/tsconfig.json` 是 `{"files": [], "references": [...]}` 结构、不遍历 project
+> references，实测命中 0 个文件、恒 exit 0。详见 Task 23 Step 5。
 
 - [ ] **Step 2: 验证每个目标能跑**
 

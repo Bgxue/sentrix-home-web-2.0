@@ -4890,7 +4890,9 @@ ci: 全部通过
 
 前端不做任何相关性计算：搜索词直接交给后端，结果按后端给的顺序渲染。**降级状态要显式展示**——后端在降级，用户有权知道这次结果是怎么来的。
 
-`make ci` 不覆盖前端（`Makefile` 的 `ci` 只跑 Python 侧），所以这一步的验收是 `tsc` + `oxlint` + `vite build` 三件套。
+`make ci` 从 2026-09-22 起已覆盖前端（链尾的 `web-check`：`tsc -b` + `oxlint` + `vite build`），
+所以这一步跑 `make ci` 即可；下面的三件套仍单独列出，方便只改前端时快速定位是哪一道挂的。
+注意类型检查是 `tsc -b` 而不是 `tsc --noEmit`——后者在本仓库命中 0 个文件、恒通过。
 
 - [ ] **Step 1: 先写前端**
 
@@ -5524,7 +5526,7 @@ curl -s "http://127.0.0.1:8391/api/v1/search?q=%E6%A1%A5&scope_id=album1&limit=1
 | 31 | `pytest apps/api/tests/contract/test_search_routes.py` | `9 passed` |
 | 32 | `cd apps/web && npx tsc -b && npx oxlint` | `Found 0 warnings and 0 errors.` |
 | 33 | `pytest apps/api/tests/e2e/test_visual_search.py` | `7 passed` |
-| 全部 | `make ci` | `5 kept, 0 broken` · `0 个问题` · `openapi 契约一致` · `161 passed` · `coverage 97.65%` · `ci: 全部通过` |
+| 全部 | `make ci` | `5 kept, 0 broken` · `0 个问题` · `openapi 契约一致` · `161 passed` · `coverage 97.65%` · 前端 `web-check` 三道静默通过 · `ci: 全部通过` |
 
 ### 环境事实（规划时实测）
 

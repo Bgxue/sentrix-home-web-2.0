@@ -401,8 +401,8 @@ sentrix-home-web2.0/data/
 ### 6.1 工具链
 
 - Python 3.11+、`pyproject.toml`、ruff（lint + format）、mypy strict（**整个 `sentrix` 包 + `scripts/`**；2026-09-21 校正，原写「仅 `domain/` + `application/`」——实测其余各层在 `--strict` 下本来就全绿，把已经干净的两层漏在门外没有收益）、pytest
-- TypeScript strict、ESLint + Prettier、Vite、Vitest
-- 统一入口（取自 `Makefile` 的 `.PHONY` 全集）：`make help / install / lint / format / format-check / typecheck / arch / test / test-unit / test-contract / test-integration / coverage / check-docs / ci / dev / web-dev`
+- TypeScript strict、oxlint（落地时为 oxlint，原写 ESLint + Prettier）、Vite（**Vitest 尚未接入**：前端目前没有测试文件，§6.5 里的 `vitest` 一环暂无实现，接入前前端门禁只有类型、lint、构建三道）
+- 统一入口（取自 `Makefile` 的 `.PHONY` 全集）：`make help / install / lint / format / format-check / typecheck / arch / test / test-unit / test-contract / test-integration / coverage / check-docs / web-check / ci / dev / web-dev`
 
 ### 6.2 分层强制
 
@@ -433,9 +433,13 @@ sentrix-home-web2.0/data/
 
 ### 6.5 CI 门禁
 
-`ruff` → `mypy` → `import-linter` → `pytest` → `openapi-diff` → 前端 `tsc + eslint + vitest`
+`ruff` → `mypy` → `import-linter` → `openapi-diff`（`check-docs` 内）→ `pytest`（含覆盖率）→ 前端 `tsc -b + oxlint + vite build`（`web-check`）
 
-本地 pre-commit 跑同一套，不等 CI。
+**前端检查排在链尾**：后端检查更快、失败信息更直接，先跑后端能让多数问题在十几秒内暴露；前端构建最慢，放最后。`make ci` 遇错即停，链上任何一环红了整个门禁就是红的。
+
+**前端的类型检查必须用 `tsc -b`，禁止 `tsc --noEmit`**。`apps/web/tsconfig.json` 是 `{"files": [], "references": [...]}` 结构，普通 `tsc` 不遍历 project references——`npx tsc --noEmit --listFiles` 实测命中 **0 个文件**、恒 exit 0。用 `--noEmit` 写成的门禁是在假装检查，本仓库禁止这种形式。
+
+本地 pre-commit 只跑 ruff（check + format）与文档防腐两项，**不是**同一套：mypy / import-linter / 覆盖率 / 前端三件套都只在 `make ci` 上跑。提交前建议直接跑一遍 `make ci`。
 
 ### 6.6 协作
 
