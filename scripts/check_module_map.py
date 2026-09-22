@@ -9,6 +9,12 @@
 「文档自称校验了、实际没人读」的列。只统计 `sentrix.*` 包内 import；stdlib 与第三方
 （fastapi / sqlite3 / PIL 等）不进这两列。
 
+包的 ``__init__.py`` 也是一条边：``import sentrix.domain.retrieval.scheme`` 这类子模块导入
+会被同时记成两条依赖——``sentrix/domain/retrieval/scheme.py`` **和**
+``sentrix/domain/retrieval/__init__.py``（导入子模块必然先执行包的 ``__init__``，而
+``__init__`` 自己也有 import）。所以新文件只要落在某个包下，被它依赖的那两行「被谁依赖」列
+都要加——少加包 ``__init__.py`` 那行同样会红。
+
 列数不足的行会被报错而不是跳过：跳过等于给依赖校验开后门——那行写什么都不会红。
 
 路径基准只有一份：``--src`` 传 **`src/` 根目录**（如 ``apps/api/src``），表格里写的也正是
