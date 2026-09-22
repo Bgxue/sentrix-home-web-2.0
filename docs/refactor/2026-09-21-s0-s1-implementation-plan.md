@@ -4635,8 +4635,14 @@ body { margin: 0; }
 - [ ] **Step 5: 类型检查与构建**
 
 ```bash
-cd apps/web && npx tsc --noEmit && npm run build
+cd apps/web && npx tsc -b && npx oxlint && npx vite build
 ```
+
+> **为什么不是 `tsc --noEmit`（2026-09-22 修正）**：本仓库的 `apps/web/tsconfig.json` 是
+> `{"files": [], "references": ["./tsconfig.app.json", "./tsconfig.node.json"]}` 结构，
+> 普通 `tsc` **不遍历 project references**，`npx tsc --noEmit --listFiles` 实测命中 **0 个文件**、
+> 恒 exit 0——它看着在检查，其实永远通过。真正的类型检查只在 `tsc -b` 里（`apps/web` 的
+> `build` 脚本用的就是它）。本仓库今后一律用 `tsc -b`，`make web-check` 已把它固化进门禁。
 
 Expected: 无错误
 
