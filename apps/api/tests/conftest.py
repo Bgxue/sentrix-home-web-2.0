@@ -53,6 +53,26 @@ def client(settings) -> TestClient:
 
 
 @pytest.fixture
+def make_state():
+    """构造一个回合状态。默认参数够大多数用例用，需要时逐字段改。"""
+    from sentrix.domain.assistant.profile import DEFAULT_PROFILE
+    from sentrix.domain.assistant.task_state import TaskState
+
+    def _make(**overrides):
+        fields = {
+            "turn_id": "turn_1",
+            "conversation_id": "conv_1",
+            "scope_id": "album1",
+            "question": "给我看看在海边的照片",
+            "profile": DEFAULT_PROFILE,
+        }
+        fields.update(overrides)
+        return TaskState(**fields)
+
+    return _make
+
+
+@pytest.fixture
 def migrations_ready_db(tmp_path) -> Database:
     """真 SQLite + 真迁移文件，跑在临时目录里。"""
     migrations = Path(__file__).resolve().parents[1] / "src/sentrix/infrastructure/persistence/migrations"
