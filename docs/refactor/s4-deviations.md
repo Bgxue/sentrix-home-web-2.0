@@ -450,3 +450,79 @@ summary），确定性摘要那 0.45 从不落库。2.0 一样。依据：逐列
 `河北省邯郸市永年区 · Nanlvgu西大屯附近`；同类还有 `Wusong Qu`、`Xisu`、`Hang Dong`。
 1.0 没有这一级。2.0 的 `_display_name` 只在备选名里**找得到汉字**时才替换，找不到就用
 原值——**宁可半中半英，也不拿拼音去猜一个中文名**。依据：这是数据缺失，不是实现缺陷。
+
+
+---
+
+## §8 S4c（检索融合接线）新增的偏离（第 39–47 条）
+
+S4c 补的是 S4b 的两处遗留：检索融合没接线（Task 64）与词法投影的 asset 锚点没有写侧
+（Task 65）。这一节的格式与 §7 相同：**1.0 怎么做 / 2.0 怎么做 / 依据**。
+
+**第 39 条 · 编排的落点从「一个 Kernel 类」挪到 application 层。**
+1.0 的 `EvidenceRetrievalKernel`（`backend/evidence_retrieval.py:92`）是个六百行的类，
+同时管召回、融合、条件判定与证据包。2.0 按
+`2026-09-21-sentrix-home-web-2-refactor-plan.md` 第 34 行的目标表，落到
+`application/retrieval/retrieve_evidence.py`，**只搬前两段**（多通道召回 + 加权 RRF）。
+依据：四层架构里没有「Kernel」这个位置；S4 没有 `QuerySpec` / 条件判定，先搬能搬的，
+S6 在同一文件上加后两段。
+
+**第 40 条 · 视觉命中的名次从融合结果里还原，而不是给 `RetrieveVisual` 加一个原始命中出口。**
+`RetrieveVisual` 是 S2 的单通道用例，`execute()` 内部已经 `fuse` 过一次。编排层从
+`channels["visual_ann"]` / `raw_scores` 把它还原成 `CandidateHit`（`_visual_candidates`）。
+依据：另一条路是把 `execute` 拆成 `recall` + `execute`，但那会让 `execute` 失去生产
+调用方（只剩测试在用），或者要重写它那 301 行单测。融合只消费 `rank`，而 `rank` 原样
+记在命中里，所以还原是无损的，分数由编排层按名次重算。
+
+**第 41 条 · 每条通道的召回条数是 4 倍过取，不是整册回灌。**
+1.0 把每条通道的 `recall_limit` 抬到 `max(requested_limit, authorized_count)`，即**整个
+已授权 scope**（`backend/evidence_retrieval.py:176-181`），理由写在 `:171-176`：不能让
+一个相关资产因为「另一条通道把它排在了某个任意头部之外」而消失。2.0 用
+`RECALL_OVERSAMPLE_FACTOR = 4`（与 `retrieve_visual.py` 的 `OVERSAMPLE_FACTOR` 同值）：
+融合前不裁到交付上限，融合后才按 `limit` 交付。依据：1.0 的写法是一次查询把全 scope
+拉进内存，2.0 的 `/search` 有明确的交付上限，4 倍过取买到了同一条性质而成本有界。
+`test_a_candidate_outside_every_channels_head_is_still_ranked_by_the_fusion` 钉住它。
+
+**第 42 条 · metadata 通道在 S4 的端点上恒静默。**
+1.0 的 `MetadataRetriever` 只在有正向结构化条件（时间窗 / 媒体类型 / 地点）时才给召回
+信号（`backend/retrieval/metadata.py:28-31`），而那些条件来自查询解析器。2.0 的
+`GET /api/v1/search` 只有 `q` / `scope_id` / `limit`，硬条件属于 S6（设计文档 §8 的 S6 行：
+「补齐六路召回 + 硬条件（时间/人物/地点）」）。所以这条通道**接进了融合，但在端点上
+恒返回空**——这与 1.0 对纯内容词查询的行为一致，不是「没接上」。`EvidenceRequest` 已经
+留好 `time_bounds` / `media_types` / `negated_media` / `place` 四格，由 S6 来填。
+
+**第 43 条 · 助手入口与 HTTP 入口共用一次融合。**
+1.0 的 HTTP 侧与 `agent_runtime/tools.py` 的 `search_memories` 走的是同一个
+`EvidenceRetrievalKernel`。2.0 原来两处各 new 一个 `RetrieveVisual`，于是「网页能搜到、
+助手搜不到」是默认行为。现在两个入口都调 `api/routes/search.py` 的
+`build_retrieve_evidence(container)`（`routes/assistant.py` 从 `routes/search.py` import
+这个工厂，与它已经从 `routes/media.py` import `deliver_asset` 是同一个形状）。
+
+**第 44 条 · `SqliteLexicalIndex` 多了两个必填协作方。**
+锚点列的值来自 **asset**（`file_name` / `captured_at`）与它解析出的 `Place`，而
+`refresh_from_observation(observation)` 的入参只有 Observation。2.0 给适配器加了
+`assets` / `places` 两个必填关键字参数（1.0 的 `RetrievalIndex` 拿着整个 `store`，
+不存在这个问题）。依据：做成可选或从 observation 反查都会让「锚点没写」重新变成静默
+失败，而这一版修的就是它。
+
+**第 45 条 · 锚点行的 `source_revision` 写 `observation.revision`，不是 1.0 的硬编码 1。**
+1.0 的 `_asset_anchor_rows` 每条都返回 `source_revision = 1`（`retrieval_indexes.py:236` 等）。
+2.0 写的是当前 Observation 的 revision。依据：2.0 里这个字段的含义是「这行是为该观察的
+哪个 revision 写的」，而锚点行与 observation 行是先删后插、同批重写的；没有任何消费者
+拿它做过期判断。行为无差异，记在这里是因为数值确实不同。
+
+**第 46 条 · `geo` 的取值是 `Place.searchable_text()` 的分段，不是 1.0 的 `label`。**
+1.0 写四个值：`label`（`浙江省杭州市萧山区` 整串）、`province`、`city`、`district`
+（`retrieval_indexes.py:230-235`）。2.0 写 `searchable_text()` 的每一段（省 / 市 / 区县 /
+乡镇 / 村庄，不含 GPS 坐标）。依据：1.0 的 `label` 在 PyGeoCN 那条路上**可能退化成坐标
+串**（它自己用 `DISPLAY_COORDINATE_RE` 挡过这件事），而 2.0 的 `Place` 把 admin（面）与
+nearest（点）分成两个槽位，分段写正好把它们都覆盖到。整串查询仍然能命中——FTS5 的
+bigram 会把 `浙江省杭州市萧山区` 拆开去撞 `浙江省` / `杭州市` / `萧山区` 三段。
+
+**第 47 条 · 第 31 条（事件总结不写 `episodic` 向量）补上 1.0 侧的实证。**
+原条目只说「没有任何一路读 `episodic`」。接线时对回 1.0：**消费它的是 `text_ann` 通道**
+——`TextAnnRetriever` 的 `spaces=("semantic", "episodic")`
+（`backend/retrieval/text_ann.py:30`），两个 space 的命中按余弦取大后**合并成同一条通道**
+再进融合，不是两条通道。所以 `episodic` 既不该单独进 `fuse()`，也不该在 S4 提前写；
+等 S6 落地 `text_ann` 时连同两个 space 一起搬。`summarize_event.py` 的模块注释已按这条
+实证改写。

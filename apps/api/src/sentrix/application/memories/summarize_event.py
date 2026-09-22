@@ -16,9 +16,12 @@
 所以进 ``make ci``。
 
 **与 1.0 的一处明确差异**：1.0 的 ``_persist_event_summary`` 同时写一条 ``episodic``
-事件向量（走 8101 文本嵌入），给它后面的「按事件语义找图」用。S4 的检索通道是
-visual_ann + lexical + metadata 三路，**没有任何一路读 ``episodic``**，写进去只是一条
-没人消费的向量；等 S6 真的接上事件语义通道时再搬。
+事件向量（走 8101 文本嵌入），给它后面的「按事件语义找图」用。**1.0 消费它的是
+``text_ann`` 通道**——``TextAnnRetriever`` 的 ``spaces=("semantic", "episodic")``
+（``backend/retrieval/text_ann.py:30``），两个 space 的命中按余弦取大之后**合并成同一条
+通道**再进融合，不是两条通道。2.0 的 ``text_ann`` 属 S6，S4 接进 ``fuse()`` 的三路
+（visual_ann + lexical + metadata）**没有任何一路读 ``episodic``**，写进去只是一条
+没人消费的向量；等 S6 落地 ``text_ann`` 时连同两个 space 一起搬。
 """
 
 from __future__ import annotations

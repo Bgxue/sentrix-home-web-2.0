@@ -53,6 +53,7 @@
 |---|---|
 | **S4a（Task 46–54）** | **已实现、已跑通、`make ci` 全绿**（599 passed / 覆盖率 97.29%）。本文档的 Task 46–54 是它的忠实记录 |
 | **S4b（Task 55–63）** | **已实施并验证**：9 个任务、8 个 commit（55 / 56 / 57a / 57b / 57c / 58+59 / 60+61 / 62），每个 commit 都有红灯、绿灯与一次完整 `make ci`。记录见文末「S4b 实施记录与验证」 |
+| **S4c（Task 64–65）** | **补做 S4b 的两处遗留**：检索融合接线（三路进 `fuse()`）+ 词法投影的 asset 锚点写侧。2 个 commit，各带红灯、绿灯与一次完整 `make ci`。记录见文末「S4c 实施记录与验证」 |
 
 S3 的教训是「计划生成这一步才是错误来源」，所以 S4b 部分**不写推测的代码块**：
 写了就是 S2 那种「13–14% 错误率全部发生在计划生成阶段」的重演。S4b 执行时按同一套
@@ -1268,6 +1269,16 @@ S4 用了 S3 的四条对策中的三条；**第四条（代码块逐字节 diff
 7. **`person_score`（权重 0.20）在 S5 之前恒为 0**——事件归并少掉一整路信号。
 8. **别名表那 30 条没有召回数据支撑。** 保留它们是因为它们是通用双语知识**且用户已
    裁决**，不是因为有实测效果（`s4-deviations.md` §6 第二条）。
+9. ~~**检索融合没接线**：`RetrieveVisual` 只把 `visual_ann` 单路交给 `fuse()`，
+   lexical / metadata 两条通道实现了但没接到搜索端点。~~ **已关闭（Task 64）。**
+10. ~~**词法投影的三类 asset 锚点没有写侧**：`ANCHOR_FIELD_TYPES` /
+   `time_anchor_tokens` / `file_stem_is_indexable` 三条规则零调用，投影里只有
+   observation 自带的字段。~~ **已关闭（Task 65）。** 这一条是 Task 64 的真数据验证
+   挖出来的，不是规划阶段看到的。
+11. **`entity` / `text_ann` 两路（S5 / S6）**，其中 `text_ann` 是 `episodic` 向量的
+   唯一消费者（1.0 `backend/retrieval/text_ann.py:30` 的
+   `spaces=("semantic", "episodic")`，两个 space 合成同一条通道）。S4 的
+   `_persist_event_summary` 不写 `episodic`，等 S6 一起搬。
 
 
 ---
@@ -1390,5 +1401,236 @@ Task 60/61 的第一版 `Timeline.tsx` 让 `make ci` 的 `web-check` 多出 **1 
 59 词法索引 / 60 `retrieve_lexical` / 61 `retrieve_metadata`）里的这些项，
 **在 S4a 就已经落地**（分别是 Task 50 / 51 / 53 / 54），所以 S4b 没有重复实现它们；
 用户表里的 57（`fallback_projection`）与 58（`summarize_event`）落在本轮的 **57b**，
-62（检索融合接线）里「三路进 `fuse()`」这一项**没有做**——见「遗留」。
+62（检索融合接线）里「三路进 `fuse()`」这一项**当时没有做**——**已由 S4c 的 Task 64/65
+补齐**，见文末「S4c 实施记录与验证」。
 本文件里的 S4b 任务编号沿用本计划原先的定义。
+
+---
+
+# S4c — 检索融合接线（Task 64–65）
+
+S4b 的终态（`d40b984`，679 passed）留下两处**代码在、没接线**的缺口，这一节把它们补齐。
+两处都是同一形状：实现（或纯规则）已经写完并有单测，但**没有任何生产调用方**。
+
+| # | 缺口 | 谁发现的 | 关掉它的任务 |
+|---|---|---|---|
+| 1 | `RetrieveVisual` 只把 `visual_ann` 单路交给 `fuse()`，lexical / metadata 两条通道实现了但没接到搜索端点 | S4b 实施时自报 | **Task 64** |
+| 2 | 词法投影只写 observation 自带的字段，1.0 的 `geo` / `time` / `file` 三类 asset 锚点从没写过（`ANCHOR_FIELD_TYPES` / `time_anchor_tokens` / `file_stem_is_indexable` 零调用） | **Task 64 的真数据验证** | **Task 65** |
+
+第 2 条是拿真相册跑出来的，不是读代码读出来的：导入 53 张真照片后按
+`observation_search_terms.field_type` 分组，只有 `place` / `object` / `caption` /
+`activity` 四类，`2017` 与 `2017-11-05` 两个查询在 FTS 上都命中 0 张——「按日期找图」这条
+S4 的目标能力（本文件开头「Goal」一行）在词法通道上根本不存在。
+
+## Task 64: 三路进 `fuse()`（检索融合接线）
+
+**依赖：** S4b 的 Task 55（`RetrieveLexical` / `RetrieveMetadata` 已进 Container）。
+
+**Files:**
+- Create: `apps/api/src/sentrix/application/retrieval/retrieve_evidence.py`
+- Create: `apps/api/tests/integration/test_retrieve_evidence.py`（10 条）
+- Modify: `apps/api/src/sentrix/api/routes/search.py`（`GET /api/v1/search` 改走编排）
+- Modify: `apps/api/src/sentrix/api/routes/assistant.py`（`search_memories` 同一个编排）
+- Modify: `apps/api/src/sentrix/application/assistant/tools.py`（协作方类型）
+- Modify: `apps/api/tests/contract/test_search_routes.py`（+2）、`apps/api/tests/integration/test_assistant_toolbox.py`
+- Modify: `docs/architecture/module-map.md`、`docs/refactor/capability-map.jsonl`
+
+**接线逐条照搬 1.0**（`backend/evidence_retrieval.py:198-243`、
+`backend/retrieval/__init__.py:65-85`）：
+
+- 通道集合 = 被启用的 primary 通道，构建顺序
+  `metadata → entity → lexical → visual_ann → text_ann → adjacency`；
+- 召回循环跳过 `kind == "expander"`（`:198-201`），只有 primary 进 `channel_hits`；
+- 融合只有一次调用，权重表 `DEFAULT_CHANNEL_WEIGHTS`（`:241-243` →
+  `retrieval/ranking.py:101-110` → `fusion.fuse`）；
+- **缺通道的形态是「不出现」**：1.0 里没启用的通道压根不在 retriever 列表里，
+  `channel_hits` 里没有那个键。2.0 的 entity / text_ann 到 S5 / S6 才有类，所以这里
+  连调用都没有——不是「调了返回空」；
+- **`adjacency` 不接**：`configs/retrieval/defaults.json:10` 里它是 `false`，实例都不建；
+  即使建了，`kind="expander"` 也让它不进并行召回——Kernel 拿 primary 融合结果的
+  exact/strong 当种子再 `expand`（`:246-273`），扩展结果 append 在主结果之后。
+
+**通道顺序是语义**：`fusion.fuse` 在候选第一次出现时按那个通道定 `evidence_class`
+（`domain/retrieval/fusion.py:76-84`），metadata 是 anchor 通道，不是第一个就会丢掉
+`+1.0` 的锚点加成。1.0 的构建顺序就是 metadata 在前。
+
+```python
+METADATA_CHANNEL = "metadata"
+LEXICAL_CHANNEL = "lexical"
+VISUAL_CHANNEL = "visual_ann"
+
+# 每条通道按调用方上限过取一层再融合。1.0 把理由写在了注释里
+# （``evidence_retrieval.py:171-176``）："Ask each enabled channel for the complete
+# authorized scope so a relevant asset cannot disappear merely because another channel
+# ranked it below an arbitrary head."——它的做法是把每条通道的 ``recall_limit`` 抬到
+# ``max(requested_limit, authorized_count)``，即整个已授权 scope（``:176-181``）。
+# 2.0 不整册回灌（一次查询把全 scope 拉进内存），改用与视觉 ANN 同一个过取倍数
+# （``retrieve_visual.py`` 的 ``OVERSAMPLE_FACTOR = 4``）：**融合前不裁到交付上限**，
+# 融合之后才按 limit 交付。
+RECALL_OVERSAMPLE_FACTOR = 4
+```
+
+```python
+        # 这个 dict 的插入顺序必须与 1.0 的构建顺序一致：metadata 最先，锚点加成才会
+        # 落在同时被 metadata 与语义通道命中的候选上。
+        channel_hits: dict[str, Sequence[CandidateHit]] = {
+            METADATA_CHANNEL: self._metadata.execute(
+                scope_id=request.scope_id,
+                time_bounds=request.time_bounds,
+                media_types=request.media_types,
+                negated_media=request.negated_media,
+                place=request.place,
+            ),
+            LEXICAL_CHANNEL: self._lexical.execute(
+                whole_query=text, scope_id=request.scope_id, limit=recall_limit
+            ),
+            VISUAL_CHANNEL: _visual_candidates(visual),
+        }
+        fused = fuse(channel_hits, channel_weights=DEFAULT_CHANNEL_WEIGHTS)
+```
+
+**两个入口共用一次融合。** 1.0 的 HTTP 侧与 `agent_runtime/tools.py` 的
+`search_memories` 都走同一个 `EvidenceRetrievalKernel`；2.0 原来两处各 new 一个
+`RetrieveVisual`，于是「网页能搜到、助手搜不到」会成为默认行为。现在两个入口都调
+`api/routes/search.py` 的 `build_retrieve_evidence(container)`。
+
+**Run:**
+
+```bash
+.venv/bin/pytest apps/api/tests/integration/test_retrieve_evidence.py apps/api/tests/integration/test_assistant_toolbox.py apps/api/tests/contract/test_search_routes.py
+```
+
+**Expected:**
+
+```
+37 passed
+```
+
+**反向验证**（`test_without_the_lexical_channel_that_photo_is_not_reachable`）：同一个
+查询词走单通道用例时首位是视觉冠军，走编排时被词法召回的那张顶到首位——两条断言同时
+成立，「接上了」与「没接」才在行为上可区分。红灯是**行为红**，不是导入红：
+
+```
+>       assert items[0]["asset"]["file_name"] == "海边.jpg"
+E       AssertionError: assert '雪山.jpg' == '海边.jpg'
+FAILED apps/api/tests/contract/test_search_routes.py::test_the_lexical_channel_is_fused_into_the_endpoint
+```
+
+**顺带钉住的标准条件**：`test_a_candidate_outside_every_channels_head_is_still_ranked_by_the_fusion`
+用 `limit=1` 证明「交付上限只裁融合之后的结果，不裁每条通道的召回」——B 在两条通道里
+都是第二名，按 `limit` 裁通道召回时交付的是 C，不裁时交付的是 B。
+
+## Task 65: 词法投影的 `geo` / `time` / `file` 锚点（写侧接线）
+
+**依赖：** Task 64（它挖出了这一条）。
+
+**Files:**
+- Modify: `apps/api/src/sentrix/domain/retrieval/lexical.py`（`AnchorTerm` + `anchor_terms`）
+- Modify: `apps/api/src/sentrix/infrastructure/persistence/repositories/search_terms.py`（写侧 + 两个协作方）
+- Modify: `apps/api/src/sentrix/bootstrap/container.py`（装配）
+- Modify: `apps/api/tests/unit/test_lexical_rules.py`（+4）、`apps/api/tests/integration/test_timeline_repositories.py`（+2）
+- Create: `apps/api/tests/e2e/test_search_channels.py`（3 条，真相册 / 真 EXIF / 真 GeoNames）
+- Modify: `docs/architecture/module-map.md`、`docs/refactor/capability-map.jsonl`
+
+**1.0 的做法**：`RetrievalIndex.refresh_from_observation` 在写完 observation 字段之后，
+再调 `_asset_anchor_rows`（`backend/retrieval_indexes.py:198-222`、`:225-245`）插三列：
+
+| 列 | 值 | 来源 |
+|---|---|---|
+| `geo` | 地名各级（1.0 是 `label` / `province` / `city` / `district`） | asset 的反地理编码 |
+| `time` | `YYYY` / `YYYY-MM` / `YYYY-MM-DD`（整串短于 7 字符不建） | `assets.captured_at` |
+| `file` | 文件名去扩展名（`event_event_*` / `kf_*` 除外） | `assets.file_name` |
+
+三条 `source_type` 分别是 `asset_geo` / `asset_time` / `asset_file`，confidence 恒 0.9。
+
+```python
+    def _anchor_terms(self, observation: Observation) -> tuple[AnchorTerm, ...]:
+        """1.0 ``retrieval_indexes.py:225-245``：从 asset 的 file_name / captured_at 与
+        解析出的地点生成 geo / time / file 三列锚点。
+
+        调用时点与 1.0 相同（写在 ``refresh_from_observation`` 里），而导入路径的
+        「地点解析 → 观察 → 词法投影」顺序保证这里读得到 ``asset_places`` 那一行
+        （``import_assets.py`` 的模块注释把顺序写成了硬约束）。
+        """
+        asset = self._assets.get(observation.asset_id)
+        if asset is None:
+            return ()
+        place = self._places.get(observation.asset_id)
+        return anchor_terms(
+            file_name=asset.file_name,
+            captured_at=asset.captured_at.isoformat() if asset.captured_at else "",
+            place_text=place.searchable_text() if place is not None else "",
+        )
+```
+
+`geo` 取 `Place.searchable_text()` 的每一段，**不含 GPS 坐标**——1.0 的 `label` 在
+PyGeoCN 那条路上可能退化成坐标串（它自己用 `DISPLAY_COORDINATE_RE` 挡过这件事），
+2.0 直接不给坐标进入这个词的机会。
+
+**Run:**
+
+```bash
+.venv/bin/pytest apps/api/tests/unit/test_lexical_rules.py apps/api/tests/integration/test_timeline_repositories.py
+.venv/bin/pytest apps/api/tests/e2e/test_search_channels.py
+```
+
+**Expected:**
+
+```
+43 passed
+3 passed
+```
+
+**红灯**（把 `_term_rows` 里的锚点循环去掉，其余不动）：
+
+```
+E       KeyError: 'asset_1'
+FAILED apps/api/tests/integration/test_timeline_repositories.py::test_lexical_refresh_writes_the_asset_anchors
+FAILED apps/api/tests/integration/test_timeline_repositories.py::test_without_a_resolved_place_there_is_no_geo_anchor
+```
+
+**真数据（53 张真相册，实测值）**：
+
+| 查询 | 结果 | 判据 |
+|---|---|---|
+| `夷陵区` | 16 张，恰好是 `captured_at` 为 `2017-11-05` 的那 16 张 | 与 `GET /api/v1/assets` 的 EXIF 日期集合逐元素相等 |
+| `清迈` | 2 张，恰好是 `2018-03-31` 那 2 张 | 国外坐标走 GeoNames 最近邻点（`nearest` 槽，边界数据里没有它） |
+| `悉尼` | 0 张 | 反向：既不是观察文本，也不是任何一张的地点或文件名 |
+
+导入后的投影行数从 212（只有 observation 字段）变成 669：`geo` 245 + `time` 159 + `file` 53
+（53 张照片 × 3 段日期 = 159，一对一 = 53）。
+
+## S4c 验证记录
+
+| Task | 红灯（原始报错） | 绿灯 | `make ci` | 累计 passed |
+|---|---|---|---|---:|
+| 64 | `assert '雪山.jpg' == '海边.jpg'`（契约层，行为红）+ `ModuleNotFoundError: sentrix.application.retrieval.retrieve_evidence` | 37 passed | 全绿 | **691** |
+| 65 | `KeyError: 'asset_1'`（2 条集成） | 43 passed + 3 passed | 全绿 | **700** |
+
+**零成本不变量**：679（S4b 终态）→ 691（+12：10 条编排用例 + 2 条契约）→ 700
+（+9：4 条锚点单测 + 2 条投影集成 + 3 条真数据端到端）。逐任务用例数与差值逐一对齐，
+没有「顺手多绿了几条」。
+
+**每个 commit 的实际改动文件集**（由 `git show --stat` 生成，再与 Files 清单核对）：
+
+| Task | commit | 改动文件 |
+|---|---|---|
+| 64 | `f1d251c` | `api/routes/assistant.py`<br>`api/routes/search.py`<br>`application/assistant/tools.py`<br>`application/retrieval/retrieve_evidence.py`<br>`tests/contract/test_search_routes.py`<br>`tests/integration/test_assistant_toolbox.py`<br>`tests/integration/test_retrieve_evidence.py`<br>`docs/architecture/module-map.md`<br>`docs/refactor/capability-map.jsonl` |
+| 65 | `bf37794` | `bootstrap/container.py`<br>`domain/retrieval/lexical.py`<br>`infrastructure/persistence/repositories/search_terms.py`<br>`tests/e2e/test_search_channels.py`<br>`tests/integration/test_assistant_toolbox.py`<br>`tests/integration/test_retrieve_evidence.py`<br>`tests/integration/test_retrieve_lexical_metadata.py`<br>`tests/integration/test_timeline_repositories.py`<br>`tests/unit/test_lexical_rules.py`<br>`docs/architecture/module-map.md`<br>`docs/refactor/capability-map.jsonl` |
+
+**`docs/architecture/module-map.md` 的两列由脚本重算**：用与 `check_module_map.py`
+同一套 AST 解析（含「包的 `__init__.py` 也是一条边」）重写，`check_module_map.py`
+报 **0 个问题**；两列之外的行一字未动（`diff` 只有这三行）。
+
+## 这一节没有做的事
+
+- **metadata 通道的正向条件没有 HTTP 来源。** S4 的 `/api/v1/search` 只有
+  `q` / `scope_id` / `limit`，而 `RetrieveMetadata` 在没有正向结构化条件时按设计返回空
+  （1.0 `metadata.py:28-31`）。所以它在端点上**恒静默**——这是 1.0 对纯内容词查询的
+  行为，不是「没接上」。`EvidenceRequest` 已经留好 `time_bounds` / `media_types` /
+  `negated_media` / `place` 四格，S6 的硬条件（时间 / 人物 / 地点）与查询解析会来填。
+- **`entity` / `text_ann` 两路**（S5 / S6）。缺它们的行为与 1.0 一致：不在
+  `channel_hits` 里，也不报空。
+- **`adjacency`**（S6）：要种子分级才谈得上扩展。
+- **`episodic` 向量**：1.0 的唯一消费者是 `text_ann`（两个 space 合成一条通道），
+  随 S6 一起搬；S4 照旧不写（`summarize_event.py` 的模块注释已按 1.0 实证改写）。
