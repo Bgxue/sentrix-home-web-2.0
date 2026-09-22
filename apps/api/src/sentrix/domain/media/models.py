@@ -65,6 +65,22 @@ class GpsPoint:
         """1.0 把 GPS 存成 ``captured_location`` 文本列，沿用该表示以兼容检索。"""
         return f"{self.latitude:.6f},{self.longitude:.6f}"
 
+    def distance_km(self, other: GpsPoint) -> float:
+        """大圆距离（公里）。1.0 ``backend/db.py:297 gps_distance_km``，地球半径一值不差。
+
+        事件候选的 GPS 衰减、地点解析的最近邻都读它，所以放在点上而不是某一边的
+        工具模块里——两点之间的距离是点自己的性质。
+        """
+        latitude_one, longitude_one = math.radians(self.latitude), math.radians(self.longitude)
+        latitude_two, longitude_two = math.radians(other.latitude), math.radians(other.longitude)
+        delta_latitude = latitude_two - latitude_one
+        delta_longitude = longitude_two - longitude_one
+        a = (
+            math.sin(delta_latitude / 2) ** 2
+            + math.cos(latitude_one) * math.cos(latitude_two) * math.sin(delta_longitude / 2) ** 2
+        )
+        return 6371.0088 * 2 * math.asin(math.sqrt(a))
+
 
 @dataclass(frozen=True, slots=True)
 class Asset:

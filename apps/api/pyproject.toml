@@ -42,4 +42,10 @@ where = ["src"]
 # 迁移脚本不是 .py，不加这条不会进 wheel。editable 安装读源码树看不出来，
 # 部署装 wheel 时 MIGRATIONS_DIR 会变成空目录——那正是 migrate() 过去静默 no-op 的分支。
 [tool.setuptools.package-data]
-sentrix = ["infrastructure/persistence/migrations/*.sql"]
+sentrix = [
+    "infrastructure/persistence/migrations/*.sql",
+    # 地名别名表随包发布。放在包内而不是仓库根的 data/ 下：那个目录整条在
+    # .gitignore 里（`/data/` 是运行期数据目录），放进去就不受版本控制，
+    # 「可审查、可替换、可测试」三条一条都做不到。见 s4-deviations.md §2 第 5 项。
+    "infrastructure/places/data/*.json",
+]
