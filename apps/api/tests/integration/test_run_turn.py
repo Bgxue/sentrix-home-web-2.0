@@ -143,9 +143,7 @@ def build(env, model, toolbox) -> RunTurn:
 
 
 def start(run_turn, conversation) -> str:
-    return run_turn.start(
-        TurnRequest(conversation_id=conversation.id, scope_id="album1", question=QUESTION)
-    ).id
+    return run_turn.start(TurnRequest(conversation_id=conversation.id, question=QUESTION)).id
 
 
 # ---- 正常链路 ---------------------------------------------------------------
@@ -463,7 +461,7 @@ def test_starting_a_turn_on_a_missing_conversation_fails(env):
     run_turn = build(env, ScriptedModel([final("好。")]), StubToolbox())
 
     with pytest.raises(TurnNotFoundError):
-        run_turn.start(TurnRequest(conversation_id="conv_nope", scope_id="album1", question=QUESTION))
+        run_turn.start(TurnRequest(conversation_id="conv_nope", question=QUESTION))
 
 
 def test_start_persists_a_pending_turn_before_anything_runs(env):

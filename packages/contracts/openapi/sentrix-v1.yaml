@@ -339,7 +339,12 @@ paths:
 
         回合先落库（``pending``）、再由 SSE 订阅，是「前端不轮询」能成立的前提：SSE 端点
 
-        永远有东西可订阅，哪怕连接晚到几百毫秒。'
+        永远有东西可订阅，哪怕连接晚到几百毫秒。
+
+
+        scope 不在请求里：回合继承会话的 scope。调用方多传的 ``scope_id`` 从 S3 交付起
+
+        就被忽略，现在连字段都不存在了。'
       operationId: start_turn_api_v1_assistant_conversations__conversation_id__turns_post
       parameters:
       - name: conversation_id
@@ -705,10 +710,6 @@ components:
           maxLength: 2000
           minLength: 1
           title: Message
-        scope_id:
-          type: string
-          title: Scope Id
-          default: home-default
         conversation_id:
           type: string
           title: Conversation Id
@@ -717,6 +718,14 @@ components:
       required:
       - message
       title: StartTurnRequest
+      description: '建回合的请求。**没有 scope**：回合的 scope 由它所属的会话决定。
+
+
+        这里曾经有一个 ``scope_id: str = "home-default"``。它让调用方在不传 scope 时
+
+        把回合落到默认值上，而会话自己的 scope 被完全忽略——检索于是在空库里跑，
+
+        失败还是静默的（表现成「搜索质量差」而不是「配置错了」）。'
     StartTurnResponse:
       properties:
         turn_id:

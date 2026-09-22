@@ -92,8 +92,13 @@ class TurnAlreadyClaimedError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class TurnRequest:
+    """建回合的输入。**没有 scope**：一个回合属于一个会话，而会话已经拥有 scope。
+
+    让调用方再传一个，等于允许「回合的 scope ≠ 会话的 scope」这种不自洽状态存在。
+    它一旦存在，检索就会跑在错误的 scope 上，而且失败是静默的。
+    """
+
     conversation_id: str
-    scope_id: str
     question: str
 
 
@@ -148,14 +153,18 @@ class RunTurn:
 
         回合先于执行落库，SSE 才有东西可订阅——1.0 的回合只活在进程内存里，页面刷新之后
         那次回合就再也拿不回来了。
+
+        scope 取自**会话**：回合落库时把它快照进 ``TurnRecord.scope_id``，供检索、消息
+        与离线分析使用——但这个值只有一个来源，就是会话。
         """
-        if self._conversations.get(request.conversation_id) is None:
+        conversation = self._conversations.get(request.conversation_id)
+        if conversation is None:
             raise TurnNotFoundError(request.conversation_id)
         now = datetime.now(UTC)
         record = TurnRecord(
             id=f"turn_{now.strftime('%Y%m%d%H%M%S%f')}",
-            conversation_id=request.conversation_id,
-            scope_id=request.scope_id,
+            conversation_id=conversation.id,
+            scope_id=conversation.scope_id,
             question=request.question,
             status=TurnStatus.PENDING,
             created_at=now,

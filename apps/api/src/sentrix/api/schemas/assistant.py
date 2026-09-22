@@ -60,9 +60,15 @@ class ConversationDetailResponse(BaseModel):
 
 
 class StartTurnRequest(BaseModel):
+    """建回合的请求。**没有 scope**：回合的 scope 由它所属的会话决定。
+
+    这里曾经有一个 ``scope_id: str = "home-default"``。它让调用方在不传 scope 时
+    把回合落到默认值上，而会话自己的 scope 被完全忽略——检索于是在空库里跑，
+    失败还是静默的（表现成「搜索质量差」而不是「配置错了」）。
+    """
+
     # 一条空消息不是「一轮空对话」，是一次调用方错误，所以这里直接挡在 422。
     message: str = Field(min_length=1, max_length=2000)
-    scope_id: str = "home-default"
     conversation_id: str = ""
 
 

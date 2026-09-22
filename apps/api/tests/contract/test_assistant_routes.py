@@ -61,9 +61,10 @@ def make_conversation(client: TestClient, scope_id: str = "album1") -> dict:
 
 
 def start_turn(client: TestClient, conversation_id: str, message: str = "给我看看在海边的照片") -> dict:
+    # 不传 scope：回合的 scope 由它所属的会话决定。
     response = client.post(
         f"/api/v1/assistant/conversations/{conversation_id}/turns",
-        json={"message": message, "scope_id": "album1"},
+        json={"message": message},
     )
     assert response.status_code == 202, response.text
     return response.json()
@@ -145,6 +146,42 @@ def test_starting_a_turn_returns_a_pending_turn_id(client: TestClient):
     assert body["status"] in {"pending", "running"}
 
 
+def test_a_turn_inherits_the_scope_of_its_conversation(client: TestClient):
+    """回合的 scope 必须来自会话，不能来自请求。
+
+    实测过的坏法：用 ``{"scope_id": "album1"}`` 建会话，再用**不带 scope** 的请求
+    建回合，回合会落到 ``StartTurnRequest.scope_id`` 的默认值 ``home-default`` 上。
+    检索于是在一个空 scope 里跑，助手如实回答「没有找到」——失败是静默的，表现为
+    「搜索质量差」而不是「配置错了」。这条用例钉的就是这条不变量。
+    """
+    conversation = make_conversation(client, scope_id="album1")
+
+    turn = start_turn(client, conversation["id"])
+
+    recorded = client.app.state.container.turn_repository.get(turn["turn_id"])
+    assert recorded is not None
+    assert recorded.scope_id == "album1"
+
+
+def test_a_scope_sent_by_the_caller_cannot_override_the_conversation(client: TestClient):
+    """请求里残留的 ``scope_id`` 造不出「回合的 scope ≠ 会话的 scope」。
+
+    缓存里的旧前端仍会带上这个字段。它现在只是一个被忽略的多余字段，而不是一次把
+    回合改道到别的 scope 的静默重定向。
+    """
+    conversation = make_conversation(client, scope_id="album1")
+
+    response = client.post(
+        f"/api/v1/assistant/conversations/{conversation['id']}/turns",
+        json={"message": "在吗", "scope_id": "album2"},
+    )
+
+    assert response.status_code == 202
+    recorded = client.app.state.container.turn_repository.get(response.json()["turn_id"])
+    assert recorded is not None
+    assert recorded.scope_id == "album1"
+
+
 def test_a_blank_message_is_rejected(client: TestClient):
     created = make_conversation(client)
 
@@ -176,7 +213,7 @@ def test_a_turn_can_be_started_without_creating_a_conversation_first(client: Tes
     """
     response = client.post(
         "/api/v1/assistant/conversations/conv_nope/turns",
-        json={"message": "在吗", "scope_id": "album1"},
+        json={"message": "在吗"},
     )
 
     assert response.status_code == 404

@@ -110,9 +110,10 @@ def read_events(client: TestClient, turn_id: str) -> list[dict]:
 
 
 def ask(client: TestClient, conversation_id: str, question: str) -> tuple[str, list[dict]]:
+    # 刻意不传 scope：回合的 scope 必须来自会话（``start_conversation`` 建的那个 SCOPE）。
     response = client.post(
         f"/api/v1/assistant/conversations/{conversation_id}/turns",
-        json={"message": question, "scope_id": SCOPE},
+        json={"message": question},
     )
     assert response.status_code == 202, response.text
     turn_id = response.json()["turn_id"]

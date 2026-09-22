@@ -188,15 +188,17 @@ def start_turn(
 
     回合先落库（``pending``）、再由 SSE 订阅，是「前端不轮询」能成立的前提：SSE 端点
     永远有东西可订阅，哪怕连接晚到几百毫秒。
+
+    scope 不在请求里：回合继承会话的 scope。调用方多传的 ``scope_id`` 从 S3 交付起
+    就被忽略，现在连字段都不存在了。
     """
     manage = ManageConversations(
         conversations=container.conversation_repository, turns=container.turn_repository
     )
     run_turn = _run_turn(container)
     try:
-        record = run_turn.start(
-            TurnRequest(conversation_id=conversation_id, scope_id=payload.scope_id, question=payload.message)
-        )
+        # 回合的 scope 由会话决定，请求里没有这个字段可传。
+        record = run_turn.start(TurnRequest(conversation_id=conversation_id, question=payload.message))
     except TurnNotFoundError as error:
         # application 抛领域错误，映射成什么状态码是这里的事。
         raise HTTPException(status_code=404, detail="conversation not found") from error
