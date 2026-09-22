@@ -6,10 +6,17 @@ PIP := .venv/bin/pip
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
 
+# 前端依赖必须在这里装。只装 Python 依赖时，全新克隆跑 `make ci` 的 web-check 会在
+# `npx tsc -b` 处去 npm 下载冒名包 tsc@2.0.4，打印 "This is not the tsc command you are
+# looking for" —— 它确实 exit 1（不是静默通过），但报错指向的是 npx 而不是缺依赖，
+# 后来人极易当成 npx 抖动而把前端检查删掉，于是又造出一个"看起来在检查、其实没有"。
+# 用 `npm ci` 而不是 `npm install`：apps/web/package-lock.json 在版本控制里，
+# `npm ci` 按 lock 装、lock 与 package.json 不一致时直接报错，比 install 可复现。
 install: ## 建 venv 并安装全部依赖
 	uv python install 3.11
 	uv venv --python 3.11 --python-preference only-managed --clear --seed .venv
 	$(PIP) install -q -e "apps/api[dev]"
+	cd apps/web && npm ci
 
 lint: ## ruff 检查
 	.venv/bin/ruff check apps/api/src apps/api/tests scripts
