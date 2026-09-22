@@ -33,6 +33,9 @@
 | `sentrix/domain/media/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | `sentrix/api/routes/media.py`、`sentrix/application/media/import_assets.py`、`sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/repositories/assets.py` |
 | `sentrix/domain/media/ports.py` | 领域端口（AssetRepository / MediaStorage / MetadataReader / PreviewEncoder）与浏览器转码规则 | domain | `sentrix/domain/media/models.py` | `sentrix/application/media/import_assets.py`、`sentrix/bootstrap/container.py` |
+| `sentrix/domain/retrieval/__init__.py` | 包标记与检索域导出 | domain | `sentrix/domain/retrieval/fusion.py`、`sentrix/domain/retrieval/models.py` | — |
+| `sentrix/domain/retrieval/models.py` | 候选命中 `CandidateHit` 与融合结果 `FusedCandidate`；分值不是裸 float | domain | — | `sentrix/domain/retrieval/__init__.py`、`sentrix/domain/retrieval/fusion.py` |
+| `sentrix/domain/retrieval/fusion.py` | 加权 RRF 融合与证据分级；权重/RRF_K/anchor 加成来自行为基线 | domain | `sentrix/domain/retrieval/models.py` | `sentrix/domain/retrieval/__init__.py` |
 | `sentrix/application/__init__.py` | 包标记 | application | — | — |
 | `sentrix/application/media/__init__.py` | 包标记 | application | — | — |
 | `sentrix/application/media/import_assets.py` | 导入用例 `ImportAssets` / `ImportRequest` / `ImportResult`；按 scope 的 SHA-256 去重 | application | `sentrix/domain/media/models.py`、`sentrix/domain/media/ports.py` | `sentrix/api/routes/media.py` |
