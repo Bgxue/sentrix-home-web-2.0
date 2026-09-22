@@ -744,6 +744,15 @@ components:
         indexed:
           type: boolean
           title: Indexed
+        placed:
+          type: boolean
+          title: Placed
+          default: false
+        event_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Event Id
       type: object
       required:
       - asset_id

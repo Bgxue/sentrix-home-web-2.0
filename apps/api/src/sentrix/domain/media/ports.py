@@ -71,6 +71,16 @@ class ObservationSemantics:
     confidence: float = 0.0
 
 
+class AssetObserver(Protocol):
+    """把一张已导入的 Asset 变成一次语义观察，并把结果写回 Observation。
+
+    与 ``AssetVisualIndexer`` / ``AssetPlaceIndex`` 同构：导入用例依赖这个抽象，
+    不依赖具体的观察器与仓储。
+    """
+
+    def observe(self, asset: Asset, observation: Observation) -> Observation | None: ...
+
+
 class MediaStorage(Protocol):
     def store(self, asset_id: str, file_name: str, content: bytes) -> Path: ...
 

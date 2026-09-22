@@ -10,9 +10,11 @@ from fastapi.responses import FileResponse, Response
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
+from sentrix.application.media.index_place import IndexAssetPlace
+from sentrix.application.memories.assign_events import AssignEvents, EventVisualSimilarity
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
-from sentrix.domain.media.models import Asset
+from sentrix.domain.media.models import Asset, Observation
 
 router = APIRouter(tags=["media"])
 
@@ -47,17 +49,7 @@ async def import_media(
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
 
-    use_case = ImportAssets(
-        assets=container.asset_repository,
-        observations=container.observation_repository,
-        storage=container.media_storage,
-        metadata=container.metadata_reader,
-        visual_indexer=IndexAssetVisual(
-            embedder=container.visual_embedder,
-            vectors=container.vector_repository,
-            index=container.vector_index,
-        ),
-    )
+    use_case = build_import_assets(container, observe=False)
     result = use_case.execute(
         ImportRequest(
             scope_id=scope_id,
@@ -73,7 +65,54 @@ async def import_media(
         status=result.status.value,
         deduplicated=result.deduplicated,
         indexed=result.indexed,
+        placed=result.placed,
+        event_id=result.event_id,
     )
+
+
+def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
+    """把导入用例的协作者接起来。**只在这里接一次**。
+
+    单张上传与整册导入共用同一条链：分开接的话，「整册少了词法投影」这类差异会以
+    「单张能搜到、批量搜不到」的形式出现，而那种 bug 在两端各看一半时都看不出来。
+
+    ``observe`` 控制要不要为每张图付视觉观察的模型调用（首轮 + 补全 + 中文化，
+    最多 3 次）。单张上传走快路径（1.0 的 ``_commit_fast_image`` 同样时机），
+    整册导入才接观察器。
+    """
+    assigner = AssignEvents(
+        events=container.event_repository,
+        observations=container.observation_repository,
+        assets=container.asset_repository,
+        places=container.asset_place_repository,
+        visual_similarity=EventVisualSimilarity(
+            vectors=container.vector_repository,
+            observations=container.observation_repository,
+            assets=container.asset_repository,
+        ),
+    )
+    return ImportAssets(
+        assets=container.asset_repository,
+        observations=container.observation_repository,
+        storage=container.media_storage,
+        metadata=container.metadata_reader,
+        visual_indexer=IndexAssetVisual(
+            embedder=container.visual_embedder,
+            vectors=container.vector_repository,
+            index=container.vector_index,
+        ),
+        place_indexer=IndexAssetPlace(
+            resolver=container.place_resolver, places=container.asset_place_repository
+        ),
+        # 观察器随 Task 57a 接上：视觉观察是**可选增强**，缺它时导入链照样跑完整条。
+        observer=None,
+        event_assigner=lambda observation: _event_id(assigner, observation),
+        lexical_index=container.lexical_index,
+    )
+
+
+def _event_id(assigner: AssignEvents, observation: Observation) -> str:
+    return assigner.execute(observation).event.id
 
 
 @router.get("/assets")
