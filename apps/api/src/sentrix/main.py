@@ -6,7 +6,7 @@ from fastapi import APIRouter, FastAPI
 
 from sentrix import __version__
 from sentrix.api.errors import DomainError, domain_error_handler
-from sentrix.api.routes import health, media
+from sentrix.api.routes import health, media, search
 from sentrix.bootstrap.container import Container
 from sentrix.config import Settings, load_settings
 
@@ -25,6 +25,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1 = APIRouter(prefix="/api/v1")
     v1.include_router(health.router)
     v1.include_router(media.router)
+    v1.include_router(search.router)
     app.include_router(v1)
     return app
 

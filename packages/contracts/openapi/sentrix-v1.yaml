@@ -154,6 +154,52 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/search:
+    get:
+      tags:
+      - search
+      summary: Search Assets
+      operationId: search_assets_api_v1_search_get
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 内容词，例如 桥 / 海边 / 红色
+          title: Q
+        description: 内容词，例如 桥 / 海边 / 红色
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: home-default
+          title: Scope Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -266,6 +312,62 @@ components:
       - deduplicated
       - indexed
       title: ImportResponse
+    SearchHit:
+      properties:
+        asset:
+          $ref: '#/components/schemas/AssetSummary'
+        score:
+          type: number
+          title: Score
+        channels:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Channels
+        raw_scores:
+          additionalProperties:
+            type: number
+          type: object
+          title: Raw Scores
+      type: object
+      required:
+      - asset
+      - score
+      - channels
+      - raw_scores
+      title: SearchHit
+      description: 一条命中。``asset`` 是可打开的原图本身——产品硬约束：查询必须返回原图。
+    SearchResponse:
+      properties:
+        query:
+          type: string
+          title: Query
+        backend:
+          type: string
+          title: Backend
+        degraded:
+          type: boolean
+          title: Degraded
+        degraded_reason:
+          type: string
+          title: Degraded Reason
+        authoritative_vectors:
+          type: integer
+          title: Authoritative Vectors
+        items:
+          items:
+            $ref: '#/components/schemas/SearchHit'
+          type: array
+          title: Items
+      type: object
+      required:
+      - query
+      - backend
+      - degraded
+      - degraded_reason
+      - authoritative_vectors
+      - items
+      title: SearchResponse
     ValidationError:
       properties:
         loc:

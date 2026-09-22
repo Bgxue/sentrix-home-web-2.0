@@ -20,7 +20,7 @@ PREVIEW_MAX_DIMENSION = 1600
 PREVIEW_QUALITY = 85
 
 
-def _to_summary(asset: Asset) -> AssetSummary:
+def to_summary(asset: Asset) -> AssetSummary:
     return AssetSummary(
         id=asset.id,
         file_name=asset.file_name,
@@ -83,7 +83,7 @@ def list_assets(
     container: Container = Depends(get_container),
 ) -> AssetListResponse:
     assets = container.asset_repository.list_by_scope(scope_id, min(limit, 1000))
-    return AssetListResponse(items=[_to_summary(asset) for asset in assets])
+    return AssetListResponse(items=[to_summary(asset) for asset in assets])
 
 
 @router.get("/assets/{asset_id}")
@@ -91,7 +91,7 @@ def get_asset(asset_id: str, container: Container = Depends(get_container)) -> A
     asset = container.asset_repository.get(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="asset not found")
-    return _to_summary(asset)
+    return to_summary(asset)
 
 
 @router.get("/assets/{asset_id}/file")

@@ -18,17 +18,19 @@
 |---|---|---|---|---|
 | `sentrix/__init__.py` | 包版本号 | — | — | `sentrix/api/routes/health.py`、`sentrix/main.py` |
 | `sentrix/config.py` | 类型化配置；`data_dir` 是唯一可配根，其余路径派生 | — | — | `sentrix/bootstrap/container.py`、`sentrix/main.py` |
-| `sentrix/main.py` | FastAPI 装配与 v1 路由注册；进程入口 | — | `sentrix/__init__.py`、`sentrix/api/errors.py`、`sentrix/api/routes/__init__.py`、`sentrix/api/routes/health.py`、`sentrix/api/routes/media.py`、`sentrix/bootstrap/container.py`、`sentrix/config.py` | — |
+| `sentrix/main.py` | FastAPI 装配与 v1 路由注册；进程入口 | — | `sentrix/__init__.py`、`sentrix/api/errors.py`、`sentrix/api/routes/__init__.py`、`sentrix/api/routes/health.py`、`sentrix/api/routes/media.py`、`sentrix/api/routes/search.py`、`sentrix/bootstrap/container.py`、`sentrix/config.py` | — |
 | `sentrix/bootstrap/__init__.py` | 包标记 | bootstrap | — | — |
-| `sentrix/bootstrap/container.py` | 唯一依赖装配点；只有这里构造适配器 | bootstrap | `sentrix/config.py`、`sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/image_io.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/models/chinese_clip.py`、`sentrix/infrastructure/persistence/database.py`、`sentrix/infrastructure/persistence/repositories/assets.py`、`sentrix/infrastructure/persistence/repositories/spaces.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` | `sentrix/api/deps.py`、`sentrix/api/routes/media.py`、`sentrix/main.py` |
+| `sentrix/bootstrap/container.py` | 唯一依赖装配点；只有这里构造适配器 | bootstrap | `sentrix/config.py`、`sentrix/domain/media/ports.py`、`sentrix/infrastructure/media/image_io.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/models/chinese_clip.py`、`sentrix/infrastructure/persistence/database.py`、`sentrix/infrastructure/persistence/repositories/assets.py`、`sentrix/infrastructure/persistence/repositories/spaces.py`、`sentrix/infrastructure/persistence/repositories/vectors.py`、`sentrix/infrastructure/vector/qdrant_index.py` | `sentrix/api/deps.py`、`sentrix/api/routes/media.py`、`sentrix/api/routes/search.py`、`sentrix/main.py` |
 | `sentrix/api/__init__.py` | 包标记 | api | — | — |
-| `sentrix/api/deps.py` | `get_container`：路由从 `app.state` 取装配好的容器，不自己构造 | api | `sentrix/bootstrap/container.py` | `sentrix/api/routes/media.py` |
+| `sentrix/api/deps.py` | `get_container`：路由从 `app.state` 取装配好的容器，不自己构造 | api | `sentrix/bootstrap/container.py` | `sentrix/api/routes/media.py`、`sentrix/api/routes/search.py` |
 | `sentrix/api/errors.py` | 领域错误基类与 `DomainError` → HTTP 的映射 | api | — | `sentrix/main.py` |
 | `sentrix/api/routes/__init__.py` | 包标记 | api | — | `sentrix/main.py` |
 | `sentrix/api/routes/health.py` | `GET /api/v1/health`，只做 HTTP 映射 | api | `sentrix/__init__.py` | `sentrix/main.py` |
-| `sentrix/api/routes/media.py` | 媒体导入与交付端点（import / assets / file / preview），只做 HTTP 映射 | api | `sentrix/api/deps.py`、`sentrix/api/schemas/media.py`、`sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/bootstrap/container.py`、`sentrix/domain/media/models.py` | `sentrix/main.py` |
+| `sentrix/api/routes/media.py` | 媒体导入与交付端点（import / assets / file / preview），只做 HTTP 映射 | api | `sentrix/api/deps.py`、`sentrix/api/schemas/media.py`、`sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/bootstrap/container.py`、`sentrix/domain/media/models.py` | `sentrix/api/routes/search.py`、`sentrix/main.py` |
+| `sentrix/api/routes/search.py` | `GET /api/v1/search`：按内容词检索，只做 HTTP 映射 | api | `sentrix/api/deps.py`、`sentrix/api/routes/media.py`、`sentrix/api/schemas/search.py`、`sentrix/application/retrieval/retrieve_visual.py`、`sentrix/bootstrap/container.py` | `sentrix/main.py` |
 | `sentrix/api/schemas/__init__.py` | 包标记 | api | — | — |
-| `sentrix/api/schemas/media.py` | v1 媒体端点的响应模型（ImportResponse / AssetSummary / AssetListResponse） | api | — | `sentrix/api/routes/media.py` |
+| `sentrix/api/schemas/media.py` | v1 媒体端点的响应模型（ImportResponse / AssetSummary / AssetListResponse） | api | — | `sentrix/api/routes/media.py`、`sentrix/api/schemas/search.py` |
+| `sentrix/api/schemas/search.py` | v1 检索端点的响应模型（SearchHit / SearchResponse） | api | `sentrix/api/schemas/media.py` | `sentrix/api/routes/search.py` |
 | `sentrix/domain/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/media/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | `sentrix/api/routes/media.py`、`sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/repositories/assets.py` |
@@ -43,7 +45,7 @@
 | `sentrix/application/media/__init__.py` | 包标记 | application | — | — |
 | `sentrix/application/retrieval/__init__.py` | 包标记 | application | — | — |
 | `sentrix/application/retrieval/index_visual.py` | 导入即向量化：嵌入 → 写权威存储 → 镜像派生索引；空向量不写、重复导入不重嵌 | application | `sentrix/domain/media/models.py`、`sentrix/domain/retrieval/__init__.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/domain/retrieval/scheme.py` | `sentrix/api/routes/media.py` |
-| `sentrix/application/retrieval/retrieve_visual.py` | 视觉召回用例：内容词 → 视觉通道候选 → 加权 RRF；索引被占用/为空/落后时回退权威存储并置 `degraded` | application | `sentrix/domain/retrieval/__init__.py`、`sentrix/domain/retrieval/fusion.py`、`sentrix/domain/retrieval/models.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/domain/retrieval/scheme.py` | — |
+| `sentrix/application/retrieval/retrieve_visual.py` | 视觉召回用例：内容词 → 视觉通道候选 → 加权 RRF；索引被占用/为空/落后时回退权威存储并置 `degraded` | application | `sentrix/domain/retrieval/__init__.py`、`sentrix/domain/retrieval/fusion.py`、`sentrix/domain/retrieval/models.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/domain/retrieval/scheme.py` | `sentrix/api/routes/search.py` |
 | `sentrix/application/media/import_assets.py` | 导入用例 `ImportAssets` / `ImportRequest` / `ImportResult`；按 scope 的 SHA-256 去重 | application | `sentrix/domain/media/models.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/retrieval/ports.py` | `sentrix/api/routes/media.py` |
 | `sentrix/infrastructure/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/persistence/__init__.py` | 包标记 | infrastructure | — | — |
