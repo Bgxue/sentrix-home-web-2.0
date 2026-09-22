@@ -28,10 +28,11 @@ import logging
 import threading
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from sentrix.api.deps import get_container
+from sentrix.api.routes.media import deliver_asset
 from sentrix.api.schemas.assistant import (
     AttachmentSummary,
     CompleteEventPayload,
@@ -353,3 +354,51 @@ def get_turn(turn_id: str, container: Container = Depends(get_container)) -> Tur
         result=_complete_payload(record) if terminal else None,
         error=record.termination_reason if record.status.value in _FAILED_STATUSES else "",
     )
+
+
+@router.get("/assistant/result-sets/{result_set_id}/photo")
+def result_set_photo(
+    result_set_id: str,
+    handle: str = Query(default=""),
+    scope_id: str = Query(default="home-default"),
+    original: bool = Query(default=False),
+    container: Container = Depends(get_container),
+) -> Response:
+    """B3.2：结果集授权原图交付。``handle`` 必须属于该结果集，且 scope 必须匹配。
+
+    1.0 ``app.py:2484`` 的忠实移植，四条判断逐条对齐（顺序也一样）：
+
+    - 结果集不存在 → 404 ``result set not found``（1.0 还带「或已过期」；2.0 的
+      ``ResultSet`` 没有 expires_at 这一格，见下述）；
+    - ``rs.scope_id != scope_id`` → 403 ``scope mismatch``；
+    - 给了 ``handle`` 但它不在该结果集里 → 404 ``handle not in result set``；
+    - 没给 ``handle`` → 取结果集第一张；结果集为空 → 404 ``empty result set``。
+
+    为什么值得搬：它是**唯一**一条把「模型给的 ``photo_N``」和「真实 ``asset_id``」隔开的
+    交付路径——``resolve`` 只在结果集自己那一串 asset_id 上做下标映射，越界返回 ``None``。
+    前端拿到的 URL 里从头到尾没有 asset_id（1.0 ``src/api.js:67``），于是「只交付它真的
+    看过的图」是个结构性事实，而不是提示词里的一句请求。
+
+    与 1.0 的两处差异，都是 2.0 这边缺的那一格数据：
+
+    1. **没有 ``expires_at``。** 1.0 的 ``ResultSet`` 有这一列，2.0 的没有，于是「过期」
+       在 2.0 表现为「查不到」，同样是 404。过期本身属于 S4 的维护面。
+    2. **``original`` 的语义沿用 2.0 媒体端点的既有映射**：``original=1`` 给原文件，
+       默认给服务端转码的 JPEG 预览（1.0 默认也走归一化转码，只有 ``original=1``
+       才给原图）。
+    """
+    result_set = container.result_set_repository.get(result_set_id)
+    if result_set is None:
+        raise HTTPException(status_code=404, detail="result set not found")
+    if result_set.scope_id != scope_id:
+        raise HTTPException(status_code=403, detail="scope mismatch")
+
+    asset_id = result_set.resolve(handle) if handle else None
+    if handle and asset_id is None:
+        raise HTTPException(status_code=404, detail="handle not in result set")
+    if asset_id is None:
+        asset_id = result_set.asset_ids[0] if result_set.asset_ids else None
+        if asset_id is None:
+            raise HTTPException(status_code=404, detail="empty result set")
+
+    return deliver_asset(asset_id, original=original, container=container)

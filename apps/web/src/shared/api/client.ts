@@ -176,3 +176,23 @@ export interface AssistantTurnPoll {
 export async function pollTurn(turnId: string): Promise<AssistantTurnPoll> {
   return request<AssistantTurnPoll>(`/assistant/turns/${encodeURIComponent(turnId)}`);
 }
+
+/**
+ * 结果集授权原图 URL——1.0 ``src/api.js:67`` 的 ``resultSetPhoto``，同一条契约。
+ *
+ * URL 里只有结果集 id 与 ``photo_N`` 这个 handle，**没有 asset_id**。``photo_N`` 由
+ * 结果集自己做下标解析，越界的 handle 解析不出来——「只交付模型真的看过的图」因此是
+ * 结构性事实，而不是提示词里的一句请求。
+ */
+export function resultSetPhotoUrl(
+  resultSetId: string,
+  handle: string,
+  scopeId: string,
+  original = false,
+): string {
+  const query = new URLSearchParams({ handle, scope_id: scopeId });
+  if (original) {
+    query.set("original", "1");
+  }
+  return `${BASE}/assistant/result-sets/${encodeURIComponent(resultSetId)}/photo?${query}`;
+}

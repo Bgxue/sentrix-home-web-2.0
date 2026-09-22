@@ -446,6 +446,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assistant/result-sets/{result_set_id}/photo:
+    get:
+      tags:
+      - assistant
+      summary: Result Set Photo
+      description: "B3.2：结果集授权原图交付。``handle`` 必须属于该结果集，且 scope 必须匹配。\n\n1.0 ``app.py:2484``\
+        \ 的忠实移植，四条判断逐条对齐（顺序也一样）：\n\n- 结果集不存在 → 404 ``result set not found``（1.0 还带「或已过期」；2.0\
+        \ 的\n  ``ResultSet`` 没有 expires_at 这一格，见下述）；\n- ``rs.scope_id != scope_id``\
+        \ → 403 ``scope mismatch``；\n- 给了 ``handle`` 但它不在该结果集里 → 404 ``handle not\
+        \ in result set``；\n- 没给 ``handle`` → 取结果集第一张；结果集为空 → 404 ``empty result set``。\n\
+        \n为什么值得搬：它是**唯一**一条把「模型给的 ``photo_N``」和「真实 ``asset_id``」隔开的\n交付路径——``resolve``\
+        \ 只在结果集自己那一串 asset_id 上做下标映射，越界返回 ``None``。\n前端拿到的 URL 里从头到尾没有 asset_id（1.0\
+        \ ``src/api.js:67``），于是「只交付它真的\n看过的图」是个结构性事实，而不是提示词里的一句请求。\n\n与 1.0 的两处差异，都是\
+        \ 2.0 这边缺的那一格数据：\n\n1. **没有 ``expires_at``。** 1.0 的 ``ResultSet`` 有这一列，2.0\
+        \ 的没有，于是「过期」\n   在 2.0 表现为「查不到」，同样是 404。过期本身属于 S4 的维护面。\n2. **``original``\
+        \ 的语义沿用 2.0 媒体端点的既有映射**：``original=1`` 给原文件，\n   默认给服务端转码的 JPEG 预览（1.0 默认也走归一化转码，只有\
+        \ ``original=1``\n   才给原图）。"
+      operationId: result_set_photo_api_v1_assistant_result_sets__result_set_id__photo_get
+      parameters:
+      - name: result_set_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Result Set Id
+      - name: handle
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Handle
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: home-default
+          title: Scope Id
+      - name: original
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Original
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:

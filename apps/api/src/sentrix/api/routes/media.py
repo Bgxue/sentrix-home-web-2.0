@@ -94,23 +94,32 @@ def get_asset(asset_id: str, container: Container = Depends(get_container)) -> A
     return to_summary(asset)
 
 
-@router.get("/assets/{asset_id}/file")
-def get_asset_file(asset_id: str, container: Container = Depends(get_container)) -> FileResponse:
+def deliver_asset(asset_id: str, *, original: bool, container: Container) -> Response:
+    """按 ``original`` 交付一张资产：``True`` 原文件，``False`` 服务端转码的 JPEG 预览。
+
+    抽出来是因为两条路由共用同一份「怎么把一张已授权的图交出去」：``/assets/{id}/file``
+    与助手侧的 ``/assistant/result-sets/{id}/photo``——1.0 的 ``asset_file``
+    （``app.py:2450``）也是被这两处共用的。转码参数只留一份。
+    """
     asset = container.asset_repository.get(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="asset not found")
     path = Path(asset.path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="media file missing on disk")
-    return FileResponse(path, media_type=asset.mime_type or "application/octet-stream")
+    if original:
+        return FileResponse(path, media_type=asset.mime_type or "application/octet-stream")
+    payload = container.preview_encoder.encode_jpeg(
+        path, max_dimension=PREVIEW_MAX_DIMENSION, quality=PREVIEW_QUALITY
+    )
+    return Response(content=payload, media_type="image/jpeg")
+
+
+@router.get("/assets/{asset_id}/file")
+def get_asset_file(asset_id: str, container: Container = Depends(get_container)) -> Response:
+    return deliver_asset(asset_id, original=True, container=container)
 
 
 @router.get("/assets/{asset_id}/preview")
 def get_asset_preview(asset_id: str, container: Container = Depends(get_container)) -> Response:
-    asset = container.asset_repository.get(asset_id)
-    if asset is None:
-        raise HTTPException(status_code=404, detail="asset not found")
-    payload = container.preview_encoder.encode_jpeg(
-        Path(asset.path), max_dimension=PREVIEW_MAX_DIMENSION, quality=PREVIEW_QUALITY
-    )
-    return Response(content=payload, media_type="image/jpeg")
+    return deliver_asset(asset_id, original=False, container=container)
