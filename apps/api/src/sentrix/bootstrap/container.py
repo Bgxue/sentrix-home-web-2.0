@@ -15,6 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sentrix.config import Settings
+from sentrix.domain.assistant.ports import (
+    ChatModel,
+    ConversationRepository,
+    PersonDirectory,
+    ResultSetRepository,
+    TurnEventBroker,
+    TurnRepository,
+)
 from sentrix.domain.media.ports import (
     AssetRepository,
     MediaStorage,
@@ -23,6 +31,9 @@ from sentrix.domain.media.ports import (
     PreviewEncoder,
 )
 from sentrix.domain.retrieval.ports import VectorIndex, VectorRepository, VisualEmbedder
+from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
+from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
+from sentrix.infrastructure.assistant.identity import NoIdentityDirectory
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
@@ -32,7 +43,12 @@ from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
     SqliteObservationRepository,
 )
+from sentrix.infrastructure.persistence.repositories.conversations import (
+    SqliteConversationRepository,
+)
+from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
+from sentrix.infrastructure.persistence.repositories.turns import SqliteTurnRepository
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
 from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
 
@@ -60,6 +76,15 @@ class Container:
     vector_index: VectorIndex
     visual_embedder: VisualEmbedder
 
+    chat_model: ChatModel
+    conversation_repository: ConversationRepository
+    turn_repository: TurnRepository
+    result_set_repository: ResultSetRepository
+    person_directory: PersonDirectory
+    # 内存里的实时事件流。它没有持久化的一面——历史事件在 agent_turn_events 表里，
+    # 两半合起来才构成完整的 SSE 语义（见 domain/assistant/ports.py 的 TurnEventBroker）。
+    turn_event_broker: TurnEventBroker
+
     @classmethod
     def build(cls, settings: Settings) -> Container:
         database = Database(settings.database_path, MIGRATIONS_DIR)
@@ -75,6 +100,16 @@ class Container:
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
             visual_embedder=ChineseClipVisualEmbedder(),
+            chat_model=OpenAIChatModel(
+                settings.vlm_base_url,
+                settings.chat_model_name,
+                timeout_s=settings.chat_timeout_s,
+            ),
+            conversation_repository=SqliteConversationRepository(database),
+            turn_repository=SqliteTurnRepository(database),
+            result_set_repository=SqliteResultSetRepository(database),
+            person_directory=NoIdentityDirectory(),
+            turn_event_broker=InProcessTurnEventBroker(),
         )
 
     def database_healthy(self) -> bool:

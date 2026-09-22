@@ -200,6 +200,173 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assistant/conversations:
+    post:
+      tags:
+      - assistant
+      summary: Create Conversation
+      operationId: create_conversation_api_v1_assistant_conversations_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConversationRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationSummary'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - assistant
+      summary: List Conversations
+      operationId: list_conversations_api_v1_assistant_conversations_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: home-default
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assistant/conversations/{conversation_id}:
+    get:
+      tags:
+      - assistant
+      summary: Get Conversation
+      operationId: get_conversation_api_v1_assistant_conversations__conversation_id__get
+      parameters:
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Conversation Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetailResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    patch:
+      tags:
+      - assistant
+      summary: Rename Conversation
+      operationId: rename_conversation_api_v1_assistant_conversations__conversation_id__patch
+      parameters:
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Conversation Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameConversationRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationSummary'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - assistant
+      summary: Delete Conversation
+      operationId: delete_conversation_api_v1_assistant_conversations__conversation_id__delete
+      parameters:
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Conversation Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/assistant/conversations/{conversation_id}/turns:
+    post:
+      tags:
+      - assistant
+      summary: Start Turn
+      description: '建一个回合并立刻返回 ``turn_id``，执行放在工作线程里。
+
+
+        回合先落库（``pending``）、再由 SSE 订阅，是「前端不轮询」能成立的前提：SSE 端点
+
+        永远有东西可订阅，哪怕连接晚到几百毫秒。'
+      operationId: start_turn_api_v1_assistant_conversations__conversation_id__turns_post
+      parameters:
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Conversation Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartTurnRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartTurnResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -258,6 +425,23 @@ components:
       - captured_at
       - gps
       title: AssetSummary
+    AttachmentSummary:
+      properties:
+        handle:
+          type: string
+          title: Handle
+        asset_id:
+          type: string
+          title: Asset Id
+        file_name:
+          type: string
+          title: File Name
+      type: object
+      required:
+      - handle
+      - asset_id
+      - file_name
+      title: AttachmentSummary
     Body_import_media_api_v1_media_import_post:
       properties:
         file:
@@ -272,6 +456,78 @@ components:
       required:
       - file
       title: Body_import_media_api_v1_media_import_post
+    ConversationDetailResponse:
+      properties:
+        conversation:
+          $ref: '#/components/schemas/ConversationSummary'
+        messages:
+          items:
+            $ref: '#/components/schemas/MessageSummary'
+          type: array
+          title: Messages
+        turns:
+          items:
+            $ref: '#/components/schemas/TurnSummary'
+          type: array
+          title: Turns
+      type: object
+      required:
+      - conversation
+      - messages
+      - turns
+      title: ConversationDetailResponse
+    ConversationListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ConversationSummary'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: ConversationListResponse
+    ConversationSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        title:
+          type: string
+          title: Title
+        created_at:
+          type: string
+          title: Created At
+        updated_at:
+          type: string
+          title: Updated At
+        last_message_at:
+          type: string
+          title: Last Message At
+      type: object
+      required:
+      - id
+      - scope_id
+      - title
+      - created_at
+      - updated_at
+      - last_message_at
+      title: ConversationSummary
+    CreateConversationRequest:
+      properties:
+        scope_id:
+          type: string
+          title: Scope Id
+          default: home-default
+        title:
+          type: string
+          title: Title
+          default: ''
+      type: object
+      title: CreateConversationRequest
     HTTPValidationError:
       properties:
         detail:
@@ -312,6 +568,42 @@ components:
       - deduplicated
       - indexed
       title: ImportResponse
+    MessageSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        role:
+          type: string
+          title: Role
+        content:
+          type: string
+          title: Content
+        turn_id:
+          type: string
+          title: Turn Id
+        created_at:
+          type: string
+          title: Created At
+      type: object
+      required:
+      - id
+      - role
+      - content
+      - turn_id
+      - created_at
+      title: MessageSummary
+    RenameConversationRequest:
+      properties:
+        title:
+          type: string
+          maxLength: 80
+          minLength: 1
+          title: Title
+      type: object
+      required:
+      - title
+      title: RenameConversationRequest
     SearchHit:
       properties:
         asset:
@@ -368,6 +660,77 @@ components:
       - authoritative_vectors
       - items
       title: SearchResponse
+    StartTurnRequest:
+      properties:
+        message:
+          type: string
+          maxLength: 2000
+          minLength: 1
+          title: Message
+        scope_id:
+          type: string
+          title: Scope Id
+          default: home-default
+        conversation_id:
+          type: string
+          title: Conversation Id
+          default: ''
+      type: object
+      required:
+      - message
+      title: StartTurnRequest
+    StartTurnResponse:
+      properties:
+        turn_id:
+          type: string
+          title: Turn Id
+        conversation_id:
+          type: string
+          title: Conversation Id
+        status:
+          type: string
+          title: Status
+      type: object
+      required:
+      - turn_id
+      - conversation_id
+      - status
+      title: StartTurnResponse
+    TurnSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        question:
+          type: string
+          title: Question
+        status:
+          type: string
+          title: Status
+        termination_reason:
+          type: string
+          title: Termination Reason
+        answer:
+          type: string
+          title: Answer
+        attachments:
+          items:
+            $ref: '#/components/schemas/AttachmentSummary'
+          type: array
+          title: Attachments
+        created_at:
+          type: string
+          title: Created At
+      type: object
+      required:
+      - id
+      - question
+      - status
+      - termination_reason
+      - answer
+      - attachments
+      - created_at
+      title: TurnSummary
     ValidationError:
       properties:
         loc:

@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     vlm_base_url: str = "http://127.0.0.1:8100/v1"
     text_embedder_url: str = "http://127.0.0.1:8101"
 
+    # 8100 上 llama-server 的模型别名。它不是可切换的「方案」——换模型要连着重建索引，
+    # 那是一次迁移（见 domain/retrieval/scheme.py），不是一个环境变量。这里之所以可配，
+    # 是因为 llama-server 的 --alias 由部署方决定，与 2.0 的代码无关。
+    chat_model_name: str = "gemma4-qat-iq3xxs"
+    chat_timeout_s: float = 120.0
+
     def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
 
