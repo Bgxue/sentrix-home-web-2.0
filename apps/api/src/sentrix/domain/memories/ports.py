@@ -31,7 +31,21 @@ class EventRepository(Protocol):
 
     def list_active(self, scope_id: str, *, limit: int) -> Sequence[EventRecord]: ...
 
-    def list_by_scope(self, scope_id: str, *, limit: int, offset: int = 0) -> Sequence[EventRecord]: ...
+    def list_by_scope(
+        self, scope_id: str, *, limit: int, offset: int = 0, place: str = ""
+    ) -> Sequence[EventRecord]: ...
+
+    def count_by_scope(self, scope_id: str, *, place: str = "") -> int: ...
+
+    def apply_summary(
+        self,
+        event_id: str,
+        *,
+        title: str,
+        event_type: str,
+        activity: str,
+        summary: str,
+    ) -> EventRecord: ...
 
     def observation_ids(self, event_id: str) -> Sequence[str]: ...
 

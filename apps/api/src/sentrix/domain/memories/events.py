@@ -120,6 +120,9 @@ class EventRecord:
     aggregation_breakdown: dict[str, object]
     status: str = "active"
     revision: int = 1
+    # 事件的落库时间。``time_start`` 缺失时按日期分组要退回它——回退规则属于后端，
+    # 否则两个前端会把同一份数据分到不同的天。
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

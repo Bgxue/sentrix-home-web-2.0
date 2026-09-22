@@ -16,8 +16,8 @@ from sentrix.infrastructure.persistence.database import Database
 
 _COLUMNS = (
     "id, scope_id, title, event_type, time_start, time_end, place, admin_district,"
-    " activity, summary, confidence, aggregation_score, aggregation_breakdown_json,"
-    " status, revision"
+    "activity, summary, confidence, aggregation_score, aggregation_breakdown_json,"
+    " status, revision, created_at"
 )
 
 # 1.0 ``merge_observation_into_event`` 新建事件时的两个占位值（``db.py:2310`` 附近）。
@@ -28,6 +28,15 @@ DEFAULT_EVENT_PLACE = "其他或不确定"
 
 def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def _scope_clause(scope_id: str, place: str) -> tuple[str, tuple[object, ...]]:
+    clause = " WHERE scope_id = ? AND status = 'active'"
+    params: list[object] = [scope_id]
+    if place:
+        clause += " AND (place LIKE ? OR admin_district LIKE ?)"
+        params.extend((f"%{place}%", f"%{place}%"))
+    return clause, tuple(params)
 
 
 def _row_to_event(row: sqlite3.Row) -> EventRecord:
@@ -51,6 +60,7 @@ def _row_to_event(row: sqlite3.Row) -> EventRecord:
         aggregation_breakdown=breakdown if isinstance(breakdown, dict) else {},
         status=row["status"],
         revision=row["revision"],
+        created_at=_parse_datetime(row["created_at"]),
     )
 
 
@@ -116,14 +126,56 @@ class SqliteEventRepository:
             ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def list_by_scope(self, scope_id: str, *, limit: int, offset: int = 0) -> Sequence[EventRecord]:
+    def list_by_scope(
+        self, scope_id: str, *, limit: int, offset: int = 0, place: str = ""
+    ) -> Sequence[EventRecord]:
+        clause, params = _scope_clause(scope_id, place)
         with self._database.connect() as connection:
             rows = connection.execute(
-                f"SELECT {_COLUMNS} FROM events WHERE scope_id = ? AND status = 'active'"
+                f"SELECT {_COLUMNS} FROM events{clause}"
                 " ORDER BY COALESCE(time_start, created_at) DESC, id DESC LIMIT ? OFFSET ?",
-                (scope_id, limit, offset),
+                (*params, limit, offset),
             ).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def count_by_scope(self, scope_id: str, *, place: str = "") -> int:
+        clause, params = _scope_clause(scope_id, place)
+        with self._database.connect() as connection:
+            row = connection.execute(f"SELECT COUNT(*) AS n FROM events{clause}", params).fetchone()
+        return int(row["n"]) if row else 0
+
+    def apply_summary(
+        self,
+        event_id: str,
+        *,
+        title: str,
+        event_type: str,
+        activity: str,
+        summary: str,
+    ) -> EventRecord:
+        """写入事件投影（标题 / 类型 / 活动 / 摘要）并把 ``revision`` 加一。
+
+        1.0 ``_persist_event_summary`` 的 UPDATE 就是这四列；置信度不在其中——
+        1.0 也没有把确定性摘要的那 0.45 写回事件。
+        """
+        if self.get(event_id) is None:
+            raise KeyError(event_id)
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE events SET title = ?, event_type = ?, activity = ?, summary = ?,"
+                " revision = revision + 1, updated_at = ? WHERE id = ?",
+                (
+                    title,
+                    event_type,
+                    activity,
+                    summary,
+                    datetime.now(UTC).isoformat(),
+                    event_id,
+                ),
+            )
+        updated = self.get(event_id)
+        assert updated is not None
+        return updated
 
     def observation_ids(self, event_id: str) -> Sequence[str]:
         with self._database.connect() as connection:
