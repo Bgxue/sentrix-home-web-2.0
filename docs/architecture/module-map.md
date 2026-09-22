@@ -51,13 +51,16 @@
 | `sentrix/config.py` | 类型化配置；`data_dir` 是唯一可配根，其余路径派生 | — | — | `sentrix/bootstrap/container.py`、`sentrix/main.py` |
 | `sentrix/domain/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/assistant/__init__.py` | 包标记 | domain | — | — |
-| `sentrix/domain/assistant/evidence_ledger.py` | 证据账本：需求状态机与显式证据绑定 | domain | — | `sentrix/domain/assistant/tools.py` |
-| `sentrix/domain/assistant/models.py` | 助手域的通用模型：ChatMessage / ToolCall / ModelReply / ProgressEvent / TurnRecord | domain | — | `sentrix/domain/assistant/task_state.py`、`sentrix/domain/assistant/tool_policy.py` |
+| `sentrix/domain/assistant/emergency.py` | 诚实兜底答复：只基于已有观察，按账本与检索事实分档 | domain | `sentrix/domain/assistant/evidence_ledger.py`、`sentrix/domain/assistant/models.py` | — |
+| `sentrix/domain/assistant/evidence_ledger.py` | 证据账本：需求状态机与显式证据绑定 | domain | — | `sentrix/domain/assistant/emergency.py`、`sentrix/domain/assistant/final_guard.py`、`sentrix/domain/assistant/intent.py`、`sentrix/domain/assistant/tools.py` |
+| `sentrix/domain/assistant/final_guard.py` | 答案门禁 L1：安全 / 占位符 / 存在性矛盾 / 证据门，只做确定性判定 | domain | `sentrix/domain/assistant/evidence_ledger.py`、`sentrix/domain/assistant/task_state.py`、`sentrix/domain/assistant/tools.py` | — |
+| `sentrix/domain/assistant/intent.py` | 确定性规划：问题映射到最少需要的证据，无模型调用 | domain | `sentrix/domain/assistant/evidence_ledger.py` | — |
+| `sentrix/domain/assistant/models.py` | 助手域的通用模型：ChatMessage / ToolCall / ModelReply / ProgressEvent / TurnRecord | domain | — | `sentrix/domain/assistant/emergency.py`、`sentrix/domain/assistant/task_state.py`、`sentrix/domain/assistant/tool_policy.py` |
 | `sentrix/domain/assistant/profile.py` | 回合预算常量（8 步 / 6 调用 / 180s / max_search_calls=1），来自行为基线 | domain | — | `sentrix/domain/assistant/task_state.py` |
 | `sentrix/domain/assistant/result_set.py` | 结果集与分页规则；handle 到 asset_id 的映射 | domain | — | — |
-| `sentrix/domain/assistant/task_state.py` | 回合状态：计数器、进度流、终止原因与门禁标志位 | domain | `sentrix/domain/assistant/models.py`、`sentrix/domain/assistant/profile.py` | `sentrix/domain/assistant/tool_policy.py` |
+| `sentrix/domain/assistant/task_state.py` | 回合状态：计数器、进度流、终止原因与门禁标志位 | domain | `sentrix/domain/assistant/models.py`、`sentrix/domain/assistant/profile.py` | `sentrix/domain/assistant/final_guard.py`、`sentrix/domain/assistant/tool_policy.py` |
 | `sentrix/domain/assistant/tool_policy.py` | 工具收敛策略：执行 / 回放 / 拒绝的唯一决定点 | domain | `sentrix/domain/assistant/models.py`、`sentrix/domain/assistant/task_state.py`、`sentrix/domain/assistant/tools.py` | — |
-| `sentrix/domain/assistant/tools.py` | 四个工具的契约：标准 JSON Schema + 声明能满足哪类证据 | domain | `sentrix/domain/assistant/evidence_ledger.py` | `sentrix/domain/assistant/tool_policy.py` |
+| `sentrix/domain/assistant/tools.py` | 四个工具的契约：标准 JSON Schema + 声明能满足哪类证据 | domain | `sentrix/domain/assistant/evidence_ledger.py` | `sentrix/domain/assistant/final_guard.py`、`sentrix/domain/assistant/tool_policy.py` |
 | `sentrix/domain/media/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | `sentrix/api/routes/media.py`、`sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/repositories/assets.py` |
 | `sentrix/domain/media/ports.py` | 领域端口（AssetRepository / MediaStorage / MetadataReader / PreviewEncoder）与浏览器转码规则 | domain | `sentrix/domain/media/models.py` | `sentrix/application/media/import_assets.py`、`sentrix/bootstrap/container.py` |
