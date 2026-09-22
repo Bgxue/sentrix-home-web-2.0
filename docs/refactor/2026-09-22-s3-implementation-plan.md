@@ -8,6 +8,10 @@
 
 **Tech Stack:** Python 3.11 / FastAPI / 标准库 sqlite3 · httpx（连接 8100 上的 llama.cpp，OpenAI 兼容 `/v1`）· pytest / ruff / mypy --strict / import-linter · React 19 / TypeScript / Vite（EventSource）
 
+> **2026-09-22 课程纠正：本计划里的 9 处偏离已逐条审计，7 处回退成对 1.0 的忠实移植。**
+> 审计表、原始数据与保留清单见 `docs/refactor/s3-deviations.md`。下面涉及偏离的段落都
+> 加了「审计后」的标注；**以那份文档与代码为准，本文档只保留当时的决策记录。**
+
 **依据文档:** `docs/architecture/2026-09-21-sentrix-home-web-2-implementation-design.md`（§2.2 目录、§2.3 分层、§3.1 表、§4.3 SSE 契约、§6 工程标准、§8 切片表）、`docs/refactor/behaviour-baseline.md`（助手一节）
 
 ---
@@ -186,10 +190,10 @@ Task 34  domain/assistant 地基：模型 / 预算 / 回合状态（纯规则）
 | 2 | 预算的 final_reserve 非对称 | `budget_manager.py:38-51` | `domain/assistant/task_state.py` | 原样：模型步只看墙钟，工具调用才检查 final_reserve |
 | 3 | 工具收敛策略 | `tool_policy.py` + `runtime.py:2991-3082` | `domain/assistant/tool_policy.py` | **改**：把散在主循环的收敛全收进一个决定 |
 | 4 | 工具契约 | `tool_registry.py:15-33` | `domain/assistant/tools.py` | **重写**：标准 JSON Schema + 原生 `tools` 字段 |
-| 5 | 证据需求状态机 | `task_state.py`（planner 版，376 行） | `domain/assistant/evidence_ledger.py` | **缩**：11 个需求状态 → 3 个；只留 S3 用到的 3 类证据 |
+| 5 | 证据需求状态机 | `task_state.py`（planner 版，376 行） | `domain/assistant/evidence_ledger.py` | **缩**：11 个需求状态 → 3 个；只留 S3 用到的 3 类证据。**审计后保留**：1.0 自己的 `recompute_status` docstring 说那 11 个是 legacy、只用于回放旧数据；且 25,112 条轨迹里 `requirement_status_after` 一条都没记过。见 `s3-deviations.md` §3.2 |
 | 6 | 「工具调用不等于证据」 | `requirement_completion.py:63-67` | `domain/assistant/evidence_ledger.py` 的 `satisfy` | 原样：需求必须显式绑定到产生它的调用 |
 | 7 | 结果集与分页 | `result_set.py:73-125` | `domain/assistant/result_set.py` | 原样：6 张/页、1-based、handle 全局序号 |
-| 8 | 答案门禁 L1 | `final_guard.py` | `domain/assistant/final_guard.py` | **缩**：保留安全 / 占位符 / 存在性矛盾，**不做语义等价** |
+| 8 | 答案门禁 L1 | `final_guard.py` | `domain/assistant/final_guard.py` | **缩**：保留安全 / 占位符 / 存在性矛盾，**不做语义等价**。**审计后：改成整张规则表的忠实移植**——补回 `viewer_escape` / `write_not_allowed` / `all_requested_but_has_more` / `delivery_contradiction` / `_ANY_DENIAL`，删掉自造的「证据门」。见 `s3-deviations.md` §1 第 6 项 |
 | 9 | 存在性矛盾 | `final_guard.py:115-153` | 同上 | **改**：去掉 `_ANY_DENIAL` 的整句否定门槛 |
 | 10 | 诚实兜底 | `emergency.py:34-84` | `domain/assistant/emergency.py` | **改**：按账本与检索事实分档，不再只有一条尾句 |
 | 11 | 会话与消息 | `agent_conversation.py` + `db.py:918-952` | `infrastructure/persistence/repositories/conversations.py` | **改**：去掉 FTS 与 `content_json` 投影 |
@@ -207,7 +211,7 @@ Task 34  domain/assistant 地基：模型 / 预算 / 回合状态（纯规则）
 
 | 能力 | 1.0 位置 | 留给谁 | 理由 |
 |---|---|---|---|
-| 双层防伪的**语义评审层**（L2 judge） | `judge.py` | **S6** | 每次评审是一次模型调用；L1 已兜住安全与结构，S3 的模型预算要留给主循环 |
+| 双层防伪的**语义评审层**（L2 judge） | `judge.py` | ~~S6~~ **审计后：已回退，S3 交付** | ~~每次评审是一次模型调用；L1 已兜住安全与结构，S3 的模型预算要留给主循环~~ **证据强度：无。1.0 生产库有 1,669 条 `agent2_trace.quality.l2_soft_release`（6.6%，全是生产默认 profile），L2 确实在跑。见 `s3-deviations.md` §3.3** |
 | 恢复作答的四级阶梯 | `runtime.py:2807-2960` | **S6** | S3 只做两级：门禁提醒一次 + 确定性兜底。阶梯要等 L2 到位才有上游信号 |
 | JIT 提示词 | `jit_prompt.py` | **S6** | 它的价值在「按未决需求收缩工具集」；S3 只有 4 个工具，收缩没有收益 |
 | 语义拆槽 | `semantic_slots.py` | **S6** | 与六路召回一起做才有意义 |
@@ -220,18 +224,18 @@ Task 34  domain/assistant 地基：模型 / 预算 / 回合状态（纯规则）
 | `search_conversation_history` | `tools.py:2363-2408` | **S7** | 需要会话检索（FTS） |
 | 会话摘要 | `conversation_summary.py` | **S7** | S3 用最近 8 条原文，够用 |
 | `completion.py` 的五码门 | `completion.py` | 被取代 | 它的五个码全是正则意图 + planner 桥接，S3 用「规划 + 账本」直接表达 |
-| ResultSet 授权交付 URL | `app.py:2484-2503` | 不做 | 见「偏离」：2.0 的 web 侧本来就看得到 `asset_id` |
-| 政策拒答正则 | `runtime.py:1725` `_detect_policy_refusal` | 不做 | 见「偏离」：那是 benchmark 时代的产物 |
+| ResultSet 授权交付 URL | `app.py:2484-2503` | ~~不做~~ **审计后：已回退，S3 交付** | ~~2.0 的 web 侧本来就看得到 `asset_id`~~ **那是「现在不需要」不是「1.0 做错了」。证据强度：无。见 `s3-deviations.md` §1** |
+| 政策拒答正则 | `runtime.py:1725` `_detect_policy_refusal` | ~~不做~~ **审计后：已回退，S3 交付** | ~~那是 benchmark 时代的产物~~ **证据强度：无。生产库 212 次命中（0.84%），是注入/人脸向量外泄/越权写的确定性边界。见 `s3-deviations.md` §1** |
 | `agent_contracts.py` | 392 行 | 冻结 | 设计 §1.3-D 已冻结，静态不可达 |
 
 ### C. 1.0 的四个助手失败模式，S3 分别怎么处理
 
 | 失败模式 | 1.0 实测 | 根因 | S3 的处理 |
 |---|---|---|---|
-| `planner_call_error` | 1,974 次，最终落成 `planner_blocked` 1,445 条轨迹 | 规划是一次模型调用（`goal_planner.py:129`），超时/连不上就整轮以「无法可靠规划」收场 | **规划改成纯函数**（Task 37）：没有调用，就没有调用失败——这条路径在 2.0 里不存在 |
+| `planner_call_error` | 1,974 次，最终落成 `planner_blocked` 1,445 条轨迹 | 规划是一次模型调用（`goal_planner.py:129`），超时/连不上就整轮以「无法可靠规划」收场 | ~~**规划改成纯函数**（Task 37）~~ **审计后：回退。** 那 1,974 次里 97.6% 落在 15 个「该分钟 100% 失败、延迟中位数 0.13 秒」的黑障窗口里，同窗口别的模型调用记的是 `[Errno 111] Connection refused`；非 PhotoBench 口径 0/763。**规划仍是一次模型调用**，见 `s3-deviations.md` §2 |
 | 零工具调用 | 7,346 / 25,069 = **29.3%** | planner 允许「零需求」（`goal_planner.py:228`），JIT 提示词随即告诉模型「可直接输出 final」（`jit_prompt.py:200`） | **规划永远至少给一条证据需求**；门禁在需求还开着时拦一次（Task 37/41） |
 | `termination_reason` 读不到 | 11,304 条（键不存在）+ 72 条空串 | 两条路：2026-09-10 之前的 `save_trajectory` 不带这个键；政策拒答那条提前 `return` 绕过了 `_classify_termination`。而 `_classify_termination` 在收尾处**无条件覆盖**，13 个 reason 里 8 个是死代码 | `TurnResult.termination_reason` 的类型就是枚举（非 `str`、非 `str | None`），收尾只有一个出口，外层还有兜底（Task 34/41） |
-| 前端轮询代替 SSE | `GET /api/assistant/turn/{id}` **668,490 次，占全部流量 73%** | `es.onerror` 一触发就永久降级成 700ms 轮询；且 SSE 无「迟到加入」补偿，`_TURN_JOBS` 重启即丢 | 进度事件**落库**（Task 38）→ SSE 断线可续（Task 43）→ 前端只用一条 EventSource（Task 44）；轮询端点在 2.0 **不存在**，契约测试显式断言它 404 |
+| 前端轮询代替 SSE | `GET /api/assistant/turn/{id}` **668,552 次，SSE 端点只有 62 次** | ~~`es.onerror` 一触发就永久降级成 700ms 轮询~~ **调用方是评测机**：`services/photobench` 的 `wait_for_assistant_turn` 每 0.5 秒轮询（`benchmark_orchestrator.py:881`），`EventSource` 对它不可用 | 进度事件**落库**（Task 38）→ SSE 断线可续（Task 43）→ 前端用一条 EventSource（Task 44）**并保留 1.0 的轮询回退**（Task 44 补）；~~轮询端点在 2.0 不存在，契约测试断言它 404~~ **审计后：端点已搬回**，见 `s3-deviations.md` §4 |
 
 ---
 
