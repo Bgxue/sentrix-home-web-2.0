@@ -67,7 +67,11 @@ ci: lint format-check typecheck arch check-docs coverage web-check ## CI 门禁
 # `npx tsc --noEmit --listFiles` 实测命中 0 个文件、恒 exit 0——它看起来在检查，其实永远通过。
 # 三件事分开跑而不是 `npm run build`：类型 / lint / 构建的失败信息各自直接，
 # 且 `npx vite build` 省掉 build 脚本里那次重复的 tsc -b。
+# 第一条存在性断言是给"跳过 install / node_modules 被删"兜底的：此时 npx 会去下冒名包
+# tsc@2.0.4 并打印 "This is not the tsc command you are looking for"，那句话不指向缺依赖。
+# 断言先拦下来，只说该做什么。
 web-check: ## 前端门禁：tsc -b + oxlint + vite build
+	@test -d apps/web/node_modules || { echo "缺少 apps/web/node_modules，请先跑 make install"; exit 1; }
 	cd apps/web && npx tsc -b
 	cd apps/web && npx oxlint
 	cd apps/web && npx vite build

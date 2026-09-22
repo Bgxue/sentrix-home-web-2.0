@@ -1945,6 +1945,7 @@ web-dev: ## 起 2.0 Web（4274）
 # {"files": [], "references": [...]} 结构，普通 tsc 不遍历 project references，
 # `npx tsc --noEmit --listFiles` 命中 0 个文件、恒 exit 0——看起来在检查，其实永远通过。
 web-check: ## 前端门禁：tsc -b + oxlint + vite build
+	@test -d apps/web/node_modules || { echo "缺少 apps/web/node_modules，请先跑 make install"; exit 1; }
 	cd apps/web && npx tsc -b
 	cd apps/web && npx oxlint
 	cd apps/web && npx vite build
@@ -1955,6 +1956,12 @@ web-check: ## 前端门禁：tsc -b + oxlint + vite build
 > 却一直没落地的一环。同时修掉一个空检查：类型检查**必须用 `tsc -b`**，`tsc --noEmit` 在本仓库
 > 因为 `apps/web/tsconfig.json` 是 `{"files": [], "references": [...]}` 结构、不遍历 project
 > references，实测命中 0 个文件、恒 exit 0。详见 Task 23 Step 5。
+>
+> **`node_modules` 断言（2026-09-22 补）**：`web-check` 第一条是存在性检查。人工跳过 `make install`
+> 或 `node_modules` 被删时，`npx tsc -b` 会去 npm 下载冒名包 `tsc@2.0.4`，打印
+> `This is not the tsc command you are looking for`——exit 1 不是静默通过，但报错指向 npx 而不是
+> 缺依赖。断言把它换成一句「请先跑 make install」。反向验证：把 `apps/web/node_modules` 改名后
+> 跑 `make web-check`，输出正是这句断言、exit 非 0；改回后 `make ci` 全绿。
 
 - [ ] **Step 2: 验证每个目标能跑**
 
