@@ -1,0 +1,518 @@
+"""一次问答回合：规划 → 工具循环 → 证据账本 → 答案门禁 → 回答。
+
+这是设计文档里「在线链路」9 步中 S3 覆盖的那一段（问题 → 规划 → 工具循环 → 检索取证 →
+证据账本 → 答案门禁 → 答案）。留给后续切片的：双层防伪的语义评审层（S6）、恢复作答的
+四级阶梯（S6/S7）、六路取证的补齐（S6）。
+
+1.0 把这段写成一个 1,700 行的 ``AgentRuntime.run()``，里面混着模型调用、工具派发、
+SQLite、预算计数与十几条软门禁。2.0 的划分是：
+
+- **规则**（``domain/assistant``）：状态、策略、账本、门禁——无 IO，可单测；
+- **端口**（``domain/assistant/ports.py``）：模型、存储、事件流——domain 只声明形状；
+- **本模块**：把上面两样接起来，并**唯一一次**决定「这一轮为什么结束」。
+
+三个 1.0 的失败模式在这里被结构性消掉：
+
+1. **``termination_reason`` 落空**：``TurnResult.termination_reason`` 的类型就是枚举，
+   收尾只走 ``_finish`` 一个出口，循环外还有一层兜底防止将来有人加了新出口却忘了声明原因。
+2. **零工具调用**：规划永远至少给一条证据需求（``intent.plan_requirements``），门禁在
+   需求还开着时拦一次最终答案。1.0 的规划允许「零需求」，而 JIT 提示词会因此直接告诉
+   模型「当前没有待确认的证据需求……可直接输出 final」（``jit_prompt.py:200``）。
+3. **``planner_call_error``**：S3 的规划是纯函数，没有模型调用，也就不存在调用失败。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+from sentrix.application.assistant.tools import (
+    AssistantToolbox,
+    DeliveredPhotos,
+    ToolOutcome,
+    is_empty_result,
+)
+from sentrix.domain.assistant import emergency
+from sentrix.domain.assistant.evidence_ledger import EvidenceLedger
+from sentrix.domain.assistant.final_guard import FinalGuard, answered_with_gap
+from sentrix.domain.assistant.intent import plan_requirements
+from sentrix.domain.assistant.models import (
+    Attachment,
+    ChatMessage,
+    ChatRole,
+    ModelReply,
+    ProgressEvent,
+    ProgressStage,
+    ProgressStatus,
+    TerminationReason,
+    ToolCall,
+    TurnRecord,
+    TurnStatus,
+)
+from sentrix.domain.assistant.ports import ChatModel, ConversationRepository, TurnRepository
+from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
+from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
+from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
+from sentrix.domain.assistant.tools import TOOL_SPECS, TOOLS_BY_NAME
+
+log = logging.getLogger("sentrix.assistant.run_turn")
+
+HISTORY_LIMIT = 8
+
+SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件事：检索照片，和读取已确认人物的档案。
+
+规则：
+- 需要照片证据时必须先调用工具，不要凭印象回答。
+- 用户说「给我看看 / 我想看」时，必须调用 get_original_photos 把照片交出去，只回一段文字不算交付。
+- 工具没给到的信息就说不知道，不要编造。
+- handle（photo_1 这类）只在调用工具时使用，不要写进给用户的回答里。
+- 用户用中文提问，就用中文回答。"""
+
+# 这些门禁拦第二次时不再放行——把内部标识交付给用户是安全边界，不是风格问题。
+HARD_GUARD_CODES = frozenset({"internal_reference_leak"})
+
+# 模型返回空回答时给它的一句提醒。实测 8100 上的 gemma4（IQ3_XXS 量化）在工具往返之后
+# 会直接吐 EOS——``finish_reason="stop"``、1 个 completion token、content 为空。它与
+# 请求形状无关（带不带 tools、content 是 null 还是空串、温度 0 到 1、有没有 note 字段都
+# 复现过），是模型/模板层面的行为。循环必须能接住：提醒一次，再空就诚实兜底。
+EMPTY_ANSWER_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
+
+
+class TurnNotFoundError(LookupError):
+    pass
+
+
+class TurnAlreadyClaimedError(RuntimeError):
+    """这个回合已经有人在跑了。同一回合只允许一个执行者。"""
+
+
+@dataclass(frozen=True, slots=True)
+class TurnRequest:
+    conversation_id: str
+    scope_id: str
+    question: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnResult:
+    turn_id: str
+    conversation_id: str
+    status: TurnStatus
+    # 非可选：1.0 的 25,112 条轨迹里 11,304 条读不到这个字段，而没有任何东西会因此报错。
+    termination_reason: TerminationReason
+    answer: str
+    attachments: tuple[Attachment, ...]
+    requirements: Sequence[dict[str, Any]]
+
+
+@dataclass
+class _Session:
+    """一次回合的可变状态。它把「状态 / 账本 / 交付 / 检索是否为空 / 推送出口」收在一起，
+    免得每个方法都要拖五个参数。"""
+
+    state: TaskState
+    ledger: EvidenceLedger
+    emit: Callable[[ProgressEvent], None] | None = None
+    delivered: DeliveredPhotos = field(default_factory=DeliveredPhotos)
+    search_returned_nothing: bool = False
+    # 门禁拦下时写给模型的提醒，由主循环作为一条 user 消息加回去。
+    pending_reminder: str = ""
+
+
+class RunTurn:
+    def __init__(
+        self,
+        *,
+        model: ChatModel,
+        conversations: ConversationRepository,
+        turns: TurnRepository,
+        toolbox: AssistantToolbox,
+        profile: TurnProfile = DEFAULT_PROFILE,
+    ) -> None:
+        self._model = model
+        self._conversations = conversations
+        self._turns = turns
+        self._toolbox = toolbox
+        self._profile = profile
+        self._policy = ToolPolicy()
+        self._guard = FinalGuard()
+
+    # ---- 建回合 -------------------------------------------------------------
+
+    def start(self, request: TurnRequest) -> TurnRecord:
+        """落一条用户消息与一个 ``pending`` 回合，立刻返回。
+
+        回合先于执行落库，SSE 才有东西可订阅——1.0 的回合只活在进程内存里，页面刷新之后
+        那次回合就再也拿不回来了。
+        """
+        if self._conversations.get(request.conversation_id) is None:
+            raise TurnNotFoundError(request.conversation_id)
+        now = datetime.now(UTC)
+        record = TurnRecord(
+            id=f"turn_{now.strftime('%Y%m%d%H%M%S%f')}",
+            conversation_id=request.conversation_id,
+            scope_id=request.scope_id,
+            question=request.question,
+            status=TurnStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+        )
+        self._turns.create(record)
+        self._conversations.add_message(
+            conversation_id=record.conversation_id,
+            scope_id=record.scope_id,
+            turn_id=record.id,
+            role=ChatRole.USER.value,
+            content=request.question,
+            created_at=now,
+        )
+        return record
+
+    # ---- 跑回合 -------------------------------------------------------------
+
+    def run(self, turn_id: str, *, emit: Callable[[ProgressEvent], None] | None = None) -> TurnResult:
+        """执行回合。``emit`` 在每条进度事件落库之后被调用一次（SSE 靠它推送）。"""
+        record = self._turns.get(turn_id)
+        if record is None:
+            raise TurnNotFoundError(turn_id)
+        if not self._turns.claim(turn_id, datetime.now(UTC)):
+            raise TurnAlreadyClaimedError(turn_id)
+
+        session = _Session(
+            state=TaskState(
+                turn_id=record.id,
+                conversation_id=record.conversation_id,
+                scope_id=record.scope_id,
+                question=record.question,
+                profile=self._profile,
+            ),
+            ledger=EvidenceLedger(
+                scope_id=record.scope_id,
+                requirements=list(plan_requirements(record.question)),
+            ),
+            emit=emit,
+        )
+        self._publish(
+            session,
+            session.state.emit(
+                ProgressStage.PLANNING,
+                ProgressStatus.COMPLETE,
+                "已确认需要哪些证据。",
+                kind="plan",
+                payload={"requirements": list(session.ledger.as_payload())},
+            ),
+        )
+
+        answer = ""
+        try:
+            answer = self._converse(session, record)
+        except Exception:
+            # 兜底不是「错误处理」，是「绝不让收尾原因落空」：任何未预料的异常也必须以
+            # 一个有名字的原因结束，而不是留下一个半开的回合。
+            log.exception("回合执行中抛出未预料的异常: %s", turn_id)
+            session.state.finish(TerminationReason.MODEL_ERROR)
+            answer = emergency.clarify_answer(TerminationReason.MODEL_ERROR)
+
+        reason = session.state.termination_reason or session.state.finish(TerminationReason.MODEL_ERROR)
+        status = _status_for(reason)
+        self._publish(
+            session,
+            session.state.emit(
+                ProgressStage.TERMINAL,
+                ProgressStatus.COMPLETE if status is TurnStatus.COMPLETE else ProgressStatus.PARTIAL,
+                "已完成本轮回答。" if status is TurnStatus.COMPLETE else "这一轮没能完整完成。",
+                kind="terminal",
+                payload={"status": status.value, "termination_reason": reason.value},
+            ),
+        )
+
+        now = datetime.now(UTC)
+        # 顺序有意义：**先**把回答写成消息，**再**把回合标成终态。
+        # 「终态」是「这一切都已经落库」的承诺——SSE 的 complete 帧就发在这个状态上，
+        # 反过来的话，读到 complete 的调用方会看到一个还没有回答的会话。
+        self._conversations.add_message(
+            conversation_id=record.conversation_id,
+            scope_id=record.scope_id,
+            turn_id=turn_id,
+            role=ChatRole.ASSISTANT.value,
+            content=answer,
+            created_at=now,
+        )
+        self._turns.finish(
+            turn_id,
+            status=status.value,
+            termination_reason=reason.value,
+            answer=answer,
+            attachments=session.delivered.items,
+            requirements=list(session.ledger.as_payload()),
+            updated_at=now,
+        )
+        return TurnResult(
+            turn_id=turn_id,
+            conversation_id=record.conversation_id,
+            status=status,
+            termination_reason=reason,
+            answer=answer,
+            attachments=session.delivered.items,
+            requirements=[dict(item) for item in session.ledger.as_payload()],
+        )
+
+    # ---- 主循环 -------------------------------------------------------------
+
+    def _converse(self, session: _Session, record: TurnRecord) -> str:
+        state = session.state
+        messages = self._initial_messages(record)
+
+        while True:
+            if not state.can_step():
+                reason = (
+                    TerminationReason.TIMEOUT
+                    if state.wall_remaining() <= 0
+                    else TerminationReason.STEP_BUDGET_EXHAUSTED
+                )
+                state.finish(reason)
+                return self._stop(session, reason)
+
+            state.model_steps += 1
+            state.phase = ACTING
+            self._publish(
+                session,
+                state.emit(ProgressStage.THINKING, ProgressStatus.RUNNING, "正在理解你的问题…"),
+            )
+
+            try:
+                reply = self._model.complete(messages, TOOL_SPECS)
+            except Exception as error:
+                log.warning("模型调用失败: %s", error)
+                state.finish(TerminationReason.MODEL_ERROR)
+                return self._stop(session, TerminationReason.MODEL_ERROR)
+
+            if not reply.wants_tools:
+                answer = self._judge_answer(session, reply)
+                if answer is not None:
+                    return answer
+                messages.append(ChatMessage(ChatRole.USER, session.pending_reminder))
+                continue
+
+            messages.append(ChatMessage(ChatRole.ASSISTANT, reply.content, tool_calls=reply.tool_calls))
+            for call in reply.tool_calls:
+                text, attachments, empty = self._run_tool(session, call)
+                session.delivered = session.delivered.merge(attachments)
+                session.search_returned_nothing = session.search_returned_nothing or empty
+                messages.append(ChatMessage(ChatRole.TOOL, text, tool_call_id=call.call_id))
+
+    def _judge_answer(self, session: _Session, reply: ModelReply) -> str | None:
+        """返回 ``None`` 表示这次不是最终回答（继续循环），返回字符串表示最终答案。
+
+        被门禁拦下时返回 ``None`` 并把提醒写进对话——调用方负责 ``continue``。
+        """
+        state = session.state
+        answer = reply.content.strip()
+        if not answer:
+            if state.block_guard_code("empty_answer"):
+                self._publish(
+                    session,
+                    state.emit(
+                        ProgressStage.RECOVERING,
+                        ProgressStatus.RUNNING,
+                        "模型这次没给出内容，再问一次…",
+                        kind="guard",
+                        payload={"code": "empty_answer"},
+                    ),
+                )
+                session.pending_reminder = EMPTY_ANSWER_NUDGE
+                return None
+            # 提醒过仍然是空的。已经取到的证据不能被丢掉——用确定性的方式把事实说清楚。
+            state.finish(TerminationReason.EMPTY_ANSWER)
+            return self._stop(session, TerminationReason.EMPTY_ANSWER)
+
+        verdict = self._guard.check(
+            answer=answer,
+            ledger=session.ledger,
+            state=state,
+            search_returned_nothing=session.search_returned_nothing,
+        )
+        if verdict.passed:
+            state.finish(
+                TerminationReason.ANSWERED_WITH_GAP
+                if answered_with_gap(session.ledger)
+                else TerminationReason.ANSWERED
+            )
+            return answer
+
+        repeated = not state.block_guard_code(verdict.code)
+        if repeated and verdict.code in HARD_GUARD_CODES:
+            # 安全边界不做第二次让步：宁可给一句确定性的兜底，也不把内部标识交付出去。
+            state.finish(TerminationReason.GUARD_BLOCKED)
+            return self._stop(session, TerminationReason.GUARD_BLOCKED)
+        if repeated:
+            state.finish(TerminationReason.ANSWERED_WITH_GAP)
+            return answer
+
+        state.phase = FINALIZING
+        self._publish(
+            session,
+            state.emit(
+                ProgressStage.RECOVERING,
+                ProgressStatus.RUNNING,
+                verdict.message,
+                kind="guard",
+                payload={"code": verdict.code},
+            ),
+        )
+        session.pending_reminder = verdict.message
+        return None
+
+    def _run_tool(self, session: _Session, call: ToolCall) -> tuple[str, tuple[Attachment, ...], bool]:
+        """执行一次工具调用，返回 ``(发回模型的 JSON, 本次交付, 检索是否为空)``。"""
+        state = session.state
+        decision = self._policy.decide(call, state)
+
+        if decision.action is ToolAction.DENY:
+            state.record(
+                ToolCallRecord(
+                    call_id=call.call_id,
+                    tool=call.name,
+                    signature=decision.signature or call.name,
+                    status="denied",
+                    failure_reason=decision.code,
+                )
+            )
+            self._tool_event(session, call, ProgressStatus.DENIED, decision.reason, "tool_error")
+            return (
+                json.dumps({"error": decision.code, "message": decision.reason}, ensure_ascii=False),
+                (),
+                False,
+            )
+
+        if decision.action is ToolAction.REPLAY:
+            state.record(
+                ToolCallRecord(
+                    call_id=call.call_id,
+                    tool=call.name,
+                    signature=decision.signature,
+                    status="replayed",
+                    failure_reason="duplicate_call",
+                )
+            )
+            self._tool_event(session, call, ProgressStatus.OK, decision.reason, "tool_result")
+            return json.dumps(dict(decision.replay), ensure_ascii=False), (), False
+
+        self._tool_event(session, call, ProgressStatus.RUNNING, f"正在执行 {call.name}…", "model_action")
+        outcome = self._toolbox.execute(
+            call.name, decision.arguments, scope_id=state.scope_id, now=datetime.now(UTC)
+        )
+        state.record(
+            ToolCallRecord(
+                call_id=call.call_id,
+                tool=call.name,
+                signature=decision.signature,
+                status="ok" if outcome.ok else "error",
+                failure_reason=outcome.failure_reason,
+                observation=outcome.observation,
+                model_visible=outcome.model_visible,
+            )
+        )
+
+        if outcome.ok:
+            for evidence_type in TOOLS_BY_NAME[call.name].satisfies:
+                session.ledger.satisfy(evidence_type, call_id=call.call_id)
+            self._tool_event(
+                session, call, ProgressStatus.OK, _tool_status_text(call.name, outcome), "tool_result"
+            )
+        elif outcome.blocks is not None:
+            # 工具明确说「这类证据本轮拿不到」——账本封口，门禁不再逼模型重试一个查不到
+            # 的东西。这是「无证据时输出 gap 不编造」在工具层的落点。
+            session.ledger.block(outcome.blocks, reason=outcome.failure_reason)
+            self._tool_event(session, call, ProgressStatus.PARTIAL, outcome.failure_reason, "tool_error")
+        else:
+            self._tool_event(session, call, ProgressStatus.DENIED, outcome.failure_reason, "tool_error")
+
+        return (
+            json.dumps(dict(outcome.model_visible), ensure_ascii=False),
+            outcome.attachments,
+            is_empty_result(outcome),
+        )
+
+    # ---- 装配与辅助 ---------------------------------------------------------
+
+    def _initial_messages(self, record: TurnRecord) -> list[ChatMessage]:
+        """system 只在最前面拼一次，历史作为真正的消息。
+
+        1.0 把历史、结果集上下文、当前选中照片、人物画像、硬值约束统统折进
+        ``messages[0]``，理由是严格 chat template 要求 system 必须在开头
+        （``_merge_system_constraint``）。原生消息角色下这条约束只剩一句「别在中途插
+        system」——本模块从头到尾只构造一条 system。
+        """
+        messages = [ChatMessage(ChatRole.SYSTEM, SYSTEM_PROMPT)]
+        for message in self._conversations.history_for_prompt(record.conversation_id, HISTORY_LIMIT):
+            if message.turn_id == record.id:
+                # 本回合的用户消息刚写进去，下面会单独加，别重复。
+                continue
+            messages.append(ChatMessage(message.role, message.content))
+        messages.append(ChatMessage(ChatRole.USER, record.question))
+        return messages
+
+    def _stop(self, session: _Session, reason: TerminationReason) -> str:
+        photo_count = max(
+            (int(record.observation.get("total") or 0) for record in session.state.records),
+            default=0,
+        )
+        return emergency.fallback_answer(
+            reason=reason,
+            ledger=session.ledger,
+            photo_count=photo_count,
+            delivered_count=len(session.delivered.items),
+        )
+
+    def _tool_event(
+        self,
+        session: _Session,
+        call: ToolCall,
+        status: ProgressStatus,
+        text: str,
+        kind: str,
+    ) -> None:
+        stage = ProgressStage.ACTION if status is ProgressStatus.RUNNING else ProgressStage.TOOL_RESULT
+        self._publish(
+            session,
+            session.state.emit(
+                stage,
+                status,
+                text,
+                kind=kind,
+                payload={"tool": call.name, "tool_call_id": call.call_id},
+            ),
+        )
+
+    def _publish(self, session: _Session, event: ProgressEvent) -> None:
+        self._turns.append_event(session.state.turn_id, event)
+        if session.emit is not None:
+            session.emit(event)
+
+
+def _status_for(reason: TerminationReason) -> TurnStatus:
+    if reason is TerminationReason.ANSWERED:
+        return TurnStatus.COMPLETE
+    if reason is TerminationReason.CANCELLED:
+        return TurnStatus.CANCELLED
+    if reason is TerminationReason.GUARD_BLOCKED:
+        return TurnStatus.BLOCKED
+    if reason in {TerminationReason.MODEL_ERROR, TerminationReason.TIMEOUT}:
+        return TurnStatus.FAILED
+    return TurnStatus.PARTIAL
+
+
+def _tool_status_text(name: str, outcome: ToolOutcome) -> str:
+    if name in {"search_memories", "get_result_page"}:
+        total = int(outcome.observation.get("total") or 0)
+        return f"结果集里共有 {total} 张候选照片。" if total else "这次检索没有匹配到照片。"
+    if name == "get_original_photos":
+        return f"已把 {outcome.observation.get('delivered', 0)} 张照片交给用户。"
+    if name == "get_person_profile":
+        return "已读取人物档案。" if outcome.observation.get("found") else "没有这位人物的档案。"
+    return "工具执行完成。"
