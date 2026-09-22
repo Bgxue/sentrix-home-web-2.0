@@ -557,7 +557,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 96.37%
-75 passed, 2 warnings in 3.83s
+75 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -1303,7 +1303,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 97.19%
-95 passed, 2 warnings in 5.42s
+95 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -2147,7 +2147,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 97.20%
-106 passed, 2 warnings in 6.35s
+106 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -2669,7 +2669,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 97.25%
-118 passed, 3 warnings in 9.02s
+118 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -3736,7 +3736,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 97.69%
-128 passed, 3 warnings in 10.40s
+128 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -4355,7 +4355,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 97.65%
-145 passed, 3 warnings in 10.76s
+145 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -4871,7 +4871,7 @@ Expected:
 
 ```text
 Required test coverage of 85.0% reached. Total coverage: 97.65%
-154 passed, 3 warnings in 12.57s
+154 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -5001,8 +5001,10 @@ Run: `cd apps/web && npx tsc -b`
 Expected:
 
 ```text
-src/App.tsx(4,27): error TS2307: Cannot find module './features/search/SearchBox' or its corresponding type declarations.
-src/App.tsx(5,31): error TS2307: Cannot find module './features/search/SearchResults' or its corresponding type declarations.
+src/features/search/SearchBox.tsx(3,10): error TS2305: Module '"../../shared/api/client"' has no exported member 'searchAssets'.
+src/features/search/SearchBox.tsx(3,29): error TS2305: Module '"../../shared/api/client"' has no exported member 'SearchResponse'.
+src/features/search/SearchResults.tsx(1,32): error TS2305: Module '"../../shared/api/client"' has no exported member 'SearchResponse'.
+src/features/search/SearchResults.tsx(32,32): error TS7006: Parameter 'item' implicitly has an 'any' type.
 ```
 
 - [ ] **Step 3: 接上 API 客户端与 App**
@@ -5416,7 +5418,7 @@ capability-map: 0 个问题
 module-map: 0 个问题
 openapi 契约一致
 Required test coverage of 85.0% reached. Total coverage: 97.65%
-161 passed, 10 warnings in 25.69s
+161 passed   （警告条数随 torch 版本变，见文末「环境事实」；不计入判定）
 ci: 全部通过
 ```
 
@@ -5525,11 +5527,11 @@ torch 2.14.0+cu130 / torchvision 0.29.0+cu130   cuda_avail True
   约束是 torch>=2.5,<3 / torchvision>=0.20,<1，上面是在该范围下解析到的当前版本，
   不是硬钉值；规划时的沙箱解析到的是 2.5.1+cu124。两个版本下 S2 的全部测试都通过。
 qdrant-client 1.19.1，自带 py.typed
-  注：「N warnings」这一项随 torch 版本变，并随**模型加载次数**放大。torch 2.5.1（规划时
-  沙箱）下 cn_clip 的 torch.load 会发一条 FutureWarning，每加载一次模型发一条：Task 28
-  只加载一次（门禁 3 warnings），Task 33 的 e2e 每个用例各建一次真容器（10 warnings）。
-  torch ≥ 2.6 把 weights_only 的默认值翻成 True，这条不再发，同一门禁只剩 starlette 的
-  2 条。差异从 Task 28（引入 test_chinese_clip.py）开始，Task 25–27 两版一致。
+  注：门禁 Expected 里**不再断言警告条数**——它是 torch 版本的函数。torch 2.5.1 下
+  cn_clip 的 torch.load 发一条 FutureWarning，且每加载一次模型发一条（规划时 Task 28
+  是 3 条，Task 33 的 e2e 每个用例各建一次真容器，放大到多条）；torch ≥ 2.6 把
+  weights_only 默认值翻成 True 后这条不再发。与版本无关的固定项只有 starlette 那 2 条。
+  判定只看 passed 数与覆盖率。
 cn-clip 1.6.0，无 py.typed（需要 mypy override）
 ~/.cache/clip/clip_cn_vit-l-14.pt  1,625,135,766 字节
 chinese-clip 加载 3.1s，768 维；GPU 上单张图约 65ms（1,589 张 103s）
@@ -5540,4 +5542,5 @@ Qdrant 本地模式第二个进程打开同一目录：
 ### 遗留
 
 - **代码在隔离副本里，没进真实仓库。** 执行阶段要按本计划逐任务真写一遍。副本路径 `/home/asus/s2verify/repo` 可以留着对照，但不要直接 `cp` 过去——照着计划走一遍才是这份文档的价值所在。
+- **Task 27/28 的 `pyproject.toml` 依赖声明，在已提交历史里落在 T28。** 本计划修正后应落在 Task 27 的 Step 5（`qdrant-client` 是 T27 自己的依赖）。已提交的 T27 没有动 `pyproject.toml`，是 T28 才把四个包一起加上的；最终文件内容与副本逐字节一致，只是 commit 边界对不上计划。对着历史看计划时别以为漏了。
 - `8191` 端口在 153 上已被另一个进程占用（非 1.0 的 8091）。人工验收换空闲端口，`vite.config.ts` 的代理要同步改。
