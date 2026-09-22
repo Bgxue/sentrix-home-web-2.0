@@ -51,8 +51,10 @@
 | `sentrix/config.py` | 类型化配置；`data_dir` 是唯一可配根，其余路径派生 | — | — | `sentrix/bootstrap/container.py`、`sentrix/main.py` |
 | `sentrix/domain/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/assistant/__init__.py` | 包标记 | domain | — | — |
+| `sentrix/domain/assistant/evidence_ledger.py` | 证据账本：需求状态机与显式证据绑定 | domain | — | — |
 | `sentrix/domain/assistant/models.py` | 助手域的通用模型：ChatMessage / ToolCall / ModelReply / ProgressEvent / TurnRecord | domain | — | `sentrix/domain/assistant/task_state.py` |
 | `sentrix/domain/assistant/profile.py` | 回合预算常量（8 步 / 6 调用 / 180s / max_search_calls=1），来自行为基线 | domain | — | `sentrix/domain/assistant/task_state.py` |
+| `sentrix/domain/assistant/result_set.py` | 结果集与分页规则；handle 到 asset_id 的映射 | domain | — | — |
 | `sentrix/domain/assistant/task_state.py` | 回合状态：计数器、进度流、终止原因与门禁标志位 | domain | `sentrix/domain/assistant/models.py`、`sentrix/domain/assistant/profile.py` | — |
 | `sentrix/domain/media/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/media/models.py` | 媒体领域模型 Asset / Observation / MediaType / GpsPoint；纯数据与规则，零 IO | domain | — | `sentrix/api/routes/media.py`、`sentrix/application/media/import_assets.py`、`sentrix/application/retrieval/index_visual.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/media/storage.py`、`sentrix/infrastructure/persistence/repositories/assets.py` |

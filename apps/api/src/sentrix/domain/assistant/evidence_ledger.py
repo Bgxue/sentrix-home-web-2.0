@@ -1,0 +1,142 @@
+"""证据账本：把「回答这个问题最少需要哪些证据」变成可判定的状态机。
+
+对应 1.0 ``agent_runtime/task_state.py`` 的 ``RequirementState`` +
+``evidence_ledger.py``，但只保留 S3 需要的那部分。
+
+一条 1.0 里最干净的纪律原样保留：**工具调用不等于证据**。1.0 的
+``requirement_completion.py:63-67`` 写得最直白——「仅共享 evidence type 的证据是有效
+遥测，但它不能隐式满足需求」。2.0 把它落成工具契约里的显式声明：工具的 ``ToolSpec``
+列出它能满足哪几类证据（``satisfies``），账本只认这个映射，不按工具名猜。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+
+class EvidenceType(StrEnum):
+    """S3 用到的公共证据类型。
+
+    1.0 的九类公共证据里，S3 只需要三类：
+
+    - ``photo_set``：取到了一组候选照片（``search_memories`` / ``get_result_page``）；
+    - ``delivered_photo``：把其中某几张标记为「要交付给用户」（``get_original_photos``）；
+    - ``person_profile``：读到了已确认人物的档案（``get_person_profile``）。
+
+    1.0 的一个真实缺口正好在 ``delivered_photo`` 这一格：``completion.py`` 有
+    ``DELIVER_MEDIA`` 需求码，但 ``requirement_completion.py`` 的
+    ``_AGENT2_EVIDENCE_CODES`` 只映射了检索/视觉/OCR 三个，而生产默认 profile
+    （``agent2_authoritative``）下 ``completion.blocking()`` 被旁路——于是「用户要看图」
+    这条需求在权威模式下**没有任何门禁保护**。2.0 把它变成一等证据类型。
+    """
+
+    PHOTO_SET = "photo_set"
+    DELIVERED_PHOTO = "delivered_photo"
+    PERSON_PROFILE = "person_profile"
+
+
+class RequirementStatus(StrEnum):
+    OPEN = "open"
+    SATISFIED = "satisfied"
+    BLOCKED = "blocked"
+
+
+@dataclass
+class EvidenceRequirement:
+    id: str
+    evidence_type: EvidenceType
+    description: str
+    required: bool = True
+    status: RequirementStatus = RequirementStatus.OPEN
+    satisfied_by: tuple[str, ...] = ()
+    unmet_reason: str = ""
+
+
+@dataclass
+class EvidenceLedger:
+    """一次回合的证据需求清单。
+
+    ``scope_id`` 与 1.0 一样进构造函数并被强校验：账本混用两个 scope 的记忆是
+    数据泄漏，不是业务错误，必须在记账那一刻就拒绝。
+    """
+
+    scope_id: str
+    requirements: list[EvidenceRequirement] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.scope_id:
+            raise ValueError("证据账本必须绑定一个 scope_id")
+
+    def requirement(self, requirement_id: str) -> EvidenceRequirement | None:
+        for item in self.requirements:
+            if item.id == requirement_id:
+                return item
+        return None
+
+    def open_requirements(self) -> tuple[EvidenceRequirement, ...]:
+        return tuple(
+            item for item in self.requirements if item.required and item.status is RequirementStatus.OPEN
+        )
+
+    @property
+    def is_complete(self) -> bool:
+        """**所有**必填需求都被满足。被 blocked 的不算——封口不是满足。
+
+        这一条与 ``open_requirements`` 是两个问题：前者问「门禁还要不要逼模型取证」，
+        后者问「这一轮证据齐了吗」。
+        """
+        return all(item.status is RequirementStatus.SATISFIED for item in self.requirements if item.required)
+
+    def satisfy(self, evidence_type: EvidenceType, *, call_id: str) -> tuple[str, ...]:
+        """一次成功的工具调用满足了哪些需求。返回被满足的需求 id。
+
+        ``call_id`` 是必填的：没有证据来源的「已满足」在 1.0 里被显式禁止
+        （``task_state.py:243-253`` 的 ``mark_satisfied`` 在 refs 为空时直接 raise）。
+        一个需求可以被多次调用满足，来源全部留痕。
+        """
+        if not call_id:
+            raise ValueError("满足一个证据需求必须带上产生它的工具调用 id")
+        satisfied: list[str] = []
+        for item in self.requirements:
+            if item.evidence_type is not evidence_type:
+                continue
+            # 已经满足的需求也继续记来源：一次检索 + 一次翻页都产出了照片证据，
+            # 审计时该看得到两次。上限由工具预算兜住（每回合最多 6 次调用）。
+            item.status = RequirementStatus.SATISFIED
+            item.satisfied_by = (*item.satisfied_by, call_id)
+            item.unmet_reason = ""
+            satisfied.append(item.id)
+        return tuple(satisfied)
+
+    def block(self, evidence_type: EvidenceType, *, reason: str) -> tuple[str, ...]:
+        """把某类证据标成「本轮拿不到」，并记下原因。
+
+        ``blocked`` 与「还开着」是两件事：开着意味着还可以再试，blocked 意味着已经
+        确认这一轮拿不到——门禁只对前者逼模型继续取证。
+        """
+        if not reason:
+            raise ValueError("封口一个证据需求必须写明原因")
+        blocked: list[str] = []
+        for item in self.requirements:
+            if item.evidence_type is evidence_type and item.status is RequirementStatus.OPEN:
+                item.status = RequirementStatus.BLOCKED
+                item.unmet_reason = reason
+                blocked.append(item.id)
+        return tuple(blocked)
+
+    def as_payload(self) -> Sequence[Mapping[str, Any]]:
+        """进 ``progress`` 事件与轨迹的投影。"""
+        return tuple(
+            {
+                "id": item.id,
+                "evidence_type": item.evidence_type.value,
+                "description": item.description,
+                "status": item.status.value,
+                "satisfied_by": list(item.satisfied_by),
+                "unmet_reason": item.unmet_reason,
+            }
+            for item in self.requirements
+        )
