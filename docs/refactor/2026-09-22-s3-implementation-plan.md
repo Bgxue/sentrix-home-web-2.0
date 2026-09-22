@@ -8809,7 +8809,7 @@ Run: `make ci`
 `apps/api/tests/e2e/test_assistant_turn.py`:
 
 ```python
-"""端到端验收：问一句「给我看看在 XX 的照片」，拿回能打开的原图。
+"""端到端验收：问一句「给我看看海边的照片」，拿回能打开的原图。
 
 这一层用**真 chinese-clip（进程内推理）+ 真 Qdrant + 真 SQLite + 8100 上真的 llama.cpp**，
 走完整 HTTP 链路（设计 §8 的 S3 验收）。
@@ -9139,7 +9139,7 @@ REPLY finish='stop' content='我为您检索到了三张与“海边”相关的
 
 | 项 | 说明 | 核实（对实现） |
 |---|---|---|
-| **检索只有视觉一路** | `search_memories` 只调 S2 的 `RetrieveVisual`（`visual_ann` 单通道）。「在海边的照片」靠的是跨模态相似度，不是地点解析——问「在杭州的照片」不会命中。地点、时间、人物、词法、实体、邻接的五路补齐在 S4/S6 | ✅ `application/assistant/tools.py` 的 `_search` 里只有一次 `RetrieveVisual.execute`；全仓无 `geocod` / `place` 检索路径 |
+| **检索只有视觉一路；S3 的「XX」只能是视觉上认得出的内容** | `search_memories` 只调 S2 的 `RetrieveVisual`（`visual_ann` 单通道）——「在海边的照片」命中的是跨模态相似度，不是地点解析。所以 S3 的验收与示例里那个「XX」必须是**画面里看得见**的东西：海边 / 桥 / 雪 / 猫 / 狗。**地名（「在杭州的照片」）与时间（「去年冬天的照片」）检索不属于 S3**，它们的召回通道在 S4（人物的五路补齐在 S6） | ✅ `application/assistant/tools.py` 的 `_search` 里只有一次 `RetrieveVisual.execute`；全仓无 `geocod` / `place` / 时间过滤检索路径 |
 | **没有相关性阈值** | 与 S2 同一条边界：毫不相干的词照样返回排好序的候选。门禁的 `fabrication_from_empty` 只在**一条向量都没有**时生效 | ✅ `final_guard.py` 的 `search_returned_nothing` 由 `is_empty_result` 算出，后者只看 `total == 0` |
 | **模型看不到候选总数** | `model_visible` 里刻意没有 `total`——1.0 实测过模型会把候选池数量当成答案里的统计数字（`runtime.py:116`）。模型只看到 `has_more` 这个布尔 | ✅ `application/assistant/tools.py` 的 `_page_outcome`；`test_the_model_never_sees_asset_ids_or_the_candidate_total` 钉住 |
 | **人物档案只有一格** | S3 没有身份层（S5 落地）。`get_person_profile` 只回答「有没有这个已确认人物、家庭角色是什么」，其余问题工具描述里已经说清楚拿不到 | ✅ `infrastructure/assistant/identity.py` 的 `NoIdentityDirectory` 恒返回 `None`，工具据此封口该需求 |
