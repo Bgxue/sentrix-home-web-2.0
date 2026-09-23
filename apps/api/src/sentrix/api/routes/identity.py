@@ -45,7 +45,12 @@ from sentrix.api.schemas.identity import (
 )
 from sentrix.application.identity.name_person import NamePerson
 from sentrix.application.identity.review_cluster import ReviewCluster
-from sentrix.application.identity.seed_identity import NoSeedFacesError, SeedIdentity, SeedPhoto
+from sentrix.application.identity.seed_identity import (
+    NoSeedFacesError,
+    SeedIdentity,
+    SeedInstanceNotFoundError,
+    SeedPhoto,
+)
 from sentrix.application.memories.assign_events import ConfirmedPersonEvents, EventVisualSimilarity
 from sentrix.bootstrap.container import Container
 from sentrix.domain.identity.models import (
@@ -403,8 +408,12 @@ def _store_seed_photo(
     return SeedPhoto(asset_id=asset_id, observation_id=observation.id, path=str(path))
 
 
-def _split_aliases(raw: str | None) -> list[str]:
-    """1.0 ``app.py:2323``：顿号或逗号分隔，去空、保序。"""
+def _split_terms(raw: str | None) -> list[str]:
+    """1.0 ``app.py:2323``：顿号或逗号分隔，去空、保序。
+
+    别名与 ``face_instance_ids`` 共用这一条规则——两处都是「一个表单字段里的多个值」，
+    两套分隔法只会让调用方猜。
+    """
     return [item.strip() for item in (raw or "").replace("、", ",").split(",") if item.strip()]
 
 
@@ -414,14 +423,26 @@ async def seed_person_identity(
     family_role: str | None = Form(None),
     aliases: str | None = Form(None),
     scope_id: str = Form("home-default"),
-    files: list[UploadFile] = File(...),
+    face_instance_ids: str | None = Form(None),
+    files: list[UploadFile] = File(default=[]),
     container: Container = Depends(get_container),
 ) -> SeedIdentityResponse:
+    """两条入口：上传照片（1.0 的口径）与**指定已检出的人脸实例**（裁决二）。
+
+    后者说「我指的是这张脸」，前者说「这张照片里的那个人」——在多人的家庭照上前者会挑
+    质量最高的那张脸，而那通常不是用户想预置的人（见 ``seed_identity`` 的模块注释）。
+    两种样本可以混用。
+    """
     clean_name = name.strip()
     if not clean_name:
         # 1.0 在预置路由上判的是 400（``app.py:2321``），而「图里没有人脸」才是 422。
         # 两个不同的失败原因有两个不同的码，合并成一个码会让调用方分不清该改请求还是换图。
         raise InvalidRequestError("name is required")
+    instance_ids = _split_terms(face_instance_ids)
+    if not files and not instance_ids:
+        # 1.0 的 ``files`` 是必填，所以这条在 1.0 不存在；两条入口之后它是新的边界：
+        # 一个两个都没给请求不是「预置不出人」，是请求本身不成立（400，不是 422）。
+        raise InvalidRequestError("files or face_instance_ids is required")
     photos = [
         _store_seed_photo(
             container,
@@ -437,9 +458,14 @@ async def seed_person_identity(
             scope_id=scope_id,
             name=clean_name,
             family_role=(family_role or "").strip() or None,
-            aliases=_split_aliases(aliases),
+            aliases=_split_terms(aliases),
             photos=photos,
+            face_instance_ids=instance_ids,
         )
+    except SeedInstanceNotFoundError as error:
+        # 调用方指向了一个不存在的对象 → 404。与「图里没有人脸」（422）分开：
+        # 一个要换 id，一个要换图。
+        raise NotFoundError(str(error)) from error
     except NoSeedFacesError as error:
         # 1.0 在路由上抛 422（``app.py:2345``）：请求是好的，是这几张图里没有人脸。
         raise UnprocessableError(str(error)) from error

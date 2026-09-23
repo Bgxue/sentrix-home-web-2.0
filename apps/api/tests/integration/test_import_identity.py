@@ -25,6 +25,7 @@ from sentrix.application.identity.seed_identity import (
     SEED_SUMMARY,
     NoSeedFacesError,
     SeedIdentity,
+    SeedInstanceNotFoundError,
     SeedPhoto,
 )
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
@@ -422,3 +423,285 @@ def test_a_face_imported_later_lands_in_the_seeded_cluster(
             (seeded.entity_id, later.observation_id),
         ).fetchone()
     assert int(mention[0]) == 1
+
+
+# ---- 按人脸实例预置（裁决二） ------------------------------------------------------
+#
+# 「给一张照片挑里面质量最高的那张脸」这条语义在多人的家庭照上是**错的**：用户想预置的
+# 那个人通常不是质量最高的那张脸。实测（dev §2k 第 100 条）预置取到的那张脸在全册里
+# 只出现过一次，它的簇原型与其余 14 张脸的最大余弦只有 0.106（阈值 0.30），于是
+# enrollment 正确地一条提及都没写——接的是对的，能预置成的人却是错的。
+#
+# 下面的门禁要能**真的把两种输入区分开**：同一张脸上，按实例预置必须命中、按照片预置
+# 必须落空。只断言「没报错」「写了几行」的实现两种都过。
+
+PHOTO_ARM = "seed-photo-arm"
+INSTANCE_ARM = "seed-instance-arm"
+
+
+class ExplodingDetector:
+    """实例路径**不许**碰检测器：真调上了就说明它又去「挑照片里最好的脸」了。"""
+
+    def detect(self, path: str) -> list[FaceDetection]:
+        raise AssertionError(f"按实例预置不该调用检测器: {path}")
+
+    def detect_identity_photo(self, path: str) -> list[FaceDetection]:
+        raise AssertionError(f"按实例预置不该调用检测器: {path}")
+
+
+def open_scope(db: Database, scope_id: str) -> None:
+    with db.connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO memory_spaces (id, name, include_in_people, created_at, updated_at)"
+            " VALUES (?, ?, 1, ?, ?)",
+            (scope_id, scope_id, NOW, NOW),
+        )
+
+
+def photo_in_scope(db: Database, *, asset_id: str, scope_id: str, path: str) -> SeedPhoto:
+    """某个 scope 里的 asset + observation（``seed_photo`` 钉死了 SCOPE，这里要按臂分家）。"""
+    observation_id = f"obs_{asset_id}"
+    with db.connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO assets (id, scope_id, file_name, media_type, path, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'image', ?, ?, ?)",
+            (asset_id, scope_id, f"{asset_id}.jpg", path, NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO observations (id, scope_id, asset_id, source_type, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'import', ?, ?)",
+            (observation_id, scope_id, asset_id, NOW, NOW),
+        )
+    return SeedPhoto(asset_id=asset_id, observation_id=observation_id, path=path)
+
+
+def stored_instance(
+    db: Database,
+    *,
+    instance_id: str,
+    asset_id: str,
+    observation_id: str,
+    embedding: tuple[float, ...],
+    quality: float = 0.9,
+    pose_bucket: str = "frontal",
+) -> None:
+    """一条**已经检出来**的人脸实例——导入路径的产物，不是用户上传的照片。
+
+    把该实例当作身份样本，说的是「我指的就是这张脸」，而不是「这张照片里的那个人」。
+    """
+    import json
+
+    with db.connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO face_instances"
+            " (id, asset_id, observation_id, cluster_id, bbox_json, embedding_json,"
+            "  detection_confidence, quality, pose_json, pose_bucket, embedding_model,"
+            "  embedding_version, embedding_quality_signal, validity, area_ratio, sharpness,"
+            "  created_at)"
+            " VALUES (?, ?, ?, NULL, ?, ?, 0.95, ?, '[]', ?, 'buffalo_l', 'buffalo_l',"
+            "  0.4, 'verified', 0.1, 0.3, ?)",
+            (
+                instance_id,
+                asset_id,
+                observation_id,
+                json.dumps([10.0, 10.0, 110.0, 110.0]),
+                json.dumps(list(embedding)),
+                quality,
+                pose_bucket,
+                NOW,
+            ),
+        )
+
+
+def enroll_later(
+    db: Database, repos: dict[str, Any], *, scope_id: str, asset_id: str, observer_face: FaceDetection
+) -> tuple[str | None, int]:
+    """在另一张照片上走一次在线匹配，返回 ``(落到的簇, 这条观察里的提及数)``。
+
+    「提及」是这一层的可观测量：``AssignEvents`` 的 ``person_score`` 读的就是它，
+    一条提及都没有时事件分里那个 0.20 的分量恒为 0。
+    """
+    later = photo_in_scope(db, asset_id=asset_id, scope_id=scope_id, path=f"/tmp/{asset_id}.jpg")
+    enroll = EnrollFace(
+        faces=repos["faces"],
+        entities=repos["entities"],
+        vectors=repos["vectors"],
+        assets=repos["assets"],
+    )
+    outcome = enroll.enroll(asset_id, later.observation_id, observer_face, model_name="buffalo_l")
+    with db.connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM entity_mentions WHERE observation_id = ?",
+            (later.observation_id,),
+        ).fetchone()
+    return outcome.cluster_id, int(row[0])
+
+
+def test_presetting_by_photo_and_by_instance_pick_different_faces(
+    seeded_db: Database, repos: dict[str, Any], seeder: Any
+) -> None:
+    """**这条就是两种输入的区分门禁。**
+
+    同一个人（``unit(1, 0)``）在一张有两个人照片里：``unit(0, 1)`` 质量 0.95
+    是检测器眼里最好的那张脸，但他在全册里只出现这一次。
+
+    - 照片那条路取质量最高的 ``unit(0, 1)`` → 之后导入 ``unit(1, 0)`` 落空、零提及；
+    - 实例那条路取库里那条 ``unit(1, 0)`` 的实例 → 之后导入同一张脸命中、有提及。
+
+    两条入口对**同一张脸**给出不同结论，「按实例预置」才算真的被实现。
+    """
+    open_scope(seeded_db, PHOTO_ARM)
+    open_scope(seeded_db, INSTANCE_ARM)
+
+    photo_asset = photo_in_scope(seeded_db, asset_id="family", scope_id=PHOTO_ARM, path="/tmp/family.jpg")
+    stored_instance(
+        seeded_db,
+        instance_id="fi_mom",
+        asset_id="family",
+        observation_id=photo_asset.observation_id,
+        embedding=unit(1.0),
+        quality=0.5,
+    )
+
+    seeder_ = seeder({"/tmp/family.jpg": [face(unit(0.0, 1.0), quality=0.95), face(unit(1.0), quality=0.5)]})
+    by_photo = seeder_.execute(
+        scope_id=PHOTO_ARM, name="妈妈", family_role=None, aliases=[], photos=[photo_asset]
+    )
+    photo_cluster, photo_mentions = enroll_later(
+        seeded_db, repos, scope_id=PHOTO_ARM, asset_id="photo_arm_later", observer_face=face(unit(1.0))
+    )
+
+    by_instance = SeedIdentity(
+        detector=ExplodingDetector(),
+        faces=repos["faces"],
+        entities=repos["entities"],
+        vectors=repos["vectors"],
+    ).execute(
+        scope_id=INSTANCE_ARM,
+        name="妈妈",
+        family_role=None,
+        aliases=[],
+        face_instance_ids=["fi_mom"],
+    )
+    # 预置那一刻的形态：代表向量逐位等于库里那条实例，簇里正好一张脸。
+    # **这一组必须在 enroll 之前读**——enroll 会把第二张脸挂上去。
+    instance_seeded = repos["faces"].get_cluster(by_instance.cluster_id)
+    assert instance_seeded is not None
+    assert instance_seeded.representative_embedding == pytest.approx(unit(1.0))
+    assert instance_seeded.member_count == 1
+    assert instance_seeded.status == "confirmed"
+    assert by_instance.face_count == 1
+
+    instance_cluster, instance_mentions = enroll_later(
+        seeded_db,
+        repos,
+        scope_id=INSTANCE_ARM,
+        asset_id="instance_arm_later",
+        observer_face=face(unit(1.0)),
+    )
+
+    # 照片路径：预置的是另一个人，同一张脸导入时另开一簇、零提及。
+    photo_seeded = repos["faces"].get_cluster(by_photo.cluster_id)
+    assert photo_seeded is not None
+    assert photo_seeded.representative_embedding == pytest.approx(unit(0.0, 1.0))
+    assert photo_cluster not in (None, by_photo.cluster_id)
+    assert photo_mentions == 0
+
+    # 实例路径：预置的就是这张脸，导入时直接落到那个簇上并写下提及。
+    assert instance_cluster == by_instance.cluster_id
+    assert instance_mentions == 1
+
+
+def test_an_unknown_face_instance_writes_nothing_and_yields_no_mention(
+    seeded_db: Database, repos: dict[str, Any], seeder: Any
+) -> None:
+    """**区分门禁的另一半：不在库里的脸预置不出来。**
+
+    预先校验全部实例 id，一个不存在就整体失败、一行不写——与「预置照片里一张脸都没有」
+    同样的口径（``test_a_photo_without_a_single_face_creates_nothing``）。
+    半个预置（实体建了、簇没建）比失败更难查。
+    """
+    open_scope(seeded_db, INSTANCE_ARM)
+
+    with pytest.raises(SeedInstanceNotFoundError):
+        SeedIdentity(
+            detector=ExplodingDetector(),
+            faces=repos["faces"],
+            entities=repos["entities"],
+            vectors=repos["vectors"],
+        ).execute(
+            scope_id=INSTANCE_ARM,
+            name="妈妈",
+            family_role=None,
+            aliases=[],
+            face_instance_ids=["fi_ghost"],
+        )
+
+    with seeded_db.connect() as connection:
+        counts = {
+            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("entities", "face_clusters", "face_instances", "entity_mentions")
+        }
+    assert counts == {
+        "entities": 0,
+        "face_clusters": 0,
+        "face_instances": 0,
+        "entity_mentions": 0,
+    }
+
+    cluster, mentions = enroll_later(
+        seeded_db, repos, scope_id=INSTANCE_ARM, asset_id="ghost_later", observer_face=face(unit(1.0))
+    )
+    # 导入路径照样会为这张脸开一个待确认的簇——**区别在提及**：没有那个已确认的人，
+    # 事件归并读到的 person_score 只能是 0。
+    assert cluster is not None
+    assert mentions == 0
+
+
+def test_the_stored_pose_bucket_and_validity_do_not_decide_the_match(
+    seeded_db: Database, repos: dict[str, Any]
+) -> None:
+    """dev 第 100 条登记的两条遗留（``pose_bucket='unknown'`` / ``validity='uncertain'``）
+    **不是**「对不上」的原因。
+
+    在线匹配读的是原型表里的**全部向量**（``EnrollFace._representatives`` 不按姿态桶
+    过滤），而 ``validity`` 只影响全局重聚类那座「已复核」的门（``list_verified_instances``）
+    与撤回认领——两条都不在在线匹配的路径上。所以哪怕预置实例落在 ``unknown`` 桶、
+    进来的是 ``frontal`` 的脸，余弦仍然对得上。
+    """
+    open_scope(seeded_db, INSTANCE_ARM)
+    asset = photo_in_scope(seeded_db, asset_id="side_face", scope_id=INSTANCE_ARM, path="/tmp/side_face.jpg")
+    stored_instance(
+        seeded_db,
+        instance_id="fi_side",
+        asset_id="side_face",
+        observation_id=asset.observation_id,
+        embedding=unit(1.0),
+        pose_bucket="unknown",
+    )
+
+    seeded = SeedIdentity(
+        detector=ExplodingDetector(),
+        faces=repos["faces"],
+        entities=repos["entities"],
+        vectors=repos["vectors"],
+    ).execute(
+        scope_id=INSTANCE_ARM,
+        name="爸爸",
+        family_role=None,
+        aliases=[],
+        face_instance_ids=["fi_side"],
+    )
+
+    instances = repos["faces"].list_instances(seeded.cluster_id)
+    assert [item.pose_bucket for item in instances] == ["unknown"]
+    assert [item.validity for item in instances] == ["uncertain"]
+    assert [
+        (item.pose_bucket, item.quality) for item in repos["faces"].list_prototypes(seeded.cluster_id)
+    ] == [("unknown", 0.9)]
+
+    cluster, mentions = enroll_later(
+        seeded_db, repos, scope_id=INSTANCE_ARM, asset_id="frontal_later", observer_face=face(unit(1.0))
+    )
+    assert cluster == seeded.cluster_id
+    assert mentions == 1

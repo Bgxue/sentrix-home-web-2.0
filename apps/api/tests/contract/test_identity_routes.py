@@ -627,3 +627,98 @@ def test_crop_with_a_short_bbox_is_422(identity_client: TestClient, tmp_path: Pa
 
     assert response.status_code == 422
     assert _error(response) == ("unprocessable", "face crop is unavailable: invalid face bounding box")
+
+
+# ---- 身份预置：按人脸实例 ----------------------------------------------------------
+#
+# 裁决二新增的入口。契约层的两件事：**不碰检测器**（所以这里能跑，而按照片那条路要
+# insightface 权重）与**不存在的实例是 404 而不是 422**。
+
+
+class ExplodingDetector:
+    """真被调上就说明实例那条路又去「挑照片里最好的脸」了。"""
+
+    def detect(self, path: str):
+        raise AssertionError(f"按实例预置不该调用检测器: {path}")
+
+    def detect_identity_photo(self, path: str):
+        raise AssertionError(f"按实例预置不该调用检测器: {path}")
+
+
+def add_embedded_instance(
+    client: TestClient, instance_id: str, *, embedding: list[float], scope_id: str = HOME
+) -> None:
+    """一条带**真向量**的实例——``add_instance`` 落的是空向量，那是「没有向量」的意思。"""
+    with _db(client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO face_instances"
+            " (id, asset_id, observation_id, cluster_id, bbox_json, embedding_json,"
+            "  detection_confidence, quality, pose_json, pose_bucket, embedding_model,"
+            "  embedding_version, embedding_quality_signal, validity, area_ratio, sharpness,"
+            "  created_at)"
+            " VALUES (?, 'asset_1', 'obs_1', NULL, '[10.0, 10.0, 110.0, 110.0]', ?,"
+            "  0.95, 0.88, '[]', 'frontal', 'buffalo_l', 'buffalo_l', 0.4, 'verified',"
+            "  0.1, 0.3, ?)",
+            (instance_id, json.dumps(embedding), NOW),
+        )
+
+
+def test_seeding_by_a_stored_face_instance_never_calls_the_detector(identity_client: TestClient):
+    """实例入口把库里那一行**原样**当作身份样本。
+
+    把检测器换成「一调就炸」的替身，这条仍然是 201——这正是它与照片那条路的区别，
+    也是它能在契约测试里跑起来的原因（那条路要 insightface 权重）。
+    """
+    import dataclasses
+
+    add_embedded_instance(identity_client, "fi_mom", embedding=[1.0, 0.0, 0.0, 0.0])
+    identity_client.app.state.container = dataclasses.replace(
+        identity_client.app.state.container, face_detector=ExplodingDetector()
+    )
+
+    response = identity_client.post(
+        "/api/v1/people/seed",
+        data={"name": "妈妈", "family_role": "母亲", "scope_id": HOME, "face_instance_ids": "fi_mom"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["name"] == "妈妈"
+    assert response.json()["face_count"] == 1
+    assert response.json()["photos_without_faces"] == 0
+    cluster = identity_client.get("/api/v1/face-clusters").json()["clusters"][0]
+    assert cluster["status"] == "confirmed"
+    assert cluster["member_count"] == 1
+    assert cluster["canonical_name"] == "妈妈"
+
+
+def test_an_unknown_face_instance_is_a_404_not_a_422(identity_client: TestClient):
+    """指向一个不存在的对象（404）与「图里没有人脸」（422）是两件事。
+
+    合并成一个码，调用方就分不清该换 id 还是该换图。
+    """
+    response = identity_client.post(
+        "/api/v1/people/seed", data={"name": "妈妈", "face_instance_ids": "fi_ghost"}
+    )
+
+    assert response.status_code == 404, response.text
+    assert _error(response) == ("not_found", "face instance not found: fi_ghost")
+
+
+def test_seeding_with_neither_files_nor_instances_is_a_400(identity_client: TestClient):
+    """1.0 的 ``files`` 是必填，所以这条在 1.0 不存在；两条入口之后它是新的边界。"""
+    response = identity_client.post("/api/v1/people/seed", data={"name": "妈妈"})
+
+    assert response.status_code == 400
+    assert _error(response) == ("invalid_request", "files or face_instance_ids is required")
+
+
+def test_an_empty_name_is_still_rejected_before_either_entrance(identity_client: TestClient):
+    """1.0 ``app.py:2321`` 的 400，两条入口共用。"""
+    add_embedded_instance(identity_client, "fi_mom", embedding=[1.0, 0.0, 0.0, 0.0])
+
+    response = identity_client.post(
+        "/api/v1/people/seed", data={"name": "   ", "face_instance_ids": "fi_mom"}
+    )
+
+    assert response.status_code == 400
+    assert _error(response) == ("invalid_request", "name is required")

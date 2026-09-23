@@ -125,6 +125,9 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
         face_enroller=_face_enroller(container),
         fact_maintainer=_fact_maintainer(container),
         lexical_index=container.lexical_index,
+        # 记忆空间行（裁决一）。**只在这里接**：簇列表内连 ``memory_spaces``，
+        # 少接这一处，全新部署导入一整册之后审阅页一个簇都不显示（第 97 / 103 条）。
+        spaces=container.spaces,
     )
 
 

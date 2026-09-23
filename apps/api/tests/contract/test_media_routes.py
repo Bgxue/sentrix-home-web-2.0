@@ -154,3 +154,46 @@ def test_the_import_route_wires_fact_maintenance(monkeypatch: pytest.MonkeyPatch
 
     assert response.status_code == 201
     assert [item.id for item in seen] == [response.json()["observation_id"]]
+
+
+def test_the_import_route_creates_the_memory_space(client: TestClient):
+    """装配点 ``build_import_assets`` 必须把 ``spaces`` 接上（裁决一）。
+
+    与 ``test_the_import_route_wires_fact_maintenance`` 同一条理由：集成用例自己构造
+    ``ImportAssets`` 并显式传协作者，**装配点漏了它看不出来**。这条只走 HTTP，断言的是
+    「导完之后库里真有一行空间」——把 ``spaces=container.spaces`` 那一行删掉，它立刻红。
+
+    断言不依赖人脸权重：检测器没权重就是空表，而空间行与有没有脸无关。
+    """
+    response = client.post(
+        "/api/v1/media/import",
+        files={"file": ("IMG_0001.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"scope_id": "album-fresh"},
+    )
+
+    assert response.status_code == 201
+    space = client.app.state.container.spaces.get("album-fresh")
+    assert space is not None
+    assert (space.name, space.kind, space.status) == ("album-fresh", "household", "active")
+
+
+def test_the_album_route_creates_the_memory_space(client: TestClient, tmp_path):
+    """整册导入是另一条入口（``/api/v1/imports`` → ``ImportAlbum`` → ``ImportAssets``）。
+
+    两条入口共用 ``build_import_assets``，但它们各自的端到端形状不同：单张那条走
+    ``observe=False`` 的快路径，整册这条带上观察器与批末总结。两边都钉一次，
+    「整册少了空间行」这种差异才不会被两条用例各看一半放过去。
+    """
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    (photos / "IMG_0002.jpg").write_bytes(jpeg_bytes(color="blue"))
+
+    response = client.post(
+        "/api/v1/imports",
+        json={"directory": str(photos), "scope_id": "album-batch", "limit": 10},
+    )
+
+    assert response.status_code == 201
+    space = client.app.state.container.spaces.get("album-batch")
+    assert space is not None
+    assert space.name == "album-batch"

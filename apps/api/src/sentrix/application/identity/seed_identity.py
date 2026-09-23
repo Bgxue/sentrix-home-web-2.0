@@ -18,6 +18,20 @@
 **预置出来的实例 ``validity`` 是 ``uncertain``**，与 1.0 一致：1.0 的 INSERT 里根本没有
 这一列，落的是 DDL 的默认值 ``'uncertain'``（``db.py:1238``）。预置走的是「用户说这是谁」，
 不是 SCRFD 复核——这两件事的证据强度不同，不该在同一个字段上抹平。
+
+**两条入口：照片与已检出的人脸实例**（裁决二）。1.0 只有前一条——「给一张照片，挑里面
+质量最高的那张脸」。那条语义在多人的家庭照上是**错的**：用户想预置的人通常不是质量最高
+的那张脸。实测（``s5-deviations`` 第 100 条）预置取到的那张脸在全册里只出现一次，它的簇
+原型与其余 14 张脸的最大余弦只有 0.106（阈值 0.30），enrollment 正确地一条提及都没写，
+``person_score`` 因此恒 0——接的是对的，能被预置成的人却是错的。
+
+按实例预置把「我指的是**这张脸**」和「这张照片里的那个人」分开：实例的向量、框、姿态桶
+都从库里那一行原样搬过来，**不重跑检测**。两条入口共用同一段落库与刷原型，所以预置出来
+的簇在两条路径上完全同形。
+
+``pose_bucket`` 与 ``validity`` 都**不是**「对不上」的原因，两条都已经实测钉住
+（``test_the_stored_pose_bucket_and_validity_do_not_decide_the_match``）：在线匹配读的是
+原型表里的全部向量，不按姿态桶过滤；``validity`` 只影响全局重聚类那座「已复核」的门。
 """
 
 from __future__ import annotations
@@ -31,6 +45,7 @@ from sentrix.domain.identity.models import (
     ENTITY_STATUS_CONFIRMED,
     FACE_VALIDITY_UNCERTAIN,
     FaceDetection,
+    FaceInstanceRecord,
 )
 from sentrix.domain.identity.ports import EntityRepository, FaceDetector, FaceRepository
 from sentrix.domain.retrieval.ports import VectorRecord, VectorRepository
@@ -47,6 +62,16 @@ class NoSeedFacesError(Exception):
     """一张预置照片里都没检出人脸。1.0 在路由上抛 422，2.0 定义在用例里、由路由映射。"""
 
 
+class SeedInstanceNotFoundError(Exception):
+    """指定的 ``face_instance_id`` 在库里不存在。
+
+    与 ``NoSeedFacesError`` 分开：那是「请求是好的，是这几张图里没有人脸」（422），
+    这是「调用方指向了一个不存在的对象」（404）。合并成一个码，调用方就分不清该换图
+    还是该换 id。**校验在任何写库之前一次做完**——预置到一半（实体建了、簇没建）比
+    整体失败更难查。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class SeedPhoto:
     """一张预置照片：资产、观察与磁盘路径。``path`` 是适配器读图用的入口。"""
@@ -54,6 +79,18 @@ class SeedPhoto:
     asset_id: str
     observation_id: str
     path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SeedSample:
+    """一条待预置的样本：落实例只需要这两个 id。
+
+    照片入口从 ``SeedPhoto`` 取它们，实例入口从 ``FaceInstanceRecord`` 取——两条入口
+    在**决定用哪张脸**那一步分家，从这一步往后是同一条路。
+    """
+
+    asset_id: str
+    observation_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,21 +129,31 @@ class SeedIdentity:
         name: str,
         family_role: str | None,
         aliases: Sequence[str],
-        photos: Sequence[SeedPhoto],
+        photos: Sequence[SeedPhoto] = (),
+        face_instance_ids: Sequence[str] = (),
     ) -> SeedResult:
-        """每张照片取**质量最高**的那张脸；一张都没有就整体失败。
+        """两种样本可以混用：方案里指定的脸 + 照片里挑出来的脸，一起构成这个人。
 
-        「一张都没有就失败」是 1.0 的行为（路由 422）：预置一个没有任何脸的人会建出一个
-        永远匹配不上任何东西的簇，而用户看到的只是「成功了」。
+        - ``photos``：每张照片取**质量最高**的那张脸（1.0 的口径）；
+        - ``face_instance_ids``：库里已有的实例，**原样采信**，不重跑检测。
+
+        两边加起来一张脸都没有就整体失败（1.0 在路由上抛 422）：预置一个没有任何脸的
+        人会建出一个永远匹配不上任何东西的簇，而用户看到的只是「成功了」。
         """
-        chosen: list[tuple[SeedPhoto, FaceDetection]] = []
+        # 先把实例 id 一次校验完再动任何一行：不存在的 id 是调用方的错，不该留下
+        # 一个建了一半的身份。照片那边检不出脸只是跳过（1.0 的行为），这里不同。
+        stored = [self._load_instance(instance_id) for instance_id in face_instance_ids]
+
+        chosen: list[tuple[_SeedSample, FaceDetection]] = []
         skipped = 0
         for photo in photos:
             faces = self._detector.detect_identity_photo(photo.path)
             if not faces:
                 skipped += 1
                 continue
-            chosen.append((photo, max(faces, key=_quality_of)))
+            chosen.append((_SeedSample(photo.asset_id, photo.observation_id), max(faces, key=_quality_of)))
+        for record in stored:
+            chosen.append((_SeedSample(record.asset_id, record.observation_id), _detection_of(record)))
         if not chosen:
             raise NoSeedFacesError("上传的照片里检不出任何人脸")
 
@@ -128,8 +175,8 @@ class SeedIdentity:
         )
         self._faces.confirm_cluster(cluster.id, entity.id)
 
-        for photo, face in chosen:
-            self._store_instance(photo, face, cluster.id, entity.scope_id)
+        for sample, face in chosen:
+            self._store_instance(sample, face, cluster.id, entity.scope_id)
         # 回写 member_count 并重算原型。原型是后续在线匹配真正读的东西（没有它，匹配会
         # 退回代表向量），所以这一步不是收尾，是让预置**生效**。
         self._faces.refresh_prototypes(cluster.id)
@@ -144,12 +191,21 @@ class SeedIdentity:
             photos_without_faces=skipped,
         )
 
-    def _store_instance(self, photo: SeedPhoto, face: FaceDetection, cluster_id: str, scope_id: str) -> None:
-        """落一条实例 + 它的权威向量。两处的 ``pose`` 都取自检测结果，不在这里重算。"""
+    def _load_instance(self, instance_id: str) -> FaceInstanceRecord:
+        """按 id 取库里那条人脸实例；不存在就整体失败（404）。"""
+        record = self._faces.get_instance(instance_id)
+        if record is None:
+            raise SeedInstanceNotFoundError(f"face instance not found: {instance_id}")
+        return record
+
+    def _store_instance(
+        self, sample: _SeedSample, face: FaceDetection, cluster_id: str, scope_id: str
+    ) -> None:
+        """落一条实例 + 它的权威向量。两处的 ``pose`` 都取自样本，不在这里重算。"""
         embedding = normalize_embedding(face.embedding)
         instance = self._faces.add_instance(
-            asset_id=photo.asset_id,
-            observation_id=photo.observation_id,
+            asset_id=sample.asset_id,
+            observation_id=sample.observation_id,
             cluster_id=cluster_id,
             bbox=face.bbox,
             embedding=embedding,
@@ -177,13 +233,36 @@ class SeedIdentity:
                 vector=tuple(float(value) for value in embedding),
                 metadata={
                     "cluster_id": cluster_id,
-                    "asset_id": photo.asset_id,
-                    "observation_id": photo.observation_id,
+                    "asset_id": sample.asset_id,
+                    "observation_id": sample.observation_id,
                     "quality": _quality_of(face),
                     "pose_bucket": face.pose_bucket or "unknown",
                 },
             )
         )
+
+
+def _detection_of(record: FaceInstanceRecord) -> FaceDetection:
+    """把库里那条实例原样搬成「检测结果」的形状。
+
+    **不重跑检测**——实例预置的全部意义就是「用户指的是这张脸」；再过一遍「挑照片里
+    最好的那张」等于把用户的选择丢掉，而那正是第 100 条里对不上的原因。
+    向量、框、姿态、质量、模型签名全部逐字段照搬，所以预置簇的原型与导入路径检出的
+    那张脸**逐位相同**（余弦 1.000），匹配不再取决于选脸运气。
+    """
+    return FaceDetection(
+        embedding=record.embedding,
+        bbox=record.bbox,
+        confidence=record.detection_confidence,
+        quality=record.quality,
+        pose=record.pose,
+        pose_bucket=record.pose_bucket,
+        area_ratio=record.area_ratio,
+        sharpness=record.sharpness,
+        quality_signal=record.embedding_quality_signal,
+        embedding_model=record.embedding_model,
+        embedding_version=record.embedding_version,
+    )
 
 
 def _quality_of(face: FaceDetection) -> float:

@@ -9,6 +9,16 @@ S2 追加一条：**导入即向量化**（1.0 ``pipeline.py`` 的 ``_commit_fas
 时机）。``visual_indexer`` 是可选协作者——不传就退化成纯导入，这样单元测试与不关心
 视觉记忆的调用方都不必构造嵌入器。
 
+S5 追加一条：**导入即建记忆空间**。落点照 1.0 ``db.py:1462`` 的 ``create_asset``
+——单张 ``/api/ingest`` 与批量 ``/api/import`` 都从它过，2.0 的同一个公共落点是这里
+（``ImportAlbum`` 也走它，两条入口一次覆盖）。没有这一步，全新部署导入一整册之后
+**审阅页的「待命名成员」列表恒空**：``FaceRepository.list_clusters`` **内连**
+``memory_spaces``，而全仓没有第二个写入者（``s5-deviations`` 第 97 条；措辞由第 103 条
+纠正——``EntityRepository.list_people`` 用的是 ``scope_id NOT IN (SELECT ...)`` 子查询，
+不受影响）。名字与类型取 1.0 的 ``create_memory_space(scope_id, scope_id)``：``name``
+与 ``id`` 同值，``kind`` 走签名默认 ``household``——批量端点里那个 ``benchmark`` 是
+1.0 的评测旁路，按第 6/30 条不移植进生产代码。
+
 S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
 
     存储 → EXIF/GPS → 地点解析 → 视觉向量 → 观察 → 语义富集 → 人脸登记 → 事件归属 → 事实写入 → 词法投影
@@ -59,6 +69,7 @@ from sentrix.domain.media.ports import (
 )
 from sentrix.domain.places.ports import AssetPlaceIndex
 from sentrix.domain.retrieval.ports import AssetVisualIndexer, LexicalIndex
+from sentrix.domain.spaces.ports import SpaceRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +120,7 @@ class ImportAssets:
         face_enroller: Callable[[Asset, Observation], int] | None = None,
         fact_maintainer: Callable[[Observation], tuple[str, ...]] | None = None,
         lexical_index: LexicalIndex | None = None,
+        spaces: SpaceRepository | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets
@@ -122,9 +134,14 @@ class ImportAssets:
         self._face_enroller = face_enroller
         self._fact_maintainer = fact_maintainer
         self._lexical_index = lexical_index
+        self._spaces = spaces
         self._clock = clock
 
     def execute(self, request: ImportRequest) -> ImportResult:
+        # 空间行排在最前：簇列表内连它，没有它这次导入在审阅页上等于没发生。
+        # 放在去重判断**之前**——去重命中同样是一条「这个 scope 被用到了」的证据。
+        self._ensure_space(request.scope_id)
+
         content_sha256 = hashlib.sha256(request.content).hexdigest()
         media_type = MediaType.from_upload(request.content_type, request.file_name)
 
@@ -201,6 +218,16 @@ class ImportAssets:
         )
 
     # ---- 可选协作者 ------------------------------------------------------------
+
+    def _ensure_space(self, scope_id: str) -> None:
+        """保证这个 scope 在 ``memory_spaces`` 里有一行。1.0 ``db.py:1462``。
+
+        不传协作者就静默跳过——与其余可选协作者同一个形状。代价写在模块注释里：
+        那条路径上人物页仍然是空的，用例把这两种情形分开钉住。
+        """
+        if self._spaces is None:
+            return
+        self._spaces.ensure(scope_id, scope_id)
 
     def _index_visual(self, asset: Asset) -> bool:
         if self._visual_indexer is None:

@@ -67,7 +67,7 @@
 | `sentrix/application/identity/seed_identity.py` | 身份预置用例 `SeedIdentity`：确认实体 + 确认簇 + 每张照片取质量最高的一张脸落成实例与向量，最后重算原型；照片里一个人脸都检不出时整体失败（1.0 的 422） | application | `sentrix/domain/identity/faces.py`、`sentrix/domain/identity/models.py`、`sentrix/domain/identity/ports.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/domain/retrieval/scheme.py` | `sentrix/api/routes/identity.py` |
 | `sentrix/application/media/__init__.py` | 包标记 | application | — | — |
 | `sentrix/application/media/import_album.py` | 整册导入用例 `ImportAlbum`：串行、可恢复、按后缀扫描目录 | application | `sentrix/application/media/import_assets.py` | `sentrix/api/routes/timeline.py` |
-| `sentrix/application/media/import_assets.py` | 导入用例 `ImportAssets` / `ImportRequest` / `ImportResult`；按 scope 的 SHA-256 去重 | application | `sentrix/domain/media/models.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/places/ports.py`、`sentrix/domain/retrieval/ports.py` | `sentrix/api/routes/media.py`、`sentrix/application/media/import_album.py` |
+| `sentrix/application/media/import_assets.py` | 导入用例 `ImportAssets` / `ImportRequest` / `ImportResult`；按 scope 的 SHA-256 去重；导入即 ensure 记忆空间行（1.0 `create_asset` 的落点） | application | `sentrix/domain/media/models.py`、`sentrix/domain/media/ports.py`、`sentrix/domain/places/ports.py`、`sentrix/domain/retrieval/ports.py`、`sentrix/domain/spaces/ports.py` | `sentrix/api/routes/media.py`、`sentrix/application/media/import_album.py` |
 | `sentrix/application/media/index_place.py` | `IndexAssetPlace`：一张 Asset 的 GPS → `asset_places` 一行；解析不出就不写行 | application | `sentrix/domain/media/models.py`、`sentrix/domain/places/ports.py` | `sentrix/api/routes/media.py` |
 | `sentrix/application/media/observe_asset.py` | `ObserveAsset`：把已导入的 Asset 交给视觉观察器，语义写回 Observation | application | `sentrix/domain/media/models.py`、`sentrix/domain/media/ports.py` | `sentrix/api/routes/media.py` |
 | `sentrix/application/memories/__init__.py` | 包标记 | application | — | — |
@@ -126,7 +126,7 @@
 | `sentrix/domain/retrieval/similarity.py` | 余弦相似度与维度一致性判定；1.0 把它埋在 `MemoryStore._cosine` 里，精确回退与主路径各算一套 | domain | — | `sentrix/application/memories/assign_events.py`、`sentrix/domain/retrieval/__init__.py`、`sentrix/infrastructure/persistence/repositories/vectors.py` |
 | `sentrix/domain/spaces/__init__.py` | 包标记 | domain | — | — |
 | `sentrix/domain/spaces/models.py` | MemorySpace：一个 scope 的元数据（原在 infrastructure） | domain | — | `sentrix/domain/spaces/ports.py`、`sentrix/infrastructure/persistence/repositories/spaces.py` |
-| `sentrix/domain/spaces/ports.py` | SpaceRepository 端口：ensure / list_all / get | domain | `sentrix/domain/spaces/models.py` | `sentrix/bootstrap/container.py` |
+| `sentrix/domain/spaces/ports.py` | SpaceRepository 端口：ensure / list_all / get | domain | `sentrix/domain/spaces/models.py` | `sentrix/application/media/import_assets.py`、`sentrix/bootstrap/container.py` |
 | `sentrix/infrastructure/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/assistant/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/assistant/chat_client.py` | 8100 的 OpenAI 兼容客户端；原生 tools / tool_calls | infrastructure | `sentrix/domain/assistant/models.py`、`sentrix/domain/assistant/tools.py` | `sentrix/bootstrap/container.py`、`sentrix/infrastructure/media/vlm_observer.py` |

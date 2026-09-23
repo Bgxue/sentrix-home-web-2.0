@@ -891,6 +891,14 @@ paths:
       tags:
       - identity
       summary: Seed Person Identity
+      description: '两条入口：上传照片（1.0 的口径）与**指定已检出的人脸实例**（裁决二）。
+
+
+        后者说「我指的是这张脸」，前者说「这张照片里的那个人」——在多人的家庭照上前者会挑
+
+        质量最高的那张脸，而那通常不是用户想预置的人（见 ``seed_identity`` 的模块注释）。
+
+        两种样本可以混用。'
       operationId: seed_person_identity_api_v1_people_seed_post
       requestBody:
         content:
@@ -1175,16 +1183,21 @@ components:
           type: string
           title: Scope Id
           default: home-default
+        face_instance_ids:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Face Instance Ids
         files:
           items:
             type: string
             contentMediaType: application/octet-stream
           type: array
           title: Files
+          default: []
       type: object
       required:
       - name
-      - files
       title: Body_seed_person_identity_api_v1_people_seed_post
     CompleteEventPayload:
       properties:

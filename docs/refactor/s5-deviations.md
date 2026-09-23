@@ -1114,6 +1114,10 @@ S6 的查询解析）。所以 `retrieve_evidence.py` 也在本轮改了，登�
 e2e 的跑法因此在**测试脚本里**显式调了一次 `SpaceRepository.ensure(scope_id, scope_id)`
 ——那一行是测试夹具，不是产品路径。
 
+**（2026-09-23 裁决一已关闭本条。）** 落点、`name`/`kind` 与控制组的形态见第 102 条；
+其中「`list_people` 也内连这张表」半句**不成立**，已在第 103 条纠正。本轮之后的 e2e
+脚本里**一次 `spaces.ensure` 都不调**——那一行从夹具变成了产品路径的一部分。
+
 #### 第 98 条 · 70b（路由自己的 `HTTPException`）本轮不做，理由与后续动作
 
 上一轮列的 70b：`media.py` / `timeline.py` / `assistant.py` 里路由自己抛的
@@ -1204,3 +1208,125 @@ e2e 的跑法因此在**测试脚本里**显式调了一次 `SpaceRepository.ens
 实测代价：真实仓库那次 `make ci` 的 pytest 跑了 30 分钟以上、峰值 2433% CPU，
 而隔离副本同一棵树是 4 分钟。**「两边树一模一样」不等于「两边跑的东西一样」**——
 这条不对称登记在此，免得后来人把隔离副本的绿灯当成全量证据。
+
+### G. 裁决一 / 裁决二的实施记录（2026-09-23 第二轮裁决）
+
+#### 第 102 条 · 裁决一的落点是 `ImportAssets.execute`，不是 `ImportAlbum`
+
+1.0 建记忆空间的地方在 `db.py:1462` 的 `create_asset`：
+
+```python
+self.create_memory_space(scope_id, scope_id) if not self._row("SELECT id FROM memory_spaces WHERE id = ?", (scope_id,)) else None
+```
+
+单张 `/api/ingest` 与批量 `/api/import` **都从它过**——它是两条入口的公共落点，不是某一条的。
+2.0 的同一个公共落点是 `ImportAssets.execute`（`ImportAlbum` 只是它的调用方），所以 ensure
+接在那里，两条入口一次覆盖；接在 `ImportAlbum` 上会漏掉单张上传那条。
+
+**`name` / `kind` 取的是 1.0 的哪一份。** `name = scope_id`（`create_asset` 传进去的就是
+scope_id 自己），`kind` 取 `create_memory_space` 的**签名默认** `household`。1.0 的两个批量端点
+显式传 `kind="benchmark"`（`app.py:3602` / `:3700`），那是评测旁路——按第 6 / 30 条不移植进
+生产代码。
+
+**协作者按本文件既有的形状做成可选的**（不传 `spaces` 就静默跳过）。这不是留后门：模块注释里
+「协作者全是可选的」是这份文件对单元测试的既有承诺，而代价由控制组用例分开钉住
+（`test_a_cluster_can_exist_in_the_database_and_still_be_invisible_on_the_people_page`）。
+
+`SpaceRepository.ensure` 在此之前**全仓零调用者**。`check_reachability.py` 看不见它——那条检查
+覆盖**模块**，而 `spaces.py` 一直被 `container.py` import 着（模块可达），零调用的是它上面的
+**方法**。这一条与第 44 条登记的是同一类不对称，本轮仍未修检查本身（那是一个独立的决定）。
+
+#### 第 103 条 · 纠正第 97 条的一半：`list_people` 并没有内连 `memory_spaces`
+
+第 97 条写「`FaceRepository.list_clusters` 与 `EntityRepository.list_people` 都内连这张表」。
+**后半句不成立。** `list_people` 用的是
+
+```sql
+scope_id NOT IN (SELECT id FROM memory_spaces WHERE include_in_people = 0)
+```
+
+（`entities.py:171`，1.0 `db.py:4043` 的 `list_entities` 原样）——一个**子查询**，
+没登记过的 scope **照常列出来**。这一轮写控制组用例时才撞出来：断言「两个人读端点都读不到」
+的那一行红了，红的原因是断言写错了，不是代码错了。
+
+所以缺空间行真正打掉的面是**簇**：`/api/v1/face-clusters`（审阅页的「待命名成员」列表）恒空，
+`/api/v1/people`（已确认的人）不受影响；`/api/v1/people/{id}` 里的 `list_clusters_for_entity`
+也不过滤空间，同样不受影响。**受影响的面比第 97 条说的小，但仍然是产品级的**——审阅页
+的半边是空的，而用户在全新部署上第一步就是去那里确认人。
+
+这条不对称（簇内连、人不内连）是 1.0 的原样，不是 2.0 引入的，本轮**不改**；只把第 97 条
+的措辞纠正过来，并在
+`test_a_cluster_can_exist_in_the_database_and_still_be_invisible_on_the_people_page`
+里钉成断言，免得后来人照着那句描述去「修」一个不存在的对称。
+
+#### 第 104 条 · 预置路由（`/people/seed`）仍然不建空间行——而 1.0 是建的
+
+1.0 的预置路由走 `store.create_asset`（`app.py:2337`），那里面就有 ensure；2.0 的
+`_store_seed_photo` 直接 `asset_repository.add`（模块注释写明「不走导入链」）。于是
+**往一个全新 scope 预置身份、又不导入任何照片时，那个簇在 `/face-clusters` 里看不见**。
+
+本轮**不改**：裁决一只说「整册导入 / 单张导入」，把落点扩到预置路由是一条新的产品决定
+（「预置时建空间」还是「空间由部署方预置」）。登记在此，等裁决。
+
+顺带一条**不是问题**的确认：`entities` / `face_clusters` 的 `scope_id` **没有**指向
+`memory_spaces` 的外键（`0006_identity.sql:25` / `:79`），所以往一个还没有空间行的 scope 预置
+不会违反外键——上面那条是「看不见」，不是「写不进去」。
+
+#### 第 105 条 · 裁决二的实现：`_SeedSample` 把两条入口合流，实例路径不重跑检测
+
+`SeedIdentity.execute` 新增 `face_instance_ids`，与 `photos` **可混用**。两条入口只在
+**决定用哪张脸**那一步分家：
+
+- 照片：`detect_identity_photo` → 取质量最高的一张（1.0 的口径，**原样保留**）；
+- 实例：`FaceRepository.get_instance` → 逐字段照搬（向量 / 框 / 姿态桶 / 质量 / 模型签名），
+  `_detection_of` 一个字段都不重算。
+
+从 `_SeedSample(asset_id, observation_id)` 往后是同一段落库 + 刷原型，所以两条路径产出的簇
+完全同形。实例路径**不调检测器**——契约测试把容器里的检测器换成「一调就炸」的替身
+（`ExplodingDetector`），这条路径仍然是 201，而照片那条路在同一台没有权重的机器上会退化成空表。
+
+**全部实例 id 在任何写库之前一次校验完**，一个不存在就整体失败、一行不写
+（`SeedInstanceNotFoundError` → 404）。与「预置照片里一张脸都没有」（422）**分成两个码**：
+一个要换 id，一个要换图。这两条是路由上新的边界，也是这条路唯一新增的错误面。
+
+契约的扩展是**请求侧**：`files` 从必填变可选，新增表单字段 `face_instance_ids`
+（顿号或逗号分隔，与 `aliases` 共用同一条拆分规则）。响应模型**没有改**——`face_count`
+本来就是「这次预置进去几张脸」，两条入口共用它。OpenAPI 已按 `scripts/export_openapi.py` 重导。
+
+#### 第 106 条 · 两条遗留（`pose_bucket='unknown'` / `validity='uncertain'`）**不是**「对不上」的原因
+
+第 100 条登记过：预置实例落的是 `pose_bucket='unknown'`（导入路径同一张脸是 `frontal`）、
+`validity='uncertain'`，并猜这两条「可能就是『对不上』的另一个原因」。**实测两条都不成立。**
+
+- **姿态桶不参与匹配。** 在线匹配读的是 `list_prototypes(cluster_id)` 的**全部向量**——
+  `EnrollFace._representatives`（`enroll_face.py`）只按 `(model_name, model_version)` 签名
+  过滤，**不按姿态桶过滤**。桶只决定「同一个桶里留哪一张当原型」（`refresh_prototypes` 的
+  `best.setdefault(bucket, row)`），不决定「哪些原型参与比对」。
+- **`validity` 不在在线匹配的路径上。** 它只出现在两个地方：`list_verified_instances`
+  （全局重聚类那座「已复核」的门）与 `list_uncertain_unclustered`（认领）。
+
+`test_the_stored_pose_bucket_and_validity_do_not_decide_the_match` 把结论钉成可失败的断言：
+预置出来的实例确实是 `unknown` + `uncertain`（两条都断言了），而同一张脸导入时仍然落进那个簇、
+写下提及。**真正的原因只有一个：选脸语义**（第 100 条查到的那个），这两个字段是被牵连的。
+
+#### 第 107 条 · 定点变异：四条新门禁各自被「故意写错」的一版抓住
+
+每条门禁都做了定点变异（把实现改坏一处、确认对应用例变红、再还原）。原始输出见
+交付报告；四条与它们抓住的用例：
+
+| 变异 | 改坏的地方 | 变红的用例 |
+|---|---|---|
+| M1 | 删掉 `ImportAssets.execute` 里的 `_ensure_space` 调用 | `test_import_memory_space.py` 3 条 |
+| M2 | 删掉装配点 `build_import_assets` 里的 `spaces=container.spaces` | `test_media_routes.py` 2 条（单张 + 整册两条入口） |
+| M3 | `_detection_of` 丢掉库里那条实例的向量 | `test_import_identity.py` 2 条 |
+| M4 | 未知 `face_instance_id` 的 404 被改成 422 | `test_identity_routes.py` 1 条 |
+
+**M2 是本轮最该有的一条。** 集成用例自己构造 `ImportAssets` 并显式传协作者，装配点漏了
+它看不出来——这正是第 85 条「一条同构装配的用例证明不了生产装配」的另一个实例，
+所以单张与整册两条入口各补了一条只走 HTTP 的用例。
+
+**一条自己撞出来的教训（过程记录）。** 第一版变异脚本没有备份 `identity.py`，M4 的改动因此
+留在了工作树里、并且被提交进去。它不是被人工复核发现的，是被**全量 `make ci` 抓住的**：
+单跑 `test_identity_routes.py` 时那条用例通过（同一个文件里的其它用例先跑），跑整个
+`contract/` 目录时才红。两件事记在这里：一是变异脚本的 `restore` 必须覆盖**每一处**改动的
+文件（漏一处就是往提交里塞 bug）；二是**只跑改动文件对应的用例不足以证明整棵树是绿的**。
