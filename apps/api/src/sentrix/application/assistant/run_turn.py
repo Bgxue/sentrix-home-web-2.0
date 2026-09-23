@@ -62,6 +62,7 @@ from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
 from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
 from sentrix.domain.assistant.tools import TOOL_SPECS, TOOLS_BY_NAME
+from sentrix.domain.errors import DomainError
 
 log = logging.getLogger("sentrix.assistant.run_turn")
 
@@ -87,8 +88,16 @@ PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文
 PLANNER_BLOCKED_ANSWER = "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
 
 
-class TurnNotFoundError(LookupError):
-    pass
+class TurnNotFoundError(DomainError, LookupError):
+    """这条会话 / 这个回合不存在。
+
+    它以前是个**不带码**的 ``LookupError``，由 ``api/routes/assistant.py`` 硬编码成 404
+    ——同一条产品行为有两个来源（异常在这里、状态码在路由），改一处就漂，而且只有起了
+    HTTP 才验得到。码与状态现在跟着异常走（口径写在 ``domain/errors.py``），路由只放行。
+    """
+
+    code = "not_found"
+    status_code = 404
 
 
 class TurnAlreadyClaimedError(RuntimeError):
@@ -170,7 +179,7 @@ class RunTurn:
         """
         conversation = self._conversations.get(request.conversation_id)
         if conversation is None:
-            raise TurnNotFoundError(request.conversation_id)
+            raise TurnNotFoundError("conversation not found")
         now = datetime.now(UTC)
         record = TurnRecord(
             id=f"turn_{now.strftime('%Y%m%d%H%M%S%f')}",
@@ -198,7 +207,7 @@ class RunTurn:
         """执行回合。``emit`` 在每条进度事件落库之后被调用一次（SSE 靠它推送）。"""
         record = self._turns.get(turn_id)
         if record is None:
-            raise TurnNotFoundError(turn_id)
+            raise TurnNotFoundError("turn not found")
         if not self._turns.claim(turn_id, datetime.now(UTC)):
             raise TurnAlreadyClaimedError(turn_id)
 

@@ -141,6 +141,16 @@ class SqliteFaceRepository:
             ).fetchall()
         return [_row_to_cluster(row) for row in rows]
 
+    def list_clusters_for_entity(self, entity_id: str) -> Sequence[FaceClusterRecord]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_CLUSTER_COLUMNS} FROM face_clusters fc"
+                " LEFT JOIN entities e ON e.id = fc.entity_id"
+                " WHERE fc.entity_id = ? ORDER BY fc.updated_at DESC",
+                (entity_id,),
+            ).fetchall()
+        return [_row_to_cluster(row) for row in rows]
+
     def list_candidates(self, scope_id: str) -> Sequence[FaceClusterRecord]:
         with self._database.connect() as connection:
             rows = connection.execute(

@@ -14,6 +14,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from sentrix.application.identity.person_directory import EntityPersonDirectory
 from sentrix.config import Settings
 from sentrix.domain.assistant.ports import (
     ChatModel,
@@ -44,7 +45,6 @@ from sentrix.domain.retrieval.ports import (
 )
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
-from sentrix.infrastructure.assistant.identity import NoIdentityDirectory
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
@@ -136,6 +136,7 @@ class Container:
         database = Database(settings.database_path, MIGRATIONS_DIR)
         observations = SqliteObservationRepository(database)
         assets = SqliteAssetRepository(database)
+        entities = SqliteEntityRepository(database)
         asset_places = SqliteAssetPlaceRepository(database)
         # 词法投影的 geo/time/file 锚点取自 asset 与 asset_places（不是 observation），
         # 所以写侧要先把这两个仓储拿在手上。
@@ -163,7 +164,7 @@ class Container:
             lexical_index=lexical,
             lexical_search=lexical,
             face_repository=SqliteFaceRepository(database),
-            entity_repository=SqliteEntityRepository(database),
+            entity_repository=entities,
             face_detector=FaceAdapter(),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
@@ -178,7 +179,7 @@ class Container:
             conversation_repository=SqliteConversationRepository(database),
             turn_repository=SqliteTurnRepository(database),
             result_set_repository=SqliteResultSetRepository(database),
-            person_directory=NoIdentityDirectory(),
+            person_directory=EntityPersonDirectory(entities=entities),
             turn_event_broker=InProcessTurnEventBroker(),
         )
 

@@ -615,6 +615,333 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/face-clusters:
+    get:
+      tags:
+      - identity
+      summary: List Face Clusters
+      operationId: list_face_clusters_api_v1_face_clusters_get
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaceClusterListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/face-clusters/{cluster_id}/confirm:
+    post:
+      tags:
+      - identity
+      summary: Confirm Face Cluster
+      operationId: confirm_face_cluster_api_v1_face_clusters__cluster_id__confirm_post
+      parameters:
+      - name: cluster_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Cluster Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmClusterRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmClusterResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/face-clusters/{cluster_id}/reject:
+    post:
+      tags:
+      - identity
+      summary: Reject Face Cluster
+      operationId: reject_face_cluster_api_v1_face_clusters__cluster_id__reject_post
+      parameters:
+      - name: cluster_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Cluster Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RejectClusterResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/face-clusters/merge:
+    post:
+      tags:
+      - identity
+      summary: Merge Face Clusters
+      operationId: merge_face_clusters_api_v1_face_clusters_merge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeClustersRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaceClusterSummary'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/face-clusters/{cluster_id}/split:
+    post:
+      tags:
+      - identity
+      summary: Split Face Cluster
+      operationId: split_face_cluster_api_v1_face_clusters__cluster_id__split_post
+      parameters:
+      - name: cluster_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Cluster Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SplitClusterRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaceClusterSummary'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people:
+    get:
+      tags:
+      - identity
+      summary: List People
+      operationId: list_people_api_v1_people_get
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people/{person_id}:
+    get:
+      tags:
+      - identity
+      summary: Get Person
+      operationId: get_person_api_v1_people__person_id__get
+      parameters:
+      - name: person_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Person Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonDetailResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people/{person_id}/name:
+    patch:
+      tags:
+      - identity
+      summary: Rename Person
+      operationId: rename_person_api_v1_people__person_id__name_patch
+      parameters:
+      - name: person_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Person Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenamePersonRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenamePersonResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people/batch-confirm:
+    post:
+      tags:
+      - identity
+      summary: Batch Confirm People
+      description: 逐件确认，逐件回执。**一件失败不影响其余**（1.0 ``app.py:2205`` 的形状）。
+      operationId: batch_confirm_people_api_v1_people_batch_confirm_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchConfirmRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchConfirmResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people/seed:
+    post:
+      tags:
+      - identity
+      summary: Seed Person Identity
+      operationId: seed_person_identity_api_v1_people_seed_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_seed_person_identity_api_v1_people_seed_post'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeedIdentityResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/face-instances/{face_instance_id}/crop:
+    get:
+      tags:
+      - identity
+      summary: Face Instance Crop
+      description: '一张人脸的缩略图。1.0 ``app.py:2508``。
+
+
+        bbox 是**方向校正后**的坐标（检测器用 cv2 读图，而 cv2 会应用 EXIF 方向），所以
+
+        转置这一步必须与检测时一致——少了它，竖拍照片上的框会整体偏。'
+      operationId: face_instance_crop_api_v1_face_instances__face_instance_id__crop_get
+      parameters:
+      - name: face_instance_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Face Instance Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -690,6 +1017,106 @@ components:
       - asset_id
       - file_name
       title: AttachmentSummary
+    BatchConfirmFailure:
+      properties:
+        person_id:
+          type: string
+          title: Person Id
+        name:
+          type: string
+          title: Name
+        error:
+          type: string
+          title: Error
+      type: object
+      required:
+      - person_id
+      - name
+      - error
+      title: BatchConfirmFailure
+    BatchConfirmItem:
+      properties:
+        person_id:
+          type: string
+          title: Person Id
+          default: ''
+        name:
+          type: string
+          title: Name
+          default: ''
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+      type: object
+      title: BatchConfirmItem
+    BatchConfirmOutcome:
+      properties:
+        person_id:
+          type: string
+          title: Person Id
+        entity_id:
+          type: string
+          title: Entity Id
+        name:
+          type: string
+          title: Name
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+        merged:
+          type: boolean
+          title: Merged
+      type: object
+      required:
+      - person_id
+      - entity_id
+      - name
+      - family_role
+      - merged
+      title: BatchConfirmOutcome
+    BatchConfirmRequest:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/BatchConfirmItem'
+          type: array
+          minItems: 1
+          title: Items
+      type: object
+      required:
+      - items
+      title: BatchConfirmRequest
+    BatchConfirmResponse:
+      properties:
+        confirmed:
+          items:
+            $ref: '#/components/schemas/BatchConfirmOutcome'
+          type: array
+          title: Confirmed
+        failed:
+          items:
+            $ref: '#/components/schemas/BatchConfirmFailure'
+          type: array
+          title: Failed
+        count:
+          type: integer
+          title: Count
+      type: object
+      required:
+      - confirmed
+      - failed
+      - count
+      title: BatchConfirmResponse
+      description: '批量确认**不做全或无**：一件失败不影响其余，逐件回执。
+
+
+        1.0 就是这个形状（``app.py:2226`` 的 ``confirmed`` / ``failed`` / ``count``），
+
+        理由是批量确认的输入来自用户逐个点选，一件失败就把整批回滚会丢掉其余选择。'
     Body_import_media_api_v1_media_import_post:
       properties:
         file:
@@ -704,6 +1131,36 @@ components:
       required:
       - file
       title: Body_import_media_api_v1_media_import_post
+    Body_seed_person_identity_api_v1_people_seed_post:
+      properties:
+        name:
+          type: string
+          title: Name
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+        aliases:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Aliases
+        scope_id:
+          type: string
+          title: Scope Id
+          default: home-default
+        files:
+          items:
+            type: string
+            contentMediaType: application/octet-stream
+          type: array
+          title: Files
+      type: object
+      required:
+      - name
+      - files
+      title: Body_seed_person_identity_api_v1_people_seed_post
     CompleteEventPayload:
       properties:
         type:
@@ -752,6 +1209,34 @@ components:
         与 1.0 的一处刻意差异：**不再把整条 ``public_progress`` 又塞一遍**。1.0 的 ``complete``
 
         帧把已经逐条发过的进度事件完整重发（``app.py:2989``），是纯粹的带宽浪费。'
+    ConfirmClusterRequest:
+      properties:
+        name:
+          type: string
+          title: Name
+          default: ''
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+      type: object
+      title: ConfirmClusterRequest
+    ConfirmClusterResponse:
+      properties:
+        entity:
+          $ref: '#/components/schemas/PersonPayload'
+        merged_into:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Merged Into
+      type: object
+      required:
+      - entity
+      - merged_into
+      title: ConfirmClusterResponse
+      description: '``merged_into`` 非空表示这次确认并进了另一个已存在的人（同名合并）。'
     ConversationDetailResponse:
       properties:
         conversation:
@@ -824,6 +1309,141 @@ components:
           default: ''
       type: object
       title: CreateConversationRequest
+    FaceClusterListResponse:
+      properties:
+        clusters:
+          items:
+            $ref: '#/components/schemas/FaceClusterSummary'
+          type: array
+          title: Clusters
+      type: object
+      required:
+      - clusters
+      title: FaceClusterListResponse
+    FaceClusterSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        status:
+          type: string
+          title: Status
+        entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+        canonical_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Canonical Name
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+        entity_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Status
+        member_count:
+          type: integer
+          title: Member Count
+        confidence:
+          type: number
+          title: Confidence
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        reviewable:
+          type: boolean
+          title: Reviewable
+        single_sample:
+          type: boolean
+          title: Single Sample
+        samples:
+          items:
+            $ref: '#/components/schemas/FaceCropRef'
+          type: array
+          title: Samples
+      type: object
+      required:
+      - id
+      - scope_id
+      - status
+      - entity_id
+      - canonical_name
+      - family_role
+      - entity_status
+      - member_count
+      - confidence
+      - revision
+      - created_at
+      - updated_at
+      - reviewable
+      - single_sample
+      - samples
+      title: FaceClusterSummary
+      description: 一簇脸。``canonical_name`` / ``family_role`` 为空是**未命名**，不是缺字段。
+    FaceCropRef:
+      properties:
+        face_instance_id:
+          type: string
+          title: Face Instance Id
+        asset_id:
+          type: string
+          title: Asset Id
+        observation_id:
+          type: string
+          title: Observation Id
+        file_name:
+          type: string
+          title: File Name
+        media_type:
+          type: string
+          title: Media Type
+        bbox:
+          items:
+            type: number
+          type: array
+          title: Bbox
+        detection_confidence:
+          type: number
+          title: Detection Confidence
+        quality:
+          type: number
+          title: Quality
+        crop_url:
+          type: string
+          title: Crop Url
+      type: object
+      required:
+      - face_instance_id
+      - asset_id
+      - observation_id
+      - file_name
+      - media_type
+      - bbox
+      - detection_confidence
+      - quality
+      - crop_url
+      title: FaceCropRef
+      description: 簇里的一张样本脸。``crop_url`` 直接可打开，前端不再拼路径。
     HTTPValidationError:
       properties:
         detail:
@@ -947,6 +1567,18 @@ components:
       - deduplicated
       - indexed
       title: ImportResponse
+    MergeClustersRequest:
+      properties:
+        target_cluster_id:
+          type: string
+          title: Target Cluster Id
+          default: ''
+        source_cluster_id:
+          type: string
+          title: Source Cluster Id
+          default: ''
+      type: object
+      title: MergeClustersRequest
     MessageSummary:
       properties:
         id:
@@ -972,6 +1604,83 @@ components:
       - turn_id
       - created_at
       title: MessageSummary
+    PersonDetailResponse:
+      properties:
+        entity:
+          $ref: '#/components/schemas/PersonPayload'
+        avatar_face_instance_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Avatar Face Instance Id
+        clusters:
+          items:
+            $ref: '#/components/schemas/FaceClusterSummary'
+          type: array
+          title: Clusters
+      type: object
+      required:
+      - entity
+      - avatar_face_instance_id
+      - clusters
+      title: PersonDetailResponse
+    PersonListResponse:
+      properties:
+        people:
+          items:
+            $ref: '#/components/schemas/PersonPayload'
+          type: array
+          title: People
+      type: object
+      required:
+      - people
+      title: PersonListResponse
+    PersonPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        canonical_name:
+          type: string
+          title: Canonical Name
+        status:
+          type: string
+          title: Status
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+        summary:
+          type: string
+          title: Summary
+        confidence:
+          type: number
+          title: Confidence
+        confirmed:
+          type: boolean
+          title: Confirmed
+        aliases:
+          items:
+            type: string
+          type: array
+          title: Aliases
+      type: object
+      required:
+      - id
+      - scope_id
+      - canonical_name
+      - status
+      - family_role
+      - summary
+      - confidence
+      - confirmed
+      - aliases
+      title: PersonPayload
+      description: 一个人物实体。``confirmed`` 与 ``status`` 并存是 1.0 的契约（``app.py:1518``）。
     ProgressEventPayload:
       properties:
         text:
@@ -1011,6 +1720,22 @@ components:
         字段集沿用 1.0（``runtime.py:1664-1687``），并补上 ``kind`` 与 ``payload``。
 
         ``step_index`` 同时是 SSE 的 ``id:`` 值，于是 ``Last-Event-ID`` 断线续传天然可用。'
+    RejectClusterResponse:
+      properties:
+        cluster_id:
+          type: string
+          title: Cluster Id
+        rejected_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rejected Entity Id
+      type: object
+      required:
+      - cluster_id
+      - rejected_entity_id
+      title: RejectClusterResponse
+      description: '``rejected_entity_id`` 为空表示这一簇本来就没有候选实体，调用没有改动任何行。'
     RenameConversationRequest:
       properties:
         title:
@@ -1022,6 +1747,28 @@ components:
       required:
       - title
       title: RenameConversationRequest
+    RenamePersonRequest:
+      properties:
+        name:
+          type: string
+          title: Name
+          default: ''
+      type: object
+      title: RenamePersonRequest
+    RenamePersonResponse:
+      properties:
+        entity:
+          $ref: '#/components/schemas/PersonPayload'
+        aliases:
+          items:
+            type: string
+          type: array
+          title: Aliases
+      type: object
+      required:
+      - entity
+      - aliases
+      title: RenamePersonResponse
     SearchHit:
       properties:
         asset:
@@ -1078,6 +1825,52 @@ components:
       - authoritative_vectors
       - items
       title: SearchResponse
+    SeedIdentityResponse:
+      properties:
+        entity_id:
+          type: string
+          title: Entity Id
+        cluster_id:
+          type: string
+          title: Cluster Id
+        name:
+          type: string
+          title: Name
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+        aliases:
+          items:
+            type: string
+          type: array
+          title: Aliases
+        face_count:
+          type: integer
+          title: Face Count
+        photos_without_faces:
+          type: integer
+          title: Photos Without Faces
+      type: object
+      required:
+      - entity_id
+      - cluster_id
+      - name
+      - family_role
+      - aliases
+      - face_count
+      - photos_without_faces
+      title: SeedIdentityResponse
+      description: 预置身份的结论。``photos_without_faces`` 单列，是为了让「静默跳过」可见。
+    SplitClusterRequest:
+      properties:
+        face_instance_id:
+          type: string
+          title: Face Instance Id
+          default: ''
+      type: object
+      title: SplitClusterRequest
     StartTurnRequest:
       properties:
         message:

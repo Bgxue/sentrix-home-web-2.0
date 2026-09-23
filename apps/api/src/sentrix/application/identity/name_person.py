@@ -57,8 +57,15 @@ class NamePerson:
         """给一个人改名：旧名折进别名，``name_state`` 转 ``confirmed``，留一条修订。
 
         非 person 实体返回 ``None``（1.0 的 ``rename_person`` 对非 person 返回 None，
-        路由据此报 404）；空名字抛 ``ValueError``，那是调用方出错，不是「这个人不存在」。
+        路由据此报 404）；空名字抛 ``InvalidReviewRequestError``（400），那是调用方出错，
+        不是「这个人不存在」。
+
+        空名字在这里判而不是留给仓储：仓储抛的是裸 ``ValueError``，它不带码、也不是
+        ``DomainError``，一路漏到处理器外面就成了 500——调用方传了个空串，收到的却是
+        「服务器内部错误」。判据与 ``ReviewCluster.confirm`` 用的是同一个类。
         """
+        if not str(new_name or "").strip():
+            raise InvalidReviewRequestError("person name is required")
         entity = self._entities.rename_person(entity_id, new_name)
         if entity is None:
             return None

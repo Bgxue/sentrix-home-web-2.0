@@ -242,7 +242,11 @@ def test_a_turn_can_be_started_without_creating_a_conversation_first(client: Tes
     )
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "conversation not found"
+    # 裁决③ 之后这个 404 由统一的领域错误处理器给出（``api/errors.py`` 那一个）：
+    # 形状是 ``{code, message, detail}``，不再是 ``HTTPException`` 的 ``{detail}``。
+    # 状态码与文案都没变，变的只是「谁决定它」——以前是路由硬编码，现在是异常带着走。
+    assert response.json()["code"] == "not_found"
+    assert response.json()["message"] == "conversation not found"
 
 
 def test_an_unknown_turn_has_no_event_stream(client: TestClient):

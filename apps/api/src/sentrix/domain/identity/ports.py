@@ -66,6 +66,16 @@ class FaceRepository(Protocol):
         """``status`` 为空时返回除 ``rejected`` 外的全部簇，且只含进人物视图的空间。"""
         ...
 
+    def list_clusters_for_entity(self, entity_id: str) -> Sequence[FaceClusterRecord]:
+        """这个人名下的全部簇（含 rejected），按 ``updated_at DESC``。
+
+        与 ``list_clusters`` 有三处不同，三处都是 1.0 ``db.py:4580`` 的原样：按实体过滤
+        （人物详情页要的是这个人的簇）、**不过滤** ``include_in_people``（详情页已经知道
+        这个人是谁，再按空间挡一次只会让他的簇凭空少一半）、**不过滤** ``rejected``
+        （被拒的簇是这个人历史的一部分，界面要能解释「这簇曾经属于他」）。
+        """
+        ...
+
     def list_candidates(self, scope_id: str) -> Sequence[FaceClusterRecord]:
         """在线匹配的候选：同 scope、``status IN ('pending','confirmed')``。
 
@@ -190,6 +200,17 @@ class EntityRepository(Protocol):
     """
 
     def get(self, entity_id: str) -> EntityRecord | None: ...
+
+    def list_people(
+        self, *, status: str | None = None, scope_id: str | None = None
+    ) -> Sequence[EntityRecord]:
+        """人物列表。1.0 ``db.py:4041`` ``list_entities`` 的 person 一支。
+
+        空间规则与 ``FaceRepository.list_clusters`` 是同一条：``include_in_people = 0``
+        的空间里的实体一律不出现——评测空间聚出来的人不该出现在家庭成员列表里。
+        ``status`` 为空时排除 ``rejected`` / ``superseded``（1.0 的字面量）。
+        """
+        ...
 
     def create_person(
         self,

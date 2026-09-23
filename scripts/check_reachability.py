@@ -34,21 +34,11 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 
 # 模块 -> 会把它接上生产的任务。**每个条目都必须写明任务，否则它就是一个说不出
 # 理由的例外**——而说不出理由的例外名单会把这条不变量重新变成摆设。
-PENDING_WIRING: dict[str, str] = {
-    "sentrix.application.identity.review_cluster": (
-        "Task 75 的四个簇审阅端点（confirm / reject / merge / split）会构造它。"
-        "Task 73 只落地用例与它的仓储写方法，S5a 的这一轮还没有路由。"
-    ),
-    "sentrix.application.identity.name_person": (
-        "Task 75 的 ``/api/people`` 改名端点与 batch-confirm 端点会构造它。Task 74 的"
-        "用例被 ``ReviewCluster.confirm`` 之外的另一条链路使用（按实体确认），而在只做"
-        "用例的 S5a 这一轮还没有路由。"
-    ),
-    "sentrix.application.identity.seed_identity": (
-        "Task 75 的 ``/api/people/seed`` 端点会构造它——导入路径不需要它（相册导入走的是"
-        "``EnrollFace``，没有那张照片的人也能建簇）。Task 79 落地用例、三级降级与门禁。"
-    ),
-}
+PENDING_WIRING: dict[str, str] = {}
+# Task 75 落地后这张表**空了**：S5a 登记的三条（``review_cluster`` / ``name_person`` /
+# ``seed_identity``）都被 ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。
+# 空表不等于这条纪律作废——机制留着，下一个「先落地、后接线」的模块照旧要在这里登记，
+# 并写明哪个任务会接线。
 
 
 def module_name(path: Path, src: Path) -> str:

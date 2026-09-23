@@ -113,9 +113,18 @@ class MetadataReader(Protocol):
 
 
 class PreviewEncoder(Protocol):
-    """把原图编码成浏览器可直接渲染的 JPEG。"""
+    """把原图编码成浏览器可直接渲染的 JPEG。
+
+    ``crop_jpeg`` 也在这里而不是另立一个端口：人脸裁剪与预览是同一件事的两个取景
+    ——打开一张图、按 EXIF 转置、编码成 JPEG。分开会得到两个各自压一次参数的适配器，
+    而它们必须用同一套转置口径，否则簇里的样本脸会与预览里的位置对不上。
+    """
 
     def encode_jpeg(self, path: Path, *, max_dimension: int, quality: int) -> bytes: ...
+
+    def crop_jpeg(
+        self, path: Path | str, bbox: Sequence[float], *, max_dimension: int, quality: int
+    ) -> bytes: ...
 
 
 class MediaTypeResolver(Protocol):

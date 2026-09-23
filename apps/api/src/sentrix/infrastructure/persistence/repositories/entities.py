@@ -163,6 +163,24 @@ class SqliteEntityRepository:
             ).fetchone()
         return _row_to_entity(row) if row else None
 
+    def list_people(
+        self, *, status: str | None = None, scope_id: str | None = None
+    ) -> Sequence[EntityRecord]:
+        excluded = "(SELECT id FROM memory_spaces WHERE include_in_people = 0)"
+        clause = "status = ?" if status else "status NOT IN ('rejected', 'superseded')"
+        params: list[object] = [status] if status else []
+        if scope_id:
+            clause += " AND scope_id = ?"
+            params.append(scope_id)
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_ENTITY_COLUMNS} FROM entities"
+                f" WHERE entity_type = ? AND {clause} AND scope_id NOT IN {excluded}"
+                " ORDER BY updated_at DESC",
+                [ENTITY_TYPE_PERSON, *params],
+            ).fetchall()
+        return [_row_to_entity(row) for row in rows]
+
     def create_person(
         self,
         name: str,

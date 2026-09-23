@@ -22,6 +22,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from sentrix.domain.errors import DomainError
 from sentrix.domain.identity.models import (
     CLUSTER_STATUS_REJECTED,
     DEFAULT_SCOPE_ID,
@@ -54,26 +55,34 @@ SOURCE_USER_SPLIT = "user_split"
 SOURCE_USER_NAME_MERGE = "user_name_merge"
 
 
-class ClusterReviewError(Exception):
+class ClusterReviewError(DomainError):
     """簇审阅的领域错误。
 
-    ``status_code`` 是**产品契约**的一部分（400 / 404 / 409），Task 75 的路由按它映射
-    HTTP。数字定在这里而不是路由里：它描述的是产品行为（「已确认的人不能被拒绝」是
-    冲突，不是参数错），定在路由里就意味着只有起了 HTTP 才验得到它。
+    ``code`` 与 ``status_code`` 都是**产品契约**的一部分（400 / 404 / 409），Task 75 的
+    路由只把它们放行、由 ``api/errors.py`` 那一个处理器映射 HTTP。定在这里而不是路由里：
+    它们描述的是产品行为（「已确认的人不能被拒绝」是冲突，不是参数错），定在路由里就意味
+    着只有起了 HTTP 才验得到。
+
+    基类是 ``domain/errors.py`` 的 ``DomainError``——统一口径见那里；这里再把 ``ValueError``
+    / ``LookupError`` 混进来，是为了不打断既有的 ``pytest.raises(ValueError)`` 用法。
     """
 
+    code = "invalid_request"
     status_code = 400
 
 
 class InvalidReviewRequestError(ClusterReviewError, ValueError):
+    code = "invalid_request"
     status_code = 400
 
 
 class ClusterNotFoundError(ClusterReviewError, LookupError):
+    code = "not_found"
     status_code = 404
 
 
 class ReviewConflictError(ClusterReviewError, ValueError):
+    code = "conflict"
     status_code = 409
 
 
