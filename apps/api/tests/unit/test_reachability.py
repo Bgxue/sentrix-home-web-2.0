@@ -100,3 +100,39 @@ def test_real_repository_has_no_problems():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_same_named_parameter_does_not_count_as_a_caller(tmp_path):
+    """**这条是第一版判据的一个假阴性，实施 Task 72 时被撞出来的。**
+
+    第一版是「把所有 ``ast.Name`` 载入名与该模块的公开符号求交」。于是只要有人在别处
+    写一个**形参**叫 ``pose_bucket``，``domain/identity/faces.py`` 那个同名公开函数就被
+    当成「已经被用过了」——模块被判成已接生产，而 PENDING_WIRING 的反向规则还会因此
+    报错要求删掉一条本来正确的登记。同一族的还有常量名撞车（``VISUAL_SPACE``）。
+
+    判据因此收紧成「**这个名字是从那个模块导入进来的，而且被读用过**」：
+    名字空间由导入关系给出，不由拼写给出。
+    """
+    src_root = build_tree(
+        tmp_path,
+        "def unrelated(pose_bucket):\n    return pose_bucket\n",
+        "def pose_bucket(pose):\n    return 'frontal'\n",
+    )
+
+    result = run_checker(src_root)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "sentrix.thing: 没有任何生产调用者" in result.stdout
+
+
+def test_a_from_imported_symbol_that_is_used_counts_as_a_caller(tmp_path):
+    """反向对照：真的 ``from ... import`` 进来并用过，就必须算数。"""
+    src_root = build_tree(
+        tmp_path,
+        "from sentrix.thing import pose_bucket\n\nx = pose_bucket(None)\n",
+        "def pose_bucket(pose):\n    return 'frontal'\n",
+    )
+
+    result = run_checker(src_root)
+
+    assert result.returncode == 0, result.stdout + result.stderr

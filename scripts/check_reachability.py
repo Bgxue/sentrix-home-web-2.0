@@ -83,25 +83,6 @@ def imported_modules(path: Path, src: Path) -> set[str]:
     return names
 
 
-def public_symbols(path: Path) -> set[str]:
-    """模块的公开符号：类、函数，以及模块级赋值。
-
-    模块级赋值不能漏。``api/routes/*.py`` 对外只有一个 ``router = APIRouter()``，
-    ``domain/retrieval/scheme.py`` 通篇是常量——只收类与函数的话，这两种模块会被
-    误报成「没人用」。
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-    return {name for name in names if not name.startswith("_")}
-
-
 def used_names(path: Path) -> set[str]:
     """文件里所有被**读**的名字。``ast.Name`` 覆盖注解与调用，``ast.Attribute`` 覆盖
     ``module.Symbol`` 这种形态。"""
@@ -113,6 +94,44 @@ def used_names(path: Path) -> set[str]:
         elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
             names.add(node.attr)
     return names
+
+
+def bound_names(path: Path, src: Path, known: set[str]) -> dict[str, str]:
+    """这个文件里**被导入绑定**的本地名 -> 它指向的模块全名。
+
+    - ``import a.b.c`` / ``import a.b.c as x`` -> 本地名 ``c`` / ``x``，指向 ``a.b.c``
+    - ``from pkg import name`` -> 若 ``pkg.name`` 是一个已知模块（子模块导入），指向
+      ``pkg.name``；否则指向 ``pkg``（那是一个符号导入）
+
+    **为什么不能只在一堆裸名字上取交集。** 第一版是「把所有 ``ast.Name`` 载入名与该模块的
+    公开符号求交」，结果是：某个函数的形参叫 ``pose_bucket``，就与
+    ``domain/identity/faces.py`` 的公开函数 ``pose_bucket`` 撞上，那个模块于是被判成
+    「已经接上生产」——**一个假阴性**，而 PENDING_WIRING 的反向规则还会因此报错要求
+    删掉一条本来正确的登记。同一族的假阴性还有常量名撞车（``VISUAL_SPACE``）。
+
+    判据收紧成「**这个名字是从那个模块导入进来的，而且被读用过**」：
+    形参、局部变量、恰好同名的常量都不再算数。名字空间由导入关系给出，不由拼写给出。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    package = package_of(path, src)
+    binding: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                binding[alias.asname or alias.name.split(".")[-1]] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package
+                for _ in range(node.level - 1):
+                    base = base.rpartition(".")[0]
+                module = f"{base}.{node.module}" if node.module else base
+            else:
+                module = node.module or ""
+            for alias in node.names:
+                candidate = f"{module}.{alias.name}"
+                target = candidate if candidate in known else module
+                binding[alias.asname or alias.name] = target
+    return binding
 
 
 def main() -> int:
@@ -138,16 +157,16 @@ def main() -> int:
     by_module = {module: path for path, module in files.items()}
 
     edges: dict[Path, set[Path]] = {}
-    symbols: dict[Path, set[str]] = {}
     used: dict[Path, set[str]] = {}
+    bound: dict[Path, dict[str, str]] = {}
     for path in files:
         edges[path] = {
             target
             for name in imported_modules(path, src)
             if (target := by_module.get(name)) is not None and target != path
         }
-        symbols[path] = public_symbols(path)
         used[path] = used_names(path)
+        bound[path] = bound_names(path, src, set(by_module))
 
     reachable: set[Path] = set()
     frontier = [by_module[name] for name in ROOTS if name in by_module]
@@ -164,13 +183,16 @@ def main() -> int:
         if name.startswith(ROOTS) or path.name == "__init__.py":
             continue
         callers = {
-            other for other in reachable if other != path and symbols[path] and (used[other] & symbols[path])
+            other
+            for other in reachable
+            if other != path
+            and any(target == name and local in used[other] for local, target in bound[other].items())
         }
         wired = bool(callers)
         if not wired and name not in pending:
             problems.append(
                 f"{name}: 没有任何生产调用者（从 {' / '.join(ROOTS)} 可达的文件里没有一处"
-                f" name-load 它的公开符号）——接线，或写进 PENDING_WIRING 并注明哪个任务会接"
+                f" 导入并用过它的名字）——接线，或写进 PENDING_WIRING 并注明哪个任务会接"
             )
         if wired and name in pending:
             problems.append(
