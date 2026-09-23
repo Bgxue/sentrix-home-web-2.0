@@ -24,10 +24,12 @@ from sentrix.domain.identity.models import (
     DEFAULT_SCOPE_ID,
     ENTITY_STATUS_CONFIRMED,
     ENTITY_STATUS_PENDING,
+    ENTITY_STATUS_REJECTED,
     ENTITY_TYPE_PERSON,
     PROPERTY_SOURCE_USER,
     PROPERTY_STATUS_ACTIVE,
     PROPERTY_STATUS_PENDING,
+    RETIRED_CANDIDATE_SUMMARY,
     REVISION_SOURCE_USER_RENAME,
     EntityMentionRecord,
     EntityPropertyRecord,
@@ -701,6 +703,23 @@ class SqliteEntityRepository:
                 (event_id, ENTITY_TYPE_PERSON, ENTITY_STATUS_CONFIRMED),
             ).fetchall()
         return frozenset(str(row["entity_id"]) for row in rows)
+
+    def retire_unclustered_candidates(self) -> int:
+        with self._database.connect() as connection, connection:
+            cursor = connection.execute(
+                "UPDATE entities SET status = ?, summary = ?, updated_at = ?"
+                " WHERE entity_type = ? AND status != ?"
+                " AND NOT EXISTS (SELECT 1 FROM face_clusters fc WHERE fc.entity_id = entities.id"
+                " AND fc.status IN ('pending', 'confirmed') AND fc.member_count > 0)",
+                (
+                    ENTITY_STATUS_REJECTED,
+                    RETIRED_CANDIDATE_SUMMARY,
+                    _now(),
+                    ENTITY_TYPE_PERSON,
+                    ENTITY_STATUS_CONFIRMED,
+                ),
+            )
+            return int(cursor.rowcount)
 
     def event_ids(self, entity_id: str) -> Sequence[str]:
         with self._database.connect() as connection:

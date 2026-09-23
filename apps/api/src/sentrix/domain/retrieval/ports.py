@@ -116,6 +116,18 @@ class VectorRepository(Protocol):
 
     def has_vector(self, *, space: str, source_type: str, source_id: str, model_name: str) -> bool: ...
 
+    def update_metadata(
+        self, *, space: str, source_type: str, source_id: str, metadata: dict[str, object]
+    ) -> int:
+        """整份替换一条向量的 metadata，返回改了几行。
+
+        全局重聚类会改动人脸实例属于哪个簇，而 ``cluster_id`` 也记在向量 metadata 里
+        （1.0 ``db.py:5028-5038`` 对每条实例逐个改）。**整份替换而不是打补丁**：一条
+        metadata 的写入者只有 ``EnrollFace`` 与重聚类两处，两处都构造得出一整份；
+        读出旧值再合并会让并发下的两个写入者互相覆盖对方刚写进去的键，而那种丢失不报错。
+        """
+        ...
+
     def get(
         self,
         *,
