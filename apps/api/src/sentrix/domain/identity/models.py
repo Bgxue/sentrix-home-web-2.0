@@ -44,6 +44,11 @@ CLUSTER_STATUS_PENDING = "pending"
 CLUSTER_STATUS_CONFIRMED = "confirmed"
 CLUSTER_STATUS_REJECTED = "rejected"
 
+# 人脸检测的复核结论。四个取值散在检测适配器、在线匹配的资格闸门、重聚类的认领条件
+# 三处，收成一份：它们同时是「落库的列」与「判据的字面量」，漂开一次就是一条静默的空集。
+FACE_VALIDITY_VERIFIED = "verified"
+FACE_VALIDITY_UNCERTAIN = "uncertain"
+
 PROPERTY_SOURCE_USER = "user"
 PROPERTY_SOURCE_DERIVED = "derived"
 
@@ -276,6 +281,6 @@ class FaceDetection:
     embedding_model: str = ""
     embedding_version: str = ""
     # 1.0 ``db.py:4847``：``str(face.get("face_validity") or "verified")``——缺省是合格。
-    validity: str = "verified"
+    validity: str = FACE_VALIDITY_VERIFIED
     identity_ready: bool = True
     identity_eligible: bool | None = None

@@ -57,6 +57,10 @@ PENDING_WIRING: dict[str, str] = {
         "``bbox_agreement`` / ``landmark_sanity`` / ``expand_crop``；Task 79 把整条链路接进"
         "导入路径。Task 77 只落地检测器本身（纯几何在 make ci 里验，真权重那条会真跑）。"
     ),
+    "sentrix.infrastructure.models.face_adapter": (
+        "Task 79（导入路径接线）会在容器里构造它，并把 ``detect`` 接进 ``ImportAssets``"
+        "的人脸登记那一步。Task 78 只落地适配器本身与它的门禁。"
+    ),
     "sentrix.application.identity.name_person": (
         "Task 75 的 ``/api/people`` 改名端点与 batch-confirm 端点会构造它。Task 74 的"
         "用例被 ``ReviewCluster.confirm`` 之外的另一条链路使用（按实体确认），而在只做"
