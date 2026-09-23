@@ -363,7 +363,7 @@ Task 69 已在隔离副本落地（commit `2824a5f`，`make ci` 全绿）。它�
 | # | 事项 | 判决 |
 |---|---|---|
 | 50 | **计划的「全部四件都写 `entity_revisions`」是错的。** 实读 1.0 `db.py:5152-5193` 的 `confirm_face_cluster`：它**不调** `_record_entity_revision`。写审计的只有三处——`_merge_cluster_into_person`（`user_name_merge`，同名合并那一路）、`merge_face_clusters`（`user_merge`，默认参数写在签名 `db.py:4776`）、`split_face_instance`（`user_split`，`db.py:4797`）。**reject 不可能写**——它删的正是那个实体的 `entity_revisions` 行。 | **按 1.0 实现**（Task 73 没有自造第四条修订）。计划文档那一行是**规划期的错误**，已在 Task 73 一节改正。若产品真要「每次确认都留一条 `user_confirm` 修订」，那是一处**有意的偏离**，需要用户点头 + 同时改这里 |
-| 51 | **一处从 1.0 继承来的地雷（探针实测，未改）**：对一个**已经 confirmed** 的簇，用**同名**再确认一次，会走同名合并分支，而目标实体就是它自己 → `clu_1.status = 'rejected'`（`member_count` 随后被 refresh 写回 1）。根因在 `db.py:5157-5159`：`existing = self.find_confirmed_person_by_name(scope_id, name)` 先查、命中即合并，**没有排除「命中的就是本簇的实体」**。1.0 同样如此。 | **照搬 + 登记，未改**。改法很简单（目标命中本簇时短路），但它是**产品可见的行为变更**（重复确认会毁掉簇），按纪律先报不自作主张。**这一条要用户裁决** |
+| 51 | **一处从 1.0 继承来的地雷（探针实测，未改）**：对一个**已经 confirmed** 的簇，用**同名**再确认一次，会走同名合并分支，而目标实体就是它自己 → `clu_1.status = 'rejected'`（`member_count` 随后被 refresh 写回 1）。根因在 `db.py:5157-5159`：`existing = self.find_confirmed_person_by_name(scope_id, name)` 先查、命中即合并，**没有排除「命中的就是本簇的实体」**。1.0 同样如此。 | **~~照搬 + 登记，未改~~ 已按用户裁决①修掉（Task 74，`11ab962`）**。改法是目标命中本簇时短路。原文的裁决记录与红灯证据见 §2f。 |
 | 52 | **异常带 `status_code` 是一个新约定**：application 层不许 import `api/errors`（`application-purity` 契约），所以 400/404/409 定在 `review_cluster.py` 的三个异常类上（`InvalidReviewRequestError` / `ClusterNotFoundError` / `ReviewConflictError`）。 | **登记 + 待用户确认统一口径**。现有的 `TurnNotFoundError` 不带码、由路由硬编码 404；两种做法都不算错，但**同一个仓库里两种并存会让「状态码从哪来」变成看运气**。Task 75 落地前需要定一个 |
 | 53 | **`delete_candidate` 比 1.0 多删三处**：`entity_observations` / `event_participants` / `event_entities`（外加 0006 里已建、S5c 才写的 `person_moments` / `person_appearance_evidence`）。 | **改，理由不是「顺手帮 Task 81 干活」**：2.0 每次连接都 `PRAGMA foreign_keys = ON`（`database.py` 的 `connect()`），1.0 没开。少删一行，某天这条 DELETE 会整体失败。**投影刷新仍留给 Task 81**——删干净与重建是两件事 |
 | 54 | **`check_reachability` 的判据有假阴性**：第一版把「所有 `ast.Name` 载入名」与该模块公开符号求交，于是别处一个**形参**叫 `pose_bucket`，就让 `domain/identity/faces.py` 的同名公开函数被当成「已经用过」，模块被判成已接生产；而 `PENDING_WIRING` 的反向规则还会因此报错要求删掉一条本来正确的登记。同族还有常量名撞车（`VISUAL_SPACE`）。 | **收紧判据**（`ee2ddad`）：改成「这个名字是**从那个模块 import 进来的**，而且被读用过」——名字空间由导入关系给出，不由拼写给出。**并补两条反向测试**（形参撞名必须仍然报红 / `from ... import` 后用过的必须算数），否则收紧后的判据自己又变成一条没人验的规则。**这一条值得单独记**：它是「声称在检查、其实没有」那一族的又一个实例，而且是**实施期被撞出来的**，不是审出来的 |
@@ -388,6 +388,108 @@ Task 69 已在隔离副本落地（commit `2824a5f`，`make ci` 全绿）。它�
 （`make: *** [Makefile:56: coverage] 已杀死`），`ci.sh` 按判据重跑 run1 后全绿。
 两段原始输出都留在 `logs/ci-20260923-122113-run0.log` 与 `-run1.log`。
 **这是顾虑①那条判据第一次在真实工作里救下一次误判**——不重跑就会拿假红灯去改代码。
+
+---
+
+## 2f. Task 74 实施期实测到的偏离与发现（含用户裁决①的落地）
+
+`11ab962`（Task 74）落地，`make ci` 全绿（869 passed / 16 skipped / coverage 97.69%），
+红灯 B 有原文。
+
+### 第 51 条的处置：修掉，并且这一次根因比规划期写得更硬
+
+规划期只说了「1.0 同样如此，照搬 + 登记」。实施期把 1.0 的两条同名确认路径并排读，
+发现**这条守卫是 1.0 自己写过的，只是漏了一处**：
+
+| 1.0 位置 | 同名查询命中后 | 有没有排除「命中的就是本簇/本人」 |
+|---|---|---|
+| `db.py:5157` `confirm_face_cluster`（簇入口） | 直接 `_merge_cluster_into_person` | **没有** ← 缺陷 |
+| `db.py:5251` `confirm_person_entity`（人入口） | `if existing and existing["entity_id"] != entity_id:` | **有** |
+
+所以修复不是「给 1.0 加一条新判据」，而是**把 1.0 自己写在人入口的那条判据补到簇入口**
+（`review_cluster.py:138`）。这个根因改变了这条修复的性质：它不再是一个产品行为的选择，
+而是**同一份代码里两处写法不一致**——按用户的判断修掉它是恢复一致性，不是改变设计。
+
+**缺陷的实际后果**（定点变异实测原文）：对一个已确认的簇用同名再确认，返回的
+`ConfirmResult.merged_into` 是**它自己**（`assert 'ent_1' is None` 失败），
+簇被置成 `rejected`、`member_count = 0`——**这个人的脸全部从人物视图里消失**，
+而且界面看到的是「这个簇没了」，没有任何一处日志或审计能指出发生了什么。
+
+**三条测试钉住它**（`test_review_cluster.py`），缺一条都不够：
+
+| 用例 | 钉的是什么 |
+|---|---|
+| `test_reconfirming_a_cluster_with_its_own_name_keeps_it` | 精确名自命中：簇保持 confirmed、`member_count` 不变、不留「并入了自己」的审计 |
+| `test_reconfirming_through_one_of_its_own_aliases_keeps_it` | 别名自命中——走的是 `find_confirmed_person_by_name` 的**第二段**（扫 aliases），与精确名是两条不同的路径 |
+| `test_a_different_cluster_with_the_same_name_still_merges` | **反向**：守卫只排除本簇自己的实体，别人的同名簇照样并。没有这一条，修复可以被实现成「同名一律不合并」而测试仍然全绿——那等于把同名合并整个功能关掉 |
+
+**红灯 B 原文**：把 `if existing is not None and existing.entity_id != cluster.entity_id:`
+改回 `if existing is not None:` → 前两条红（`assert 'ent_1' is None`）、第三条仍绿。
+
+### 第 55 条 · `make ci` 在 153 上被 SIGKILL 的**真实根因**：glibc arena 膨胀
+
+顾虑①原来只把「coverage 会被 OOM」当成环境噪声并固化成重跑判据。实施期读到了内核日志，
+根因是可复现、可修的：
+
+```
+oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),global_oom,...task=pytest,pid=148543
+Out of memory: Killed process 148543 (pytest) total-vm:39128280kB, anon-rss:18174300kB
+```
+
+**pytest 自己涨到 18 GB**（全机 61 GB，同期 1.0 的 8091 + llama-server + cursor-server
+已占 43 GB，swap 打满）。同样的测试在同一台机器上**限住 glibc arena 后峰值只有 10.1 GB**：
+
+```
+MALLOC_ARENA_MAX=2 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/pytest
+→ 846 passed, 16 skipped in 124.64s
+   Maximum resident set size (kbytes): 10146904
+```
+
+torch / onnxruntime 会按核数开线程，每个线程一个 64 MiB 的 glibc arena，**默认不限**，
+于是多线程测试进程的 RSS 随线程数线性膨胀，与测试内容无关。所以：
+
+- 顾虑①的重跑判据**仍然有效且必须保留**（真实的内存竞争还会来自别的服务）；
+- 但 `make ci` 在 153 上应当**默认带 `MALLOC_ARENA_MAX=2`**，把假红的来源去掉，
+  而不是每次都靠重跑消化它。这是环境配置，不是代码问题。
+
+### 第 56 条 · `onnxruntime-gpu` 的 CUDA EP 需要**先 `import torch`**，否则静默退化成 CPU
+
+依赖试装（S5b 的闸门）实测：装了 `onnxruntime-gpu==1.30.0` 之后
+`ort.get_available_providers()` 里有 `CUDAExecutionProvider`，但**真建 session 时失败**：
+
+```
+Failed to load library .../onnxruntime/capi/libonnxruntime_providers_cuda.so with error:
+libcublasLt.so.13: cannot open shared object file: No such file or directory
+Failed to create CUDAExecutionProvider. Require cuDNN 9.* and CUDA 13.*.
+```
+
+而且 **`InferenceSession` 不报错**——它退回 CPU 并正常返回结果。这是「看起来在跑、
+其实在 CPU 上跑」那一族的又一例：`get_available_providers()` 只说明 EP 编译进去了，
+**不说明运行期能加载**，必须真建一个 session 并读 `sess.get_providers()` 才算验过。
+
+根因与修法：venv 里 cu13 的 `libcublasLt.so.13` 在
+`.venv/lib/python3.11/site-packages/nvidia/cu13/lib/`，不在动态加载路径上。而 **torch 启动时
+会把它们预载进进程**，所以：
+
+| 做法 | 结果 |
+|---|---|
+| 不设 `LD_LIBRARY_PATH`，先 `import onnxruntime` 再建 session | **退化成 CPU** |
+| 不设 `LD_LIBRARY_PATH`，**先 `import torch`** 再建 session | `['CUDAExecutionProvider', 'CPUExecutionProvider']` ✔ |
+| 设 `LD_LIBRARY_PATH` 指向 `nvidia/cu13/lib` 等 | ✔（但要靠启动环境，1.0 不这么做） |
+
+Task 77 的 `onnx_runtime.py` 因此**必须自己负责预载**（不能依赖启动脚本设环境变量，
+也不能依赖「调用方恰好先 import 过 torch」——那是隐式顺序依赖，正是本仓库一路在防的东西）。
+
+### 第 57 条 · 第 52 条（`status_code` 口径统一）本轮**没有做**
+
+裁决③要求把异常 `status_code` 口径统一到「领域错误带码、路由只映射」，这会动 S3 的
+`TurnNotFoundError`（目前不带码、由路由硬编码 404），属跨切片改动。Task 74 不碰它，
+留给 Task 75（路由落地时一并改）——**它仍然是一条未结的账**。
+
+### 第 58 条 · 裁决②（两张解冻的表挪到 S5c）本轮**没有做**
+
+`person_portrait_revisions` / `person_moments` 不在 0006 里建，计划 Task 85/86 才落地；
+S5a/S5b 期间没有写入者。Task 74 不涉及迁移。**这条只是登记「尚未执行」，不是偏离。**
 
 ---
 
