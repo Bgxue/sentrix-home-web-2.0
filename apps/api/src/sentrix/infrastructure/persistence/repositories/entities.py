@@ -21,7 +21,9 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sentrix.domain.identity.models import (
+    DEFAULT_SCOPE_ID,
     ENTITY_STATUS_CONFIRMED,
+    ENTITY_STATUS_PENDING,
     ENTITY_TYPE_PERSON,
     PROPERTY_SOURCE_USER,
     PROPERTY_STATUS_ACTIVE,
@@ -160,6 +162,110 @@ class SqliteEntityRepository:
                 f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE id = ?", (entity_id,)
             ).fetchone()
         return _row_to_entity(row) if row else None
+
+    def create_person(
+        self,
+        name: str,
+        *,
+        status: str = ENTITY_STATUS_PENDING,
+        family_role: str | None = None,
+        confidence: float = 0.0,
+        summary: str = "",
+        scope_id: str = DEFAULT_SCOPE_ID,
+    ) -> EntityRecord:
+        entity_id = _new_id("entity")
+        now = _now()
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO entities"
+                " (id, scope_id, entity_type, canonical_name, status, family_role, summary,"
+                "  confidence, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    scope_id or DEFAULT_SCOPE_ID,
+                    ENTITY_TYPE_PERSON,
+                    name,
+                    status,
+                    family_role,
+                    summary,
+                    float(confidence or 0),
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+        assert row is not None
+        return _row_to_entity(row)
+
+    def confirm_person(
+        self, entity_id: str, *, name: str, family_role: str | None, summary: str
+    ) -> EntityRecord:
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE entities SET canonical_name = ?, status = ?, family_role = ?,"
+                " confidence = MAX(confidence, 1), summary = ?, updated_at = ? WHERE id = ?",
+                (name, ENTITY_STATUS_CONFIRMED, family_role, summary, _now(), entity_id),
+            )
+            row = connection.execute(
+                f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+        assert row is not None
+        return _row_to_entity(row)
+
+    def delete_candidate(self, entity_id: str) -> bool:
+        entity = self.get(entity_id)
+        if entity is None or entity.entity_type != ENTITY_TYPE_PERSON:
+            return False
+        if entity.status == ENTITY_STATUS_CONFIRMED:
+            raise ValueError("confirmed person entities cannot be deleted")
+        with self._database.connect() as connection, connection:
+            cluster_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM face_clusters WHERE entity_id = ?", (entity_id,)
+                ).fetchall()
+            ]
+            for cluster_id in cluster_ids:
+                # 人脸实例保留：它们是证据，只是不再属于任何簇。原型跟着簇走——
+                # 簇没了，原型就没有可归属的行（外键指向 face_clusters）。
+                connection.execute(
+                    "UPDATE face_instances SET cluster_id = NULL WHERE cluster_id = ?",
+                    (cluster_id,),
+                )
+                connection.execute("DELETE FROM face_prototypes WHERE cluster_id = ?", (cluster_id,))
+                connection.execute("DELETE FROM face_clusters WHERE id = ?", (cluster_id,))
+            # 1.0 只删 entity_mentions / entity_properties / entity_revisions 与几张
+            # S5c 的表，其余子行留着不管——它没开外键，留着不报错。2.0 每次连接都
+            # ``PRAGMA foreign_keys = ON``，所以**所有**指向 entities(id) 的子行都要走，
+            # 否则这条 DELETE 会在某一天因为一行残留而整体失败。多出来的三张：
+            #   entity_observations / event_participants / event_entities
+            # 1.0 靠 ``_refresh_event_participants`` 把后两张清干净（Task 81 会接上投影
+            # 刷新，但这一句仍要留着——它是删除的完整性，不是投影）。
+            for table, column in (
+                ("entity_mentions", "entity_id"),
+                ("entity_observations", "entity_id"),
+                ("entity_properties", "entity_id"),
+                ("entity_revisions", "entity_id"),
+                ("event_participants", "person_id"),
+                ("event_entities", "entity_id"),
+                ("person_appearance_evidence", "person_id"),
+                ("person_moments", "person_id"),
+            ):
+                connection.execute(f"DELETE FROM {table} WHERE {column} = ?", (entity_id,))
+            connection.execute(
+                "DELETE FROM relationships WHERE subject_entity_id = ? OR object_entity_id = ?",
+                (entity_id, entity_id),
+            )
+            # 事实挂在**名字**上，不挂在 id 上——实体没了，用这个名字写的事实就没有主语了。
+            connection.execute(
+                "DELETE FROM facts WHERE subject = ? OR object = ?",
+                (entity.canonical_name, entity.canonical_name),
+            )
+            connection.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+        return True
 
     def find_confirmed_person_by_name(self, scope_id: str, name: str) -> PersonNameMatch | None:
         target = str(name or "").strip()

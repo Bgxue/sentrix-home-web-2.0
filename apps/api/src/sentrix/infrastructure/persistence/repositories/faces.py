@@ -13,6 +13,9 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sentrix.domain.identity.models import (
+    CLUSTER_STATUS_CONFIRMED,
+    CLUSTER_STATUS_REJECTED,
+    DEFAULT_SCOPE_ID,
     ENTITY_STATUS_PENDING,
     PENDING_CLUSTER_NAME,
     FaceClusterRecord,
@@ -97,7 +100,7 @@ def _row_to_instance(row: sqlite3.Row) -> FaceInstanceRecord:
         sharpness=row["sharpness"],
         created_at=_parse_datetime(row["created_at"]),
         # 1.0 ``get_face_instance`` 从 asset 取 scope，缺省 ``home-default``。
-        scope_id=row["asset_scope_id"] or "home-default",
+        scope_id=row["asset_scope_id"] or DEFAULT_SCOPE_ID,
         asset_path=row["asset_path"],
         file_name=row["file_name"],
         mime_type=row["mime_type"] or "",
@@ -137,6 +140,187 @@ class SqliteFaceRepository:
                 params,
             ).fetchall()
         return [_row_to_cluster(row) for row in rows]
+
+    def list_candidates(self, scope_id: str) -> Sequence[FaceClusterRecord]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_CLUSTER_COLUMNS} FROM face_clusters fc"
+                " LEFT JOIN entities e ON e.id = fc.entity_id"
+                " WHERE fc.scope_id = ? AND fc.status IN ('pending', 'confirmed')"
+                " ORDER BY fc.updated_at DESC",
+                (scope_id,),
+            ).fetchall()
+        return [_row_to_cluster(row) for row in rows]
+
+    def get_cluster(self, cluster_id: str) -> FaceClusterRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_CLUSTER_COLUMNS} FROM face_clusters fc"
+                " LEFT JOIN entities e ON e.id = fc.entity_id WHERE fc.id = ?",
+                (cluster_id,),
+            ).fetchone()
+        return _row_to_cluster(row) if row else None
+
+    def create_cluster(
+        self, embedding: Sequence[float], *, confidence: float, scope_id: str
+    ) -> FaceClusterRecord:
+        cluster_id = _new_id("cluster")
+        now = datetime.now(UTC).isoformat()
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO face_clusters"
+                " (id, scope_id, representative_embedding_json, member_count, confidence,"
+                "  created_at, updated_at)"
+                " VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (
+                    cluster_id,
+                    scope_id or DEFAULT_SCOPE_ID,
+                    json.dumps([float(value) for value in embedding]),
+                    float(confidence or 0),
+                    now,
+                    now,
+                ),
+            )
+        cluster = self.get_cluster(cluster_id)
+        assert cluster is not None
+        return cluster
+
+    def link_entity(self, cluster_id: str, entity_id: str) -> FaceClusterRecord:
+        now = datetime.now(UTC).isoformat()
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE face_clusters SET entity_id = ?, updated_at = ? WHERE id = ?",
+                (entity_id, now, cluster_id),
+            )
+        cluster = self.get_cluster(cluster_id)
+        assert cluster is not None
+        return cluster
+
+    def confirm_cluster(self, cluster_id: str, entity_id: str) -> FaceClusterRecord:
+        now = datetime.now(UTC).isoformat()
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE face_clusters SET status = ?, entity_id = ?, updated_at = ?,"
+                " revision = revision + 1 WHERE id = ?",
+                (CLUSTER_STATUS_CONFIRMED, entity_id, now, cluster_id),
+            )
+        cluster = self.get_cluster(cluster_id)
+        assert cluster is not None
+        return cluster
+
+    def retire_cluster(self, cluster_id: str, *, entity_id: str | None = None) -> FaceClusterRecord:
+        now = datetime.now(UTC).isoformat()
+        with self._database.connect() as connection, connection:
+            if entity_id is None:
+                connection.execute(
+                    "UPDATE face_clusters SET status = ?, member_count = 0, updated_at = ?,"
+                    " revision = revision + 1 WHERE id = ?",
+                    (CLUSTER_STATUS_REJECTED, now, cluster_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE face_clusters SET status = ?, entity_id = ?, member_count = 0,"
+                    " updated_at = ?, revision = revision + 1 WHERE id = ?",
+                    (CLUSTER_STATUS_REJECTED, entity_id, now, cluster_id),
+                )
+        cluster = self.get_cluster(cluster_id)
+        assert cluster is not None
+        return cluster
+
+    def move_instances(self, source_cluster_id: str, target_cluster_id: str) -> int:
+        with self._database.connect() as connection, connection:
+            cursor = connection.execute(
+                "UPDATE face_instances SET cluster_id = ? WHERE cluster_id = ?",
+                (target_cluster_id, source_cluster_id),
+            )
+            return int(cursor.rowcount)
+
+    def move_instance(self, instance_id: str, target_cluster_id: str) -> None:
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE face_instances SET cluster_id = ? WHERE id = ?",
+                (target_cluster_id, instance_id),
+            )
+
+    def confirmed_cluster_for_entity(self, entity_id: str) -> FaceClusterRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_CLUSTER_COLUMNS} FROM face_clusters fc"
+                " LEFT JOIN entities e ON e.id = fc.entity_id"
+                " WHERE fc.entity_id = ? AND fc.status = 'confirmed'"
+                " ORDER BY fc.member_count DESC, fc.updated_at DESC LIMIT 1",
+                (entity_id,),
+            ).fetchone()
+        return _row_to_cluster(row) if row else None
+
+    def add_instance(
+        self,
+        *,
+        asset_id: str,
+        observation_id: str,
+        cluster_id: str | None,
+        bbox: Sequence[float],
+        embedding: Sequence[float],
+        detection_confidence: float,
+        quality: float,
+        pose: Sequence[float],
+        pose_bucket_name: str,
+        embedding_model: str,
+        embedding_version: str,
+        embedding_quality_signal: float,
+        validity: str,
+        area_ratio: float,
+        sharpness: float,
+    ) -> FaceInstanceRecord:
+        instance_id = _new_id("face")
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO face_instances"
+                " (id, asset_id, observation_id, cluster_id, bbox_json, embedding_json,"
+                "  detection_confidence, quality, pose_json, area_ratio, sharpness,"
+                "  pose_bucket, embedding_model, embedding_version, embedding_quality_signal,"
+                "  validity, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    instance_id,
+                    asset_id,
+                    observation_id,
+                    cluster_id,
+                    json.dumps([float(value) for value in bbox]),
+                    json.dumps([float(value) for value in embedding]),
+                    float(detection_confidence or 0),
+                    float(quality or 0),
+                    json.dumps([float(value) for value in pose]),
+                    float(area_ratio or 0),
+                    float(sharpness or 0),
+                    str(pose_bucket_name or "unknown"),
+                    embedding_model,
+                    embedding_version,
+                    float(embedding_quality_signal or 0),
+                    validity,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        instance = self.get_instance(instance_id)
+        assert instance is not None
+        return instance
+
+    def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]:
+        return self._instances_where("fi.cluster_id = ?", (cluster_id,))
+
+    def find_instance(self, cluster_id: str, instance_id: str) -> FaceInstanceRecord | None:
+        rows = self._instances_where("fi.cluster_id = ? AND fi.id = ?", (cluster_id, instance_id))
+        return rows[0] if rows else None
+
+    def _instances_where(self, clause: str, params: tuple[object, ...]) -> Sequence[FaceInstanceRecord]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_INSTANCE_COLUMNS} FROM face_instances fi"
+                " JOIN assets a ON a.id = fi.asset_id"
+                f" WHERE {clause} ORDER BY fi.quality DESC, fi.created_at ASC",
+                params,
+            ).fetchall()
+        return [_row_to_instance(row) for row in rows]
 
     def get_instance(self, instance_id: str) -> FaceInstanceRecord | None:
         with self._database.connect() as connection:

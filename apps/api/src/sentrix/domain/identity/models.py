@@ -8,6 +8,9 @@
 这里的是落库的一行。同名会让人分不清「我手里这个改了会不会写库」，所以落库侧统一带
 ``Record``，与 ``domain/memories/events.py`` 的 ``EventRecord`` 同一个约定。
 
+唯一的例外是 ``FaceDetection``：它是检测适配器交给用例的**输入形状**，不落库，
+所以按同一条约定它不带 ``Record`` 后缀。
+
 **``pending`` 的名字与角色为什么在模型层就被抹掉。** 1.0 在 HTTP 路由里改写
 ``canonical_name``（``app.py:1976``），于是「待命名成员」这个名字只对走那条路由的人成立；
 直接读仓储的内部调用方拿到的仍是「待确认人物簇 · cluster-3」。2.0 把这条规则放在记录
@@ -28,6 +31,11 @@ from datetime import datetime
 
 ENTITY_TYPE_PERSON = "person"
 
+# 没指定记忆空间时的落点。1.0 把这个字面量写了十几处（``db.py:4816`` 等），
+# 2.0 收成一份：它出现在 SQL 的 ``DEFAULT``、仓储的兜底与用例的入参默认值里，
+# 三处漂开一次，人脸就会落进一个查询永远查不到的空间。
+DEFAULT_SCOPE_ID = "home-default"
+
 ENTITY_STATUS_PENDING = "pending"
 ENTITY_STATUS_CONFIRMED = "confirmed"
 ENTITY_STATUS_REJECTED = "rejected"
@@ -47,6 +55,22 @@ REVISION_SOURCE_USER_RENAME = "user_rename"
 
 # 未命名人物簇对外显示的名字。1.0 ``app.py:1976`` 的字面量，一字不差。
 PENDING_CLUSTER_NAME = "待命名成员"
+
+# 未命名人物簇**落库**时的内部名与说明（1.0 ``db.py:4639`` 的 ``create_face_cluster``）。
+# 与上面那个不是一回事：``PENDING_CLUSTER_NAME`` 是给用户看的，这两个是存在
+# ``entities`` 行里的原文，用户永远看不到它们（``_row_to_cluster`` 会换掉）。
+# 一字不差是要求：换一次措辞，老库里的行与新行就再也对不上了。
+PENDING_CLUSTER_NAME_PREFIX = "待确认人物簇"
+PENDING_CLUSTER_SUMMARY = "由 buffalo_l embedding 生成，等待用户确认"
+
+
+def pending_cluster_name(cluster_id: str) -> str:
+    """新簇的实体内部名。1.0 是 ``f"待确认人物簇 · {cluster_id}"``，分隔符是两个字符。
+
+    写成函数而不是让两处各拼一次 f-string：它是**落库的数据**，不是日志文案，
+    拼法漂开一次，库里就同时存在两种命名。
+    """
+    return f"{PENDING_CLUSTER_NAME_PREFIX} · {cluster_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,3 +241,41 @@ class EntityMentionRecord:
     face_instance_id: str | None
     confidence: float
     created_at: datetime | None
+
+
+# ---- 检测结果的输入形状 ----------------------------------------------------------
+#
+# ``FaceDetection`` 不是落库的一行，所以它**不带** ``Record`` 后缀（这正是那条约定的
+# 用处：一眼看出手里这个改了不会写库）。它放在 domain 而不是 application，是因为
+# 造它的是 infrastructure 的检测适配器（Task 77/78），而 infrastructure 不许 import
+# application——这一层依赖方向决定了这个类型的家住哪儿。
+
+
+@dataclass(frozen=True, slots=True)
+class FaceDetection:
+    """检测器 + 嵌入器交给在线匹配的一条人脸。1.0 里它是个无类型 dict。
+
+    ``quality`` / ``pose_bucket`` 可空是**有语义的**：为空表示「检测器没算」，
+    由匹配用例按纯规则补算；给了就原样采信，不再重算。两条路径在 1.0
+    ``db.py:4831-4845`` 分叉，所以这里保留同样的空值语义。
+
+    ``identity_eligible`` 无默认值（``None`` = 没给）而不是 ``True``：1.0 的默认值
+    是 ``identity_ready``，而 ``identity_ready`` 自己缺省为真。写成 ``True`` 会让
+    「显式说了不合格」与「没说」看起来一样。
+    """
+
+    embedding: tuple[float, ...] = ()
+    bbox: tuple[float, ...] = ()
+    confidence: float = 0.0
+    quality: float | None = None
+    pose: tuple[float, ...] = ()
+    pose_bucket: str = ""
+    area_ratio: float = 0.0
+    sharpness: float = 0.0
+    quality_signal: float = 0.0
+    embedding_model: str = ""
+    embedding_version: str = ""
+    # 1.0 ``db.py:4847``：``str(face.get("face_validity") or "verified")``——缺省是合格。
+    validity: str = "verified"
+    identity_ready: bool = True
+    identity_eligible: bool | None = None

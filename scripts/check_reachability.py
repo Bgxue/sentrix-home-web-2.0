@@ -36,8 +36,13 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # 理由的例外**——而说不出理由的例外名单会把这条不变量重新变成摆设。
 PENDING_WIRING: dict[str, str] = {
     "sentrix.domain.identity.faces": (
-        "Task 72（在线匹配用例构造 FaceClusterer）与 Task 79（导入路径接线）会调用它。"
-        "它是 Task 69 落地的纯规则，S5a 之前没有别的调用者。"
+        "Task 84（全局重聚类的维护入口）会构造 FaceClusterer；Task 72 只用了它的四个"
+        "纯函数（归一化 / 余弦 / 质量 / 姿态桶），而 Task 72 的用例本身还没接线，"
+        "所以它仍不可达。它是 Task 69 落地的纯规则，S5a 之前没有别的调用者。"
+    ),
+    "sentrix.application.identity.enroll_face": (
+        "Task 75（HTTP 路由 + PersonDirectory 实现）与 Task 79（导入路径接线）会构造它，"
+        "那时它才有生产调用者。Task 72 只落地用例与它的仓储写方法。"
     ),
 }
 

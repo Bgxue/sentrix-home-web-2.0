@@ -17,6 +17,8 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from sentrix.domain.identity.models import (
+    DEFAULT_SCOPE_ID,
+    ENTITY_STATUS_PENDING,
     PROPERTY_SOURCE_DERIVED,
     EntityMentionRecord,
     EntityPropertyRecord,
@@ -41,8 +43,98 @@ class FaceRepository(Protocol):
         """``status`` 为空时返回除 ``rejected`` 外的全部簇，且只含进人物视图的空间。"""
         ...
 
+    def list_candidates(self, scope_id: str) -> Sequence[FaceClusterRecord]:
+        """在线匹配的候选：同 scope、``status IN ('pending','confirmed')``。
+
+        与 ``list_clusters`` 有两处**故意**不同，两处都照抄 1.0 ``db.py:4867``：
+        按 scope 过滤（匹配是空间内的事），且**不过滤** ``include_in_people``
+        （评测空间也要聚类，只是它的簇不进人物视图）。
+        """
+        ...
+
+    def get_cluster(self, cluster_id: str) -> FaceClusterRecord | None:
+        """簇审阅的入口：四个动作都先按 id 找它，找不到就是 404。"""
+        ...
+
     def get_instance(self, instance_id: str) -> FaceInstanceRecord | None:
         """实例带出它所属 asset 的路径 / 文件名 / 媒体类型与 scope。"""
+        ...
+
+    def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]: ...
+
+    def find_instance(self, cluster_id: str, instance_id: str) -> FaceInstanceRecord | None:
+        """只在**这个簇里**找这张脸。拆分的合法性就是这一条：实例不属于该簇 → 404。"""
+        ...
+
+    def add_instance(
+        self,
+        *,
+        asset_id: str,
+        observation_id: str,
+        cluster_id: str | None,
+        bbox: Sequence[float],
+        embedding: Sequence[float],
+        detection_confidence: float,
+        quality: float,
+        pose: Sequence[float],
+        pose_bucket_name: str,
+        embedding_model: str,
+        embedding_version: str,
+        embedding_quality_signal: float,
+        validity: str,
+        area_ratio: float,
+        sharpness: float,
+    ) -> FaceInstanceRecord:
+        """落一条人脸实例。``cluster_id`` 可空——那是「这张脸还算不上某个人」的表达。
+
+        ``pose_bucket_name`` 收的是**算好的桶名**，不是算它的那个纯函数
+        （``domain/identity/faces.pose_bucket``）——仓储不重算，重算就会有两份规则。
+        """
+        ...
+
+    def create_cluster(
+        self, embedding: Sequence[float], *, confidence: float, scope_id: str
+    ) -> FaceClusterRecord:
+        """新建一个簇，``entity_id`` 先留空。
+
+        1.0 ``create_face_cluster`` 一次做三件事（建簇 → 建实体 → 回填 ``entity_id``），
+        2.0 拆开：实体属于另一个聚合，在这里顺手写它会让「谁改了实体」在类型上消失。
+        ``confidence`` 收的是**质量**——1.0 的形参就叫 confidence，同一条语句里传进去的
+        却是 quality，两处语义一致，这里跟着叫 confidence 以免与第二个 0.30 混起来。
+        """
+        ...
+
+    def link_entity(self, cluster_id: str, entity_id: str) -> FaceClusterRecord:
+        """把簇挂到一个实体上（新簇建实体的那一步）。"""
+        ...
+
+    def confirm_cluster(self, cluster_id: str, entity_id: str) -> FaceClusterRecord:
+        """簇转 ``confirmed`` 并回填归属，``revision + 1``。"""
+        ...
+
+    def retire_cluster(self, cluster_id: str, *, entity_id: str | None = None) -> FaceClusterRecord:
+        """簇转 ``rejected``、``member_count`` 归零、``revision + 1``。
+
+        ``entity_id`` 给了就一并改归属（同名并入一个已确认的人，``db.py:5230``），
+        不给就保持原归属（用户把两个簇并成一个，``db.py:4790``）。
+        1.0 那两条 SQL 的差别只有这一个字段，所以是一个方法而不是两个。
+        """
+        ...
+
+    def move_instances(self, source_cluster_id: str, target_cluster_id: str) -> int:
+        """把源簇的实例整体改挂到目标簇，返回移动条数（1.0 的合并只改这一列）。"""
+        ...
+
+    def move_instance(self, instance_id: str, target_cluster_id: str) -> None:
+        """把一张脸移到另一个簇（拆分）。"""
+        ...
+
+    def confirmed_cluster_for_entity(self, entity_id: str) -> FaceClusterRecord | None:
+        """这个人当前作为门面的已确认簇：``member_count DESC, updated_at DESC`` 取首个。
+
+        同名合并要把实例挂到一个**已确认**的簇上，没有可挂的就不挂——1.0 允许
+        ``target_cluster`` 为空，那时实例留在原地。
+        """
         ...
 
     def list_prototypes(self, cluster_id: str) -> Sequence[FacePrototypeRecord]: ...
@@ -64,6 +156,48 @@ class EntityRepository(Protocol):
     """
 
     def get(self, entity_id: str) -> EntityRecord | None: ...
+
+    def create_person(
+        self,
+        name: str,
+        *,
+        status: str = ENTITY_STATUS_PENDING,
+        family_role: str | None = None,
+        confidence: float = 0.0,
+        summary: str = "",
+        scope_id: str = DEFAULT_SCOPE_ID,
+    ) -> EntityRecord:
+        """建一个 person 实体并返回它。
+
+        ``name`` 是**内部名**（新簇的实体叫「待确认人物簇 · cluster-x」），对外叫什么
+        由出口决定——``pending`` 的实体在 ``list_clusters`` 里一律显示成「待命名成员」。
+        1.0 的 ``create_entity`` 是通用的；2.0 只收 person 这一种，因为本切片没有别的
+        调用者，写成通用签名等于给一个没人用的参数留位置。
+        """
+        ...
+
+    def confirm_person(
+        self,
+        entity_id: str,
+        *,
+        name: str,
+        family_role: str | None,
+        summary: str,
+    ) -> EntityRecord:
+        """确认一个人：置名、转 ``confirmed``、写家庭角色，``confidence = MAX(…, 1)``。
+
+        ``family_role`` 是**覆盖**不是补写（1.0 ``db.py:5163`` 的 ``family_role = ?``）：
+        确认时不带角色，会把上一次的角色抹掉。这是 1.0 的行为，照搬。
+        """
+        ...
+
+    def delete_candidate(self, entity_id: str) -> bool:
+        """彻底删掉一个未确认的候选实体与它的派生行，返回是否删掉了。
+
+        人脸实例**保留**（它们是证据），只是 ``cluster_id`` 归 NULL。已确认的实体抛
+        ``ValueError``——删一个人要用改名或合并，不是删行。非 person 实体返回 ``False``。
+        """
+        ...
 
     def find_confirmed_person_by_name(self, scope_id: str, name: str) -> PersonNameMatch | None:
         """本 scope 内 ``entity_type='person' AND status='confirmed'`` 的人。
