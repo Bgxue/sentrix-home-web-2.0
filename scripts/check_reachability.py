@@ -44,6 +44,10 @@ PENDING_WIRING: dict[str, str] = {
         "Task 75（HTTP 路由 + PersonDirectory 实现）与 Task 79（导入路径接线）会构造它，"
         "那时它才有生产调用者。Task 72 只落地用例与它的仓储写方法。"
     ),
+    "sentrix.application.identity.review_cluster": (
+        "Task 75 的四个簇审阅端点（confirm / reject / merge / split）会构造它。"
+        "Task 73 只落地用例与它的仓储写方法，S5a 的这一轮还没有路由。"
+    ),
 }
 
 
