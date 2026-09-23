@@ -337,6 +337,26 @@ class EntityRepository(Protocol):
         """
         ...
 
+    def confirmed_people_for_observation(self, observation_id: str) -> frozenset[str]:
+        """这条观察里**已确认**的人物 id。1.0 ``db.py:2241``。
+
+        只认 ``entity_type='person' AND status='confirmed'``：未确认的候选人物簇还只是
+        一次聚类猜测，让它进事件打分等于用猜测去归并事件。``entity_mentions`` 本身也只
+        由已确认实体写得出（``link_confirmed_mention`` 的资格闸门），这一条是第二道。
+
+        返回 ``frozenset`` 不是 ``Sequence``：调用方拿它做交集（``people & event_people``），
+        顺序没有意义。
+        """
+        ...
+
+    def confirmed_people_for_event(self, event_id: str) -> frozenset[str]:
+        """这个事件里**已确认**的人物 id：事件名下所有观察的提及并集。1.0 ``db.py:2250``。
+
+        与按观察查的那条差别只在 JOIN 的那一跳——事件的人物是它的成员观察带进来的，
+        所以两边用的是同一份提及数据，不会出现「观察里有、事件里没有」的第三种状态。
+        """
+        ...
+
     def event_ids(self, entity_id: str) -> Sequence[str]:
         """这个人牵涉到的事件：提及桥 / 事件参与者投影 / 实体-观察关联三条来源的并集。"""
         ...

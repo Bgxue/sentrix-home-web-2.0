@@ -94,6 +94,11 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
             observations=container.observation_repository,
             assets=container.asset_repository,
         ),
+        # 事件打分的 person 分量（权重 0.20）的两个来源。装配点**只有这里**：
+        # 单张上传与整册导入共用同一条链，分开接会让「整册少了人物桥」以
+        # 「批量导入时事件分得更碎」的形式出现，而那种差异在两端口各看一半时看不出来。
+        confirmed_people=container.entity_repository.confirmed_people_for_observation,
+        confirmed_event_people=container.entity_repository.confirmed_people_for_event,
     )
     return ImportAssets(
         assets=container.asset_repository,

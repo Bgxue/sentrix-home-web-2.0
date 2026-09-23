@@ -668,6 +668,31 @@ class SqliteEntityRepository:
 
     # ---- 事件关联 ----------------------------------------------------------------
 
+    def confirmed_people_for_observation(self, observation_id: str) -> frozenset[str]:
+        if not observation_id:
+            return frozenset()
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT em.entity_id FROM entity_mentions em"
+                " JOIN entities e ON e.id = em.entity_id"
+                " WHERE em.observation_id = ? AND e.entity_type = ? AND e.status = ?",
+                (observation_id, ENTITY_TYPE_PERSON, ENTITY_STATUS_CONFIRMED),
+            ).fetchall()
+        return frozenset(str(row["entity_id"]) for row in rows)
+
+    def confirmed_people_for_event(self, event_id: str) -> frozenset[str]:
+        if not event_id:
+            return frozenset()
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT em.entity_id FROM entity_mentions em"
+                " JOIN entities e ON e.id = em.entity_id"
+                " JOIN event_observations eo ON eo.observation_id = em.observation_id"
+                " WHERE eo.event_id = ? AND e.entity_type = ? AND e.status = ?",
+                (event_id, ENTITY_TYPE_PERSON, ENTITY_STATUS_CONFIRMED),
+            ).fetchall()
+        return frozenset(str(row["entity_id"]) for row in rows)
+
     def event_ids(self, entity_id: str) -> Sequence[str]:
         with self._database.connect() as connection:
             rows = connection.execute(

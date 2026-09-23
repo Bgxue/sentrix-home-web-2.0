@@ -4,6 +4,11 @@
 ``:1962-1990`` 的 ``_event_candidates``。流程一模一样：列本 scope 的活动事件 → 6 小时
 硬窗过滤 → 八分量打分 → 取最高分 → ``>= 0.50`` 折进去，否则新建。
 
+**人物桥是第二硬的约束：人脸必须先于事件归并。** 与已确认的人相像的脸在导入链的
+前一步写下 ``entity_mentions``，这里才有 ``person_score`` 可算。顺序写反**不报错**——
+两个来源都查得到、只是都返回空集，``person_score`` 恒为 0、``corroborated`` 更容易为假，
+事件照分照建，只是分错了（对照测试在 Task 79/80）。
+
 **归并顺序是硬约束：视觉向量必须先写。** ``score_event_candidate`` 的 ``visual_boost``
 （权重 0.05）与 ``split_guard`` 的判定都来自 ``_event_visual_similarity``，而它读的是
 ``memory_vectors`` 里 ``space='visual' & source_type='asset'`` 的向量。1.0 在
@@ -119,8 +124,9 @@ class AssignEvents:
         assets: AssetRepository,
         places: AssetPlaceRepository,
         visual_similarity: EventVisualSimilarity,
+        confirmed_people: Callable[[str], frozenset[str]],
+        confirmed_event_people: Callable[[str], frozenset[str]],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-        confirmed_people: Callable[[str], frozenset[str]] = lambda _observation_id: frozenset(),
     ) -> None:
         self._events = events
         self._observations = observations
@@ -128,10 +134,15 @@ class AssignEvents:
         self._places = places
         self._visual = visual_similarity
         self._clock = clock
-        # S5 之前恒为空集：没有 entity_mentions 就没有「已确认人物」。
-        # person_score（权重 0.20）因此在 S5 落地前恒为 0，这一点写在计划里，
-        # 不在这里编一个假来源。见 s4-deviations.md §4。
+        # 两个来源**都没有默认值**。S4 给它们留过「默认恒回空集」的默认值，理由是那时
+        # 没有 entity_mentions；代价是「忘了接线」与「真的没有人」在类型上长得一模一样，
+        # 而 person_score（权重 0.20）恒为 0 不会报错、只会让事件分错——正是本仓库一路
+        # 在防的那类静默。Task 80 把默认值删掉，装配点少写一个就是 TypeError。
+        #
+        # 两个来源不是冗余：``people`` 是**候选观察**里的人，``event_people`` 是**事件
+        # 名下所有观察**里的人，打分要的是两者的交集（``_person_score``）。
         self._confirmed_people = confirmed_people
+        self._confirmed_event_people = confirmed_event_people
 
     def execute(self, observation: Observation) -> AssignmentResult:
         asset = self._assets.get(observation.asset_id)
@@ -157,7 +168,7 @@ class AssignEvents:
                 activity=event.activity,
                 anchors=anchors,
                 object_sets=object_sets,
-                people=frozenset(),
+                people=self._confirmed_event_people(event.id),
             )
             visual = self._visual.for_observation(observation, observation_ids)
             scored.append((anchor_set, score_event_candidate(anchor=anchor, event=anchor_set, visual=visual)))
