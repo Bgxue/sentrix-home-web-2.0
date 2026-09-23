@@ -48,6 +48,15 @@ PENDING_WIRING: dict[str, str] = {
         "Task 75 的四个簇审阅端点（confirm / reject / merge / split）会构造它。"
         "Task 73 只落地用例与它的仓储写方法，S5a 的这一轮还没有路由。"
     ),
+    "sentrix.infrastructure.models.onnx_runtime": (
+        "Task 78 的 ``face_adapter`` 会用它建 buffalo_l 的 session，Task 79 再把人脸链路"
+        "接进导入路径。Task 77 只落地检测器与它的 provider 预算。"
+    ),
+    "sentrix.infrastructure.models.face_detector": (
+        "Task 78 的 ``face_adapter`` 会构造 ``RetinaFaceTiledDetector`` 并复用它的"
+        "``bbox_agreement`` / ``landmark_sanity`` / ``expand_crop``；Task 79 把整条链路接进"
+        "导入路径。Task 77 只落地检测器本身（纯几何在 make ci 里验，真权重那条会真跑）。"
+    ),
     "sentrix.application.identity.name_person": (
         "Task 75 的 ``/api/people`` 改名端点与 batch-confirm 端点会构造它。Task 74 的"
         "用例被 ``ReviewCluster.confirm`` 之外的另一条链路使用（按实体确认），而在只做"

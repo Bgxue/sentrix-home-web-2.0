@@ -33,6 +33,15 @@ ignore_missing_imports = true
 module = ["PyGeoCN", "PyGeoCN.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
 
+# 人脸链路的三个包都没有 py.typed：onnxruntime / insightface 是 C++ 扩展的 Python 壳，
+# cv2 连 .pyi 都没有。同一条规则——缺 stub 是环境事实，集中写在这里，而不是在每个 import
+# 上散落 # type: ignore。**这条只关掉「找不到类型」，关不掉「用法写错了」**：本仓库自己
+# 包住它们的那两个模块（models/onnx_runtime.py、models/face_detector.py）仍然在 strict
+# 检查范围内，它们的函数签名与 numpy 运算都是有类型的。
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*", "insightface", "insightface.*", "cv2", "cv2.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["apps/api/tests"]
 addopts = "-q"
