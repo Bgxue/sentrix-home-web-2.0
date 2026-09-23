@@ -96,6 +96,18 @@ class LexicalSearch(Protocol):
 
     def exact_assets(self, whole_query: str, *, scope_id: str | None) -> frozenset[str]: ...
 
+    def assets_for_person(self, name: str, *, scope_id: str | None) -> frozenset[str]:
+        """含这个人的 asset 集合，读 ``observation_search_terms`` 的 ``person_bridge`` 行。
+
+        1.0 ``retrieval/entity.py:33-49`` 那条查询。**名字按整串精确匹配**（与写入时的
+        ``normalize_text`` 同一口径），不做子串：人名是短词，「妈」命中「妈妈」与
+        「姑妈」是两件不同的事。
+
+        查不到就返回空集——**空集与「这个人在库里没有照片」在调用方是一回事**，
+        由 ``RetrieveEntity`` 决定要不要退回直接读观察。
+        """
+        ...
+
 
 class VectorRepository(Protocol):
     """权威向量存储。SQLite 是唯一实现，也是索引重建的数据来源。"""
@@ -103,6 +115,18 @@ class VectorRepository(Protocol):
     def upsert(self, record: VectorRecord) -> None: ...
 
     def has_vector(self, *, space: str, source_type: str, source_id: str, model_name: str) -> bool: ...
+
+    def update_metadata(
+        self, *, space: str, source_type: str, source_id: str, metadata: dict[str, object]
+    ) -> int:
+        """整份替换一条向量的 metadata，返回改了几行。
+
+        全局重聚类会改动人脸实例属于哪个簇，而 ``cluster_id`` 也记在向量 metadata 里
+        （1.0 ``db.py:5028-5038`` 对每条实例逐个改）。**整份替换而不是打补丁**：一条
+        metadata 的写入者只有 ``EnrollFace`` 与重聚类两处，两处都构造得出一整份；
+        读出旧值再合并会让并发下的两个写入者互相覆盖对方刚写进去的键，而那种丢失不报错。
+        """
+        ...
 
     def get(
         self,

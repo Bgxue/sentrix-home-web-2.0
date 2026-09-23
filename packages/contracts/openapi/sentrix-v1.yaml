@@ -942,6 +942,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/maintenance/recluster-faces:
+    post:
+      tags:
+      - maintenance
+      summary: Recluster Faces
+      operationId: recluster_faces_api_v1_maintenance_recluster_faces_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReclusterFacesRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReclusterFacesResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -1720,6 +1745,69 @@ components:
         字段集沿用 1.0（``runtime.py:1664-1687``），并补上 ``kind`` 与 ``payload``。
 
         ``step_index`` 同时是 SSE 的 ``id:`` 值，于是 ``Last-Event-ID`` 断线续传天然可用。'
+    ReclusterFacesRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        threshold:
+          type: number
+          title: Threshold
+          default: 0.3
+        minimum_quality:
+          type: number
+          title: Minimum Quality
+          default: 0.3
+      type: object
+      title: ReclusterFacesRequest
+      description: '``scope_id`` 为空表示跨空间重算（1.0 ``recluster_faces(scope_id=None)``）。
+
+
+        **不是「默认空间」**：``None`` 与 ``"home-default"`` 在两处不同——跨空间时
+
+        ``list_verified_instances`` 不按 asset 的 scope 过滤，而认领不确定人脸时按每条
+
+        实例自己的空间找目标。'
+    ReclusterFacesResponse:
+      properties:
+        instances:
+          type: integer
+          title: Instances
+        clusters:
+          type: integer
+          title: Clusters
+        noise:
+          type: integer
+          title: Noise
+        attached_uncertain:
+          type: integer
+          title: Attached Uncertain
+        retired_clusters:
+          type: integer
+          title: Retired Clusters
+        retired_candidates:
+          type: integer
+          title: Retired Candidates
+        threshold:
+          type: number
+          title: Threshold
+        minimum_quality:
+          type: number
+          title: Minimum Quality
+      type: object
+      required:
+      - instances
+      - clusters
+      - noise
+      - attached_uncertain
+      - retired_clusters
+      - retired_candidates
+      - threshold
+      - minimum_quality
+      title: ReclusterFacesResponse
+      description: 一次重聚类改了什么。**计数就是这条路径的全部可核产出**。
     RejectClusterResponse:
       properties:
         cluster_id:

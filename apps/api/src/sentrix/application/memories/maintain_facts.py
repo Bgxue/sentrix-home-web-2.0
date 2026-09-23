@@ -9,50 +9,36 @@
     all(fact.get(k) for k in ("subject","predicate","object")) and
     self.store.is_confirmed_person_name(fact.get("subject"), scope_id)
 
-第一段是纯规则 ``is_writable_fact``（``domain/memories/facts.py``）；第二段是
-``confirmed_people``，与 ``AssignEvents`` 的同名参数同构——**S5 之前恒为空集**。
-1.0 的 ``is_confirmed_person_name`` 查的是 ``entities`` 表里
-``entity_type='person' AND status='confirmed'`` 的行（``db.py:1494-1503``），
-而 2.0 的身份层（人脸聚类 → 簇确认 → 命名 → entities）是 S5，S4 没有这张表。
+第一段是纯规则 ``is_writable_fact``（``domain/memories/facts.py``）；第二段由
+``confirmed_people`` 提供——**入参是 ``scope_id``，回的是名字集合**（不是 id），
+判据是 1.0 ``db.py:1494`` 的 ``is_confirmed_person_name``：只认
+``entity_type='person' AND status='confirmed'`` 且 ``canonical_name`` **精确相等**，
+**不查别名**。
 
-所以这条路径在当前装配下**一行都写不出来**。这是门禁的真实后果，不是接线没接上：
-「事实表按设计为空」与「事实表因为没人调而恒空」是两件事，这条用例把前者变成可断言的。
-要改门禁（放宽到非人物主语也写，或换个确认判据）是**用户裁决点**，不在这里自己定。
+**两半在 S5b 同时接上**（用户裁决④），此前它们各自都能让这张表恒空：
 
-候选事实的来源是同一处的第二个缺口：1.0 的候选来自模型自报的 ``facts``
-（``model_clients.py:1130-1198`` 的 ``analyze_image`` 让它回 ``facts`` 数组），
-2.0 的观察器**明确不搬**（``s4-deviations.md`` 第 30 条：事实由 ``maintain_fact``
-规则决定，不由模型自报，属于 S5）。所以 ``candidates`` 这个协作者在 S4 的生产装配下
-返回空元组，真来源随 S5 一起接。即使把门禁放开，**只放门禁也仍然出不了东西**——
-这一点写在接线处的注释里，免得下一个人以为「放宽门禁就够了」。
+1. **候选来源**：1.0 的候选来自模型自报的 ``facts``（``model_clients.py:1130-1198``
+   的 ``analyze_image``），2.0 的 S4 明确不搬它，于是 ``candidates`` 在生产装配下
+   恒为空元组。现在 ``Observation.facts`` 就是那条来源。
+2. **门禁**：S4 之前没有身份层，``confirmed_people`` 恒为空集。
+
+S4 的用例里有一条「门禁关着时写不出东西」的断言，它**必须继续红在它该红的地方**：
+门禁是「subject 必须是已确认人物的本名」，不是「有 subject 就行」。
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 
-from sentrix.domain.media.models import Observation
+from sentrix.domain.media.models import Observation, ObservationFact
 from sentrix.domain.memories.facts import Fact, FactWriteAction, decide_fact_write, is_writable_fact
 from sentrix.domain.memories.ports import FactRepository
 
-# 1.0 ``pipeline.py:350``：``normalize_confidence(fact.get("confidence"), result.get("confidence", 0.5))``
-# 的兜底值。模型没给 confidence 时用它。
-DEFAULT_FACT_CONFIDENCE = 0.5
-
-
-@dataclass(frozen=True, slots=True)
-class FactCandidate:
-    """一条候选事实。1.0 里它是个 dict（``{"subject","predicate","object","confidence"}``）。"""
-
-    subject: str
-    predicate: str
-    object: str
-    confidence: float = DEFAULT_FACT_CONFIDENCE
-
 
 def _new_fact_id() -> str:
+    """1.0 ``make_id("fact")``。与 ``application/identity/review_cluster.py`` 同一个格式
+    ——两条写事实的路径必须给出同一种 id，否则库里会有两种长相的事实。"""
     return f"fact_{uuid.uuid4().hex[:12]}"
 
 
@@ -61,12 +47,14 @@ class MaintainFacts:
         self,
         *,
         facts: FactRepository,
-        candidates: Callable[[Observation], Sequence[FactCandidate]],
-        confirmed_people: Callable[[str], frozenset[str]] = lambda _scope_id: frozenset(),
+        candidates: Callable[[Observation], Sequence[ObservationFact]],
+        confirmed_people: Callable[[str], frozenset[str]],
     ) -> None:
         self._facts = facts
         self._candidates = candidates
-        # S5 之前恒为空集：没有 entities 就没有「已确认人物」。不在这里编一个假来源。
+        # **没有默认值。** S4 给这一个留的是「恒回空集」的默认值，代价与 ``AssignEvents``
+        # 的两个来源完全一样：门禁关着与忘了接线在类型上长得一模一样，而「事实恒空」
+        # 不报错、只是永远查不到。Task 80 已经在那两处删掉默认值，这里跟着删。
         self._confirmed_people = confirmed_people
 
     def maintain(self, observation: Observation) -> tuple[str, ...]:
@@ -86,7 +74,20 @@ class MaintainFacts:
             written.append(self._write(observation, candidate))
         return tuple(written)
 
-    def _write(self, observation: Observation, candidate: FactCandidate) -> str:
+    def purge_unanchored(self, scope_id: str) -> int:
+        """删掉本 scope 里 subject 不再是「已确认人物本名」的事实，返回删了几条。
+
+        1.0 ``db.py:3433-3447``。它**不是**维护脚本里的顺手动作：门禁只保证**写入那一刻**
+        subject 是已确认人物，人一旦改名或候选被拒，那条事实就失去了锚点，而它仍然会
+        被检索命中——「妈妈去过赵县」在人已经不是「妈妈」之后还在应答里出现。
+
+        **S5 没有任何地方调它**（1.0 的唯一调用点是
+        ``scripts/maintenance/rebuild_memory.py``，2.0 不复刻脚本）。这不是漏接，是这条
+        能力要等一个维护入口才有地方挂；如实登记在 ``s5-deviations.md``。
+        """
+        return self._facts.purge_unanchored(scope_id)
+
+    def _write(self, observation: Observation, candidate: ObservationFact) -> str:
         existing = self._facts.active_for(
             scope_id=observation.scope_id,
             subject=candidate.subject,

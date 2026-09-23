@@ -12,7 +12,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
+from sentrix.domain.media.models import (
+    Asset,
+    AssetStatus,
+    GpsPoint,
+    MediaType,
+    Observation,
+    ObservationFact,
+)
 
 SUPPORTED_IMAGE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff"}
@@ -68,6 +75,11 @@ class ObservationSemantics:
     ocr_text: str = ""
     objects: tuple[str, ...] = ()
     clothing: tuple[str, ...] = ()
+    # 模型自报的候选事实。1.0 的 ``analyze_image`` 让模型回一个 ``facts`` 数组
+    # （``model_clients.py:1130-1198`` 的提示词原文），2.0 的 S4 明确不搬它，
+    # 于是 ``MaintainFacts`` 的候选在 S4 的生产装配下恒为空元组——门禁全开也写不出一条
+    # 事实。用户裁决④选了「按 1.0 原样：模型自报」，这个字段就是那条来源。
+    facts: tuple[ObservationFact, ...] = ()
     confidence: float = 0.0
 
 

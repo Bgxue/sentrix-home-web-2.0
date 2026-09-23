@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from sentrix.application.assistant.tools import AssistantToolbox, is_empty_result
+from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_evidence import RetrieveEvidence
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
@@ -105,6 +106,10 @@ def toolbox(migrations_ready_db, tmp_path):
     # 边界，不是召回；通道自己的行为在 test_retrieve_evidence.py。
     build = AssistantToolbox(
         retrieval=RetrieveEvidence(
+            entity=RetrieveEntity(
+                index=SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places),
+                observations=observations,
+            ),
             visual=RetrieveVisual(embedder=ScriptedEmbedder(), vectors=vectors, index=None),
             lexical=RetrieveLexical(
                 index=SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)

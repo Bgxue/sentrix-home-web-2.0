@@ -126,6 +126,22 @@ class SqliteFactRepository:
             )
             return int(cursor.rowcount)
 
+    def purge_unanchored(self, scope_id: str) -> int:
+        """删掉 subject 对不上本 scope 任何「已确认人物本名」的事实（1.0 ``db.py:3433``）。
+
+        判据与写入时的门禁是同一条（``canonical_name`` 精确相等、**不看别名**），否则
+        「写得进、删不掉」——别名放行一次就会把另一个人的同名事实一起删掉。
+        """
+        with self._database.connect() as connection, connection:
+            cursor = connection.execute(
+                "DELETE FROM facts WHERE scope_id = ? AND NOT EXISTS ("
+                " SELECT 1 FROM entities WHERE entities.scope_id = facts.scope_id"
+                " AND entities.entity_type = 'person' AND entities.status = 'confirmed'"
+                " AND entities.canonical_name = facts.subject)",
+                (scope_id,),
+            )
+            return int(cursor.rowcount)
+
     def list_facts(self, scope_id: str, *, limit: int) -> Sequence[Fact]:
         with self._database.connect() as connection:
             rows = connection.execute(

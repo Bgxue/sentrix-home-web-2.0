@@ -46,6 +46,7 @@ from sentrix.api.schemas.identity import (
 from sentrix.application.identity.name_person import NamePerson
 from sentrix.application.identity.review_cluster import ReviewCluster
 from sentrix.application.identity.seed_identity import NoSeedFacesError, SeedIdentity, SeedPhoto
+from sentrix.application.memories.assign_events import ConfirmedPersonEvents, EventVisualSimilarity
 from sentrix.bootstrap.container import Container
 from sentrix.domain.identity.models import (
     CLUSTER_STATUS_PENDING,
@@ -77,11 +78,35 @@ SEED_SOURCE_TYPE = "identity_seed"
 # ---- 用例装配 --------------------------------------------------------------------
 
 
+def _confirmed_person_events(container: Container) -> ConfirmedPersonEvents:
+    """确认之后的事件侧。**只在确认这一类用例里接**——重分段不是导入链的一部分。
+
+    两个 ``confirmed_people`` 来源与 ``api/routes/media.py`` 的 ``AssignEvents`` 是同一对
+    仓储方法：事件打分与重分段算的是同一个 ``person_score``，两个装配点取不同的来源，
+    「按人找事件」的分歧就再也不会被发现。
+    """
+    return ConfirmedPersonEvents(
+        events=container.event_repository,
+        participants=container.event_participant_repository,
+        observations=container.observation_repository,
+        assets=container.asset_repository,
+        entities=container.entity_repository,
+        visual_similarity=EventVisualSimilarity(
+            vectors=container.vector_repository,
+            observations=container.observation_repository,
+            assets=container.asset_repository,
+        ),
+        confirmed_people=container.entity_repository.confirmed_people_for_observation,
+        confirmed_event_people=container.entity_repository.confirmed_people_for_event,
+    )
+
+
 def _review_cluster(container: Container) -> ReviewCluster:
     return ReviewCluster(
         faces=container.face_repository,
         entities=container.entity_repository,
         facts=container.fact_repository,
+        events=_confirmed_person_events(container),
     )
 
 
