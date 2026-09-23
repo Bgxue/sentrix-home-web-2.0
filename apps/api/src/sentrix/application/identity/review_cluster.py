@@ -6,12 +6,15 @@
 :5290。四件事回答的是同一个问题的四个答案：这一簇脸是不是一个人？
 是（confirm）／不是（reject）／和另一簇是同一个（merge）／里面混进了别人（split）。
 
-**这一层不写事件投影，也不给它们留钩子。** 1.0 的 ``confirm`` 在同一个函数里既写身份
-（entities / mentions）又刷事件参与者、重分段、重建人物画像。2.0 把两半拆开：那三件事
-（``_refresh_event_participants`` / ``resegment_events_for_confirmed_entity`` /
-``rebuild_person_memory``）读的正是这里写的提及，放在这里就是一个循环，它们属于
-Task 81 / 86，落地时会回头改 ``confirm`` 这一处。**不预埋空的回调参数**——S4 栽过
-「零调用的纯规则」，一个现在没人传的钩子和它同类。
+**确认之后事件侧要跟着改什么，这一层不自己算。** 1.0 的 ``confirm_face_cluster``
+在同一个函数里既写身份（entities / mentions）又刷事件参与者、重分段、重建人物画像。
+2.0 把那三件事拆到 ``ConfirmedPersonEvents``（Task 81）与人物画像（Task 86，S5c）：
+它们读的正是这里写的提及，直接内联就是一个循环。``confirm`` 与 ``_merge_into_person``
+在写完提及之后各调一次 ``ConfirmedPersonEvents``，**依赖是构造参数、不是可选回调**——
+S4 栽过「零调用的纯规则」，一个现在没人传的钩子和它同类。
+
+**顺序在这里是硬约束**：提及先写、投影后刷。反过来外部键（``entity_mentions``）是空的，
+参与者投影刷出来的就是一份没有人的名单——不报错，只是事件摘要里永远没有名字。
 
 **四件里写审计的是 merge 与 split**（外加 confirm 走同名合并那一路，写的也是
 ``face_cluster_merge``）。reject 写不了：它删的正是那个实体的 ``entity_revisions`` 行。
@@ -22,6 +25,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from sentrix.application.memories.assign_events import ConfirmedPersonEvents
 from sentrix.domain.errors import DomainError
 from sentrix.domain.identity.models import (
     CLUSTER_STATUS_REJECTED,
@@ -116,10 +120,14 @@ class ReviewCluster:
         faces: FaceRepository,
         entities: EntityRepository,
         facts: FactRepository,
+        events: ConfirmedPersonEvents,
     ) -> None:
         self._faces = faces
         self._entities = entities
         self._facts = facts
+        # 确认之后的事件侧（参与者投影 + 重分段）。**不是可选参数**：一次确认如果不刷
+        # 投影，事件里就查不到这个人，而那是「按人找照片」唯一的桥——少接一处不会报错。
+        self._events = events
 
     # ---- 确认 --------------------------------------------------------------------
 
@@ -175,6 +183,10 @@ class ReviewCluster:
             )
         if role:
             self._write_family_role(scope_id, clean_name, role, observation_ids)
+        # 1.0 ``db.py:5179-5180`` 的两句。**必须排在上面那些提及之后**：投影读的就是
+        # ``entity_mentions``，提及还没写出来时刷出来的是一份空名单。
+        self._events.refresh_participants(observation_ids)
+        self._events.resegment(entity.id)
         return ConfirmResult(entity=entity, merged_into=None)
 
     def _merge_into_person(self, cluster: FaceClusterRecord, target_entity_id: str) -> ConfirmResult:
@@ -210,6 +222,10 @@ class ReviewCluster:
             target_cluster.id if target_cluster is not None else None,
             source=SOURCE_USER_NAME_MERGE,
         )
+        # 同名合并那一路在 1.0 里也刷投影与重分段（``db.py:5233-5234``），目标换成了
+        # 被并入的那个人——实例挂到他名下了，他的事件才是要改的那些。
+        self._events.refresh_participants([instance.observation_id for instance in instances])
+        self._events.resegment(target.id)
         return ConfirmResult(entity=target, merged_into=target.id)
 
     def _write_family_role(self, scope_id: str, name: str, role: str, observation_ids: list[str]) -> None:

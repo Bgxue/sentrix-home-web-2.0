@@ -185,6 +185,30 @@ class SqliteEventRepository:
             ).fetchall()
         return [row["observation_id"] for row in rows]
 
+    def events_for_observations(self, observation_ids: Sequence[str]) -> dict[str, tuple[str, ...]]:
+        """这些观察各自落在哪些事件上（``event_observations`` 的反向查询）。
+
+        1.0 ``_refresh_event_participants`` 是把每条观察单独查一次再在 Python 里分组；
+        这里一次 ``IN`` 查完，分组结果一样。观察按 id 升序去重——一条观察在一个事件里
+        只可能有一行（主键 ``(event_id, observation_id)``），同一条观察落在两个事件上
+        倒是可能的（1.0 允许的中间态），那种情况它出现在两个分组里，各自算一次。
+        """
+        unique = list(dict.fromkeys(observation_ids))
+        if not unique:
+            return {}
+        placeholders = ",".join("?" for _ in unique)
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT event_id, observation_id FROM event_observations"
+                f" WHERE observation_id IN ({placeholders})"
+                " ORDER BY event_id, observation_id",
+                tuple(unique),
+            ).fetchall()
+        grouped: dict[str, list[str]] = {}
+        for row in rows:
+            grouped.setdefault(row["event_id"], []).append(row["observation_id"])
+        return {event_id: tuple(items) for event_id, items in grouped.items()}
+
     def attach(self, event_id: str, observation_id: str) -> None:
         with self._database.connect() as connection, connection:
             connection.execute(
