@@ -114,3 +114,45 @@ def test_checker_flags_row_with_missing_dependency_columns(tmp_path):
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "sentrix/config.py: 行有 3 列，与表头的 5 列不一致" in result.stdout
+
+
+def test_checker_flags_duplicate_rows(tmp_path):
+    """重复行必须报红——这是这个 checker 原先的一个洞。
+
+    洞的形状不是「判据不覆盖重复行」，而是「判据的容器把重复行吃掉了」：
+    ``documented_paths()`` 返回 ``set``（重复只留一份），``documented_edges()``
+    返回 ``dict``（后一行覆盖前一行）。两条**逐字节相同**的行因此「写几遍都一样」，
+    而内容不同的两条也只是让覆盖后那一份被比到——文件集合那一半连这都抓不到。
+    **校验模型里不存在的量，就是没被校验的量。**
+
+    真实来历：``ee690e1``（Task 64）把那一行从 0 加到 1，``9f14c5d``（Task 65）
+    从 1 加到 2，位置是 ``docs/architecture/module-map.md`` 的第 66 / 67 行，
+    两行 ``md5sum`` 相同，两种状态 checker 都报 0 个问题。
+    """
+    src_root = tmp_path / "src"
+    package = src_root / "sentrix"
+    package.mkdir(parents=True)
+    (package / "config.py").write_text('"""Config."""\n', encoding="utf-8")
+    row = "| `sentrix/config.py` | 配置 | — | — | — |\n"
+    doc = tmp_path / "module-map.md"
+    doc.write_text(HEADER + row + row, encoding="utf-8")
+
+    result = run_checker(src_root, doc)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "module-map 有重复行" in result.stdout
+    assert "sentrix/config.py" in result.stdout
+
+
+def test_checker_accepts_a_table_without_duplicates(tmp_path):
+    """反向对照：不重复时不能报。没有这条，上面那条可能只是「永远报红」。"""
+    src_root = tmp_path / "src"
+    package = src_root / "sentrix"
+    package.mkdir(parents=True)
+    (package / "config.py").write_text('"""Config."""\n', encoding="utf-8")
+    doc = tmp_path / "module-map.md"
+    doc.write_text(HEADER + "| `sentrix/config.py` | 配置 | — | — | — |\n", encoding="utf-8")
+
+    result = run_checker(src_root, doc)
+
+    assert result.returncode == 0, result.stdout + result.stderr

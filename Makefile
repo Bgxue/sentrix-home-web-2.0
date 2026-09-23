@@ -31,8 +31,13 @@ format-check: ## ruff 格式检查（只读）
 typecheck: ## mypy strict（全包 + scripts）
 	.venv/bin/mypy
 
-arch: ## 分层契约检查（已在 ci 链上）
+# 两条互补的检查：lint-imports 管「谁不许 import 谁」，check_reachability 管
+# 「每个模块在生产装配路径上有没有调用者」。S4 两次交付「代码在、没人调」的能力
+# （零调用的纯规则、零调用的 SummarizeEvent），两次都是事后被用户点出来的——
+# 靠人记记不住，所以把它变成可机械判定的东西。
+arch: ## 分层契约检查 + 生产可达性（已在 ci 链上）
 	.venv/bin/lint-imports
+	$(PY) scripts/check_reachability.py
 
 test-unit: ## 单元测试
 	.venv/bin/pytest apps/api/tests/unit -q

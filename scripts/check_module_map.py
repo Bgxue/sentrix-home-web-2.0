@@ -110,6 +110,32 @@ def documented_paths(doc: Path) -> set[str]:
     return paths
 
 
+def documented_rows(doc: Path) -> list[str]:
+    """表格第一列的路径，**按出现顺序、保留重复**。
+
+    ``documented_paths`` 返回的是 set，重复路径在集合里只留一份——于是「同一行写了
+    两遍」在这条校验里根本不是一个可观测量。这个函数专门把「重复」变成看得见的东西。
+    """
+    text = doc.read_text(encoding="utf-8") if doc.exists() else ""
+    rows: list[str] = []
+    for line in text.splitlines():
+        match = ROW_RE.match(line)
+        if match:
+            rows.append(match.group(1))
+    return rows
+
+
+def duplicate_rows(doc: Path) -> list[str]:
+    """出现超过一次的第一列路径，按首次出现顺序。"""
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for path in documented_rows(doc):
+        if path in seen and path not in duplicates:
+            duplicates.append(path)
+        seen.add(path)
+    return duplicates
+
+
 def row_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
@@ -186,6 +212,16 @@ def main() -> int:
     in_doc = documented_paths(doc)
 
     problems: list[str] = []
+    # 重复行必须在这里拦下来，不能靠后面的集合/字典比对——那两个容器会把重复吃掉：
+    # documented_paths() 是 set（重复只留一份），documented_edges() 是 dict（后一行
+    # 覆盖前一行）。两条逐字节相同的行因此「写几遍都一样」，一条不同的行也只是让
+    # 覆盖后那一份被比到。**校验模型里不存在的量，就是没被校验的量。**
+    duplicates = duplicate_rows(doc)
+    rows = documented_rows(doc)
+    if duplicates:
+        problems.append(
+            f"module-map 有重复行：{len(rows)} 行、{len(set(rows))} 个唯一路径，重复的是 {duplicates}"
+        )
     for missing in sorted(in_code - in_doc):
         problems.append(f"代码里有但 module-map 未记录: {missing}")
     for stale in sorted(in_doc - in_code):
