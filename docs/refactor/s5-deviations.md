@@ -607,6 +607,65 @@ provider 链实测是 `['CUDAExecutionProvider', 'CPUExecutionProvider']`——�
 
 ---
 
+## 2i. Task 79 实施期实测到的偏离与发现（导入路径接线 + 身份预置）
+
+``d328878``（Task 79）落地，`make ci` 全绿（`928 passed / 16 skipped / coverage 98%`）。这一节记四条**结构性**偏离
+（计划的文件清单与实施时落点不一致，逐条写清为什么）与一条**杀不掉的变异**。
+
+### 计划 vs 实施：文件清单的四处偏离
+
+| # | 计划写的 | 实际落的 | 为什么 |
+|---|---|---|---|
+| 67 | `application/media/import_album.py`【改】 | `application/media/import_assets.py`【改】 + `api/routes/media.py`【改】 | **顺序约束在 `ImportAssets.execute` 里**，不在 `ImportAlbum` 里——后者只按文件循环调前者（``ImportAlbum.execute`` 的循环体只有一行 ``self._importer.execute(...)``）。人脸登记必须插在「写观察」与「事件归并」之间，那两件事都在 `ImportAssets` 里；改 `import_album.py` 改不出这个顺序。接线点仍在 `build_import_assets`（单张上传与整册导入共用同一处，这是它的原话） |
+| 68 | 三级降级落在 `application/identity/seed_identity.py` | 落在 `infrastructure/models/face_adapter.py` 的 `detect_identity_photo` | 后两级要**解码 / 缩放 / 重编码图片**（`application-purity` 契约禁掉 PIL），第三级还要**识别 session**（那是适配器私有状态）。1.0 能把它写在 `app.py` 里，是因为 `pipeline.face.identity_adapter` 当时是全局可达的；2.0 没有那个全局。用例（`SeedIdentity`）只负责「拿这些脸去建什么」 |
+| 69 | 未提 `domain/identity/ports.py` | 新增 `FaceDetector` 端口 | 容器字段**必须按 domain 端口声明**（`test_container_wiring.py` 强制），而人脸适配器此前没有任何端口。两个入口（`detect` / `detect_identity_photo`）的差别写在端口 docstring 里：**不是两种能力，是一套能力的两档召回策略** |
+| 70 | 未提 `test_face_embedding.py` | 三级降级的六条用例加在**适配器自己的**用例文件里 | 它们是适配器的行为，不是用例的行为。放进 `test_import_identity.py` 就要在那里重建一整套假件（StubFace / StubAnalysis / 假 session），而 `test_face_embedding.py` 里已经有现成的、且**判据表本身就是用它验的** |
+
+### 第 71 条 · 一条杀不掉的变异：`SeedIdentity` 选出的「最好的那张脸」在终态上不可观测
+
+红灯 B 的第三次变异（`max(chosen, key=…)` → `min(chosen, key=…)`，即代表向量改取**质量最低**
+的那张）**没有变红**。按纪律先怀疑「变异没落上去」与「用例没走到边界」，逐条排查：
+
+- 变异**确实落上去了**（`apply()` 的 `assert count == 1` 通过，且事后 `diff` 确认文件被改写）；
+- 用例**确实跑到了**那一行（临时插 `print` 实测，两条路径都执行）；
+- 排除了 `__pycache__` 陈旧的假说（删掉 `__pycache__` 重跑，结果不变）。
+
+**根因**：`FaceRepository.refresh_prototypes` 在重算原型时**顺带把代表向量也重写了**
+（`repositories/faces.py:389-400`，取当前实例里质量最高的那一张）。而 `SeedIdentity` 落实例时
+写的 `quality` 就是它选代表时的那个键——**两条路径用的是同一条规则，所以终态永远一致**，
+`create_cluster` 那一刻传进去的向量在两行之后就被覆盖了。
+
+**判决：照搬 1.0，不改，如实登记。** 1.0 的 `seed_person_identity` 同样是「先按质量选出代表
+向量写进簇，再 `_refresh_face_prototypes`」；去掉前一步会让 2.0 与 1.0 在「簇建出来到刷新
+原型之间」有一个可观测的中间态差异，而那个窗口在单线程用例里根本不存在。
+**代价如实记**：这条选脸逻辑没有任何门禁用例能钉住它，它是一行**等价但不可观测**的代码。
+
+### 第 72 条 · 预置出来的簇 `revision` 是 1，1.0 是 0
+
+1.0 用一条 `INSERT ... status='confirmed'` 直接把簇建成已确认（`revision` 取 DDL 默认 0）。
+2.0 走 `create_cluster` → `confirm_cluster`，后者带 `revision = revision + 1`。
+**终态的语义一致**（都是「一个已确认的、挂着人的簇」），差的是那一个计数器。
+不为了对齐它去改 `confirm_cluster`——那个 `+1` 是簇审阅路径（Task 73）真实需要的修订号，
+为预置这一条路径把它去掉，等于让审阅路径少一次修订。
+
+### 第 73 条 · 预置实例的 `validity` 写死 `uncertain`
+
+1.0 的 `seed_person_identity` 那条 INSERT **不含 `validity` 列**，落的是 DDL 默认值
+`'uncertain'`（`db.py:1238` 的 `_ensure_columns`）。2.0 的仓储 `add_instance` 要求显式传，
+所以这里**显式传 `uncertain`**——不是为了「更安全」，是为了**与 1.0 的落库结果一致**：
+预置走的是「用户说这是谁」，不是 SCRFD 复核，两种证据强度不该在同一个字段上抹平。
+**这一条有用例钉住**（`test_seeded_instances_carry_the_uncertain_validity`）。
+
+### 第 74 条 · 导入路径的对照用例断言的是「内容」不是「调用序」
+
+`test_a_matching_face_is_already_a_mention_when_the_event_is_decided` 里，事件归并那一步
+**去库里查 `entity_mentions`**，断言查到 1 行——而不是断言「`faces` 排在 `events` 前面」。
+两种写法在正常实现下都绿，但把顺序倒过来时：前者红在「这一刻还没有提及」（这正是
+`person_score` 恒 0 的成因），后者只红在「列表顺序不对」。**要钉的是后果，不是顺序本身**。
+（顺序也顺带断了一条 `order == ["faces", "events"]`，作为失败时的第一手线索。）
+
+---
+
 ## 3. 这份文档没有做的事（如实记录）
 
 1. **没有跑 1.0 的测试套件。** 所有 1.0 的行为都是从**源码 + 行号**读出来的，
