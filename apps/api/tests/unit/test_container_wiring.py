@@ -15,14 +15,12 @@ from sentrix.bootstrap.container import Container
 
 # 显式例外：类型确实落在 sentrix.infrastructure 下，而且**故意**如此。
 # 一个说不出理由的例外名单会把这条不变量重新变成摆设，所以每条都必须写明为什么。
+# 只剩一条：``spaces`` 那条在 Task 76 被消掉了——MemorySpace 与 SpaceRepository 都
+# 进了 domain，字段改按端口声明。
 EXCEPTIONS: dict[str, str] = {
     "database": (
         "共享连接工厂，不是任何一个端口的实现（多个仓储共用同一个连接来源），"
         "且 database_healthy() 直接需要它；domain 里没有「数据库池」这个概念可依。"
-    ),
-    "spaces": (
-        "目前没有任何 application / api 消费者，为它补端口是投机抽象。"
-        "记忆空间的用例落地时，把 MemorySpace 一并迁进 domain 再补 SpaceRepository。"
     ),
 }
 

@@ -1,19 +1,17 @@
-"""MemorySpace 仓储。2.0 是空库，只需 ensure/list。"""
+"""MemorySpace 仓储。2.0 是空库，只需 ensure/list。
+
+**只剩 SQL。** 记录类型与端口都搬去了 ``domain/spaces``（Task 76）：``MemorySpace`` 是
+领域的数据，不是这个适配器的返回形状——``include_in_people`` 那条规则（评测空间聚出来的
+人脸不进人物视图）由两个仓储按它过滤，那是领域规则，只是恰好存在一行数据里。
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
+from sentrix.domain.spaces.models import MemorySpace
 from sentrix.infrastructure.persistence.database import Database
-
-
-@dataclass(frozen=True, slots=True)
-class MemorySpace:
-    id: str
-    name: str
-    kind: str
-    status: str
 
 
 class SqliteSpaceRepository:
@@ -31,7 +29,7 @@ class SqliteSpaceRepository:
             )
         return scope_id
 
-    def list_all(self) -> list[MemorySpace]:
+    def list_all(self) -> Sequence[MemorySpace]:
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, name, kind, status FROM memory_spaces ORDER BY created_at"

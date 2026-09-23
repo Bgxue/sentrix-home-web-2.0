@@ -43,6 +43,7 @@ from sentrix.domain.retrieval.ports import (
     VectorRepository,
     VisualEmbedder,
 )
+from sentrix.domain.spaces.ports import SpaceRepository
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
@@ -86,9 +87,7 @@ class Container:
     # 且 database_healthy() 直接需要它。domain 里没有「数据库池」这个概念可依。
     database: Database
 
-    # 例外：目前没有任何 application / api 消费者，为它补端口是投机抽象。
-    # 记忆空间的用例落地时，把 MemorySpace 一并迁进 domain 再补 SpaceRepository。
-    spaces: SqliteSpaceRepository
+    spaces: SpaceRepository
 
     asset_repository: AssetRepository
     observation_repository: ObservationRepository
