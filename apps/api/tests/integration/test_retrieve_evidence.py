@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_evidence import (
     EvidenceRequest,
     RetrieveEvidence,
@@ -148,6 +149,7 @@ def library(migrations_ready_db: Database, tmp_path: Path):
     return {
         "assets": assets,
         "places": places,
+        "observations": observations,
         "index": index,
         "vectors": vectors,
         "embedder": ScriptedEmbedder(query=QUERY, images=payloads),
@@ -162,6 +164,7 @@ def build(library) -> RetrieveEvidence:
 
     return RetrieveEvidence(
         visual=RetrieveVisual(embedder=library["embedder"], vectors=library["vectors"], index=None),
+        entity=RetrieveEntity(index=library["index"], observations=library["observations"]),
         lexical=RetrieveLexical(index=library["index"]),
         metadata=RetrieveMetadata(
             assets=library["assets"],

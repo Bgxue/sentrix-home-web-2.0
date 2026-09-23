@@ -96,6 +96,18 @@ class LexicalSearch(Protocol):
 
     def exact_assets(self, whole_query: str, *, scope_id: str | None) -> frozenset[str]: ...
 
+    def assets_for_person(self, name: str, *, scope_id: str | None) -> frozenset[str]:
+        """含这个人的 asset 集合，读 ``observation_search_terms`` 的 ``person_bridge`` 行。
+
+        1.0 ``retrieval/entity.py:33-49`` 那条查询。**名字按整串精确匹配**（与写入时的
+        ``normalize_text`` 同一口径），不做子串：人名是短词，「妈」命中「妈妈」与
+        「姑妈」是两件不同的事。
+
+        查不到就返回空集——**空集与「这个人在库里没有照片」在调用方是一回事**，
+        由 ``RetrieveEntity`` 决定要不要退回直接读观察。
+        """
+        ...
+
 
 class VectorRepository(Protocol):
     """权威向量存储。SQLite 是唯一实现，也是索引重建的数据来源。"""

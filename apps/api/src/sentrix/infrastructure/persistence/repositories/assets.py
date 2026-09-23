@@ -112,8 +112,8 @@ class SqliteAssetRepository:
 
 _OBSERVATION_COLUMNS = (
     "id, scope_id, asset_id, source_type, captured_at, confidence, caption, place, activity,"
-    " event_type, ocr_text, objects_json, clothing_json, facts_json, revision, created_at,"
-    " updated_at"
+    " event_type, ocr_text, objects_json, clothing_json, people_json, facts_json, revision,"
+    " created_at, updated_at"
 )
 
 
@@ -136,6 +136,27 @@ def _json_facts(value: str | None) -> tuple[ObservationFact, ...]:
         for item in parsed
         if isinstance(item, dict)
     )
+
+
+def _json_people(value: str | None) -> tuple[str, ...]:
+    """``people_json`` → 名字元组。
+
+    写入侧（``entities.py`` 的 ``_append_person_snapshot``）存的是
+    ``{"entity_id":…, "name":…, "status":…}``；1.0 把它整条 ``str()`` 进了词法投影
+    （见 ``domain/retrieval/lexical.py`` 的字段表注释），2.0 只取名字。
+    """
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    names: list[str] = []
+    for item in parsed:
+        name = str(item.get("name") or "").strip() if isinstance(item, dict) else str(item).strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def _json_list(value: str | None) -> tuple[str, ...]:
@@ -165,6 +186,7 @@ def row_to_observation(row: sqlite3.Row) -> Observation:
         ocr_text=row["ocr_text"] or "",
         objects=_json_list(row["objects_json"]),
         clothing=_json_list(row["clothing_json"]),
+        people=_json_people(row["people_json"]),
         facts=_json_facts(row["facts_json"]),
         revision=row["revision"],
     )
@@ -179,8 +201,8 @@ class SqliteObservationRepository:
             connection.execute(
                 "INSERT INTO observations (id, scope_id, asset_id, source_type, captured_at,"
                 " confidence, caption, place, activity, event_type, ocr_text, objects_json,"
-                " clothing_json, facts_json, revision, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " clothing_json, people_json, facts_json, revision, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     observation.id,
                     observation.scope_id,
@@ -195,6 +217,10 @@ class SqliteObservationRepository:
                     observation.ocr_text,
                     json.dumps(list(observation.objects), ensure_ascii=False),
                     json.dumps(list(observation.clothing), ensure_ascii=False),
+                    json.dumps(
+                        [{"name": name, "status": "confirmed"} for name in observation.people],
+                        ensure_ascii=False,
+                    ),
                     json.dumps([dataclasses.asdict(item) for item in observation.facts], ensure_ascii=False),
                     observation.revision,
                     observation.created_at.isoformat(),

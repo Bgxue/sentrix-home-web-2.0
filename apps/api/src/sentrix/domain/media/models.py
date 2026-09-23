@@ -159,6 +159,10 @@ class Observation:
     ocr_text: str = ""
     objects: tuple[str, ...] = ()
     clothing: tuple[str, ...] = ()
+    # 这条观察里**已确认**的人的名字快照。写入者是 ``EntityRepository.link_confirmed_mention``
+    # （跟着提及一起写），读它的是词法投影的 ``person_bridge`` 字段。存名字而不是 id：
+    # 这一列是给人看的检索面，按 id 建词法投影等于让人去搜 ``ent_ab12cd34``。
+    people: tuple[str, ...] = ()
     # 模型自报的候选事实（1.0 ``observations`` 上没有这一列，它们只活在
     # ``assets.metadata_json["fact_ids"]`` 与那次调用的内存里）。2.0 单开一列而不是塞进
     # ``detail_json``：事实是**有结构**的东西，``subject/predicate/object`` 三个字段直接
