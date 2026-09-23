@@ -56,7 +56,7 @@ def seeded_db(migrations_ready_db: Database) -> Database:
 
 
 @pytest.fixture
-def name_person(seeded_db: Database, confirmed_person_events) -> NamePerson:
+def name_person(seeded_db: Database) -> NamePerson:
     return NamePerson(
         faces=SqliteFaceRepository(seeded_db),
         entities=SqliteEntityRepository(seeded_db),
@@ -64,7 +64,6 @@ def name_person(seeded_db: Database, confirmed_person_events) -> NamePerson:
             faces=SqliteFaceRepository(seeded_db),
             entities=SqliteEntityRepository(seeded_db),
             facts=SqliteFactRepository(seeded_db),
-            events=confirmed_person_events(seeded_db),
         ),
     )
 

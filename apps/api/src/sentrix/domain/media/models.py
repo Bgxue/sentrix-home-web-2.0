@@ -103,35 +103,6 @@ class Asset:
             raise ValueError(f"未知 media_type: {self.media_type!r}")
 
 
-# 1.0 ``model_clients.py:1190``：``normalize_fact_confidences(parsed.get("facts"), 0.65)``。
-# 模型没给 confidence 时用它。它在**观察器**这一层，与 ``maintain_facts`` 那一层
-# 处理「观察整体置信度」的兜底不是同一个数。
-MODEL_FACT_CONFIDENCE = 0.65
-
-# 1.0 ``model_clients.py`` 的提示词原文：``facts 最多8项``。
-MODEL_FACT_LIMIT = 8
-
-
-@dataclass(frozen=True, slots=True)
-class ObservationFact:
-    """模型自报的一条候选事实。1.0 ``model_clients.py`` 的 ``facts`` 数组元素。
-
-    **候选由模型自报，写法由规则决定**（用户裁决④）。这两句不矛盾，是两件事：
-    模型只负责说「画面上这个人好像去过赵县」，至于这条候选落成 ``active`` 还是
-    ``pending``、要不要合并证据、要不要记 ``supersedes``，全在
-    ``domain/memories/facts.py`` 的 ``decide_fact_write`` 里。
-
-    形状定义在 media 而不是 memories，是因为它**是观察的一部分**（跟着
-    ``ObservationSemantics`` 一起从观察器出来、跟着 Observation 一起落库）；
-    ``domain/memories/events.py`` 反过来要 import ``GpsPoint``，两边互相 import 就成环了。
-    """
-
-    subject: str
-    predicate: str
-    object: str
-    confidence: float = MODEL_FACT_CONFIDENCE
-
-
 @dataclass(frozen=True, slots=True)
 class Observation:
     """一次导入对资产抽取出的观察结果。
@@ -159,16 +130,6 @@ class Observation:
     ocr_text: str = ""
     objects: tuple[str, ...] = ()
     clothing: tuple[str, ...] = ()
-    # 这条观察里**已确认**的人的名字快照。写入者是 ``EntityRepository.link_confirmed_mention``
-    # （跟着提及一起写），读它的是词法投影的 ``person_bridge`` 字段。存名字而不是 id：
-    # 这一列是给人看的检索面，按 id 建词法投影等于让人去搜 ``ent_ab12cd34``。
-    people: tuple[str, ...] = ()
-    # 模型自报的候选事实（1.0 ``observations`` 上没有这一列，它们只活在
-    # ``assets.metadata_json["fact_ids"]`` 与那次调用的内存里）。2.0 单开一列而不是塞进
-    # ``detail_json``：事实是**有结构**的东西，``subject/predicate/object`` 三个字段直接
-    # 被 ``is_writable_fact`` 与 ``decide_fact_write`` 读，摊平进一个无结构 blob 之后
-    # 那两个纯规则就只能靠字符串约定去取字段了。
-    facts: tuple[ObservationFact, ...] = ()
     revision: int = 1
 
     def __post_init__(self) -> None:

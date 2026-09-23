@@ -70,15 +70,18 @@ ci: lint format-check typecheck arch check-docs coverage web-check ## CI 门禁
 # 前端门禁。类型检查必须用 `tsc -b`，不能用 `tsc --noEmit`：apps/web/tsconfig.json 是
 # {"files": [], "references": [...]} 结构，普通 tsc 不遍历 project references，
 # `npx tsc --noEmit --listFiles` 实测命中 0 个文件、恒 exit 0——它看起来在检查，其实永远通过。
-# 三件事分开跑而不是 `npm run build`：类型 / lint / 构建的失败信息各自直接，
+# 四件事分开跑而不是 `npm run build`：类型 / lint / 测试 / 构建的失败信息各自直接，
 # 且 `npx vite build` 省掉 build 脚本里那次重复的 tsc -b。
+# vitest 排在 vite build **之前**：构建最慢，而测试慢几十毫秒就能报出「逻辑错了」，
+# 让它先说话，人不用等完一次打包才知道。
 # 第一条存在性断言是给"跳过 install / node_modules 被删"兜底的：此时 npx 会去下冒名包
 # tsc@2.0.4 并打印 "This is not the tsc command you are looking for"，那句话不指向缺依赖。
 # 断言先拦下来，只说该做什么。
-web-check: ## 前端门禁：tsc -b + oxlint + vite build
+web-check: ## 前端门禁：tsc -b + oxlint + vitest + vite build
 	@test -d apps/web/node_modules || { echo "缺少 apps/web/node_modules，请先跑 make install"; exit 1; }
 	cd apps/web && npx tsc -b
 	cd apps/web && npx oxlint
+	cd apps/web && npx vitest run
 	cd apps/web && npx vite build
 
 dev: ## 起 2.0 API（8191）

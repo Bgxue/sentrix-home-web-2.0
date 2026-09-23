@@ -183,57 +183,6 @@ class FaceRepository(Protocol):
 
     def list_prototypes(self, cluster_id: str) -> Sequence[FacePrototypeRecord]: ...
 
-    def list_verified_instances(
-        self, *, scope_id: str | None, minimum_quality: float
-    ) -> Sequence[FaceInstanceRecord]:
-        """全局重聚类要过的那批脸。1.0 ``db.py:4961-4967`` 的四个条件，一个都不能少：
-
-        - ``embedding_json != '[]'``——没有向量的脸不参与建簇；
-        - ``cluster_id IS NOT NULL``——这张脸已经属于某个簇（整表重算算的是**已归簇**
-          的那批，还没归属的由在线匹配那条路管）；
-        - ``quality >= minimum_quality``——质量门；
-        - ``validity = 'verified'``——复核过的脸才算数。少这一条，被复核判为
-          ``uncertain`` 的脸会以「可信证据」的身份参与建簇，而它们正是最容易同时像
-          好几个人的那一批。
-
-        ``scope_id`` 为空表示跨空间（1.0 的 ``scope_id=None``）。
-        """
-        ...
-
-    def assign_instances(self, instance_ids: Sequence[str], cluster_id: str) -> int:
-        """把一批脸整体改挂到某个簇，返回改了几条。
-
-        与 ``move_instances``（按源簇整体搬）不同：重聚类算出来的分组**不是**按源簇切的
-        ——一个源簇的成员会被分到不同组里，所以只能按实例 id 逐个改。
-        """
-        ...
-
-    def set_cluster_state(self, cluster_id: str, *, status: str, member_count: int) -> None:
-        """直接写簇的状态与成员数，``revision + 1``，**不动** ``entity_id``。
-
-        重聚类保留的那个簇（``keep_id``）要按算出来的分组改状态：组里有已确认的簇
-        就是 ``confirmed``，否则 ``pending``。归属不在这条路上改——重聚类不改「这簇是
-        谁」，只改「哪些脸在一簇」。
-        """
-        ...
-
-    def list_uncertain_unclustered(self, *, scope_id: str | None) -> Sequence[FaceInstanceRecord]:
-        """认领的候选脸：``validity='uncertain'``、有向量、且 ``cluster_id IS NULL``。
-
-        1.0 ``_attach_uncertain_faces``（``db.py:5054-5060``）的三个条件。**只认领、
-        绝不新建簇**：小图 / 遮挡检出的脸单独立簇会造出一堆只有一张脸的候选，
-        而它们与已确认的人高度相似时其实是同一批人。
-        """
-        ...
-
-    def list_confirmed_clusters(self, scope_id: str, *, minimum_members: int) -> Sequence[FaceClusterRecord]:
-        """认领的目标：同空间、已确认、成员数不低于 ``minimum_members`` 的簇。
-
-        1.0 ``_find_attach_cluster``（``db.py:5085-5088``）的字面量是 ``>= 2``——
-        只有一张脸的「已确认」簇还没有稳定的代表向量，把不确定的脸挂上去等于放大噪声。
-        """
-        ...
-
     def refresh_prototypes(self, cluster_id: str) -> Sequence[FacePrototypeRecord]:
         """按当前实例重算该簇的原型并回写 ``member_count``。
 
@@ -388,18 +337,6 @@ class EntityRepository(Protocol):
         """
         ...
 
-    def confirmed_person_names(self, scope_id: str) -> frozenset[str]:
-        """本 scope 内已确认人物的**本名**集合。1.0 ``is_confirmed_person_name``（``db.py:1494``）。
-
-        这是事实写入门禁（``MaintainFacts`` 的第二段合取）的取值来源。三条判据照抄：
-        ``entity_type='person'``、``status='confirmed'``、``canonical_name`` **精确相等**。
-
-        **不查别名**，这不是遗漏：某人的别名常常是另一个人的本名（家里人互相叫小名），
-        按别名放行会让模型自报的一条事实落到错的人头上，而事实表按
-        ``(scope, subject, predicate)`` 唯一——写错之后连「这条是谁的」都看不出来。
-        """
-        ...
-
     def confirmed_people_for_observation(self, observation_id: str) -> frozenset[str]:
         """这条观察里**已确认**的人物 id。1.0 ``db.py:2241``。
 
@@ -417,20 +354,6 @@ class EntityRepository(Protocol):
 
         与按观察查的那条差别只在 JOIN 的那一跳——事件的人物是它的成员观察带进来的，
         所以两边用的是同一份提及数据，不会出现「观察里有、事件里没有」的第三种状态。
-        """
-        ...
-
-    def retire_unclustered_candidates(self) -> int:
-        """把已经没有活着的人脸簇的候选人物转 ``rejected``，返回转了几行。
-
-        1.0 ``_sync_face_entity_statuses``（``db.py:5118-5132``）：全局重聚类会把一些簇
-        整个撤掉（成员被并走、或全被判成 noise），那些簇的候选实体就成了孤儿——
-        它们还在人物列表里显示成「待命名成员」，点进去一张脸都没有。
-        **已确认的人永远不动**：用户认过的人不会因为一次聚类重算而消失。转状态而不是
-        删行，理由写在 ``RETIRED_CANDIDATE_SUMMARY`` 那里。
-
-        跨空间是**有意**的：1.0 的循环没有 scope 条件，而实体与簇都在同一次重聚类里
-        被改过，只看一个空间会留下一半孤儿。没有参数也就没有「传错了 scope」这种错。
         """
         ...
 

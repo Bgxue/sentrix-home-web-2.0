@@ -82,15 +82,6 @@ WEIGHTS = {
 
 SPLIT_GUARD_SEMANTIC_VISUAL_CONFLICT = "semantic_visual_conflict"
 
-# 1.0 ``db.py:5570``：人脸簇被确认之后，这个人在事件里的角色是「画面里的人」。
-# 它与 ``captured_by`` 是两个角色而不是一个：同一个人可以既是画面里的人又是拍摄者，
-# ``event_participants`` 的 ``UNIQUE(event_id, person_id, role)`` 正是为此留的。
-PARTICIPANT_ROLE_VISIBLE_SUBJECT = "visible_subject"
-# 1.0 ``db.py:5570`` 的字面量。0.75 低于用户确认的 1.0（``confirm_face_cluster`` 的家
-# 庭角色事实）——「这簇脸是这个人」是用户按下的，而「这张照片里出现了这个人」是聚类
-# 推断出来的，两者不是同一种确定度。
-VISIBLE_SUBJECT_CONFIDENCE = 0.75
-
 
 def normalise_tokens(value: object) -> frozenset[str]:
     """1.0 ``db.py:1992-1998`` 的 ``_tokens``。
@@ -132,27 +123,6 @@ class EventRecord:
     # 事件的落库时间。``time_start`` 缺失时按日期分组要退回它——回退规则属于后端，
     # 否则两个前端会把同一份数据分到不同的天。
     created_at: datetime | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class EventParticipantRecord:
-    """``event_participants`` 一行，带出这个人当前的名字与状态（1.0 ``list_event_participants``
-    的 JOIN）。
-
-    ``person_name`` / ``person_status`` 是**读时快照**，不是这张表的列：它们是投影，
-    改一次名字不该回头重写历史参与记录。事件摘要要拿名字去拼，所以这一层就带出来，
-    免得调用方再逐条回查实体。
-    """
-
-    id: str
-    event_id: str
-    person_id: str
-    role: str
-    evidence_ids: tuple[str, ...]
-    confidence: float
-    revision: int = 1
-    person_name: str = ""
-    person_status: str = ""
 
 
 @dataclass(frozen=True, slots=True)

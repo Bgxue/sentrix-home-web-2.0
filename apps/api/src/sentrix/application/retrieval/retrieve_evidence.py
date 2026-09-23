@@ -16,8 +16,8 @@ S4 只搬前两步。后两步要种子分级与 ``EvidencePacket``，属于 S6�
 - 融合只有一次调用，权重表用 ``DEFAULT_CHANNEL_WEIGHTS``：``evidence_retrieval.py:241-243``
   → ``retrieval/ranking.py:101-110``（``weighted_rrf`` 分支）→ ``fusion.fuse``；
 - **缺通道的形态是「不出现」**，不是空列表也不是错误。1.0 里没启用的通道压根不在
-  ``retrievers`` 列表里，``channel_hits`` 里就没有那个键。2.0 的 entity 到 S5b 才有类
-  （Task 83），text_ann 要等 S6——后者在这里连调用都没有，不是「调了然后返回空」。
+  ``retrievers`` 列表里，``channel_hits`` 里就没有那个键。2.0 的 entity / text_ann
+  到 S5 / S6 才有类，所以这里连调用都没有——不是「调了然后返回空」。
 
 **adjacency 不接。** 1.0 ``configs/retrieval/defaults.json:10`` 里 ``"adjacency": false``，
 它连实例都不会被建；即使建了，``kind="expander"`` 也让它不进并行召回——Kernel 拿
@@ -37,7 +37,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
 from sentrix.application.retrieval.retrieve_visual import (
@@ -50,7 +49,6 @@ from sentrix.domain.retrieval.fusion import DEFAULT_CHANNEL_WEIGHTS, fuse
 from sentrix.domain.retrieval.models import CandidateHit
 
 METADATA_CHANNEL = "metadata"
-ENTITY_CHANNEL = "entity"
 LEXICAL_CHANNEL = "lexical"
 VISUAL_CHANNEL = "visual_ann"
 
@@ -83,11 +81,6 @@ class EvidenceRequest:
     negated_media: tuple[MediaType, ...] = ()
     time_bounds: tuple[datetime, datetime] | None = None
     place: str = ""
-    # 人物条件（1.0 ``RetrievalQuery.constraints`` 里 ``dimension == "person"`` 的那几条）。
-    # 与上面三个正向条件同一个处境：S5 的 HTTP 端点还传不了它（把「妈妈的照片」解析成
-    # 人物条件属于 S6 的查询解析），但 **entity 通道只在有人物条件时才给召回信号**——
-    # 这个字段不存在的话，那条通道在类型上就没法被喂过，它会永远返回空，而不是「被接上了」。
-    person: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +129,7 @@ def _visual_candidates(result: VisualSearchResult) -> tuple[CandidateHit, ...]:
 
 
 class RetrieveEvidence:
-    """四条 primary 通道（metadata / entity / lexical / visual_ann）→ 一次加权 RRF。"""
+    """三条 primary 通道 → 一次加权 RRF。"""
 
     def __init__(
         self,
@@ -144,12 +137,10 @@ class RetrieveEvidence:
         visual: RetrieveVisual,
         lexical: RetrieveLexical,
         metadata: RetrieveMetadata,
-        entity: RetrieveEntity,
     ) -> None:
         self._visual = visual
         self._lexical = lexical
         self._metadata = metadata
-        self._entity = entity
 
     def execute(self, request: EvidenceRequest) -> EvidenceResult:
         text = request.text.strip()
@@ -170,13 +161,6 @@ class RetrieveEvidence:
                 media_types=request.media_types,
                 negated_media=request.negated_media,
                 place=request.place,
-            ),
-            # entity 排在 metadata 之后、lexical 之前——1.0 ``build_default_retrievers``
-            # 的构建顺序就是 metadata → entity → lexical → visual_ann。anchor 加成按
-            # **候选第一次出现时**的通道给，顺序换了，同时被 entity 与 lexical 命中的
-            # 候选就拿不到那 +1.0。
-            ENTITY_CHANNEL: self._entity.execute(
-                people=request.person, scope_id=request.scope_id, limit=recall_limit
             ),
             LEXICAL_CHANNEL: self._lexical.execute(
                 whole_query=text, scope_id=request.scope_id, limit=recall_limit

@@ -68,11 +68,6 @@ PENDING_CLUSTER_NAME = "待命名成员"
 PENDING_CLUSTER_NAME_PREFIX = "待确认人物簇"
 PENDING_CLUSTER_SUMMARY = "由 buffalo_l embedding 生成，等待用户确认"
 
-# 全局重聚类之后，已经没有活着的人脸簇的候选人物会被转成 rejected——**删掉的是状态，
-# 不是行**：这个人在确认之前的所有痕迹（簇、实例、提及、修订）都要留在库里可查。
-# 1.0 ``db.py:5129`` 的原文，一字不差。
-RETIRED_CANDIDATE_SUMMARY = "该人物候选已因全局重聚类失效，保留历史审计记录"
-
 
 def pending_cluster_name(cluster_id: str) -> str:
     """新簇的实体内部名。1.0 是 ``f"待确认人物簇 · {cluster_id}"``，分隔符是两个字符。

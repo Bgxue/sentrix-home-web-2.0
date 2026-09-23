@@ -15,11 +15,51 @@ interface AssetListResponse {
   items: AssetSummary[];
 }
 
+/** 后端统一错误体的形状（``apps/api/src/sentrix/api/errors.py``）。 */
+interface ApiErrorBody {
+  code: string;
+  message: string;
+  detail: string;
+}
+
+/**
+ * 带 ``code`` 的接口错误。
+ *
+ * 按 ``code`` 分支而不是按状态码猜：``code`` 才是后端契约里的字段，状态码只是它的
+ * 载体——同一件事的状态码变过（空名字刻意保持 400 而不是 pydantic 的 422），按状态码
+ * 写的分支会在那次变更里静默走错。
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail: string;
+
+  constructor(status: number, body: ApiErrorBody | null, raw: string) {
+    super(body === null ? `Sentrix API ${status}: ${raw}` : body.message || body.code);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = body === null ? "unknown" : body.code;
+    this.detail = body === null ? raw : body.detail;
+  }
+}
+
+function parseApiError(raw: string): ApiErrorBody | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && "code" in parsed) {
+      return parsed as ApiErrorBody;
+    }
+  } catch {
+    // 非 JSON 的错误体（反向代理的 502 页面之类）原样留在 raw 里，走兜底分支。
+  }
+  return null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE}${path}`, init);
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Sentrix API ${response.status}: ${body}`);
+    const raw = await response.text();
+    throw new ApiError(response.status, parseApiError(raw), raw);
   }
   return (await response.json()) as T;
 }
@@ -250,4 +290,221 @@ export function resultSetPhotoUrl(
     query.set("original", "1");
   }
   return `${BASE}/assistant/result-sets/${encodeURIComponent(resultSetId)}/photo?${query}`;
+}
+
+// ---- 身份 / 人脸簇 ---------------------------------------------------------------
+
+/**
+ * 簇里的一张样本脸。
+ *
+ * ``crop_url`` **是服务端拼好的整串**（``schemas/identity.py`` 的类注释）：前端只负责
+ * 把它塞进 ``<img src>``，不再自己拼 ``/api/v1/face-instances/{id}/crop``。1.0 两个地方
+ * 各拼一次，路径一改就要同时改两处。
+ */
+export interface FaceCropRef {
+  face_instance_id: string;
+  asset_id: string;
+  observation_id: string;
+  file_name: string;
+  media_type: string;
+  bbox: number[];
+  detection_confidence: number;
+  quality: number;
+  crop_url: string;
+}
+
+/**
+ * 一簇脸。``canonical_name`` 与 ``family_role`` 为空是**未命名**，不是缺字段。
+ *
+ * ``reviewable`` / ``single_sample`` 是**服务端算好的派生布尔**（1.0 ``db.py:5146`` 的
+ * 同一对）：能不能审、是不是只有一张脸的孤证。前端据此决定按钮可用状态，不重算规则。
+ */
+export interface FaceClusterSummary {
+  id: string;
+  scope_id: string;
+  status: string;
+  entity_id: string | null;
+  canonical_name: string | null;
+  family_role: string | null;
+  entity_status: string | null;
+  member_count: number;
+  confidence: number;
+  revision: number;
+  created_at: string | null;
+  updated_at: string | null;
+  reviewable: boolean;
+  single_sample: boolean;
+  samples: FaceCropRef[];
+}
+
+/** 一个人物实体。``confirmed`` 与 ``status`` 并存是 1.0 的契约，两个都留着。 */
+export interface PersonPayload {
+  id: string;
+  scope_id: string;
+  canonical_name: string;
+  status: string;
+  family_role: string | null;
+  summary: string;
+  confidence: number;
+  confirmed: boolean;
+  aliases: string[];
+}
+
+interface FaceClusterListResponse {
+  clusters: FaceClusterSummary[];
+}
+
+interface PersonListResponse {
+  people: PersonPayload[];
+}
+
+/** ``merged_into`` 非空表示这次确认并进了另一个已存在的人（同名合并）。 */
+export interface ConfirmClusterResponse {
+  entity: PersonPayload;
+  merged_into: string | null;
+}
+
+/** ``rejected_entity_id`` 为空表示这一簇本来就没有候选实体，调用没有改动任何行。 */
+export interface RejectClusterResponse {
+  cluster_id: string;
+  rejected_entity_id: string | null;
+}
+
+export interface PersonDetailResponse {
+  entity: PersonPayload;
+  avatar_face_instance_id: string | null;
+  clusters: FaceClusterSummary[];
+}
+
+export interface RenamePersonResponse {
+  entity: PersonPayload;
+  aliases: string[];
+}
+
+export interface BatchConfirmItem {
+  person_id: string;
+  name: string;
+  family_role?: string | null;
+}
+
+export interface BatchConfirmOutcome {
+  person_id: string;
+  entity_id: string;
+  name: string;
+  family_role: string | null;
+  merged: boolean;
+}
+
+export interface BatchConfirmFailure {
+  person_id: string;
+  name: string;
+  error: string;
+}
+
+/** 批量确认**不做全或无**：一件失败不影响其余，逐件回执。 */
+export interface BatchConfirmResponse {
+  confirmed: BatchConfirmOutcome[];
+  failed: BatchConfirmFailure[];
+  count: number;
+}
+
+/**
+ * 簇列表。**默认不含 rejected**——后端 ``list_clusters(status=None)`` 就是这个语义，
+ * 前端不自己过滤。传 ``status`` 再切一刀。
+ */
+export async function listFaceClusters(
+  scopeId: string,
+  status?: string,
+): Promise<FaceClusterSummary[]> {
+  const params = new URLSearchParams({ scope_id: scopeId });
+  if (status) {
+    params.set("status", status);
+  }
+  const body = await request<FaceClusterListResponse>(`/face-clusters?${params.toString()}`);
+  return body.clusters;
+}
+
+/**
+ * 确认一簇脸，给它一个名字。``name`` 允许为空串——空名字是**用例的判据**（400），
+ * 不是请求格式错，所以这里不替后端拦。
+ */
+export async function confirmFaceCluster(
+  clusterId: string,
+  payload: { name: string; family_role?: string | null },
+): Promise<ConfirmClusterResponse> {
+  return request<ConfirmClusterResponse>(`/face-clusters/${encodeURIComponent(clusterId)}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: payload.name, family_role: payload.family_role ?? null }),
+  });
+}
+
+/** 拒绝一簇：删掉候选实体，原始照片不受影响。 */
+export async function rejectFaceCluster(clusterId: string): Promise<RejectClusterResponse> {
+  return request<RejectClusterResponse>(`/face-clusters/${encodeURIComponent(clusterId)}/reject`, {
+    method: "POST",
+  });
+}
+
+/**
+ * 合并两个簇：``source`` 的样本并进 ``target``，返回合并后的 ``target``。
+ *
+ * 两个 id 都由调用方的多选给出，方向由调用方指定——后端不做「哪个更像谁」的推断。
+ */
+export async function mergeFaceClusters(
+  targetClusterId: string,
+  sourceClusterId: string,
+): Promise<FaceClusterSummary> {
+  return request<FaceClusterSummary>("/face-clusters/merge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      target_cluster_id: targetClusterId,
+      source_cluster_id: sourceClusterId,
+    }),
+  });
+}
+
+/** 从一簇里拆出一张脸，返回**新建的那个簇**（不是原簇）。 */
+export async function splitFaceCluster(
+  clusterId: string,
+  faceInstanceId: string,
+): Promise<FaceClusterSummary> {
+  return request<FaceClusterSummary>(`/face-clusters/${encodeURIComponent(clusterId)}/split`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ face_instance_id: faceInstanceId }),
+  });
+}
+
+export async function listPeople(scopeId: string, status?: string): Promise<PersonPayload[]> {
+  const params = new URLSearchParams({ scope_id: scopeId });
+  if (status) {
+    params.set("status", status);
+  }
+  const body = await request<PersonListResponse>(`/people?${params.toString()}`);
+  return body.people;
+}
+
+export async function getPerson(personId: string): Promise<PersonDetailResponse> {
+  return request<PersonDetailResponse>(`/people/${encodeURIComponent(personId)}`);
+}
+
+/** 改一个人的名字。返回里带 ``aliases``——旧名字会留成别名，前端不自己拼这份历史。 */
+export async function renamePerson(personId: string, name: string): Promise<RenamePersonResponse> {
+  return request<RenamePersonResponse>(`/people/${encodeURIComponent(personId)}/name`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function batchConfirmPeople(
+  items: BatchConfirmItem[],
+): Promise<BatchConfirmResponse> {
+  return request<BatchConfirmResponse>("/people/batch-confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
 }

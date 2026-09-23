@@ -33,11 +33,7 @@ from sentrix.domain.media.ports import (
     PreviewEncoder,
     VlmObserver,
 )
-from sentrix.domain.memories.ports import (
-    EventParticipantRepository,
-    EventRepository,
-    FactRepository,
-)
+from sentrix.domain.memories.ports import EventRepository, FactRepository
 from sentrix.domain.places.aliases import PlaceAliases
 from sentrix.domain.places.ports import AssetPlaceRepository, PlaceResolver
 from sentrix.domain.retrieval.ports import (
@@ -69,9 +65,6 @@ from sentrix.infrastructure.persistence.repositories.entities import SqliteEntit
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
 from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
-from sentrix.infrastructure.persistence.repositories.participants import (
-    SqliteEventParticipantRepository,
-)
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
@@ -113,9 +106,6 @@ class Container:
     # 包内数据文件读进来（那是唯一的 IO 边界），而读文件这件事不能发生在 api 层。
     place_aliases: PlaceAliases
     event_repository: EventRepository
-    # 事件参与者投影（S5b）。与 ``event_repository`` 分开的理由写在
-    # ``domain/memories/ports.py``：写这张表的是身份侧的确认动作，不是事件本身。
-    event_participant_repository: EventParticipantRepository
     fact_repository: FactRepository
     # 词法投影的写侧与读侧由同一个 SQLite 适配器实现（它是同一张投影表的两个方向），
     # 这里按两个端口分别声明：调用方在类型上就看得出自己只需要其中一侧。
@@ -169,7 +159,6 @@ class Container:
             asset_place_repository=asset_places,
             place_aliases=load_place_aliases(),
             event_repository=SqliteEventRepository(database),
-            event_participant_repository=SqliteEventParticipantRepository(database),
             fact_repository=SqliteFactRepository(database),
             lexical_index=lexical,
             lexical_search=lexical,

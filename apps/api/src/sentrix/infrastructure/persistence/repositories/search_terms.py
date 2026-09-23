@@ -34,10 +34,9 @@ from sentrix.infrastructure.persistence.database import Database
 # 必须与 1.0 一样**有界且被写出来**，而不是一个看起来无穷大的默认值。
 REBUILD_LIMIT = 10_000
 
-# 1.0 ``:150-158`` 的 ``term_sources`` 七条。``person_bridge`` 在 S5b 之前是唯一缺席的
-# 一条（身份层属于 S5，没有 ``entity_mentions`` 可桥），所以这一版**不再过滤**：
-# 加过滤等于留一个「字段清单与 1.0 对齐、实际少一个」的假象。
-_ACTIVE_FIELD_SOURCES = FIELD_SOURCES
+# 1.0 ``:150-158``：``term_sources`` 里的 ``person_bridge`` 在 2.0 不建（身份层属于 S5，
+# 现在没有 entity_mentions 可桥），保留在 FIELD_SOURCES 里只是为了让字段清单与 1.0 对齐。
+_ACTIVE_FIELD_SOURCES = tuple(item for item in FIELD_SOURCES if item[1] != "people")
 
 
 def _new_id() -> str:
@@ -216,27 +215,6 @@ class SqliteLexicalIndex:
                 for row in rows:
                     hits[row["asset_id"]] = hits.get(row["asset_id"], 0) + 1
         return sorted(hits.items(), key=lambda item: (-item[1], item[0]))[:limit]
-
-    def assets_for_person(self, name: str, *, scope_id: str | None) -> frozenset[str]:
-        """含这个人的 asset 集合（1.0 ``retrieval/entity.py:35-46`` 那条查询）。
-
-        ``field_type`` 是硬条件：不加它，同名的一个地名或物品也会把 asset 带进来。
-        名字走 ``normalize_text``（与写入侧同一个口径）——写成 ``name.lower()`` 会在
-        全角空格或多空格的名字上悄悄漏掉。
-        """
-        value = normalize_text(name)
-        if not value:
-            return frozenset()
-        clause = " WHERE field_type = 'person_bridge' AND normalized_value = ?"
-        params: list[object] = [value]
-        if scope_id:
-            clause += " AND scope_id = ?"
-            params.append(scope_id)
-        with self._database.connect() as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT asset_id FROM observation_search_terms" + clause, params
-            ).fetchall()
-        return frozenset(row["asset_id"] for row in rows)
 
     def exact_assets(self, whole_query: str, *, scope_id: str | None) -> frozenset[str]:
         """库里存在 ``normalized_value`` 与整串 query **完全相等**的行的 asset 集合。"""

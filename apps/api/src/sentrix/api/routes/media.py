@@ -155,22 +155,27 @@ def _face_enroller(container: Container) -> Callable[[Asset, Observation], int]:
 
 
 def _fact_maintainer(container: Container) -> Callable[[Observation], tuple[str, ...]]:
-    """事实写入的接线。S5b 起两半都在（用户裁决④），S4 的「按设计为空」到此结束。
+    """事实写入的接线。**这块在 S4 写不出任何一行，两个原因都不在这里**。
 
-    1. **候选来源**：模型自报的 ``facts``，落库在 ``observations.facts_json``，读出来
-       就是 ``Observation.facts``。1.0 的候选来自 ``analyze_image`` 的同一个数组
-       （``model_clients.py:1130-1198``）。
-    2. **门禁**：``confirmed_person_names`` 是 1.0 ``is_confirmed_person_name``
-       （``db.py:1494-1503``）的集合形态——本 scope 内已确认人物的**本名**。
+    1. **候选事实没有来源**。1.0 的候选来自模型自报的 ``facts``
+       （``backend/model_clients.py:1130-1198``），2.0 的观察器明确不搬它
+       （``s4-deviations.md`` 第 30 条）。所以下面的 ``candidates`` 恒为空元组。
+    2. **门禁关着**。1.0 的 ``is_confirmed_person_name`` 查 ``entities`` 表里
+       ``status='confirmed'`` 的人物（``db.py:1494-1503``），而 2.0 的身份层是 S5。
+       ``MaintainFacts`` 的 ``confirmed_people`` 默认空集，与 ``AssignEvents``
+       同名参数的 S4 取值一致。
 
-    **两个入参都不再有默认值**（Task 80 的同一口径）：门禁留一个恒空默认值的话，
-    「忘了接线」与「真的没有已确认人物」在类型上完全一样，而事实恒空不报错、
-    只是永远查不到。少写一个参数现在是 ``TypeError``。
+    接线的意义在于：``domain/memories/facts.py`` 的三条纯规则与
+    ``repositories/facts.py`` 从这一版起**有生产调用方**（1.0 的
+    ``_commit_semantic_image`` 整段不调 ``maintain_fact``，两条路径不一致是用户裁决
+    第 3 条要修的）。「按设计为空」与「没人调所以恒空」是两件事，前者可断言、后者
+    只能靠读代码发现——这条注释与 ``tests/integration/test_maintain_facts.py``
+    都按前者写。
+    **放宽门禁或补候选来源都是用户裁决点**，不在接线里自己定。
     """
     maintain = MaintainFacts(
         facts=container.fact_repository,
-        candidates=lambda observation: observation.facts,
-        confirmed_people=container.entity_repository.confirmed_person_names,
+        candidates=lambda _observation: (),
     )
     return maintain.maintain
 

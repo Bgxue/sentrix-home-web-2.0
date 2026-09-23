@@ -15,13 +15,8 @@
 
 - 1.0 的 semantic 受控词表（地点 / 物品 / 氛围三个主类体系）——那是 S6 的精读；
 - ``detail``（visible_details / regions / text_blocks / uncertainties）——同上，
-  2.0 的 ``Observation`` 没有 ``detail`` 字段（S4 不建 ``_terms_from_detail``）。
-
-**模型自报的 ``facts`` 在 S5b 搬进来了**（用户裁决④）。S4 曾把它判给 S5 并写下
-「事实由 ``maintain_fact`` 规则决定，不由模型自报」——那句话把两件事混成了一件：
-**候选由模型自报，写法由规则决定**。规则层（``domain/memories/facts.py``）只能决定
-「这条候选怎么写」，它变不出候选；少了这一路，``MaintainFacts`` 的 ``candidates``
-在生产装配下恒为空元组，门禁全开也写不出一条事实。
+  2.0 的 ``Observation`` 没有 ``detail`` 字段（S4 不建 ``_terms_from_detail``）；
+- 模型自报的 ``facts``——事实由 ``maintain_fact`` 规则决定，不由模型自报（S5）。
 
 模型不可用、HTTP 失败、返回的不是 JSON——一律返回 ``None``：观察是**增强**，
 不是导入的前置条件。1.0 在 ``pipeline`` 里也是这么收尾的（异常吞掉、留下无向量的资产）。
@@ -38,7 +33,6 @@ from typing import Any
 
 import httpx
 
-from sentrix.domain.media.models import MODEL_FACT_CONFIDENCE, ObservationFact
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.infrastructure.assistant.chat_client import MAX_ANSWER_TOKENS
 
@@ -54,8 +48,6 @@ OBSERVATION_CONFIDENCE = 0.65
 _LANGUAGE_FIELDS = ("caption", "activity", "place", "event_type")
 _TEXT_FIELDS = ("caption", "activity", "place", "event_type", "ocr_text")
 _LIST_FIELDS = ("objects", "clothing")
-# ``facts`` 是**结构化**字段，不是字符串列表：补全那一步按 ``_COPY_FIELDS`` 逐个搬
-# 标量/列表，搬不动它，所以它单列一份、由 ``semantics_from_payload`` 统一解析。
 _COPY_FIELDS = (*_TEXT_FIELDS, *_LIST_FIELDS)
 
 _LATIN_RE = re.compile(r"[A-Za-z]{2,}")
@@ -63,24 +55,21 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 _OBSERVE_PROMPT = """你是家庭记忆观察器。仅根据图片抽取可验证的观察，不猜测姓名。
 严格返回简体中文 JSON 对象，不要解释。不要输出 GPS 坐标、经纬度、文件名或路径。
-字段固定为：caption、activity、place、event_type、objects、clothing、ocr_text、facts。
+字段固定为：caption、activity、place、event_type、objects、clothing、ocr_text。
 caption 是画面里看到什么（160 字内）；activity 是正在发生什么（40 字内）；
 place 是语义地点，例如家中客厅、餐厅、公园（40 字内）；event_type 40 字内；
 objects 是可见物品（最多 40 项）；clothing 是可见衣物（最多 12 项）；
-ocr_text 是图中文字（1000 字内）；facts 最多 8 项，仅含 subject、predicate、object、confidence。
-caption、activity、place、event_type 必须**同时**给出自然语言描述，画面能判断时不要留空；
-确实看不清才用空字符串或空数组。"""
+ocr_text 是图中文字（1000 字内）。caption、activity、place、event_type 必须**同时**
+给出自然语言描述，画面能判断时不要留空；确实看不清才用空字符串或空数组。"""
 
 _RECOVERY_PROMPT = """首轮结果缺少自然语言观察，请补齐可验证的观察。只根据图片，不猜测姓名，不输出坐标。
 严格返回简体中文 JSON：caption（160 字内）、activity（40 字内）、place（语义地点，40 字内）、
-event_type（40 字内）、objects（最多 40 项）、clothing（最多 12 项）、ocr_text（1000 字内）、
-facts（最多 8 项，仅含 subject、predicate、object、confidence）。
+event_type（40 字内）、objects（最多 40 项）、clothing（最多 12 项）、ocr_text（1000 字内）。
 画面确实看不清才留空；不要只返回分类字段。"""
 
 _CANONICAL_PROMPT = """把下面的家庭图片观察规范化为简体中文 JSON。只翻译和整理已有内容，
 不新增人物、物体、活动或事实，不猜测姓名。保留字段 caption、activity、place、event_type、
-objects、clothing、ocr_text、facts（每项仍只含 subject、predicate、object、confidence）。
-\n原始观察："""
+objects、clothing、ocr_text。\n原始观察："""
 
 
 def _encode_image(path: Path) -> str | None:
@@ -124,38 +113,6 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _confidence(value: object) -> float:
-    """1.0 ``normalize_confidence``：拿不到数就用 ``MODEL_FACT_CONFIDENCE``，拿得到就 clamp。"""
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return MODEL_FACT_CONFIDENCE
-    return min(1.0, max(0.0, number))
-
-
-def facts_from_payload(value: object) -> tuple[ObservationFact, ...]:
-    """1.0 ``normalize_fact_confidences``（``model_clients.py:221-226``）。
-
-    **只做两件事**：丢掉不是 dict 的元素、给缺 confidence 的补上默认值。字段缺失
-    （subject / predicate / object 有空串）的项**照留**——「这条候选写不写得出来」
-    是 ``is_writable_fact`` 的判据，解析器在这里多判一次，那条规则就有一半永远走不到。
-    """
-    items = value if isinstance(value, (list, tuple)) else ([value] if value else [])
-    facts = [
-        ObservationFact(
-            subject=_text(item.get("subject")),
-            predicate=_text(item.get("predicate")),
-            object=_text(item.get("object")),
-            confidence=_confidence(item.get("confidence")),
-        )
-        for item in items
-        if isinstance(item, dict)
-    ]
-    # 1.0 的提示词写的是「facts 最多8项」，那条上限在提示词里；解析侧不再截断——
-    # 模型多回了一条不比少回一条更值得丢。
-    return tuple(facts)
-
-
 def semantics_from_payload(payload: dict[str, Any]) -> ObservationSemantics:
     """把模型返回的对象收敛成 ``ObservationSemantics``。纯函数，便于单独测。"""
     return ObservationSemantics(
@@ -166,7 +123,6 @@ def semantics_from_payload(payload: dict[str, Any]) -> ObservationSemantics:
         ocr_text=_text(payload.get("ocr_text")),
         objects=_as_text_tuple(payload.get("objects")),
         clothing=_as_text_tuple(payload.get("clothing")),
-        facts=facts_from_payload(payload.get("facts")),
         confidence=OBSERVATION_CONFIDENCE,
     )
 
@@ -200,10 +156,6 @@ class OpenAIVlmObserver:
                 for key in _COPY_FIELDS:
                     if recovered.get(key) not in (None, "", []):
                         parsed[key] = recovered[key]
-                # facts 是结构化字段，进不了上面那张标量/列表的表；首轮一个字都没说
-                # 画面里有什么的时候，补全这一轮的事实候选同样是唯一来源。
-                if recovered.get("facts"):
-                    parsed["facts"] = recovered["facts"]
 
         scalar = " ".join(_text(parsed.get(field)) for field in _TEXT_FIELDS)
         if calls < MAX_MODEL_CALLS and _LATIN_RE.search(scalar):

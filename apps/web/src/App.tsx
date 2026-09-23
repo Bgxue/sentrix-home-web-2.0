@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AssistantPanel } from "./features/assistant/AssistantPanel";
 import { AssetGrid } from "./features/library/AssetGrid";
+import { PeopleView } from "./features/people/PeopleView";
 import { SearchBox } from "./features/search/SearchBox";
 import { SearchResults } from "./features/search/SearchResults";
 import { Timeline } from "./features/timeline/Timeline";
@@ -9,7 +10,7 @@ import { listAssets, type AssetSummary, type SearchResponse } from "./shared/api
 
 const SCOPE_ID = "album1";
 
-type View = "timeline" | "library";
+type View = "timeline" | "library" | "people";
 
 export default function App() {
   const [view, setView] = useState<View>("timeline");
@@ -33,6 +34,9 @@ export default function App() {
         <button type="button" onClick={() => setView("library")} aria-pressed={view === "library"}>
           全部照片
         </button>
+        <button type="button" onClick={() => setView("people")} aria-pressed={view === "people"}>
+          人物
+        </button>
       </nav>
       <AssistantPanel scopeId={SCOPE_ID} />
       <SearchBox scopeId={SCOPE_ID} onResults={setResults} />
@@ -41,8 +45,10 @@ export default function App() {
         <SearchResults response={results} onClose={() => setResults(null)} />
       ) : view === "timeline" ? (
         <Timeline scopeId={SCOPE_ID} />
-      ) : (
+      ) : view === "library" ? (
         <AssetGrid assets={assets} />
+      ) : (
+        <PeopleView scopeId={SCOPE_ID} />
       )}
     </main>
   );

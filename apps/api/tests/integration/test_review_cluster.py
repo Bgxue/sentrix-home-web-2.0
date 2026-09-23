@@ -4,13 +4,11 @@
 :5194、``reject_face_cluster`` :5579、``merge_face_clusters`` :4776、``split_face_instance``
 :4797、``delete_person_candidate`` :5290。
 
-**事件侧的那两件事（参与者投影 / 重分段）不在这里验。** 1.0 的 ``confirm`` 在同一个
-函数里既写身份（entities / mentions）又刷事件参与者、重分段、重建人物画像；2.0 把它们
-拆开：``ConfirmedPersonEvents`` 是 ``ReviewCluster`` 的一个**必填**协作者，在
-``confirm`` 与 ``_merge_into_person`` 写完提及之后各调一次。它的行为与阈值在
-``tests/integration/test_event_participants.py`` 里单独钉，这里只保证四件事本身的痕迹——
-本文件的事件夹具是空的，所以那两次调用在这里都是空操作（``refresh_participants`` 查不到
-任何事件、``resegment`` 数不出两个事件），不影响下面的断言。
+**这一层不写任何事件投影。** 1.0 的 ``confirm`` 在同一个函数里既写身份（entities /
+mentions）又刷事件参与者、重分段、重建人物画像；2.0 把两半拆到不同任务（73 与 81），
+因为 81 的投影要读的正是 73 写的提及——顺序反了就是一个循环。所以这里**不调用**
+``_refresh_event_participants`` / ``resegment_events_for_confirmed_entity`` /
+``rebuild_person_memory``，也不给它们留一个空的回调钩子（S4 栽过「零调用的纯规则」）。
 
 **四件里有几件写审计**：merge 与 split 写（1.0 原文），confirm 走同名合并那一路时写的也是
 ``face_cluster_merge``。reject 不可能写——它删的正是那个实体的 ``entity_revisions`` 行。
@@ -64,12 +62,11 @@ def seeded_db(migrations_ready_db: Database) -> Database:
 
 
 @pytest.fixture
-def review(seeded_db: Database, confirmed_person_events) -> ReviewCluster:
+def review(seeded_db: Database) -> ReviewCluster:
     return ReviewCluster(
         faces=SqliteFaceRepository(seeded_db),
         entities=SqliteEntityRepository(seeded_db),
         facts=SqliteFactRepository(seeded_db),
-        events=confirmed_person_events(seeded_db),
     )
 
 

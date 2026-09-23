@@ -17,8 +17,6 @@ from sentrix.domain.identity.models import (
     CLUSTER_STATUS_REJECTED,
     DEFAULT_SCOPE_ID,
     ENTITY_STATUS_PENDING,
-    FACE_VALIDITY_UNCERTAIN,
-    FACE_VALIDITY_VERIFIED,
     PENDING_CLUSTER_NAME,
     FaceClusterRecord,
     FaceInstanceRecord,
@@ -355,58 +353,6 @@ class SqliteFaceRepository:
                 (instance_id,),
             ).fetchone()
         return _row_to_instance(row) if row else None
-
-    # ---- 全局重聚类（Task 84）要的三组读写 ----------------------------------------
-
-    def list_verified_instances(
-        self, *, scope_id: str | None, minimum_quality: float
-    ) -> Sequence[FaceInstanceRecord]:
-        clause = (
-            "fi.embedding_json != '[]' AND fi.cluster_id IS NOT NULL AND fi.quality >= ? AND fi.validity = ?"
-        )
-        params: list[object] = [float(minimum_quality), FACE_VALIDITY_VERIFIED]
-        if scope_id:
-            clause += " AND a.scope_id = ?"
-            params.append(scope_id)
-        return self._instances_where(clause, tuple(params))
-
-    def assign_instances(self, instance_ids: Sequence[str], cluster_id: str) -> int:
-        ids = list(dict.fromkeys(instance_ids))
-        if not ids:
-            return 0
-        with self._database.connect() as connection, connection:
-            connection.executemany(
-                "UPDATE face_instances SET cluster_id = ? WHERE id = ?",
-                [(cluster_id, instance_id) for instance_id in ids],
-            )
-        return len(ids)
-
-    def set_cluster_state(self, cluster_id: str, *, status: str, member_count: int) -> None:
-        with self._database.connect() as connection, connection:
-            connection.execute(
-                "UPDATE face_clusters SET member_count = ?, status = ?, revision = revision + 1,"
-                " updated_at = ? WHERE id = ?",
-                (int(member_count), status, datetime.now(UTC).isoformat(), cluster_id),
-            )
-
-    def list_uncertain_unclustered(self, *, scope_id: str | None) -> Sequence[FaceInstanceRecord]:
-        clause = "fi.validity = ? AND fi.embedding_json != '[]' AND fi.cluster_id IS NULL"
-        params: list[object] = [FACE_VALIDITY_UNCERTAIN]
-        if scope_id:
-            clause += " AND a.scope_id = ?"
-            params.append(scope_id)
-        return self._instances_where(clause, tuple(params))
-
-    def list_confirmed_clusters(self, scope_id: str, *, minimum_members: int) -> Sequence[FaceClusterRecord]:
-        with self._database.connect() as connection:
-            rows = connection.execute(
-                f"SELECT {_CLUSTER_COLUMNS} FROM face_clusters fc"
-                " LEFT JOIN entities e ON e.id = fc.entity_id"
-                " WHERE fc.scope_id = ? AND fc.status = ? AND fc.member_count >= ?"
-                " ORDER BY fc.member_count DESC, fc.updated_at DESC",
-                (scope_id, CLUSTER_STATUS_CONFIRMED, int(minimum_members)),
-            ).fetchall()
-        return [_row_to_cluster(row) for row in rows]
 
     def list_prototypes(self, cluster_id: str) -> Sequence[FacePrototypeRecord]:
         with self._database.connect() as connection:

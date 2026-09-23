@@ -79,30 +79,6 @@ class SqliteVectorRepository:
                 ),
             )
 
-    def update_metadata(
-        self, *, space: str, source_type: str, source_id: str, metadata: dict[str, object]
-    ) -> int:
-        """只改 metadata，不动向量本身。
-
-        **不带 ``model_name`` 条件**：同一个实例在同一空间下可能有多个模型版本的行
-        （换过嵌入模型之后新旧并存），而 ``cluster_id`` 是实例的属性，不是模型版本的
-        属性——只改最新那一条会让旧行继续指着已经被撤掉的簇。1.0 的对应 UPDATE
-        （``db.py:5034-5037``）同样不带模型条件。
-        """
-        with self._database.connect() as connection, connection:
-            cursor = connection.execute(
-                "UPDATE memory_vectors SET metadata_json = ?, updated_at = ?"
-                " WHERE space = ? AND source_type = ? AND source_id = ?",
-                (
-                    json.dumps(dict(metadata), ensure_ascii=False, sort_keys=True),
-                    _now(),
-                    space,
-                    source_type,
-                    source_id,
-                ),
-            )
-            return int(cursor.rowcount)
-
     def has_vector(self, *, space: str, source_type: str, source_id: str, model_name: str) -> bool:
         with self._database.connect() as connection:
             row = connection.execute(

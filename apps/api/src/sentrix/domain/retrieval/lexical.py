@@ -24,16 +24,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# 1.0 ``retrieval_indexes.py:20``。七个字段全都建——``person_bridge`` 在 S5b 之前
-# 是唯一缺席的一个（身份层属于 S5），现在 ``Observation.people`` 有了值源。
-#
-# **值源那一格与 1.0 有一处不同，是修 1.0 的缺陷**：1.0 的 ``_terms_from_field`` 对
-# 列表元素一律 ``_normalize(item)``，而 ``people`` 的元素是
-# ``{"entity_id":…, "name":…, "status":…}`` 这样的 dict——``str(dict)`` 写进
-# ``person_bridge`` 之后，按人名去查（``normalized_value = '妈妈'``）永远查不中。
-# 1.0 里真正干活的是 ``EntityRetriever`` 那条「投影查不到就退回直接读观察」的兜底。
-# 2.0 的值源是**名字**（``Observation.people`` 已经是名字元组），投影查得中，兜底那条
-# 路仍然照搬（它还有别的用处：投影还没建起来的库）。见 ``s5-deviations.md``。
+# 1.0 ``retrieval_indexes.py:20``。``person_bridge`` 在 2.0 不建（身份层属于 S5），
+# 其余七个字段一字不差。
 FIELD_SOURCES: tuple[tuple[str, str], ...] = (
     ("place", "place"),
     ("activity", "activity"),
