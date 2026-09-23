@@ -25,10 +25,33 @@ from sentrix.domain.identity.models import (
     EntityRecord,
     EntityRevisionRecord,
     FaceClusterRecord,
+    FaceDetection,
     FaceInstanceRecord,
     FacePrototypeRecord,
     PersonNameMatch,
 )
+
+
+class FaceDetector(Protocol):
+    """一张图 → 人脸表。实现在 ``infrastructure/models/face_adapter.py``。
+
+    **只声明两个检测入口，不声明适配器的其余状态。** 1.0 的 ``FaceAdapter`` 还带一串
+    ``identity_*`` 字段（``identity_ready`` / ``identity_error`` / ``identity_fallback``），
+    它们服务于那三个被判死的 AdaFace 适配器（见 ``s5-deviations`` 证据 1/3）；2.0 这条
+    链路只剩「有向量 / 没向量」，而那是 ``FaceDetection`` 自己的字段，不是适配器的状态。
+
+    两个入口的差别在**召回策略**，不在能力上：``detect`` 是相册导入用的常规检测；
+    ``detect_identity_photo`` 是用户预置身份照片用的三级降级（常规 → 放大重试 → 整图
+    兜底），它更慢、更宽松，也因此只该用在「用户明确说这张图里有这个人」的场合。
+    """
+
+    def detect(self, path: str) -> Sequence[FaceDetection]:
+        """常规检测：返回的人脸都已经带好向量（没有向量的候选被丢掉）。"""
+        ...
+
+    def detect_identity_photo(self, path: str) -> Sequence[FaceDetection]:
+        """预置照片的检测：检不出就放大重试，再检不出就把整张图当成一张脸。"""
+        ...
 
 
 class FaceRepository(Protocol):

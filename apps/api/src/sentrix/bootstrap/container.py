@@ -23,7 +23,7 @@ from sentrix.domain.assistant.ports import (
     TurnEventBroker,
     TurnRepository,
 )
-from sentrix.domain.identity.ports import EntityRepository, FaceRepository
+from sentrix.domain.identity.ports import EntityRepository, FaceDetector, FaceRepository
 from sentrix.domain.media.ports import (
     AssetRepository,
     MediaStorage,
@@ -50,6 +50,7 @@ from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
+from sentrix.infrastructure.models.face_adapter import FaceAdapter
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.asset_places import SqliteAssetPlaceRepository
 from sentrix.infrastructure.persistence.repositories.assets import (
@@ -116,6 +117,9 @@ class Container:
     # 人脸侧的写入者是在线匹配与簇审阅，实体侧的写入者是命名与属性维护。
     face_repository: FaceRepository
     entity_repository: EntityRepository
+    # 人脸检测与向量（S5b）。**构造它不建 session**：权重在第一次 detect 时才加载，
+    # 所以容器构造期没有模型开销，缺权重的机器上它会自己退化成空表（``available``）。
+    face_detector: FaceDetector
 
     chat_model: ChatModel
     vlm_observer: VlmObserver
@@ -160,6 +164,7 @@ class Container:
             lexical_search=lexical,
             face_repository=SqliteFaceRepository(database),
             entity_repository=SqliteEntityRepository(database),
+            face_detector=FaceAdapter(),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
                 settings.chat_model_name,

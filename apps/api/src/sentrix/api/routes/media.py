@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
+from sentrix.application.identity.enroll_face import EnrollFace
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
 from sentrix.application.media.observe_asset import ObserveAsset
@@ -116,9 +117,36 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
             else None
         ),
         event_assigner=lambda observation: _event_id(assigner, observation),
+        face_enroller=_face_enroller(container),
         fact_maintainer=_fact_maintainer(container),
         lexical_index=container.lexical_index,
     )
+
+
+def _face_enroller(container: Container) -> Callable[[Asset, Observation], int]:
+    """人脸登记：检测 → 在线匹配，逐张脸走一遍 ``EnrollFace``。
+
+    **它必须排在事件归并之前**——1.0 在 ``pipeline.py:316-320`` 用注释钉过这件事：
+    与已确认的人相像的脸会在这一步写下 ``entity_mentions``，而事件归并的
+    ``person_score`` 读的正是它。顺序写在 ``ImportAssets.execute`` 里，这里只负责接。
+
+    权重没装的机器上 ``detect`` 返回空表，这条链路整个不生效——**不需要在这里判空**：
+    让它自然地「没有脸」比在这里分叉出第二条路径更省事，也更难写错。
+    """
+    enroll = EnrollFace(
+        faces=container.face_repository,
+        entities=container.entity_repository,
+        vectors=container.vector_repository,
+        assets=container.asset_repository,
+    )
+
+    def run(asset: Asset, observation: Observation) -> int:
+        faces = container.face_detector.detect(asset.path)
+        for face in faces:
+            enroll.enroll(asset.id, observation.id, face)
+        return len(faces)
+
+    return run
 
 
 def _fact_maintainer(container: Container) -> Callable[[Observation], tuple[str, ...]]:

@@ -11,7 +11,7 @@ S2 追加一条：**导入即向量化**（1.0 ``pipeline.py`` 的 ``_commit_fas
 
 S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
 
-    存储 → EXIF/GPS → 地点解析 → 视觉向量 → 观察 → 语义富集 → 事件归属 → 事实写入 → 词法投影
+    存储 → EXIF/GPS → 地点解析 → 视觉向量 → 观察 → 语义富集 → 人脸登记 → 事件归属 → 事实写入 → 词法投影
 
 - **视觉向量先于事件归属**：``score_event_candidate`` 的 ``visual_boost``（权重 0.05）
   与 ``split_guard`` 都读 ``memory_vectors`` 里 ``space='visual' & source_type='asset'``
@@ -23,6 +23,12 @@ S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
   那一行（``AssignEvents._create`` / ``_fold``），解析没做完时事件里就是空的。
 - **词法投影挂在观察写入之后逐条写**：1.0 的 ``refresh_from_observation`` 存在但生产
   零调用，2.0 不做懒补建。
+- **人脸登记先于事件归属**（S5 追加）。1.0 在 ``pipeline.py:316-320`` 用注释钉过这件事：
+  与某个已确认的人相像的脸会在登记时写下 ``entity_mentions``，而事件归并读的正是它——
+  ``_confirmed_entity_ids_for_observation`` 拿它算 ``person_score``。顺序写反**不报错**：
+  提及是空的，``person_score`` 恒 0、``corroborated`` 更容易为假，事件照分照建，只是
+  **分错了**（两张同一个人出现的照片会被拆成两个事件）。与「视觉向量先于事件归属」
+  同一条纪律，由 ``tests/integration/test_import_identity.py`` 的对照用例钉住。
 - **事实写入排在事件归属之后**：1.0 ``pipeline.process()`` 的顺序就是
   ``merge_observation_into_event`` → ``maintain_fact``（``pipeline.py:340-350``，
   计划 Task 52 的「52 在 51 之后」也是这个依据）。事实是**观察级**的：一条观察一组
@@ -74,6 +80,9 @@ class ImportResult:
     placed: bool = False
     event_id: str | None = None
     lexical_terms: int = 0
+    # 本次导入登记的人脸实例数。没有协作者时是 0——「没有人脸能力」与「这张图没有脸」
+    # 是两件事，但要分开它们得先有个可观测面，这个计数就是。
+    faces: int = 0
     # 1.0 把这份 id 表写进 ``assets.metadata_json["fact_ids"]``。2.0 不往 asset 上挂
     # JSON blob，但要留下同一个可观测面：调用方与测试都靠它区分「门禁关了」与「没接线」。
     fact_ids: tuple[str, ...] = ()
@@ -97,6 +106,7 @@ class ImportAssets:
         place_indexer: AssetPlaceIndex | None = None,
         observer: AssetObserver | None = None,
         event_assigner: Callable[[Observation], str] | None = None,
+        face_enroller: Callable[[Asset, Observation], int] | None = None,
         fact_maintainer: Callable[[Observation], tuple[str, ...]] | None = None,
         lexical_index: LexicalIndex | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -109,6 +119,7 @@ class ImportAssets:
         self._place_indexer = place_indexer
         self._observer = observer
         self._event_assigner = event_assigner
+        self._face_enroller = face_enroller
         self._fact_maintainer = fact_maintainer
         self._lexical_index = lexical_index
         self._clock = clock
@@ -170,6 +181,7 @@ class ImportAssets:
         self._observations.add(observation)
 
         observation = self._observe(asset, observation) or observation
+        faces = self._enroll_faces(asset, observation)
         event_id = self._assign_event(observation)
         fact_ids = self._maintain_facts(observation)
         lexical_terms = self._project_lexical(observation)
@@ -185,6 +197,7 @@ class ImportAssets:
             event_id=event_id,
             lexical_terms=lexical_terms,
             fact_ids=fact_ids,
+            faces=faces,
         )
 
     # ---- 可选协作者 ------------------------------------------------------------
@@ -203,6 +216,12 @@ class ImportAssets:
         if self._observer is None:
             return None
         return self._observer.observe(asset, observation)
+
+    def _enroll_faces(self, asset: Asset, observation: Observation) -> int:
+        """登记这张图里检出的每一张脸。**必须排在事件归并之前**，理由见模块注释第 4 条。"""
+        if self._face_enroller is None:
+            return 0
+        return self._face_enroller(asset, observation)
 
     def _assign_event(self, observation: Observation) -> str | None:
         if self._event_assigner is None:

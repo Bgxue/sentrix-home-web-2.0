@@ -35,36 +35,18 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # 模块 -> 会把它接上生产的任务。**每个条目都必须写明任务，否则它就是一个说不出
 # 理由的例外**——而说不出理由的例外名单会把这条不变量重新变成摆设。
 PENDING_WIRING: dict[str, str] = {
-    "sentrix.domain.identity.faces": (
-        "Task 84（全局重聚类的维护入口）会构造 FaceClusterer；Task 72 只用了它的四个"
-        "纯函数（归一化 / 余弦 / 质量 / 姿态桶），而 Task 72 的用例本身还没接线，"
-        "所以它仍不可达。它是 Task 69 落地的纯规则，S5a 之前没有别的调用者。"
-    ),
-    "sentrix.application.identity.enroll_face": (
-        "Task 75（HTTP 路由 + PersonDirectory 实现）与 Task 79（导入路径接线）会构造它，"
-        "那时它才有生产调用者。Task 72 只落地用例与它的仓储写方法。"
-    ),
     "sentrix.application.identity.review_cluster": (
         "Task 75 的四个簇审阅端点（confirm / reject / merge / split）会构造它。"
         "Task 73 只落地用例与它的仓储写方法，S5a 的这一轮还没有路由。"
-    ),
-    "sentrix.infrastructure.models.onnx_runtime": (
-        "Task 78 的 ``face_adapter`` 会用它建 buffalo_l 的 session，Task 79 再把人脸链路"
-        "接进导入路径。Task 77 只落地检测器与它的 provider 预算。"
-    ),
-    "sentrix.infrastructure.models.face_detector": (
-        "Task 78 的 ``face_adapter`` 会构造 ``RetinaFaceTiledDetector`` 并复用它的"
-        "``bbox_agreement`` / ``landmark_sanity`` / ``expand_crop``；Task 79 把整条链路接进"
-        "导入路径。Task 77 只落地检测器本身（纯几何在 make ci 里验，真权重那条会真跑）。"
-    ),
-    "sentrix.infrastructure.models.face_adapter": (
-        "Task 79（导入路径接线）会在容器里构造它，并把 ``detect`` 接进 ``ImportAssets``"
-        "的人脸登记那一步。Task 78 只落地适配器本身与它的门禁。"
     ),
     "sentrix.application.identity.name_person": (
         "Task 75 的 ``/api/people`` 改名端点与 batch-confirm 端点会构造它。Task 74 的"
         "用例被 ``ReviewCluster.confirm`` 之外的另一条链路使用（按实体确认），而在只做"
         "用例的 S5a 这一轮还没有路由。"
+    ),
+    "sentrix.application.identity.seed_identity": (
+        "Task 75 的 ``/api/people/seed`` 端点会构造它——导入路径不需要它（相册导入走的是"
+        "``EnrollFace``，没有那张照片的人也能建簇）。Task 79 落地用例、三级降级与门禁。"
     ),
 }
 
