@@ -1634,3 +1634,167 @@ FAILED apps/api/tests/integration/test_timeline_repositories.py::test_without_a_
 - **`adjacency`**（S6）：要种子分级才谈得上扩展。
 - **`episodic` 向量**：1.0 的唯一消费者是 `text_ann`（两个 space 合成一条通道），
   随 S6 一起搬；S4 照旧不写（`summarize_event.py` 的模块注释已按 1.0 实证改写）。
+
+---
+
+# S4d 实施记录与验证（Task 66–67）
+
+S4c 补的是 S4b 的两处遗留（检索融合没接线、词法投影的 asset 锚点没有写侧）。这一轮补的
+是**同类的另外两处**：`SummarizeEvent`（Task 57b）与事实写入的规则/仓储（Task 52）
+建好之后都**没有任何生产调用方**。S4c 抓住并修了词法锚点那三条纯规则，这两块漏了。
+
+诊断是从真数据来的，不是读代码猜的：整册导入（`POST /api/v1/imports`）53 张真照片之后
+
+```
+assets 53 / observations 53 / events 17 / observation_search_terms 969 / facts 0
+有描述的 observation: 46          ← 语义富化跑了
+事件的 title       待总结事件      ← 占位符（1.0 db.py:2310-2325 的字面量）
+事件的 event_type  待判断          ← 占位符
+```
+
+`summary` / `activity` 有内容，是**事件归并**顺手拼的（`events.py` 的 folded 值），
+不是总结器写的。所以「事件看起来有内容」正是这个缺陷难被发现的原因，也是原来那条
+e2e 只断言 `events > 0` 就够绿的原因（第 51 条）。
+
+## Task 66: 批末事件总结接线（1.0 的时机）
+
+**1.0 的时机（实测行号）**
+
+| 位置 | 行为 |
+|---|---|
+| `app.py:616-660` `process_ingest_batch` | 逐张走 `enrich_fast_image` → `_process_image_stages` → `commit_semantic_image(summarize_event=False)` ——**逐张不总结** |
+| `app.py:647-653` | 全部 `complete` 后：`claim_ingest_batch_summary(batch_id)` → `batch_event_ids(batch_id)` → `ThreadPoolExecutor` 里逐个 `_summarize_event_worker(event_id)` |
+| `app.py:577-581` `_process_ingest_asset_group(finalize_batch=True)` | 同一段收尾（增量消费的那条路径） |
+| `pipeline.py:700-717` `finalize_ingest_batch` | 同样按 `batch_event_ids` 逐个总结 + `finalize_ingest_scope` |
+| `pipeline.py:355-356` | **另一条入口**（`process()`，`summarize_event=True` 默认值）逐张总结；整册导入不走它 |
+
+一句话：**批末、按事件、只总结这一批碰过的事件**。
+
+**2.0 的落点**：`application/media/import_album.py` 的 `ImportAlbum.execute` 在逐张循环里
+保序去重收集 `result.event_id`，循环结束后 `_summarize_events(event_ids)` 逐个调用；
+装配点在 `api/routes/timeline.py` 的 `_summarize_event`（模型取 `container.chat_model`，
+**不是** `None`）。`ImportBatchResponse` 增 `summarized`。
+
+**Files:** `application/media/import_album.py`、`api/routes/timeline.py`、
+`api/schemas/timeline.py`、`tests/integration/test_import_album.py`、
+`tests/contract/test_media_routes.py`、`tests/e2e/test_album_timeline.py`、`tests/conftest.py`、
+`packages/contracts/openapi/sentrix-v1.yaml`、`docs/architecture/module-map.md`、
+`docs/refactor/capability-map.jsonl`
+
+**接线之后真跑一次，抓到了第三个缺陷（同一个能力上的）**：`/tmp/s4-api.log` 里 17 条
+warning 全是一句——
+
+```
+事件总结的模型调用失败，改用确定性摘要: 对话必须以一条 system 消息开头（严格 chat template 的硬要求）
+```
+
+这句话来自 **2.0 自己的客户端**（`chat_client.py:98`），不是 8100。`SummarizeEvent`
+照 1.0 的 `GammaClient.summarize_event`（`model_clients.py:1394-1433`）把提示词与证据
+拼成**一条 user 消息**发出去；1.0 的 `chat(prompt)` 确实只发一条 user 消息
+（`model_clients.py:314-315`），宽松模板容忍，而 2.0 的 `ChatModel` 端口不接受那个形状。
+**所以 S4b 的 `SummarizeEvent` 从来没有真正调用过模型**——每一次都在本地抛
+`ChatModelError`，被 `except` 吞掉退回确定性摘要。它看起来像「模型端点不可用时的降级」，
+实际是「根本走不到」。
+
+改法：`build_prompt` 拆成 `build_system_prompt()`（进 `messages[0]`）与
+`build_evidence()`（证据 JSON，进 user 消息）；**单测的假件补上同一对断言**
+（原来的 `FakeChatModel` 根本不管 messages 的形状，这正是缺陷能在 18 条绿灯下藏住的原因）。
+
+## Task 67: 事实写入接线（1.0 `process()` 的观察级调用点）
+
+**1.0 的时机**：`pipeline.py:346-350`——`merge_observation_into_event` **之后**逐条
+`maintain_fact`，门禁是 `all(fact.get(k) for k in ("subject","predicate","object")) and
+store.is_confirmed_person_name(subject, scope_id)`。`_commit_semantic_image`
+（`pipeline.py:570-635`）整段不调——**两条路径不一致是用户裁决 #3 要修的**。
+
+**2.0 的落点**：新建 `application/memories/maintain_facts.py` 的 `MaintainFacts`；
+`ImportAssets` 多一个可选协作者 `fact_maintainer`，调用点在 `_assign_event` 与
+`_project_lexical` 之间（导入顺序因此多一段「事实写入」）；返回值进 `ImportResult.fact_ids`。
+
+**Files:** `application/memories/maintain_facts.py`（新）、`application/media/import_assets.py`、
+`api/routes/media.py`、`tests/integration/test_maintain_facts.py`（新）、
+`tests/e2e/test_album_timeline.py`、`docs/architecture/module-map.md`、
+`docs/refactor/capability-map.jsonl`
+
+**这一轮没有修的东西（需用户裁决）**：S4 的装配下事实表仍然为空，两个原因彼此独立——
+候选事实没有来源（第 30 条）与门禁依赖 S5 的身份层。详见 `s4-deviations.md` §9 第 50 条。
+
+## S4d 验证记录
+
+| Task | 红灯（原始报错） | 绿灯 | `make ci` | 累计 passed |
+|---|---|---|---|---:|
+| 66 | `assert body["summarized"] > 0` → `E assert 0 > 0`（拆掉 `routes/timeline.py` 的 `summarize_event=`，e2e 实测 13 个事件 title 全为 `待总结事件`） | 39 passed（`test_import_album.py` 10 条 + `test_event_summary.py` 19 条 + `test_media_routes.py` 10 条） | 全绿（`CI_EXIT=0`） | **716** |
+| 67 | `assert [] == ['obs_4b94f32c5ac1']`（拆掉 `routes/media.py` 的 `fact_maintainer=`）与 `assert ['events'] == ['events', 'facts:obs_...']`（拆掉 `ImportAssets` 的调用） | 7 passed（`test_maintain_facts.py`） | 全绿（`CI_EXIT=0`） | **716**（s4c 终态 700 + 16：4 条批末总结 + 1 条装配点 + 7 条事实写入 + 3 条 e2e 内容 + 1 条消息形状） |
+
+**反向验证逐条做过**（四条接线各拆一次，确认对应断言必红）：
+
+```
+拆 routes/timeline.py 的 summarize_event=        -> assert body["summarized"] > 0   E assert 0 > 0
+                                                    title 全为 ['待总结事件']，event_type 全为 ['待判断']
+拆 routes/media.py 的 fact_maintainer=           -> assert [item.id for item in seen] == [...]   E assert [] == ['obs_4b94f32c5ac1']
+拆 import_assets.py 的 _maintain_facts 调用       -> assert recorder.order == ["events", ...]    E assert ['events'] == ['events', 'facts:obs_...']
+拆 import_album.py 的 _summarize_events(event_ids) -> assert summarizer.calls == ["evt_1"]        E assert [] == ['evt_1']
+把 summarize_event.py 的模型调用改回单条 user 消息 -> assert '浙江省杭州市萧山区拍照' == '萧山区家庭活动'（模型那条路整体失效）
+                                                    assert [] == [<ChatRole.SYSTEM…>, <ChatRole.USER…>]
+```
+
+## 真数据验收（8191，重新导入 53 张）
+
+`data/` 清空（保留 `data/geo/`）后重启 8191 并重跑整册导入：
+
+```
+POST http://127.0.0.1:8191/api/v1/imports
+{"scope_id":"album1","directory":"/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos"}
+```
+
+```json
+{"scope_id":"album1","directory":"/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos",
+ "imported":53,"deduplicated":0,"events":53,"lexical_terms":976,"summarized":17,"failures":[]}
+```
+
+（`events` 是「有 event_id 的照片数」，与 1.0 同义；`summarized` 是**去重后的事件数**。
+53 张折成 17 个事件，所以 17 < 53 是折叠，不是漏总结。）
+
+导入后的库：
+
+```
+assets 53 / observations 53 / events 17 / event_observations 53
+observation_search_terms 976 / facts 0      有描述的 observation 46
+title 是占位值的行数 0       event_type 是占位值的行数 0       revision>1 的事件数 17
+```
+
+事件的实际内容（17 个事件、17 个各不相同的标题、11 种 `event_type`）：
+
+```
+山景观赏与水域景观        户外活动   在2017年11月5日，在湖北省宜昌市夷陵区邓村白狮系附近，观察到了一系列户外活动…
+公交车在道路上行驶        交通活动   在湖北省宜昌市夷陵区邓村白狮系附近，公交车在道路上行驶。
+工业区域湖边散步与桥梁结构观察 户外活动
+河岸及周边景观观察        户外观景   在河边观景台和道路上散步，欣赏日落景色
+在室外游乐设施和公园活动   户外娱乐
+室内行走与休息            日常活动   在大型室内公共建筑的走廊中，人们穿着深色短袖衬衫，进行行走和休息…
+夜间户外活动与集会        户外集会   在2018年4月1日晚间，在Hang Dong附近户外广场上，一群人聚集…
+室内玩耍与户外活动        儿童活动
+户外泥塑公园玩耍          户外活动   在户外泥塑公园，孩子们穿着黄色T恤和白色短裤…
+烘焙原料展示              日常活动
+制作粉状兔子食物          食物制作   在厨房台面上制作了粉状兔子形状的食物，并使用绿色磨砂抹布。
+户外果园活动              户外活动
+室内聚会与活动            人在室内合影
+在金汇花园附近活动        日常活动   在上海市闵行区Wusong Qu金汇花园附近，于2022年7月16日14:16:21至14:16:25…
+夜间商业街景              商业活动   2022年7月31日19:47:46至19:48:22，在河北省石家庄市桥西区南长南小街社区附近…
+夜间户外家庭聚会与烟花活动 家庭户外活动
+夜间户外玩耍与休闲场景     户外活动
+```
+
+摘要里出现**时间范围与语义地点**是模型那条路的标志（提示词要求），说明第 52 条修好之后
+17 个事件全部走通模型，不是退回 `fallback_projection`；`/tmp/s4-api.log` 里两条降级
+warning（模型调用失败 / 模型回复不可用）都是 **0** 次。
+
+**`facts` 仍然是 0**——按设计如此，两个原因见 `s4-deviations.md` §9 第 50 条，
+需要用户裁决。接线本身是活的（三条断言钉住调用点与装配点，见上面的反向验证）。
+
+## 这一节没有做的事
+
+- **facts 的取值没有改善**（第 50 条）。接线做完了，S4 的装配下仍然写不出行——这是
+  门禁与候选来源两处的缺口，不是接线没接上。
+- **模型自报的 `facts` 没有搬回来**（第 30 条的反转属于 S5/S6）。
+- **`episodic` 事件向量仍然不写**（第 31 条）：1.0 的唯一消费者是 S6 的 `text_ann`。

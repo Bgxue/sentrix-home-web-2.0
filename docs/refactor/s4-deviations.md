@@ -285,6 +285,7 @@ event_place = self.store._event_display_place(observation) or "其他或不确�
 | `person_score`（权重 **0.20**）在 S5 之前恒为 0 | 事件归并少掉一整路最强信号之一；靠时间/GPS/活动/物件仍然工作，但「同一个人出现在两场不同活动」这条桥暂时没有 | `AssignEvents.__init__` 的 `confirmed_people` 参数默认 `frozenset()`，注释写明这是 S5 的输入而不是编出来的假来源 |
 | `_terms_from_detail`（`visible_details` / `regions` / `text_blocks`）不建 | 词法召回少一路 `detail` 字段。S4 的 `Observation` 没有 `detail`，它属于 S6 的 OCR/VLM 精读 | `search_terms.py` 的 `_observation_terms` docstring |
 | `person_bridge` 字段类型保留在 `FIELD_SOURCES` 但不写 | 与 1.0 的字段清单保持逐字对齐，读代码的人不会以为「2.0 忘了这一路」 | `search_terms.py` 的 `_ACTIVE_FIELD_SOURCES` |
+| 候选事实的来源（1.0 模型自报的 `facts`）在 S4 不接 | `facts` 表按设计为空——另一条独立原因是门禁依赖 S5 的身份层。**两条都要动才出得了东西** | §9 第 50 条；`api/routes/media.py` 的 `_fact_maintainer` 注释 |
 | `reverse_geocoder`（1.0 的国外回退）**不引入** | 国外城市由 GeoNames `PPL*` 覆盖。1.0 的 `reverse_geocoder` 自带数据是 `cities1000` 的子集，与 GeoNames 同源，两套并存只会给出两个答案 | 本表；`geonames.py` 的模块 docstring |
 | 事件封面 `select_event_cover` / 参与者表 `event_participants` / `event_entities` **不建** | 本切片不做封面选图与参与者投影；参与者强依赖 S5 的 `entities` | `0005_timeline.sql` 的 `events` 表注释 |
 
@@ -526,3 +527,172 @@ bigram 会把 `浙江省杭州市萧山区` 拆开去撞 `浙江省` / `杭州�
 再进融合，不是两条通道。所以 `episodic` 既不该单独进 `fuse()`，也不该在 S4 提前写；
 等 S6 落地 `text_ann` 时连同两个 space 一起搬。`summarize_event.py` 的模块注释已按这条
 实证改写。
+
+---
+
+## §9 S4d（两块零调用的能力接进导入路径）新增的偏离（第 48–52 条）
+
+S4d 补的是 S4b 遗留的**第三、第四处零生产调用**。S4c 已经修过一次同类问题（词法投影的
+`geo`/`time`/`file` 三条锚点规则），当时漏了这两块：
+
+| 建好但没人调的东西 | 建在哪 | 后果 |
+|---|---|---|
+| `application/memories/summarize_event.py` 的 `SummarizeEvent` | Task 57b | 53 张照片导完，**每个事件的 title 都是 `待总结事件`、event_type 都是 `待判断`**；`fallback_projection`（确定性摘要）也一次都没跑 |
+| `domain/memories/facts.py` + `repositories/facts.py` + `0005` 的 `facts` 表 | Task 52 | 事实写入的三条规则没有生产调用方（1.0 的 `_commit_semantic_image` 也不调） |
+
+**为什么 e2e 没抓住**：`tests/e2e/test_album_timeline.py` 当时只断言了 `body["events"] > 0`
+这个**数量**。事件一行总结都没跑，数量照样是 53——占位符 `待总结事件` 是**落库的可见值**，
+它让「空事件」看起来像「有事件」。第 51 条把这个缺口补上。
+
+### 第 48 条 · 事件总结的调用点是**批末**（逐事件一次），不是逐张。
+
+1.0 的整册批量路径（`app.py:616-660` 的 `process_ingest_batch`）走的是
+`commit_semantic_image(summarize_event=False)`——逐张**不总结**；等所有照片
+`complete` 之后 `claim_ingest_batch_summary(batch_id)` → `batch_event_ids(batch_id)`
+→ 逐个 `_summarize_event_worker(event_id)`（`app.py:647-653`）。同样的收尾也在
+`_process_ingest_asset_group(finalize_batch=True)`（`app.py:577-581`）与
+`IngestionPipeline.finalize_ingest_batch`（`pipeline.py:700-717`）。
+
+2.0 与 1.0 的两处差异都照搬：**批末**（不是每张之后）、**只总结这一批碰过的事件**
+（不是整个 scope）。`ImportAlbum.execute` 在逐张循环里保序去重收集 `result.event_id`，
+循环结束后逐个调 `summarize_event`。
+
+逐张那条路（`pipeline.process()`，`pipeline.py:355-356` 的 `summarize_event=True` 默认值）
+是**另一个入口**的默认值，整册导入不走它——这一点在 `import_album.py` 的模块 docstring 里
+写明了，免得下一个人照 `process()` 的默认值把总结挪进逐张循环（在单卡上等于每张多付一次
+模型调用）。
+
+**可恢复**：一个事件的总结失败只记日志，不中断整批，也不回滚任何东西——总结是幂等的，
+重跑同一个 scope 就能补上。这与「一张照片失败不中断整批」是两条独立性质。
+
+`ImportAlbum` 的 `summarize_event` 是可选协作者（不传就退化成纯导入，事件留在占位值上），
+与 `ImportAssets` 其余协作者同形；装配点在 `api/routes/timeline.py` 的 `_summarize_event`，
+模型取 `container.chat_model`（**不是** S1 的嵌入器）。它不是 `None`——`Container.build()`
+里是 `OpenAIChatModel(...)`——所以 `SummarizeEvent.execute` 的
+`if not observations or self._model is None: return event` 那条早退在整册导入里不触发；
+模型端点不可用时走 `fallback_projection`（`summarize_event.py` 的模块注释已说明它是
+**跑批时的正常路径之一**，不是异常兜底）。
+
+`ImportBatchResponse` 因此多了 `summarized`（已重导 `packages/contracts/openapi/sentrix-v1.yaml`）。
+**实测**：修好第 52 条那个形状缺陷之后，17 个事件全部走通模型那条路；
+`fallback_projection` 仍在（模型不可用/回复不可用/抛异常三条降级路径不变），
+这一轮一次都没触发。
+它的含义是「批末被总结过的事件数（去重后）」，`summarized < events` 说明有照片折进了
+已总结过的那个事件——**不是**「漏总结」。
+
+### 第 49 条 · 事实写入接进导入路径的**观察级**调用点（1.0 `process()` 的位置）。
+
+1.0 `pipeline.process()`（`pipeline.py:346-350`）在 `merge_observation_into_event` **之后**
+逐条处理候选事实；计划文档 Task 52 的「52 在 51 之后」依据的就是这个顺序。2.0 把这段做成
+用例 `application/memories/maintain_facts.py` 的 `MaintainFacts`，调用点放在
+`ImportAssets.execute` 的 `_assign_event` 与 `_project_lexical` 之间，导入顺序因此变成：
+
+    存储 → EXIF/GPS → 地点解析 → 视觉向量 → 观察 → 语义富集 → 事件归属 → 事实写入 → 词法投影
+
+**事实是观察级的**（一条观察一组候选），事件总结是事件级的（第 48 条）——两者不在同一层，
+所以也没有接在同一个方法里。`ImportAssets` 多一个可选协作者 `fact_maintainer`，
+返回值进 `ImportResult.fact_ids`（1.0 把这份 id 表写进
+`assets.metadata_json["fact_ids"]`；2.0 不往 asset 上挂 JSON blob，但要留下同一个可观测面）。
+
+门禁逐字保留 1.0 的两段合取（`pipeline.py:348`）：`is_writable_fact`（三个字段非空，
+Task 52 抽的纯规则）+ 已确认人物。第二段在 2.0 是 `confirmed_people`，与 `AssignEvents`
+的同名参数同构（`assign_events.py:123` 的 S4 取值是空集）。**这是「修 1.0 内部矛盾」
+（用户裁决 #3）的落点**：从此两条导入路径共用同一个写入决定点，而不是「哪条路径会调」。
+
+### 第 50 条 · **S4 的装配下事实表按设计是空的**，两个原因彼此独立，都需要裁决。
+
+这一条不是实现选择，是把查证结果如实登记；**要用户裁决**。
+
+| # | 原因 | 证据 | 后果 |
+|---|---|---|---|
+| 1 | **候选事实没有来源** | 1.0 的候选来自模型自报的 `facts`（`model_clients.py:1130-1198` 的 `analyze_image`，`pipeline.py:347` 的 `result.get("facts", [])`）；2.0 的观察器**明确不搬**它（本文件第 30 条：事实由 `maintain_fact` 规则决定，不由模型自报） | 即使门禁全开，`candidates` 也恒为空元组 |
+| 2 | **门禁关着** | 1.0 的 `is_confirmed_person_name`（`db.py:1494-1503`）查 `entities` 里 `entity_type='person' AND status='confirmed'` 的行；2.0 的身份层是 S5（计划文档第 313 行把 `purge_unanchored_facts` 也记在 S5，理由同一处：S5 之前没有 `entities`） | 即使有候选，`subject` 也不可能在已确认人物集合里 |
+
+**两条都要动才出得了东西**——只放宽门禁不够，只补候选来源也不够。三种可能的裁决方向
+（实现只做到「接上调用方」这一步，没有替用户选）：
+
+- **维持现状**：S4 的事实表就是空的，S5 一起接。本次接线的价值是「有调用方 + 有断言」，
+  不再是「代码在、没人调」；
+- **放宽门禁**：把 `confirmed_people` 换成别的判据（例如「非人物主语照写」）。这会让
+  S5 之前的 `facts` 表出现**未经身份层确认**的行，而这些行会被 `purge_unanchored_facts`
+  （S5）按 entities 过滤——即现在写进去的东西将来可能整批作废；
+- **补候选来源**：把 1.0 的模型自报 `facts` 搬回来（观察器提示词 + `ObservationSemantics`
+  加字段 + 落库列）。这是第 30 条的反转，属于 S5/S6 的范围。
+
+**接线本身是活的**，这一点与「结果为空」是两件事，分别有三条断言钉住（第 51 条）：
+`test_the_import_path_calls_fact_maintenance_after_event_assignment`（调用点）、
+`test_the_import_route_wires_fact_maintenance`（装配点）、
+`test_the_import_path_calls_fact_maintenance_after_event_assignment` 的门禁对照用例
+（门禁一开就真的落库，含合并 / 改口两条）。谁把 `fact_maintainer` 拆掉，前两条会红。
+
+### 第 51 条 · e2e 补**内容**断言（原来只断言数量），并如实钉住 S4 的事实取值。
+
+原 `test_the_whole_album_imports_without_failures` 只断言 `body["events"] > 0`。事件一行
+总结都没跑时这个数也是 53，所以它**恒真**。新增三条：
+
+- `test_events_are_summarized_into_real_content_not_placeholders`：每个事件的
+  `title` / `event_type` 都不在 `PLACEHOLDER_TITLES`（`待总结事件` / `待确认的家庭记录` /
+  `待判断`）里，且 `activity` / `summary` 非空。**把 `routes/timeline.py` 的
+  `summarize_event=` 拆掉，这条必红**（实测：13 个事件的 title 全变回 `待总结事件`）；
+- `test_each_event_is_summarized_once_not_once_per_photo`：`summarized == 时间线里的事件总数`
+  且 `events == 53`——钉住「总结是事件级、只跑一次」；
+- `test_no_facts_are_written_because_s4_has_no_confirmed_people`：事实表为空。
+  这条断言的是**第 50 条那个取值**，不是「接线通不通」（后者由上面两条钉住）。谁放宽了
+  门禁或补上了候选来源，它会红——那正是要用户裁决的时刻，注释里写明了这一点。
+
+**连带的一处装配改动**：批末总结会打 8100 上的文本模型，所以 `tests/conftest.py` 的
+`client` 夹具与 e2e 的 `album_client` 夹具一并把 `chat_model` 换成确定性假件
+（`FakeChatModel`）。契约测试不能因为一次批末收尾去敲真模型——那会让 `make ci` 依赖
+「8100 在不在」以及「它这次回了什么标题」。理由是这两个夹具本来就有的那条：
+「契约测试要验的是 HTTP 映射，不是模型」。
+
+**反向验证的原始输出**（四条接线各拆一次，逐条确认会红）：
+
+```
+拆 routes/timeline.py 的 summarize_event=      -> assert body["summarized"] > 0  E assert 0 > 0
+                                                   13 个事件的 title 全为 ['待总结事件']，type 全为 ['待判断']
+拆 routes/media.py 的 fact_maintainer=          -> assert [] == ['obs_4b94f32c5ac1']
+拆 import_assets.py 的 _maintain_facts 调用      -> assert ['events'] == ['events', 'facts:obs_40e24a5064bd']
+拆 import_album.py 的 _summarize_events(event_ids) -> assert [] == ['evt_1']
+```
+
+### 第 52 条 · `SummarizeEvent` 的模型调用形状修好：**每一次调用都在本地就抛**。
+
+接线之后真跑一次整册导入（53 张、17 个事件），`/tmp/s4-api.log` 里 17 条一模一样的
+warning：
+
+```
+事件总结的模型调用失败，改用确定性摘要: 对话必须以一条 system 消息开头（严格 chat template 的硬要求）
+```
+
+这句话来自 **2.0 自己的客户端**，不是 8100：`OpenAIChatModel.complete` 的第一条硬
+契约就是「`messages[0]` 必须是 system」（`chat_client.py:98`，模块 docstring 第 2 条
+记的就是 1.0 的 `400 System message must be at the beginning`）。而
+`SummarizeEvent._from_model`（Task 57b）照 1.0 的 `GammaClient.summarize_event`
+（`model_clients.py:1394-1433`）把提示词与证据拼成**一条 user 消息**发出去——
+1.0 的 `chat(prompt)` 确实只发一条 user 消息（`model_clients.py:314-315`），宽松模板
+容忍；2.0 的端口不接受那个形状。
+
+**所以 S4b 的 `SummarizeEvent` 从来没有真正调用过模型**：每一次都在本地抛
+`ChatModelError`，被 `_from_model` 的 `except` 吞掉，退回确定性摘要。这与第 48 条
+的「模型端点不可用时退回确定性摘要」看起来一模一样，但原因完全不同——前者是降级，
+后者是**根本走不到**。
+
+**2.0 的改法**：`build_prompt` 拆成 `build_system_prompt()`（提示词，进 `messages[0]`）
+与 `build_evidence()`（证据 JSON，进 user 消息）。**单测的假件也补上同一对断言**
+（`tests/unit/test_event_summary.py` 的 `FakeChatModel`）——原来的假件
+`def complete(self, messages, tools): return ModelReply(...)` 根本不管 messages
+的形状，这正是这个缺陷能在 18 条绿灯下藏住的原因。新增
+`test_the_model_call_carries_a_system_message_that_holds_the_prompt` 与
+`FakeChatModel` 的两条 `assert` 一起钉住形状。
+
+**反向验证**：把 `_from_model` 改回单条 user 消息，两条用例立刻红——
+`assert '浙江省杭州市萧山区拍照' == '萧山区家庭活动'`（模型那条路整体失效，退回确定性摘要）
+与 `assert [] == [<ChatRole.SYSTEM…>, <ChatRole.USER…>]`。
+
+**修好形状之后重跑整册导入（53 张）：17 个事件全部走通模型那条路**，
+`/tmp/s4-api.log` 里「模型调用失败」与「模型回复不可用」两条 warning 都是 **0** 次。
+17 个事件拿到 17 个各不相同的标题、11 种 `event_type`，摘要里带上了时间范围与语义地点
+（例如 `在2017年11月5日，在湖北省宜昌市夷陵区邓村白狮系附近，观察到了一系列户外活动…`）。
+在此之前它们**全部**是 `fallback_projection` 的产物——两条路都给非占位内容，所以
+「有内容」不能区分「模型在跑」与「模型每一次都在本地抛」。
