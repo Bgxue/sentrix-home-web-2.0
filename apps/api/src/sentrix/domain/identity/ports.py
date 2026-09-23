@@ -337,6 +337,18 @@ class EntityRepository(Protocol):
         """
         ...
 
+    def confirmed_person_names(self, scope_id: str) -> frozenset[str]:
+        """本 scope 内已确认人物的**本名**集合。1.0 ``is_confirmed_person_name``（``db.py:1494``）。
+
+        这是事实写入门禁（``MaintainFacts`` 的第二段合取）的取值来源。三条判据照抄：
+        ``entity_type='person'``、``status='confirmed'``、``canonical_name`` **精确相等**。
+
+        **不查别名**，这不是遗漏：某人的别名常常是另一个人的本名（家里人互相叫小名），
+        按别名放行会让模型自报的一条事实落到错的人头上，而事实表按
+        ``(scope, subject, predicate)`` 唯一——写错之后连「这条是谁的」都看不出来。
+        """
+        ...
+
     def confirmed_people_for_observation(self, observation_id: str) -> frozenset[str]:
         """这条观察里**已确认**的人物 id。1.0 ``db.py:2241``。
 

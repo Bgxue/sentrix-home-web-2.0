@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
 
-from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
+from sentrix.domain.media.models import (
+    Asset,
+    AssetStatus,
+    GpsPoint,
+    MediaType,
+    Observation,
+    ObservationFact,
+)
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.infrastructure.persistence.database import Database
 
@@ -104,8 +112,30 @@ class SqliteAssetRepository:
 
 _OBSERVATION_COLUMNS = (
     "id, scope_id, asset_id, source_type, captured_at, confidence, caption, place, activity,"
-    " event_type, ocr_text, objects_json, clothing_json, revision, created_at, updated_at"
+    " event_type, ocr_text, objects_json, clothing_json, facts_json, revision, created_at,"
+    " updated_at"
 )
+
+
+def _json_facts(value: str | None) -> tuple[ObservationFact, ...]:
+    """模型自报的候选事实。与 ``people_json`` 一样，**这里只解析，不校验**：
+    字段齐不齐是 ``is_writable_fact`` 的判据，落库层再判一次会让那条规则有一半走不到。"""
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(
+        ObservationFact(
+            subject=str(item.get("subject") or ""),
+            predicate=str(item.get("predicate") or ""),
+            object=str(item.get("object") or ""),
+            confidence=float(item.get("confidence") or 0.0),
+        )
+        for item in parsed
+        if isinstance(item, dict)
+    )
 
 
 def _json_list(value: str | None) -> tuple[str, ...]:
@@ -135,6 +165,7 @@ def row_to_observation(row: sqlite3.Row) -> Observation:
         ocr_text=row["ocr_text"] or "",
         objects=_json_list(row["objects_json"]),
         clothing=_json_list(row["clothing_json"]),
+        facts=_json_facts(row["facts_json"]),
         revision=row["revision"],
     )
 
@@ -148,8 +179,8 @@ class SqliteObservationRepository:
             connection.execute(
                 "INSERT INTO observations (id, scope_id, asset_id, source_type, captured_at,"
                 " confidence, caption, place, activity, event_type, ocr_text, objects_json,"
-                " clothing_json, revision, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " clothing_json, facts_json, revision, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     observation.id,
                     observation.scope_id,
@@ -164,6 +195,7 @@ class SqliteObservationRepository:
                     observation.ocr_text,
                     json.dumps(list(observation.objects), ensure_ascii=False),
                     json.dumps(list(observation.clothing), ensure_ascii=False),
+                    json.dumps([dataclasses.asdict(item) for item in observation.facts], ensure_ascii=False),
                     observation.revision,
                     observation.created_at.isoformat(),
                     observation.updated_at.isoformat(),
@@ -204,7 +236,7 @@ class SqliteObservationRepository:
         with self._database.connect() as connection, connection:
             connection.execute(
                 "UPDATE observations SET caption = ?, place = ?, activity = ?, event_type = ?,"
-                " ocr_text = ?, objects_json = ?, clothing_json = ?,"
+                " ocr_text = ?, objects_json = ?, clothing_json = ?, facts_json = ?,"
                 " confidence = MAX(confidence, ?), revision = revision + 1,"
                 " updated_at = datetime('now') WHERE id = ?",
                 (
@@ -215,6 +247,7 @@ class SqliteObservationRepository:
                     semantics.ocr_text,
                     json.dumps(list(semantics.objects), ensure_ascii=False),
                     json.dumps(list(semantics.clothing), ensure_ascii=False),
+                    json.dumps([dataclasses.asdict(item) for item in semantics.facts], ensure_ascii=False),
                     float(semantics.confidence),
                     observation_id,
                 ),

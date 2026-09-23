@@ -668,6 +668,15 @@ class SqliteEntityRepository:
 
     # ---- 事件关联 ----------------------------------------------------------------
 
+    def confirmed_person_names(self, scope_id: str) -> frozenset[str]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT canonical_name FROM entities"
+                " WHERE scope_id = ? AND entity_type = ? AND status = ?",
+                (scope_id, ENTITY_TYPE_PERSON, ENTITY_STATUS_CONFIRMED),
+            ).fetchall()
+        return frozenset(str(row["canonical_name"]) for row in rows)
+
     def confirmed_people_for_observation(self, observation_id: str) -> frozenset[str]:
         if not observation_id:
             return frozenset()

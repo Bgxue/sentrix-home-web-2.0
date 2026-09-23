@@ -146,4 +146,12 @@ class FactRepository(Protocol):
 
     def list_facts(self, scope_id: str, *, limit: int) -> Sequence[Fact]: ...
 
+    def purge_unanchored(self, scope_id: str) -> int:
+        """删掉 subject 不再是本 scope 已确认人物本名的事实，返回删了几条。
+
+        与写入门禁同一条判据（``canonical_name`` 精确相等、不看别名）：放行得进、就该
+        删得掉；判据一旦漂开，事实表里会留下永远清不掉的孤儿行。
+        """
+        ...
+
     def supersede_others(self, *, scope_id: str, subject: str, predicate: str, keep_fact_id: str) -> int: ...
