@@ -23,6 +23,7 @@ from sentrix.domain.assistant.ports import (
     TurnEventBroker,
     TurnRepository,
 )
+from sentrix.domain.identity.ports import EntityRepository, FaceRepository
 from sentrix.domain.media.ports import (
     AssetRepository,
     MediaStorage,
@@ -58,7 +59,9 @@ from sentrix.infrastructure.persistence.repositories.assets import (
 from sentrix.infrastructure.persistence.repositories.conversations import (
     SqliteConversationRepository,
 )
+from sentrix.infrastructure.persistence.repositories.entities import SqliteEntityRepository
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
+from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
@@ -109,6 +112,11 @@ class Container:
     lexical_index: LexicalIndex
     lexical_search: LexicalSearch
 
+    # 身份层（S5a）。两个仓储分家的理由写在 domain/identity/ports.py 的模块注释里：
+    # 人脸侧的写入者是在线匹配与簇审阅，实体侧的写入者是命名与属性维护。
+    face_repository: FaceRepository
+    entity_repository: EntityRepository
+
     chat_model: ChatModel
     vlm_observer: VlmObserver
     conversation_repository: ConversationRepository
@@ -150,6 +158,8 @@ class Container:
             fact_repository=SqliteFactRepository(database),
             lexical_index=lexical,
             lexical_search=lexical,
+            face_repository=SqliteFaceRepository(database),
+            entity_repository=SqliteEntityRepository(database),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
                 settings.chat_model_name,

@@ -1,0 +1,563 @@
+"""``entities`` / ``entity_revisions`` / ``entity_properties`` / ``entity_mentions`` 仓储。
+
+对应 1.0 ``backend/db.py`` 的 ``find_confirmed_person_by_name`` :4407、
+``person_aliases`` :4399、``set_person_aliases`` :4428、``rename_person`` :4436、
+``entity_event_ids`` :4553、``_record_entity_revision`` :4644、实体属性层 :4666-4750、
+``_link_confirmed_entity_mention`` :4912 与 ``_add_entity_to_observation`` :5435。
+
+**没收进来的两样，以及为什么。** ``maintain_entity_property_values``（多值合并，
+``db.py:4731``）与 ``list_relationships``（``db.py:5590``）都不在这里：
+前者的调用点全在语义实体抽取（``db.py:3840-4032`` 的 atmosphere / semantic_details），
+那是 S7 的链路；后者的调用点在人物详情与家庭图谱（S7）。本切片没有调用者，
+写进来就是零调用的能力——S4 为此栽过两次。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from collections.abc import Sequence
+from datetime import UTC, datetime
+
+from sentrix.domain.identity.models import (
+    ENTITY_STATUS_CONFIRMED,
+    ENTITY_TYPE_PERSON,
+    PROPERTY_SOURCE_USER,
+    PROPERTY_STATUS_ACTIVE,
+    PROPERTY_STATUS_PENDING,
+    REVISION_SOURCE_USER_RENAME,
+    EntityMentionRecord,
+    EntityPropertyRecord,
+    EntityRecord,
+    EntityRevisionRecord,
+    PersonNameMatch,
+)
+from sentrix.infrastructure.persistence.database import Database
+
+_ENTITY_COLUMNS = (
+    "id, scope_id, entity_type, canonical_name, status, family_role, summary, confidence,"
+    " identity_state, role_state, name_state, created_at, updated_at"
+)
+_PROPERTY_COLUMNS = (
+    "id, entity_id, property_key, value_json, source, confidence, status, evidence_ids_json,"
+    " supersedes_property_id, revision, created_at, updated_at"
+)
+_MENTION_COLUMNS = "id, entity_id, observation_id, face_instance_id, confidence, created_at"
+
+ALIAS_PROPERTY_KEY = "aliases"
+
+
+def _new_id(prefix: str) -> str:
+    """1.0 ``make_id``：``f"{prefix}_{uuid4().hex[:12]}"``。"""
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _encode(value: object) -> str:
+    """1.0 ``json_value``：``None`` 也编码成 ``"null"``，不落 SQL NULL。
+
+    这个选择有下游后果：属性比较是同值判断，比的是**编码后的串**。把 ``None`` 写成 SQL
+    NULL 会让 ``value_json == encoded`` 永远为假，于是每次派生都新起一行 pending。
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _decode(text: str | None, fallback: object = None) -> object:
+    try:
+        return json.loads(text or "null")
+    except json.JSONDecodeError:
+        return fallback
+
+
+def _decode_list(text: str | None) -> list[object]:
+    value = _decode(text, [])
+    return value if isinstance(value, list) else []
+
+
+def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
+    """1.0 到处在用的 ``list(dict.fromkeys(...))``：保序去重。"""
+    return tuple(dict.fromkeys(str(item) for item in values if str(item)))
+
+
+def _row_to_entity(row: sqlite3.Row) -> EntityRecord:
+    return EntityRecord(
+        id=row["id"],
+        scope_id=row["scope_id"],
+        entity_type=row["entity_type"],
+        canonical_name=row["canonical_name"],
+        status=row["status"],
+        family_role=row["family_role"],
+        summary=row["summary"],
+        confidence=row["confidence"],
+        identity_state=row["identity_state"],
+        role_state=row["role_state"],
+        name_state=row["name_state"],
+        created_at=_parse_datetime(row["created_at"]),
+        updated_at=_parse_datetime(row["updated_at"]),
+    )
+
+
+def _row_to_property(row: sqlite3.Row) -> EntityPropertyRecord:
+    evidence = _decode_list(row["evidence_ids_json"])
+    return EntityPropertyRecord(
+        id=row["id"],
+        entity_id=row["entity_id"],
+        property_key=row["property_key"],
+        value=_decode(row["value_json"]),
+        source=row["source"],
+        confidence=row["confidence"],
+        status=row["status"],
+        evidence_ids=tuple(str(item) for item in evidence),
+        supersedes_property_id=row["supersedes_property_id"],
+        revision=row["revision"],
+        created_at=_parse_datetime(row["created_at"]),
+        updated_at=_parse_datetime(row["updated_at"]),
+    )
+
+
+def _row_to_revision(row: sqlite3.Row) -> EntityRevisionRecord:
+    evidence = _decode_list(row["evidence_ids_json"])
+    return EntityRevisionRecord(
+        id=row["id"],
+        entity_id=row["entity_id"],
+        field_name=row["field_name"],
+        old_value=row["old_value"],
+        new_value=row["new_value"],
+        source=row["source"],
+        evidence_ids=tuple(str(item) for item in evidence),
+        created_at=_parse_datetime(row["created_at"]),
+    )
+
+
+def _row_to_mention(row: sqlite3.Row) -> EntityMentionRecord:
+    return EntityMentionRecord(
+        id=row["id"],
+        entity_id=row["entity_id"],
+        observation_id=row["observation_id"],
+        face_instance_id=row["face_instance_id"],
+        confidence=row["confidence"],
+        created_at=_parse_datetime(row["created_at"]),
+    )
+
+
+class SqliteEntityRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    # ---- 实体 --------------------------------------------------------------------
+
+    def get(self, entity_id: str) -> EntityRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+        return _row_to_entity(row) if row else None
+
+    def find_confirmed_person_by_name(self, scope_id: str, name: str) -> PersonNameMatch | None:
+        target = str(name or "").strip()
+        if not target:
+            return None
+        with self._database.connect() as connection:
+            exact = connection.execute(
+                f"SELECT {_ENTITY_COLUMNS} FROM entities"
+                " WHERE scope_id = ? AND entity_type = ? AND status = ? AND canonical_name = ?"
+                " ORDER BY updated_at DESC LIMIT 1",
+                (scope_id, ENTITY_TYPE_PERSON, ENTITY_STATUS_CONFIRMED, target),
+            ).fetchone()
+            if exact is not None:
+                return PersonNameMatch(entity_id=exact["id"], via_alias=False)
+            # 精确名没有才轮到别名。顺序不能反：反了的话，A 的别名会抢走名字真的叫这个的 B。
+            candidates = connection.execute(
+                "SELECT id FROM entities WHERE scope_id = ? AND entity_type = ? AND status = ?",
+                (scope_id, ENTITY_TYPE_PERSON, ENTITY_STATUS_CONFIRMED),
+            ).fetchall()
+        for candidate in candidates:
+            if target in self.person_aliases(candidate["id"]):
+                return PersonNameMatch(entity_id=candidate["id"], via_alias=True)
+        return None
+
+    def record_revision(
+        self,
+        entity_id: str,
+        field_name: str,
+        old_value: str | None,
+        new_value: str | None,
+        *,
+        source: str,
+        evidence_ids: Sequence[str] = (),
+    ) -> EntityRevisionRecord:
+        with self._database.connect() as connection, connection:
+            return self._insert_revision(
+                connection, entity_id, field_name, old_value, new_value, source, evidence_ids
+            )
+
+    @staticmethod
+    def _insert_revision(
+        connection: sqlite3.Connection,
+        entity_id: str,
+        field_name: str,
+        old_value: str | None,
+        new_value: str | None,
+        source: str,
+        evidence_ids: Sequence[str],
+    ) -> EntityRevisionRecord:
+        """审计行与它描述的变更必须同一个事务——分成两次提交会留下「改了但没留痕」的窗口。
+
+        所以公开的 ``record_revision`` 与 ``set_property`` / ``rename_person`` 共用这一个
+        函数，区别只在谁持有连接。
+        """
+        revision_id = _new_id("entity_revision")
+        now = _now()
+        connection.execute(
+            "INSERT INTO entity_revisions"
+            " (id, entity_id, field_name, old_value, new_value, source, evidence_ids_json, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                revision_id,
+                entity_id,
+                field_name,
+                old_value,
+                new_value,
+                source,
+                _encode(list(_dedupe(evidence_ids))),
+                now,
+            ),
+        )
+        return EntityRevisionRecord(
+            id=revision_id,
+            entity_id=entity_id,
+            field_name=field_name,
+            old_value=old_value,
+            new_value=new_value,
+            source=source,
+            evidence_ids=_dedupe(evidence_ids),
+            created_at=_parse_datetime(now),
+        )
+
+    # ---- 属性 --------------------------------------------------------------------
+
+    def list_properties(
+        self, entity_id: str, *, include_history: bool = False
+    ) -> Sequence[EntityPropertyRecord]:
+        clause = "" if include_history else " AND status IN ('active', 'pending')"
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_PROPERTY_COLUMNS} FROM entity_properties WHERE entity_id = ?{clause}"
+                " ORDER BY property_key, revision DESC, updated_at DESC",
+                (entity_id,),
+            ).fetchall()
+        return [_row_to_property(row) for row in rows]
+
+    def maintain_property(
+        self,
+        entity_id: str,
+        property_key: str,
+        value: object,
+        *,
+        confidence: float = 0.0,
+        evidence_ids: Sequence[str] = (),
+        source: str = "derived",
+    ) -> EntityPropertyRecord:
+        self._require_entity(entity_id)
+        key = self._clean_key(property_key)
+        evidence = _dedupe(evidence_ids)
+        encoded = _encode(value)
+        with self._database.connect() as connection, connection:
+            current = self._current_property(connection, entity_id, key)
+            if current is not None and current["source"] == PROPERTY_SOURCE_USER:
+                # 用户的输入是权威。这里连「新起一条 pending」都不做——那同样会让界面上
+                # 冒出第二个别名，只是把覆盖换成了并列。
+                return _row_to_property(current)
+            if current is not None and current["value_json"] == encoded:
+                merged = _dedupe(
+                    [str(item) for item in _decode_list(current["evidence_ids_json"])] + list(evidence)
+                )
+                connection.execute(
+                    "UPDATE entity_properties SET confidence = MAX(confidence, ?),"
+                    " evidence_ids_json = ?, updated_at = ? WHERE id = ?",
+                    (float(confidence or 0), _encode(list(merged)), _now(), current["id"]),
+                )
+                return self._property_by_id(connection, current["id"])
+            return self._insert_property(
+                connection,
+                entity_id=entity_id,
+                property_key=key,
+                encoded=encoded,
+                source=source,
+                confidence=confidence,
+                evidence=evidence,
+                # 没有当前值就是首次写入 → active；有当前值而值不同 → 改口，等人确认。
+                status=PROPERTY_STATUS_ACTIVE if current is None else PROPERTY_STATUS_PENDING,
+                supersedes=current["id"] if current is not None else None,
+                revision=int(current["revision"] or 0) + 1 if current is not None else 1,
+            )
+
+    def set_property(
+        self,
+        entity_id: str,
+        property_key: str,
+        value: object,
+        *,
+        evidence_ids: Sequence[str] = (),
+    ) -> EntityPropertyRecord:
+        self._require_entity(entity_id)
+        key = self._clean_key(property_key)
+        evidence = _dedupe(evidence_ids)
+        encoded = _encode(value)
+        now = _now()
+        with self._database.connect() as connection, connection:
+            current = self._current_property(connection, entity_id, key)
+            if current is not None:
+                connection.execute(
+                    "UPDATE entity_properties SET status = 'superseded', updated_at = ?"
+                    " WHERE entity_id = ? AND property_key = ? AND status IN ('active', 'pending')",
+                    (now, entity_id, key),
+                )
+            written = self._insert_property(
+                connection,
+                entity_id=entity_id,
+                property_key=key,
+                encoded=encoded,
+                source=PROPERTY_SOURCE_USER,
+                confidence=1.0,
+                evidence=evidence,
+                status=PROPERTY_STATUS_ACTIVE,
+                supersedes=current["id"] if current is not None else None,
+                revision=int(current["revision"] or 0) + 1 if current is not None else 1,
+            )
+            # 修订的旧值存**编码后的串**，与 1.0 一致：属性值的类型不固定（串 / 列表 / 字典），
+            # 审计行统一成文本才可比。
+            self._insert_revision(
+                connection,
+                entity_id,
+                f"property:{key}",
+                current["value_json"] if current is not None else None,
+                encoded,
+                PROPERTY_SOURCE_USER,
+                evidence,
+            )
+        return written
+
+    @staticmethod
+    def _insert_property(
+        connection: sqlite3.Connection,
+        *,
+        entity_id: str,
+        property_key: str,
+        encoded: str,
+        source: str,
+        confidence: float,
+        evidence: tuple[str, ...],
+        status: str,
+        supersedes: str | None,
+        revision: int,
+    ) -> EntityPropertyRecord:
+        property_id = _new_id("entity_property")
+        now = _now()
+        connection.execute(
+            "INSERT INTO entity_properties"
+            " (id, entity_id, property_key, value_json, source, confidence, status,"
+            "  evidence_ids_json, supersedes_property_id, revision, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                property_id,
+                entity_id,
+                property_key,
+                encoded,
+                source,
+                float(confidence or 0),
+                status,
+                _encode(list(evidence)),
+                supersedes,
+                revision,
+                now,
+                now,
+            ),
+        )
+        row = connection.execute(
+            f"SELECT {_PROPERTY_COLUMNS} FROM entity_properties WHERE id = ?", (property_id,)
+        ).fetchone()
+        assert row is not None
+        return _row_to_property(row)
+
+    @staticmethod
+    def _property_by_id(connection: sqlite3.Connection, property_id: str) -> EntityPropertyRecord:
+        row = connection.execute(
+            f"SELECT {_PROPERTY_COLUMNS} FROM entity_properties WHERE id = ?", (property_id,)
+        ).fetchone()
+        assert row is not None
+        return _row_to_property(row)
+
+    @staticmethod
+    def _current_property(
+        connection: sqlite3.Connection, entity_id: str, property_key: str
+    ) -> sqlite3.Row | None:
+        """当前生效的一行：``active`` 优先于 ``pending``，再按 ``revision`` 降序。
+
+        ``active`` 优先是这条 SQL 的全部要点：派生写出的新值转 ``pending`` 之后，
+        「当前值」仍然是那条已确认的旧值，直到有人确认新值为止。
+        """
+        row = connection.execute(
+            f"SELECT {_PROPERTY_COLUMNS} FROM entity_properties"
+            " WHERE entity_id = ? AND property_key = ? AND status IN ('active', 'pending')"
+            " ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, revision DESC,"
+            " updated_at DESC LIMIT 1",
+            (entity_id, property_key),
+        ).fetchone()
+        return row if row is not None else None
+
+    def _require_entity(self, entity_id: str) -> None:
+        """1.0 的属性写入对不存在的实体抛 ``KeyError``，不是静默返回——属性挂在实体上，
+        没有实体就没有可挂的地方，静默会让调用方以为写成功了。"""
+        if self.get(entity_id) is None:
+            raise KeyError(entity_id)
+
+    @staticmethod
+    def _clean_key(property_key: str) -> str:
+        key = str(property_key or "").strip()
+        if not key:
+            raise ValueError("property_key is required")
+        return key
+
+    # ---- 别名与改名 --------------------------------------------------------------
+
+    def person_aliases(self, entity_id: str) -> tuple[str, ...]:
+        with self._database.connect() as connection:
+            row = self._current_property(connection, entity_id, ALIAS_PROPERTY_KEY)
+        if row is None:
+            return ()
+        value = _decode(row["value_json"])
+        if isinstance(value, list):
+            return tuple(str(item) for item in value)
+        return (str(value),) if value else ()
+
+    def set_person_aliases(self, entity_id: str, aliases: Sequence[str]) -> tuple[str, ...]:
+        cleaned = _dedupe([str(item or "").strip() for item in aliases if str(item or "").strip()])
+        if self.get(entity_id) is None:
+            return ()
+        self.set_property(entity_id, ALIAS_PROPERTY_KEY, list(cleaned))
+        return self.person_aliases(entity_id)
+
+    def rename_person(self, entity_id: str, new_name: str) -> EntityRecord | None:
+        entity = self.get(entity_id)
+        if entity is None or entity.entity_type != ENTITY_TYPE_PERSON:
+            return None
+        name = str(new_name or "").strip()
+        if not name:
+            raise ValueError("person name is required")
+        old_name = entity.canonical_name
+        if old_name != name:
+            if old_name:
+                aliases = list(self.person_aliases(entity_id))
+                if old_name not in aliases:
+                    aliases.append(old_name)
+                self.set_person_aliases(entity_id, aliases)
+            with self._database.connect() as connection, connection:
+                now = _now()
+                connection.execute(
+                    "UPDATE entities SET canonical_name = ?, name_state = 'confirmed', updated_at = ?"
+                    " WHERE id = ?",
+                    (name, now, entity_id),
+                )
+                self._insert_revision(
+                    connection,
+                    entity_id,
+                    "canonical_name",
+                    old_name,
+                    name,
+                    REVISION_SOURCE_USER_RENAME,
+                    (),
+                )
+        return self.get(entity_id)
+
+    # ---- 提及桥 ------------------------------------------------------------------
+
+    def link_confirmed_mention(
+        self,
+        entity_id: str,
+        observation_id: str,
+        *,
+        face_instance_id: str | None = None,
+        confidence: float = 0.0,
+    ) -> EntityMentionRecord:
+        entity = self.get(entity_id)
+        if entity is None:
+            raise KeyError(entity_id)
+        if entity.status != ENTITY_STATUS_CONFIRMED:
+            # 1.0 是在调用点用 ``if entity.get("status") == "confirmed"`` 挡的。2.0 挡在
+            # 这里：这条规则一旦漏掉，观察的人物快照里就会混进一个聚类猜出来的候选人，
+            # 而它是 ``person_score`` 与 ``person_bridge`` 的输入——一处漏判，后面全是事实。
+            raise ValueError(f"只有已确认的实体才写提及，{entity_id} 当前是 {entity.status}")
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO entity_mentions"
+                " (id, entity_id, observation_id, face_instance_id, confidence, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (
+                    _new_id("mention"),
+                    entity_id,
+                    observation_id,
+                    face_instance_id,
+                    float(confidence or 0),
+                    _now(),
+                ),
+            )
+            row = connection.execute(
+                f"SELECT {_MENTION_COLUMNS} FROM entity_mentions"
+                " WHERE entity_id = ? AND observation_id = ? AND face_instance_id IS ?",
+                (entity_id, observation_id, face_instance_id),
+            ).fetchone()
+            assert row is not None
+            self._append_person_snapshot(connection, observation_id, entity)
+        return _row_to_mention(row)
+
+    @staticmethod
+    def _append_person_snapshot(
+        connection: sqlite3.Connection, observation_id: str, entity: EntityRecord
+    ) -> None:
+        """把这个人追加进 ``observations.people_json``（1.0 ``_add_entity_to_observation``）。
+
+        写的是**另一个聚合的表**，这一点是有意的：``people_json`` 是身份层在观察上的投影，
+        它没有自己的写入用例，跟着提及一起写才不会出现「有提及、快照里没人」。已存在就不
+        重复追加，所以重复调用幂等。
+        """
+        row = connection.execute(
+            "SELECT people_json FROM observations WHERE id = ?", (observation_id,)
+        ).fetchone()
+        if row is None:
+            return
+        people = _decode_list(row["people_json"])
+        if not any(isinstance(item, dict) and item.get("entity_id") == entity.id for item in people):
+            people.append({"entity_id": entity.id, "name": entity.canonical_name, "status": entity.status})
+        connection.execute(
+            "UPDATE observations SET people_json = ? WHERE id = ?",
+            (_encode(people), observation_id),
+        )
+
+    # ---- 事件关联 ----------------------------------------------------------------
+
+    def event_ids(self, entity_id: str) -> Sequence[str]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT event_id FROM (
+                    SELECT eo.event_id FROM entity_mentions em
+                    JOIN event_observations eo ON eo.observation_id = em.observation_id
+                    WHERE em.entity_id = ?
+                    UNION
+                    SELECT event_id FROM event_participants WHERE person_id = ?
+                    UNION
+                    SELECT eo.event_id FROM entity_observations eob
+                    JOIN event_observations eo ON eo.observation_id = eob.observation_id
+                    WHERE eob.entity_id = ?
+                )""",
+                (entity_id, entity_id, entity_id),
+            ).fetchall()
+        return [row["event_id"] for row in rows]
