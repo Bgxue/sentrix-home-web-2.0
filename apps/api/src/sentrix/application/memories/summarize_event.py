@@ -152,7 +152,21 @@ def _parse_json_object(text: str) -> dict[str, object] | None:
     return None
 
 
-def build_prompt(event: EventRecord, observations: Sequence[Observation]) -> str:
+def build_system_prompt() -> str:
+    """系统提示词。**它必须是 ``messages[0]``。**
+
+    ``OpenAIChatModel.complete`` 的第一条硬契约就是这个（``chat_client.py:98``），
+    1.0 的 ``400 System message must be at the beginning`` 是同一个坑的另一面。
+    这段在 1.0 里是拼进**同一个 user 消息**发给 Ollama 的（``model_clients.py:314``
+    的 ``chat(prompt)`` 只发一条 user 消息，宽松模板容忍）；2.0 的端口不接受那种形状，
+    照搬 1.0 的单条 user 消息会让**每一次模型调用都在本地就抛**
+    （``ChatModelError``），于是模型那条路永远走不到、只剩确定性摘要。
+    """
+    return _SUMMARY_PROMPT
+
+
+def build_evidence(event: EventRecord, observations: Sequence[Observation]) -> str:
+    """user 消息：这次要总结的事件的可验证证据（JSON，不含任何提示词）。"""
     evidence = [
         {
             "observation_id": item.id,
@@ -165,7 +179,7 @@ def build_prompt(event: EventRecord, observations: Sequence[Observation]) -> str
         }
         for item in observations
     ]
-    return _SUMMARY_PROMPT + json.dumps(
+    return json.dumps(
         {
             "time_start": event.time_start.isoformat() if event.time_start else None,
             "time_end": event.time_end.isoformat() if event.time_end else None,
@@ -226,7 +240,11 @@ class SummarizeEvent:
             return None
         try:
             reply: ModelReply = model.complete(
-                [ChatMessage(role=ChatRole.USER, content=build_prompt(event, observations))], ()
+                (
+                    ChatMessage(role=ChatRole.SYSTEM, content=build_system_prompt()),
+                    ChatMessage(role=ChatRole.USER, content=build_evidence(event, observations)),
+                ),
+                (),
             )
         except Exception as error:  # 端点不可用/超时/返回不可解析，一律退回确定性摘要
             log.warning("事件总结的模型调用失败，改用确定性摘要: %s", error)

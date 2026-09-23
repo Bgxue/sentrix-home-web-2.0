@@ -63,4 +63,7 @@ class ImportBatchResponse(BaseModel):
     deduplicated: int
     events: int
     lexical_terms: int
+    # 批末被总结过的事件数（去重后）。不为 0 是「事件拿到了真标题」的可观测面——
+    # 这个数小于 ``events`` 说明有事件被折叠进了已总结过的那个（1.0 亦然）。
+    summarized: int
     failures: list[ImportFailure]

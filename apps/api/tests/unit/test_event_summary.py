@@ -24,7 +24,7 @@ from sentrix.application.memories.summarize_event import (
     fallback_projection,
     projection_from_reply,
 )
-from sentrix.domain.assistant.models import ModelReply
+from sentrix.domain.assistant.models import ChatMessage, ChatRole, ModelReply
 from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
 from sentrix.domain.memories.events import EventRecord
 from sentrix.infrastructure.persistence.database import Database
@@ -161,12 +161,25 @@ def test_a_usable_reply_becomes_a_projection():
 
 
 class FakeChatModel:
+    """与 ``OpenAIChatModel.complete`` 同契约的假件。
+
+    **两条前置条件必须在这里也成立**：假件放过它们，「单条 user 消息」这种违反就
+    永远不会在单测里露头。Task 57b 的 `SummarizeEvent` 正是这么漏的——它照 1.0
+    ``model_clients.py:314`` 的 ``chat(prompt)`` 只发了一条 user 消息，而 2.0 的端口
+    要求 ``messages[0]`` 是 system，于是**每一次模型调用都在本地就抛**
+    （``ChatModelError``），整册导入 17 个事件全部退回确定性摘要（实测）。
+    """
+
     def __init__(self, reply: str = "", *, error: Exception | None = None) -> None:
         self.reply = reply
         self.error = error
         self.calls = 0
+        self.messages: tuple[ChatMessage, ...] = ()
 
     def complete(self, messages, tools) -> ModelReply:  # noqa: ANN001
+        assert messages and messages[0].role is ChatRole.SYSTEM, "messages[0] 必须是 system"
+        assert not any(item.role is ChatRole.SYSTEM for item in messages[1:]), "system 只能出现在开头"
+        self.messages = tuple(messages)
         self.calls += 1
         if self.error is not None:
             raise self.error
@@ -269,3 +282,21 @@ def test_a_bare_string_reply_falls_back(repos):
 def test_missing_event_raises(repos):
     with pytest.raises(KeyError):
         use_case(repos, FakeChatModel()).execute("evt_gone")
+
+
+def test_the_model_call_carries_a_system_message_that_holds_the_prompt(repos):
+    """提示词进 system、证据进 user，且 system 是第一条。
+
+    1.0 把两段拼成一条 user 消息（``model_clients.py:314`` 的 ``chat(prompt)``）；
+    2.0 的 ``ChatModel`` 端口不接受那个形状（``chat_client.py:98``）。这条用例与
+    ``FakeChatModel`` 的两条断言一起，把这个形状钉死。
+    """
+    seed(repos)
+    model = FakeChatModel('{"title": "萧山区家庭活动", "summary": "下午拍照"}')
+
+    use_case(repos, model).execute("evt_1")
+
+    assert [item.role for item in model.messages] == [ChatRole.SYSTEM, ChatRole.USER]
+    assert "事件总结器" in model.messages[0].content
+    assert "obs_1" in model.messages[1].content  # 证据在 user 那条里
+    assert "事件总结器" not in model.messages[1].content

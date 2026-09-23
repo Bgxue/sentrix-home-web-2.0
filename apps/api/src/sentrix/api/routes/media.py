@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -13,6 +14,7 @@ from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
 from sentrix.application.media.observe_asset import ObserveAsset
 from sentrix.application.memories.assign_events import AssignEvents, EventVisualSimilarity
+from sentrix.application.memories.maintain_facts import MaintainFacts
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
 from sentrix.domain.media.models import Asset, Observation
@@ -114,8 +116,35 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
             else None
         ),
         event_assigner=lambda observation: _event_id(assigner, observation),
+        fact_maintainer=_fact_maintainer(container),
         lexical_index=container.lexical_index,
     )
+
+
+def _fact_maintainer(container: Container) -> Callable[[Observation], tuple[str, ...]]:
+    """事实写入的接线。**这块在 S4 写不出任何一行，两个原因都不在这里**。
+
+    1. **候选事实没有来源**。1.0 的候选来自模型自报的 ``facts``
+       （``backend/model_clients.py:1130-1198``），2.0 的观察器明确不搬它
+       （``s4-deviations.md`` 第 30 条）。所以下面的 ``candidates`` 恒为空元组。
+    2. **门禁关着**。1.0 的 ``is_confirmed_person_name`` 查 ``entities`` 表里
+       ``status='confirmed'`` 的人物（``db.py:1494-1503``），而 2.0 的身份层是 S5。
+       ``MaintainFacts`` 的 ``confirmed_people`` 默认空集，与 ``AssignEvents``
+       同名参数的 S4 取值一致。
+
+    接线的意义在于：``domain/memories/facts.py`` 的三条纯规则与
+    ``repositories/facts.py`` 从这一版起**有生产调用方**（1.0 的
+    ``_commit_semantic_image`` 整段不调 ``maintain_fact``，两条路径不一致是用户裁决
+    第 3 条要修的）。「按设计为空」与「没人调所以恒空」是两件事，前者可断言、后者
+    只能靠读代码发现——这条注释与 ``tests/integration/test_maintain_facts.py``
+    都按前者写。
+    **放宽门禁或补候选来源都是用户裁决点**，不在接线里自己定。
+    """
+    maintain = MaintainFacts(
+        facts=container.fact_repository,
+        candidates=lambda _observation: (),
+    )
+    return maintain.maintain
 
 
 def _event_id(assigner: AssignEvents, observation: Observation) -> str:

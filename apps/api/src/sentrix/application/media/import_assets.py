@@ -11,7 +11,7 @@ S2 追加一条：**导入即向量化**（1.0 ``pipeline.py`` 的 ``_commit_fas
 
 S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
 
-    存储 → EXIF/GPS → 地点解析 → 视觉向量 → 观察 → 语义富集 → 事件归属 → 词法投影
+    存储 → EXIF/GPS → 地点解析 → 视觉向量 → 观察 → 语义富集 → 事件归属 → 事实写入 → 词法投影
 
 - **视觉向量先于事件归属**：``score_event_candidate`` 的 ``visual_boost``（权重 0.05）
   与 ``split_guard`` 都读 ``memory_vectors`` 里 ``space='visual' & source_type='asset'``
@@ -23,6 +23,10 @@ S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
   那一行（``AssignEvents._create`` / ``_fold``），解析没做完时事件里就是空的。
 - **词法投影挂在观察写入之后逐条写**：1.0 的 ``refresh_from_observation`` 存在但生产
   零调用，2.0 不做懒补建。
+- **事实写入排在事件归属之后**：1.0 ``pipeline.process()`` 的顺序就是
+  ``merge_observation_into_event`` → ``maintain_fact``（``pipeline.py:340-350``，
+  计划 Task 52 的「52 在 51 之后」也是这个依据）。事实是**观察级**的：一条观察一组
+  候选事实，逐条处理，不等批末。
 
 协作者全是可选的：不传就退化成纯导入（本文件的既有调用方与单元测试不必构造整条链）。
 
@@ -70,6 +74,9 @@ class ImportResult:
     placed: bool = False
     event_id: str | None = None
     lexical_terms: int = 0
+    # 1.0 把这份 id 表写进 ``assets.metadata_json["fact_ids"]``。2.0 不往 asset 上挂
+    # JSON blob，但要留下同一个可观测面：调用方与测试都靠它区分「门禁关了」与「没接线」。
+    fact_ids: tuple[str, ...] = ()
 
 
 def _new_id(prefix: str) -> str:
@@ -90,6 +97,7 @@ class ImportAssets:
         place_indexer: AssetPlaceIndex | None = None,
         observer: AssetObserver | None = None,
         event_assigner: Callable[[Observation], str] | None = None,
+        fact_maintainer: Callable[[Observation], tuple[str, ...]] | None = None,
         lexical_index: LexicalIndex | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -101,6 +109,7 @@ class ImportAssets:
         self._place_indexer = place_indexer
         self._observer = observer
         self._event_assigner = event_assigner
+        self._fact_maintainer = fact_maintainer
         self._lexical_index = lexical_index
         self._clock = clock
 
@@ -162,6 +171,7 @@ class ImportAssets:
 
         observation = self._observe(asset, observation) or observation
         event_id = self._assign_event(observation)
+        fact_ids = self._maintain_facts(observation)
         lexical_terms = self._project_lexical(observation)
 
         return ImportResult(
@@ -174,6 +184,7 @@ class ImportAssets:
             placed=placed,
             event_id=event_id,
             lexical_terms=lexical_terms,
+            fact_ids=fact_ids,
         )
 
     # ---- 可选协作者 ------------------------------------------------------------
@@ -197,6 +208,11 @@ class ImportAssets:
         if self._event_assigner is None:
             return None
         return self._event_assigner(observation)
+
+    def _maintain_facts(self, observation: Observation) -> tuple[str, ...]:
+        if self._fact_maintainer is None:
+            return ()
+        return self._fact_maintainer(observation)
 
     def _project_lexical(self, observation: Observation) -> int:
         if self._lexical_index is None:

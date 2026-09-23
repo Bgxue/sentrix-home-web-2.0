@@ -1,8 +1,11 @@
 import io
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from sentrix.application.memories.maintain_facts import MaintainFacts
+from sentrix.domain.media.models import Observation
 from sentrix.domain.retrieval.scheme import IMAGE_MODEL
 
 
@@ -124,3 +127,30 @@ def test_reimport_does_not_duplicate_the_visual_vector(client: TestClient):
         )
 
     assert client.app.state.container.vector_repository.count(space="visual") == 1
+
+
+def test_the_import_route_wires_fact_maintenance(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    """导入路径必须**有**事实写入的调用方。
+
+    ``domain/memories/facts.py`` 与 ``repositories/facts.py`` 建好之后一度零生产调用
+    （1.0 也只有 ``process()`` 会调，``_commit_semantic_image`` 不调）。这里用替身
+    替换用例本身，验的是装配点 ``build_import_assets`` 真的把 ``MaintainFacts`` 接上了、
+    且每导入一条观察就会被调一次——**S4 的候选来源与门禁都还是空的，所以观察不到
+    facts 表有行**，能观察到的只有调用本身。见 ``tests/integration/test_maintain_facts.py``。
+    """
+    seen: list[Observation] = []
+
+    def record(self: MaintainFacts, observation: Observation) -> tuple[str, ...]:
+        seen.append(observation)
+        return ()
+
+    monkeypatch.setattr(MaintainFacts, "maintain", record)
+
+    response = client.post(
+        "/api/v1/media/import",
+        files={"file": ("IMG_0001.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"scope_id": "album1"},
+    )
+
+    assert response.status_code == 201
+    assert [item.id for item in seen] == [response.json()["observation_id"]]

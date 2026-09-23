@@ -875,6 +875,9 @@ components:
         lexical_terms:
           type: integer
           title: Lexical Terms
+        summarized:
+          type: integer
+          title: Summarized
         failures:
           items:
             $ref: '#/components/schemas/ImportFailure'
@@ -888,6 +891,7 @@ components:
       - deduplicated
       - events
       - lexical_terms
+      - summarized
       - failures
       title: ImportBatchResponse
     ImportFailure:

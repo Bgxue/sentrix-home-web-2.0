@@ -27,6 +27,7 @@ from sentrix.application.memories.read_timeline import (
 from sentrix.application.memories.read_timeline import (
     TimelineEvent as TimelineEventResult,
 )
+from sentrix.application.memories.summarize_event import SummarizeEvent
 from sentrix.bootstrap.container import Container
 
 log = logging.getLogger("sentrix.api.timeline")
@@ -64,6 +65,22 @@ def _read_timeline(container: Container) -> ReadTimeline:
         observations=container.observation_repository,
         assets=container.asset_repository,
         places=container.asset_place_repository,
+    )
+
+
+def _summarize_event(container: Container) -> SummarizeEvent:
+    """整册导入的批末收尾用的总结器。
+
+    ``model`` 传的是 ``container.chat_model``——它是 **8100 上的文本模型**，
+    不是 8101 的嵌入器。``SummarizeEvent`` 拿不到模型或模型报错时都会退回
+    ``fallback_projection``（确定性摘要），所以端点不可用不会让批末卡住或让事件
+    重新变回占位值。``model is None`` 才是「接了也白接」的那条早退，这里不会发生。
+    """
+    return SummarizeEvent(
+        events=container.event_repository,
+        observations=container.observation_repository,
+        assets=container.asset_repository,
+        model=container.chat_model,
     )
 
 
@@ -108,7 +125,10 @@ def import_album(
     整册导入要串行走模型调用，所以这个请求会跑很久——客户端的超时必须自己调大，
     这一点写在 ``docs/runbooks/geonames-data.md`` 的相邻章节（导入一节）。
     """
-    album = ImportAlbum(importer=build_import_assets(container, observe=True))
+    album = ImportAlbum(
+        importer=build_import_assets(container, observe=True),
+        summarize_event=_summarize_event(container).execute,
+    )
     try:
         result = album.execute(
             AlbumImportRequest(scope_id=request.scope_id, directory=request.directory, limit=request.limit)
@@ -122,5 +142,6 @@ def import_album(
         deduplicated=result.deduplicated,
         events=result.events,
         lexical_terms=result.lexical_terms,
+        summarized=result.summarized,
         failures=[ImportFailure(file_name=item.file_name, reason=item.reason) for item in result.failures],
     )

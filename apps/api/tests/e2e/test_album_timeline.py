@@ -8,7 +8,8 @@
 **模型不在这里调**：8100 的 VLM 是 1.0 的服务，生命周期不归 2.0 管，而 CI 运行时对
 同一块单卡 GPU 发起真推理也不是这条用例要验的东西。观察器换成确定性的假件；
 真链路是「真 EXIF → 真地点解析（PyGeoCN 面 + GeoNames 点）→ 真归并 → 真时间线」。
-视觉嵌入同样换成假件（真模型是 1.6GB 权重 + GPU 推理）。
+视觉嵌入同样换成假件（真模型是 1.6GB 权重 + GPU 推理）。批末的事件总结也会打 8100
+（同一个端点的文本模型），所以文本模型一并换成假件——见 ``FakeChatModel``。
 
 断言里的两个地名是**实测值**，不是推断：
 
@@ -26,8 +27,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from sentrix.application.memories.summarize_event import PLACEHOLDER_TITLES
 from sentrix.config import Settings
+from sentrix.domain.assistant.models import ModelReply
 from sentrix.domain.retrieval import scheme
+from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 from sentrix.main import create_app
 
 ALBUM = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
@@ -98,6 +102,25 @@ class FakeVlmObserver:
         )
 
 
+class FakeChatModel:
+    """批末事件总结用的确定性文本模型（真件是 8100 上的 llama-server）。
+
+    模型名与那条降级路径都不在这里验——``test_event_summary.py`` 单独验。
+    这里要的是：批末真的调了一次总结、事件因此拿到非占位的标题/类型。
+    """
+
+    model_id = "fake-chat"
+
+    def complete(self, messages, tools) -> ModelReply:  # noqa: ANN001
+        return ModelReply(
+            content=(
+                '{"title":"户外拍照","event_type":"家庭活动","activity":"拍照",'
+                '"summary":"一批家庭照片记录了户外拍照。","confidence":0.8}'
+            ),
+            finish_reason="stop",
+        )
+
+
 def photos() -> list[Path]:
     if not ALBUM.is_dir():
         pytest.skip(f"真相册夹具不可用: {ALBUM}")
@@ -125,7 +148,7 @@ def geo_sources() -> list[Path]:
 
 @pytest.fixture
 def album_client(tmp_path, monkeypatch) -> TestClient:
-    """真 SQLite、真迁移、真地点解析；模型换成假件。"""
+    """真 SQLite、真迁移、真地点解析；三个模型适配器换成假件。"""
     sources = geo_sources()
     monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
     settings = Settings()
@@ -134,7 +157,10 @@ def album_client(tmp_path, monkeypatch) -> TestClient:
         os.symlink(source, settings.geo_dir / source.name)
     app = create_app(settings)
     app.state.container = dataclasses.replace(
-        app.state.container, visual_embedder=FakeVisualEmbedder(), vlm_observer=FakeVlmObserver()
+        app.state.container,
+        visual_embedder=FakeVisualEmbedder(),
+        vlm_observer=FakeVlmObserver(),
+        chat_model=FakeChatModel(),
     )
     return TestClient(app)
 
@@ -278,3 +304,59 @@ def test_import_is_resumable_and_does_not_duplicate_events(album_client: TestCli
     assert second["imported"] == 0
     assert second["deduplicated"] == first["imported"]
     assert timeline(album_client)["total"] == before
+
+
+def test_events_are_summarized_into_real_content_not_placeholders(album_client: TestClient):
+    """**这条断言的是内容，不是数量。**
+
+    原来的整册验收只断言了 ``events > 0`` 这个数量——而事件即使一行总结都没跑，
+    数量也是 53。占位的 ``待总结事件`` / ``待判断`` 是 1.0 新建事件时的字面量
+    （``db.py:2310-2325``），它们落库、出现在接口响应里，看起来像「有内容」。
+
+    ``SummarizeEvent`` 在 S4b 建好之后**没有任何生产调用方**，于是 53 张照片导完，
+    每个事件的 title 都还是 ``待总结事件``。这条用例把它钉住。
+    """
+    body = import_album(album_client)
+
+    timeline_body = timeline(album_client)
+    events = [event for day in timeline_body["days"] for event in day["events"]]
+
+    assert events, "时间线里没有事件，这条断言就失去意义"
+    assert body["summarized"] > 0
+    assert {event["title"] for event in events} & PLACEHOLDER_TITLES == set()
+    assert all(event["title"].strip() for event in events)
+    assert all(event["event_type"] not in PLACEHOLDER_TITLES for event in events)
+    assert all(event["activity"].strip() and event["summary"].strip() for event in events)
+
+
+def test_each_event_is_summarized_once_not_once_per_photo(album_client: TestClient):
+    """总结是**事件级**的（1.0 ``batch_event_ids`` → 逐个 ``_summarize_event_worker``）。
+
+    53 张照片折成 17 个事件，总结就该跑 17 次；按张跑会把同一个事件写 3 遍。
+    """
+    body = import_album(album_client)
+
+    total = timeline(album_client)["total"]
+
+    assert body["events"] == 53
+    assert body["summarized"] == total
+
+
+def test_no_facts_are_written_because_s4_has_no_confirmed_people(album_client: TestClient):
+    """事实表按设计是空的，原因有两个，都不在接线里。
+
+    1. 候选事实没有来源：1.0 的候选来自模型自报的 ``facts``
+       （``model_clients.py:1130-1198``），2.0 的观察器明确不搬
+       （``s4-deviations.md`` 第 30 条）；
+    2. 门禁关着：1.0 的 ``is_confirmed_person_name`` 查 ``entities`` 里
+       ``status='confirmed'`` 的人物，身份层是 S5。
+
+    **接线本身是活的**——``test_the_import_path_calls_fact_maintenance_after_event_assignment``
+    与 ``test_the_import_route_wires_fact_maintenance`` 分别钉住调用点与装配点。
+    这条用例钉住的是「S4 的取值」，谁放宽门禁或补上候选来源，它会红——那正是要用户
+    裁决的时刻。
+    """
+    import_album(album_client)
+
+    facts = SqliteFactRepository(album_client.app.state.container.database)
+    assert list(facts.list_facts("album1", limit=100)) == []

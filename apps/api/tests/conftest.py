@@ -1,11 +1,13 @@
 import dataclasses
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from sentrix.config import Settings
+from sentrix.domain.assistant.models import ChatMessage, ModelReply
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.database import Database
@@ -55,6 +57,30 @@ class FakeVlmObserver:
         )
 
 
+class FakeChatModel:
+    """契约测试用的确定性文本模型。
+
+    真的 ``container.chat_model`` 打的是 8100 的 llama-server——``/api/v1/imports``
+    的批末收尾（``SummarizeEvent``）会调它，每批一次、每个事件一次。契约测试要验的是
+    HTTP 映射，不该把「8100 在不在」和「它这次回了什么标题」变成断言的前置条件：
+    模型不可用时 ``SummarizeEvent`` 会退回确定性摘要（这条降级路径在
+    ``tests/unit/test_event_summary.py`` 里单独验），但退回之前要付一次连接失败。
+
+    返回一份合法的事件投影，让模型那条路在契约测试里也走到且确定。
+    """
+
+    model_id = "fake-chat"
+
+    def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
+        return ModelReply(
+            content=(
+                '{"title":"测试事件标题","event_type":"家庭活动","activity":"测试活动",'
+                '"summary":"测试摘要","confidence":0.8}'
+            ),
+            finish_reason="stop",
+        )
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Settings:
     monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
@@ -63,14 +89,19 @@ def settings(tmp_path, monkeypatch) -> Settings:
 
 @pytest.fixture
 def client(settings) -> TestClient:
-    """装配好的应用，但把视觉嵌入器换成确定性假件。
+    """装配好的应用，但把三个模型适配器换成确定性假件。
 
-    Container 是 frozen dataclass，用 dataclasses.replace 换掉一个适配器，
+    Container 是 frozen dataclass，用 dataclasses.replace 换掉适配器，
     其余装配路径（真 SQLite、真迁移、真 Qdrant）保持原样。
+    ``chat_model`` 也是假件：``/api/v1/imports`` 的批末事件总结会调它
+    （见 ``FakeChatModel``）。
     """
     app = create_app(settings)
     app.state.container = dataclasses.replace(
-        app.state.container, visual_embedder=FakeVisualEmbedder(), vlm_observer=FakeVlmObserver()
+        app.state.container,
+        visual_embedder=FakeVisualEmbedder(),
+        vlm_observer=FakeVlmObserver(),
+        chat_model=FakeChatModel(),
     )
     return TestClient(app)
 
