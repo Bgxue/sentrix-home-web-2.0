@@ -843,6 +843,9 @@ capability-map 里那条指向它的记录同步改成新实现（`person_direct
 
 ### 本轮**没有做**的
 
+> **两条都已由下一轮（§2k 的 E 节）收掉**：定点变异做了四个任务、`make ci` 逐 commit
+> 各跑一次。下面两段是当时的状态，保留原样以便追溯。
+
 - **定点变异（红灯 B）这一轮没做。** 前两轮每个任务挑三条要害改一行、验证红灯指向具体
   断言；本轮三个任务的用例里有对照臂（Task 80 的六条全是），但没有做「改掉实现那一行
   看门禁红不红」的动作。**这是一条未结的账**，下一轮补。
@@ -850,3 +853,239 @@ capability-map 里那条指向它的记录同步改成新实现（`person_direct
   Task 76 的改动落地之后才跑到 pytest（`CI_OK`，日志
   `logs/ci-20260923-204812-run0.log`），所以它验证的是 75+76 的合并树而不是 75 单独一棵。
   76/80 之后的完整 `make ci` 见下一节。**如实登记，不当作「每个 commit 都跑过」。**
+
+---
+
+## 2k. Task 81 / 82 / 83 / 84 实施期实测
+
+上一轮 §2j 末尾那两条未结的账，本轮的处理写在本节末尾。
+
+### A. Task 81（事件参与者投影 + 确认后重分段）的偏离
+
+#### 第 75 条 · `captured_by` 那一路没有搬，因为 2.0 没有它的数据来源
+
+1.0 `_refresh_event_participants`（`db.py:5567-5574`）写两种角色：`visible_subject`
+（0.75）与 `captured_by`（取 `asset.source_confidence`，缺省 0.5）。后者的取值链是
+`assets.source_owner_id` → `entities` 里那个已确认的人。
+
+**2.0 的 `assets` 表没有 `source_owner_id` / `source_confidence` 两列**，也没有任何
+写入者：1.0 那两个值来自导入侧的 metadata（`db.py:1467-1473` 的
+`metadata.get("source_owner_id")`），而 2.0 的 `ImportRequest` 没有 metadata 通道。
+**本轮不建这两列**——建出来就是两个零写入者的列，而 `check_reachability.py` 只覆盖模块、
+看不见列（这条不对称上一轮已经登记在第 44 条）。计划的「必须钉住的行为」里写着
+`captured_by` 的取值口径，那条口径在 2.0 暂时无处可施；**等哪条导入路径真的带来
+「谁拍的」这个信息时再连列一起补。**
+
+#### 第 76 条 · 关系候选（`_maintain_event_cooccurrence_candidates`）没有搬
+
+1.0 `upsert_event_participant` 的最后一句是
+`self._maintain_event_cooccurrence_candidates(event_id)`（`db.py:2508-2525`）：同一个
+事件里两个 `visible_subject` 会往 `relationships` 写一条 `共同出现` 的 **pending** 关系。
+
+2.0 里**没有任何地方读 `relationships`**（人物详情与家庭图谱是 S6）。写进去就是一张
+只有写入者、没有读者的表——S4 已在「零调用的能力」上栽过两次。搬它的那一天，
+`create_relationship` 也要一起搬，否则这条候选连落库都做不到。
+
+#### 第 77 条 · `refresh_event_summary` 的两处缩减与一次合并
+
+参与者的摘要重写（1.0 `db.py:2585-2610`）在 2.0 少了三样东西：
+
+1. **地点**直接用 `event.place`，不再走 `_resolved_event_place` 的反查表：2.0 的事件在
+   归属时就把 `asset_places` 那一行写进 `place` 了，再解析一次等于把同一条规则实现两遍。
+2. **GPS 前缀**（`_gps_prefix_for_event`）没有搬：2.0 的 `events` 表没有 GPS 列。
+3. 1.0 那条 `source_type != 'video_scene'` 的摘要豁免在 2.0 **恒真**——`events` 表没有
+   `source_type` 列，也就没有视频事件。等视频事件进来时要连列一起补。
+
+另外，1.0 在 `_refresh_event_participants` 里发两条 UPDATE（先 `participants_json`、再
+`refresh_event_summary`），**事件 `revision` 因此跳两格**。2.0 没有 `participants_json`
+这一列（参与者就是 `event_participants` 表），第一条 UPDATE 的剩余效果只有 revision，
+所以合成一次 `apply_summary`：**每个受影响事件恰好 +1**，与计划的判据一致。
+
+#### 第 78 条 · 参与者的 `revision` 是**逐观察**递增的（实测 3，不是 2）
+
+1.0 的循环是 `for observation_id in event_observation_ids: ... upsert_event_participant(...)`
+（`db.py:5569-5571`），**每条观察各调一次 upsert**。所以一个事件里同一个人的两条证据
+会让参与者行的 `revision` 从 1 涨到 3，而不是 2。用例的第一版断言写的是 2，实测 3——
+实现是对的，**断言写错了**，按 1.0 的实际行为改正并把这个数写进注释。
+
+#### 第 79 条 · `event_entities` 的 upsert 没有公开方法，但换家那一段照样搬
+
+计划的移植清单里有 `upsert_event_entity`（`db.py:3287`）。2.0 现在**没有任何一处写
+`event_entities`**（1.0 的写入者是 agent runtime 与实体抽取，属 S6），搬一个零调用者的
+公开方法正是本仓库一路在防的那个形状。但 `rehome` **仍然搬这张表的行**：它的
+`event_id` 有指向 `events(id)` 的外键，而连接上开着 `PRAGMA foreign_keys`，
+留着就会挡住 `events.merge` 的 `DELETE`。合并语义（同键合并证据、抬置信度）以私有形态
+存在，等 S6 有了写入者再开口。
+
+#### 第 80 条 · 两处 2.0 新增的端口方法（计划里没有）
+
+- `EventRepository.events_for_observations`：1.0 是**逐条观察**查一次再在 Python 里分组
+  （`db.py:5550-5554`），2.0 一次 `IN` 查完。行为一样，往返次数从 N 降到 1。
+- `EventParticipantRepository` 整个端口，以及 `ConfirmedPersonEvents` 这个用例类落在
+  `application/memories/assign_events.py` 里（计划把 `participants.py`【新】记在
+  infrastructure，application 侧只写了 `assign_events.py`【改】——按计划的文件清单落）。
+
+### B. Task 82（facts 门禁 + 候选来源）的偏离
+
+#### 第 81 条 · `facts_json` 新开 0007，不并进 0006
+
+计划把「加进 0006 或新开 0007」留给了执行时判断。**取 0007**：0006 已经作为一次提交
+发出去过，而迁移器只记版本号、不记内容——任何跑过 0006 的库都不会再执行一遍，
+把它改宽只会得到「老库少一列、新库多一列」，那种差异**不报错**，只在写事实时炸。
+
+#### 第 82 条 · `FactCandidate` 被 `ObservationFact` 取代（删掉一个重复类型）
+
+`application/memories/maintain_facts.py` 原本有一个 `FactCandidate`（四个字段与
+模型自报的 facts 元素完全一样）。本轮把形状收到 `domain/media/models.py` 的
+`ObservationFact`——它**是观察的一部分**（跟着 `ObservationSemantics` 从观察器出来、
+跟着 `Observation` 落库），而 `domain/memories/events.py` 反过来要 import
+`domain/media/models.py` 的 `GpsPoint`，把形状定义在 memories 会成环。
+`maintain_facts.py` 的 `FactCandidate` 与 `DEFAULT_FACT_CONFIDENCE` 一并删除。
+
+**顺带登记一处 1.0 的死兜底**：`pipeline.py:350` 的
+`normalize_confidence(fact.get("confidence"), result.get("confidence", 0.5))` 那个 0.5
+在 1.0 就到不了——`analyze_image` 已经用 0.65 归一过一遍（`model_clients.py:1190`）。
+2.0 的 `ObservationFact.confidence` 默认值因此是 **0.65**。
+
+#### 第 83 条 · `MaintainFacts.confirmed_people` 删掉了默认值
+
+S4 给它留的是 `lambda _scope_id: frozenset()`。代价与 Task 80 删掉 `AssignEvents` 那两个
+默认值时完全一样：**「忘了接线」与「真的没有已确认人物」在类型上长得一模一样**，
+而事实恒空不报错、只是永远查不到。删掉之后装配点少写一个参数就是 `TypeError`。
+
+#### 第 84 条 · `purge_unanchored` 在 S5 没有生产调用者
+
+1.0 `db.py:3433-3447` 的 `purge_unanchored_facts` 唯一调用点是
+`scripts/maintenance/rebuild_memory.py:128`，2.0 不复刻脚本。本轮把它做成
+`FactRepository.purge_unanchored` + `MaintainFacts.purge_unanchored` 并有两条用例
+（正例 / 反例），**但不接任何用例**——接了就是自己发明一个触发时机（1.0 的
+cluster reject 与 rename 都不调它）。**如实登记为「有能力、无调用者」**，
+等 S6 的维护入口出现再接。
+
+#### 第 85 条 · 一条**同构装配**的用例证明不了生产装配（本轮最有价值的一条实测）
+
+Task 82 的端到端用例第一版是自己拼一个 `MaintainFacts`（「同构装配」），
+把生产 `api/routes/media.py` 里那句 `candidates=lambda observation: observation.facts`
+换成 S4 的恒空元组 —— **它照样全绿**。用例验的是一个自己拼出来的装配。
+
+改法是加一条**走 `build_import_assets(container, observe=True)`** 的用例。加上之后，
+同一个变异立刻变红（红点落在 `test_the_production_wiring_writes_the_observed_fact`）。
+**这条教训适用于所有「装配点 + 用例各自拼一遍」的地方**：同构不等于同一条路径。
+
+### C. Task 83（`person_bridge` + 实体检索通道）的偏离
+
+#### 第 86 条 · 1.0 的 `person_bridge` 投影写的是 `str(dict)`，2.0 写名字
+
+1.0 `retrieval_indexes.py:74-80` 的 `_terms_from_field` 对列表元素一律
+`_normalize(item)`，而 `observations.people` 的元素是
+`{"entity_id":…, "name":…, "status":…}` 这样的 dict —— `str(dict)` 写进
+`person_bridge` 之后，`WHERE normalized_value = '妈妈'` **永远查不中**。
+1.0 里真正干活的是 `EntityRetriever._resolve_asset_ids_for_person` 那条
+「投影查不到就退回直接读观察」的兜底（`entity.py:50-59`）。
+
+**2.0 的值源是名字**（`Observation.people` 已经是名字元组）。投影因此真的能命中；
+兜底那条路照搬，但它现在管的是「投影还没建起来的库」而不是「投影建坏了」。
+测试 `test_confirming_a_person_projects_the_name_not_the_raw_snapshot` 钉的是
+`normalized_value` 的**值**——把名字换回 `str(dict)`，它变红。
+
+#### 第 87 条 · `EvidenceRequest.person` 是 2.0 新增字段（计划文件清单里没有）
+
+计划的 Task 83 文件清单只有 `retrieve_entity.py`【新】+ `lexical.py` / `ports.py` /
+`search_terms.py`【改】。但 entity 通道**只在有人物条件时才给召回信号**：不把
+`retrieve_evidence.py` 的 `EvidenceRequest` 加一格 `person`，那条通道在类型上就没法被
+喂过——它会永远返回空，而不是「被接上了」。这与 S4 给 `metadata` 通道加
+`media_types` / `time_bounds` / `place` 是同一个处境（那几个字段的 `http` 入口同样要等
+S6 的查询解析）。所以 `retrieve_evidence.py` 也在本轮改了，登记在此。
+
+#### 第 88 条 · 兜底那条路不支持跨空间查询
+
+`RetrieveEntity` 的兜底读 `ObservationRepository.list_scope(scope_id, limit)`，而它要求
+一个具体的 scope；1.0 的 `list_observations(limit=100_000)` 可以不带。`scope_id` 为空时
+兜底**不跑**（投影那条路照跑）。2.0 目前没有跨空间的人名查询调用方
+（`EvidenceRequest` 总有 scope），所以这里是「不支持」而不是「随便挑一个空间」。
+
+#### 第 89 条 · 兜底的扫描上限 100_000 写在常量里
+
+1.0 `entity.py:52` 的 `list_observations(limit=100_000)`。写成
+`FALLBACK_SCAN_LIMIT` 而不是一个看起来无穷大的默认值：**超过它的照片会静默召回不到**，
+这个数必须可见。
+
+### D. Task 84（全局重聚类维护入口）的偏离
+
+#### 第 90 条 · 仓储补了 **6 个**方法（计划只列了 application + route + 测试）
+
+计划的任务文件清单里，Task 84 只有 `recluster.py`【新】、`routes/maintenance.py`【新】、
+`main.py` / `container.py`【改】+ 两个测试。**实际至少要给仓储补方法**（上一轮已经预告）：
+
+| 端口 | 新方法 | 1.0 对应 |
+|---|---|---|
+| `FaceRepository` | `list_verified_instances` | `db.py:4961-4967` 那条 SELECT |
+| `FaceRepository` | `assign_instances`（批量改归属） | `db.py:4993-4996` 的 `executemany` |
+| `FaceRepository` | `set_cluster_state`（状态 + member_count） | `db.py:4997-5001` |
+| `FaceRepository` | `list_uncertain_unclustered` | `db.py:5054-5060` |
+| `FaceRepository` | `list_confirmed_clusters`（认领目标） | `db.py:5085-5088`（`member_count >= 2`） |
+| `EntityRepository` | `retire_unclustered_candidates` | `db.py:5118-5132`（`_sync_face_entity_statuses`） |
+| `VectorRepository` | `update_metadata` | `db.py:5028-5038`（改向量 metadata 的 `cluster_id`） |
+
+合计 **7 个**。计划的清单低估了这条路径的读写面，这一行是如实登记。
+
+#### 第 91 条 · `_sync_face_entity_statuses` 写成一条 SQL 而不是逐实体循环
+
+1.0 是「列出所有 person 实体 → 逐个查活跃簇数 → 逐个 UPDATE」。2.0 写成**一条带
+`NOT EXISTS` 的 UPDATE**：同一件事，但少了 N 次往返，而且判据只有一处。
+唯一的语义差别是「已确认的人不动」从 Python 的 `if` 变成 SQL 的 `status != 'confirmed'`——
+两条用例（孤儿被撤 / 已确认的人不动）分别钉住两侧。
+
+#### 第 92 条 · 认领阈值 0.75 不读环境变量
+
+1.0 读 `os.getenv("FACE_ATTACH_THRESHOLD", "0.75")`。2.0 写成常数：`domain-purity`
+禁止 domain 碰 `os`，而且这类阈值一旦能从环境改，**同一个库在两台机器上会聚出不同的
+结果，差别只藏在部署脚本里**。同组的另外两个数（0.08 的领先余量、`>= 2` 的最小成员数）
+1.0 本来就是硬编码的。
+
+#### 第 93 条 · 新增 `api/schemas/maintenance.py`（计划只列了 routes）
+
+与其余端点同构：请求 / 响应模型放 `api/schemas/`，路由只做映射。
+`threshold` / `minimum_quality` 的默认值取 `FaceClusterer` 的类默认（`0.30` / `0.30`），
+放在**请求模型**上是为了让默认值出现在 OpenAPI 契约里——调用方看得见自己不传时会按
+什么口径跑。**不取** 1.0 两个 benchmark 调用方的 `0.30` / `0.55`（后者与类默认不一致，
+已登记在证据 39）。
+
+#### 第 94 条 · `bootstrap/container.py` 没有改（计划列了它）
+
+计划的文件清单里有 `container.py`【改】。实际不需要：维护路由与身份路由一样，
+在路由里从已有的 `container.*` 字段构造用例（那两处是「用例装配点」，
+`container.py` 的职责是**适配器**装配）。为一条不需要新适配器的路由加一个 container
+字段，只会让「谁是装配点」多一处。
+
+#### 第 95 条 · 认领时的同分排序改成确定性
+
+1.0 `ranked.sort(reverse=True)` 只按分数排，同分时名次由簇 id 的降序决定——
+同一份数据换个插入顺序就换一个答案，而这里**挂错人是会留痕的**。
+2.0 用 `(-score, cluster_id)`；0.08 的领先余量本来就会挡掉近似同分，
+这条是为了让「真的同分」也确定。
+
+### E. 上一轮两条未结的账，本轮的处理
+
+- **70c（定点变异）本轮补上了。** 四个任务各挑了要害改一行验证红灯指向具体断言：
+  Task 81——把 `confirm` 里那两句接线注释掉（红灯精确落在
+  `test_confirming_a_cluster_merges_the_two_events_its_photos_created`）；
+  Task 82——①候选来源退回恒空、②门禁退回恒空、③解析器丢掉 facts，
+  三次都红且红在对应的断言上；Task 83——①通道顺序排到 lexical 之后（分数从
+  `1.0 + 2/61` 掉到 `1/61`）、②退回 S4 的不建 `person_bridge`、③把名字换成
+  `str(dict)`（重现 1.0 的缺陷），三次都红。
+- **70d（每个 commit 单独一次完整 `make ci`）本轮每棵树各跑一次**，日志见交付记录；
+  本轮不再有「验证的是合并树」的缺口。
+
+#### 第 96 条 · 1.0 只撤「有实例、但实例被并走」的簇；一张脸都不挂的簇不会被清
+
+`recluster_faces` 的 `stale_ids` 是 `{row["cluster_id"] for row in instances ...} - active`
+（`db.py:5019-5021`）——它的来源是**实例表**，所以一个 `member_count = 0`、一张脸都不挂
+的簇**根本不在那次重算的视野里**，状态保持原样。2.0 照抄了这个行为
+（`test_a_cluster_with_no_instances_at_all_is_not_retired` 把它钉住）。
+
+真正的清理落在实体那一侧：那种簇对应的候选人物会在
+`retire_unclustered_candidates` 里因为没有活着的簇被转成 rejected。所以「空簇」这件事
+在 2.0 里是**一半被清理、一半留着**——留着的那个是历史审计，转掉的那个是人物列表的
+显示面。这不是我们的设计选择，是 1.0 的行为；登记在此，免得后来人把它当成 bug 顺手
+删掉一个簇。
