@@ -48,6 +48,11 @@ PENDING_WIRING: dict[str, str] = {
         "Task 75 的四个簇审阅端点（confirm / reject / merge / split）会构造它。"
         "Task 73 只落地用例与它的仓储写方法，S5a 的这一轮还没有路由。"
     ),
+    "sentrix.application.identity.name_person": (
+        "Task 75 的 ``/api/people`` 改名端点与 batch-confirm 端点会构造它。Task 74 的"
+        "用例被 ``ReviewCluster.confirm`` 之外的另一条链路使用（按实体确认），而在只做"
+        "用例的 S5a 这一轮还没有路由。"
+    ),
 }
 
 

@@ -129,7 +129,13 @@ class ReviewCluster:
         scope_id = cluster.scope_id or DEFAULT_SCOPE_ID
 
         existing = self._entities.find_confirmed_person_by_name(scope_id, clean_name)
-        if existing is not None:
+        # ``existing.entity_id != cluster.entity_id`` 这一半是**修 1.0 的缺陷**（见
+        # s5-deviations.md）：对一个已经确认过的簇用**它自己的名字**再确认一次时，
+        # 名字查询命中的就是它自己的实体，走合并分支于是把簇置成 rejected、
+        # member_count 归零——**自己把自己删了**。1.0 的 ``confirm_face_cluster``
+        # （``db.py:5157``）漏了这条守卫，而同一作者在 ``confirm_person_entity``
+        # （``db.py:5251``）里写了它；这不是新行为，是把 1.0 自己那条判据补齐。
+        if existing is not None and existing.entity_id != cluster.entity_id:
             return self._merge_into_person(cluster, existing.entity_id)
 
         instances = self._faces.list_instances(cluster.id)

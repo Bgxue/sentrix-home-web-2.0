@@ -360,6 +360,72 @@ def test_confirm_folds_into_an_existing_person_with_the_same_name(review: Review
     assert merge_revisions[0]["new_value"] == "clu_old"
 
 
+def test_reconfirming_a_cluster_with_its_own_name_keeps_it(review: ReviewCluster, seeded_db: Database):
+    """**修 1.0 的缺陷（用户裁决）**：对一个已确认的簇用它**自己的名字**再确认一次，
+    簇必须原样留着。
+
+    1.0 ``db.py:5157`` 的同名查询命中即合并，**没有排除「命中的就是本簇的实体」**：
+    于是重复确认走进 ``_merge_cluster_into_person``，把自己置成 ``rejected``、
+    ``member_count`` 归零——**这个人的脸全丢了**，而且从界面看是「这个簇消失了」。
+    同一作者在 ``confirm_person_entity``（``db.py:5251``）里写了
+    ``existing["entity_id"] != entity_id`` 这条守卫，``confirm_face_cluster`` 漏了。
+    这不是新行为，是把 1.0 自己那条判据补齐。依据见 ``s5-deviations.md``。
+    """
+    add_entity(seeded_db, "ent_1", name="妈妈", status="confirmed")
+    add_cluster(seeded_db, "clu_1", status="confirmed", entity_id="ent_1", member_count=1)
+    add_instance(seeded_db, "ins_1", cluster_id="clu_1")
+
+    result = review.confirm("clu_1", name="妈妈")
+
+    assert result.merged_into is None
+    assert result.entity.id == "ent_1"
+    assert query(
+        seeded_db, "SELECT status, member_count, entity_id FROM face_clusters WHERE id = 'clu_1'"
+    ) == [{"status": "confirmed", "member_count": 1, "entity_id": "ent_1"}]
+    assert scalar(seeded_db, "SELECT cluster_id FROM face_instances WHERE id = 'ins_1'") == "clu_1"
+    # 自合并不该留下一条「并入了自己」的审计。
+    assert scalar(seeded_db, "SELECT COUNT(*) FROM entity_revisions") == 0
+
+
+def test_reconfirming_through_one_of_its_own_aliases_keeps_it(review: ReviewCluster, seeded_db: Database):
+    """同一个人的**别名**命中的还是它自己——同样不能自合并。
+
+    别名那条路要走到 ``find_confirmed_person_by_name`` 的第二段（扫 aliases），
+    与精确名是两条不同的代码路径，所以这条要单独钉。
+    """
+    add_entity(seeded_db, "ent_1", name="母亲", status="confirmed")
+    SqliteEntityRepository(seeded_db).set_person_aliases("ent_1", ["妈妈"])
+    add_cluster(seeded_db, "clu_1", status="confirmed", entity_id="ent_1", member_count=2)
+
+    result = review.confirm("clu_1", name="妈妈")
+
+    assert result.merged_into is None
+    assert result.entity.id == "ent_1"
+    assert query(seeded_db, "SELECT status, member_count FROM face_clusters WHERE id = 'clu_1'") == [
+        {"status": "confirmed", "member_count": 2}
+    ]
+
+
+def test_a_different_cluster_with_the_same_name_still_merges(review: ReviewCluster, seeded_db: Database):
+    """反向的一条：守卫只排除**本簇自己的实体**，别人的同名簇照样并。
+
+    没有这一条，上面那条修复可以被实现成「同名一律不合并」而测试仍然全绿——
+    而那样等于把同名合并整个功能关掉。
+    """
+    add_entity(seeded_db, "ent_1", name="妈妈", status="confirmed")
+    add_cluster(seeded_db, "clu_1", status="confirmed", entity_id="ent_1", member_count=1)
+    add_entity(seeded_db, "ent_2", name="待确认人物簇 · clu_2")
+    add_cluster(seeded_db, "clu_2", entity_id="ent_2", member_count=1)
+
+    result = review.confirm("clu_2", name="妈妈")
+
+    assert result.merged_into == "ent_1"
+    assert query(seeded_db, "SELECT status FROM face_clusters WHERE id = 'clu_2'") == [{"status": "rejected"}]
+    assert query(seeded_db, "SELECT status FROM face_clusters WHERE id = 'clu_1'") == [
+        {"status": "confirmed"}
+    ]
+
+
 # ---- reject ----------------------------------------------------------------------
 
 

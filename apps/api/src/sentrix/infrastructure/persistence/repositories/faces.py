@@ -242,6 +242,19 @@ class SqliteFaceRepository:
                 (target_cluster_id, instance_id),
             )
 
+    def active_cluster_for_entity(self, entity_id: str) -> FaceClusterRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_CLUSTER_COLUMNS} FROM face_clusters fc"
+                " LEFT JOIN entities e ON e.id = fc.entity_id"
+                " WHERE fc.entity_id = ? AND fc.status IN ('pending', 'confirmed')"
+                " AND fc.member_count > 0"
+                " ORDER BY CASE fc.status WHEN 'pending' THEN 0 ELSE 1 END, fc.updated_at DESC"
+                " LIMIT 1",
+                (entity_id,),
+            ).fetchone()
+        return _row_to_cluster(row) if row else None
+
     def confirmed_cluster_for_entity(self, entity_id: str) -> FaceClusterRecord | None:
         with self._database.connect() as connection:
             row = connection.execute(

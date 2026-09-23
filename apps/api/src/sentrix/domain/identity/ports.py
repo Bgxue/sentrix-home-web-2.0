@@ -129,6 +129,17 @@ class FaceRepository(Protocol):
         """把一张脸移到另一个簇（拆分）。"""
         ...
 
+    def active_cluster_for_entity(self, entity_id: str) -> FaceClusterRecord | None:
+        """这个人当前**可以拿来确认**的簇：``pending`` 优先，其次 ``confirmed``，都要有成员。
+
+        与 ``confirmed_cluster_for_entity`` 有两处**故意**不同，两处都照抄 1.0
+        ``db.py:5258``：``status`` 收的是两种（先确认一个还没认过的簇，而不是只找已确认
+        的），且 ``member_count > 0`` 是硬条件——空簇确认出来是一个没有任何脸的人。
+        ``ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END`` 让待确认的簇排前面：
+        用户按下确认时，想认的正是那个刚聚出来、还没归属的簇。
+        """
+        ...
+
     def confirmed_cluster_for_entity(self, entity_id: str) -> FaceClusterRecord | None:
         """这个人当前作为门面的已确认簇：``member_count DESC, updated_at DESC`` 取首个。
 
