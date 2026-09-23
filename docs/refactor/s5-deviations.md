@@ -727,3 +727,126 @@ provider 链实测是 `['CUDAExecutionProvider', 'CPUExecutionProvider']`——�
 | 1.0 venv 人脸依赖 | `insightface 1.0.1` / `onnxruntime-gpu 1.23.2` / `opencv-contrib-python 4.10.0.84` |
 | AdaFace 权重 | 700,286,703 B（`/home/asus/models/AdaFace/pretrained/adaface_ir50_ms1mv2.ckpt`） |
 | 不稳定的根因 | 同机在跑 1.0 的 8091（RSS 11.7 GB）、vLLM 8500、photobench runner、2.0 的 8191/4274 |
+
+---
+
+## 2j. Task 75 / 76 / 80 实施期实测（含裁决③的落地）
+
+三个任务逐任务提交：`272ea20`（Task 75）、`fef1da5`（Task 76）、`a1e29c7`（Task 80）。
+用例总数从 936（920 passed + 16 skipped）涨到 **991 collected**。
+
+### 裁决③的落点：领域错误带码、路由只映射
+
+**做法**：新增 `apps/api/src/sentrix/domain/errors.py` 的 `DomainError`（一个 `code` 字符串
++ 一个 `status_code` 整数），`api/errors.py` 只留四个 api 层自己的子类与**唯一**那个处理器。
+用例抛带码的错误，路由原样放行。
+
+**为什么基类必须落在 domain**：`application-purity` 契约不许 application import api，
+而 api 可以 import domain——「两边都看得见」的那一层只有 domain。这不是新设计，
+是裁决③那句话在现有分层下的唯一落点。
+
+**动到的 S3 代码（两处，都是裁决点名的）**：
+
+1. `application/assistant/run_turn.py` 的 `TurnNotFoundError(LookupError)` →
+   `TurnNotFoundError(DomainError, LookupError)`，带 `code="not_found"` / `status_code=404`；
+   构造时的实参从「会话 id / 回合 id」改成固定文案（`conversation not found` /
+   `turn not found`）——**id 从响应里消失了**，这是行为变更，如实登记。
+2. `api/routes/assistant.py` 的 `start_turn` 去掉 `try/except TurnNotFoundError` 与那句
+   硬编码 404，改由统一处理器出。
+
+**连带改掉的断言**：`apps/api/tests/contract/test_assistant_routes.py` 断言的是
+`response.json()["detail"] == "conversation not found"`（`HTTPException` 的形状）。
+统一之后响应体是 `{"code", "message", "detail"}`，断言改成
+`["code"] == "not_found"` + `["message"] == "conversation not found"`。
+**状态码与文案没变，变的是「谁决定它」。**
+
+**没动的 HTTPException**：`media.py` / `timeline.py` / `search.py` / `assistant.py` 里还有
+若干路由**自己在边界上**发现的问题（找不到 asset、目录不存在、result set 越界）仍用
+`HTTPException`。它们是「请求在这里就没法继续」，不是用例的结论；把它们一起换掉会改动
+四条既有契约的响应体，属于另一次机械变更。**这是一条未结的账**，不是遗漏。
+
+### 第 64 条 · 身份路由的实际范围比计划窄
+
+计划写的是移植 `app.py:1512-1800` 的「`/api/people` 系列」。实际搬的是**身份层能回答的
+那几个**：列表 / 详情 / 改名 / 批量确认 / 预置 / 人脸裁剪 + 簇列表与四审阅。
+`profile` / `claims` / `event_memory` / `patterns` / `portrait` 五块读的是
+`semantic_claims` / `person_event_memory` / `person_portraits` 那几张表，**它们是 S5c
+（Task 85/86）的东西**——现在搬等于照抄一个查不到数据的投影。
+
+`/people/{id}` 的详情同理：1.0 的 `get_entity_detail` 还带 relationships / facts /
+entity_observations，2.0 只回**实体 + 别名 + 头像脸 + 簇（带样本）**。少的那三块不是
+这一层的事实来源（关系与事实各有自己的读侧），登记为**未搬**。
+
+### 第 65 条 · 新增三个读方法与一个端口方法（计划清单里没有）
+
+| 新增 | 为什么绕不开 |
+|---|---|
+| `EntityRepository.list_people` | `/api/people` 要列人物，而端口上只有 `get`。空间规则（`include_in_people = 0` 的不出现）与 `list_clusters` 同一条，写在这一层只写一次 |
+| `FaceRepository.list_clusters_for_entity` | 人物详情要「这个人的簇」。`list_clusters` 是「进人物视图的全部簇」，按实体过滤它做不了 |
+| `PreviewEncoder.crop_jpeg` | 裁剪要 PIL，而 `api-transport-only` 契约不许 api 直接 import PIL。端口是唯一合法的落点（与 `encode_jpeg` 同一条理由：同一张图的两种取景） |
+| `EntityRepository.confirmed_people_for_observation` / `_for_event` | Task 80 的两个来源（见第 67 条） |
+
+### 第 66 条 · 删掉了 S3 的占位实现
+
+`infrastructure/assistant/identity.py`（`NoIdentityDirectory`）**删除**，不是留着不用。
+留着的代价是 `check_reachability` 会把它报成「零生产调用者的模块」——那正是这条检查要抓的
+形状。计划清单里没写这一条删除，但它是不变量推出来的必然后果。
+
+capability-map 里那条指向它的记录同步改成新实现（`person_directory.py`），
+否则「登记的落点」会指向一个已删除的文件。
+
+### 第 67 条 · Task 80 的两处偏离：装配点与「删掉默认值」
+
+1. **装配点不在 `bootstrap/container.py`，在 `api/routes/media.py` 的
+   `build_import_assets`。** 那是 `AssignEvents` 在全仓**唯一**的构造点（该函数的注释
+   自己写着「只在这里接一次」），container 里根本没有 `assign_events` 字段。计划把这一行
+   记在 container 是记错了位置，不是记错了事。
+
+2. **`confirmed_people` / `confirmed_event_people` 删掉了默认值。**
+   S4 给它们留的是 `lambda _: frozenset()`，理由是「那时没有 `entity_mentions`」。
+   代价是**「忘了接线」与「真的没有人」在类型上完全一样**，而 `person_score` 恒为 0
+   不报错、只让事件分错——与本仓库一路在防的那类静默同形。删掉默认值之后，装配点少写
+   一个参数就是 `TypeError`。**这是一次行为面收紧**：任何未更新的构造点会立刻红。
+
+3. **`EventAnchorSet.people` 原来是写死的 `frozenset()`。** 计划只写了移植两个
+   `_confirmed_entity_ids_for_*`，但**只接观察侧那一半是没有用的**：`_person_score` 算的
+   是 `anchor.people & event.people`，事件侧恒空 → 交集恒空 → 分数恒 0。
+   事件侧那一半必须一起接。这条是实施期才看清的，不是计划里的。
+
+### 第 68 条 · 一条没变红的「不变量」被自己的对照臂抓出来
+
+`test_the_person_component_moves_the_total_by_exactly_its_weight` 第一版用**同一对 5 分钟
+间隔的照片**跑两条臂，断言 `总分差 == WEIGHTS['person'] * 0.8`。实测**差值恒为 0**：
+那对照片的原始总分超过 1.0，被 `max(0.0, min(1.0, total))` 截断，两条臂都等于 1.0。
+
+它没有报错、也没有变红——因为 0.0 != 0.16 会红，它**确实红了**，但红的原因不是「实现错了」
+而是「这对输入饱和了」。改法是两臂都用 4 小时的时间差（仍在 6 小时窗内），并在断言前
+**显式加一条 `total < 1.0` 的前置**——饱和时先报「换一对不饱和的输入」，而不是报一个
+看起来像权重算错的差值。
+
+同族的前一例是第 60 条（变异的 `<=` 没走到边界）。**两次都是「用例看起来在钉一个数，
+其实那个数在这组输入下是常数」。**
+
+### 第 69 条 · `split_guard` 一旦触发会把 `total` 直接置 0
+
+`domain/memories/events.py:352` 的 `if split_guard: total = 0.0`。所以「有共同确认人物时
+不再拆事件」在**产品上**的表现不是「分数从 0.65 涨到 0.81」，而是**从「另起一个事件」变成
+「归并进已有事件」**。Task 80 的那条对照用例因此断言的是 `created`，不是分数——
+分数只是中间量。S4 实测的「2017-11-05 被拆成 4 个事件」走的正是 `created=True` 这条路。
+
+### 第 70 条 · 簇样本的排序与 1.0 不同（登记，未改）
+
+1.0 `list_face_clusters` 的样本是 `ORDER BY fi.created_at DESC LIMIT 12`；2.0 走
+`FaceRepository.list_instances`（`quality DESC, created_at ASC`）再取前 12。
+**同一批样本、不同顺序**，界面上是「先看到最清楚的」还是「先看到最新的」的差别。
+改它要动 Task 71 已交付并被门禁钉住的排序契约，本轮不动。
+
+### 本轮**没有做**的
+
+- **定点变异（红灯 B）这一轮没做。** 前两轮每个任务挑三条要害改一行、验证红灯指向具体
+  断言；本轮三个任务的用例里有对照臂（Task 80 的六条全是），但没有做「改掉实现那一行
+  看门禁红不红」的动作。**这是一条未结的账**，下一轮补。
+- **`make ci` 的逐 commit 复核这一轮有缺口。** Task 75 提交后启动的那次 `make ci` 在
+  Task 76 的改动落地之后才跑到 pytest（`CI_OK`，日志
+  `logs/ci-20260923-204812-run0.log`），所以它验证的是 75+76 的合并树而不是 75 单独一棵。
+  76/80 之后的完整 `make ci` 见下一节。**如实登记，不当作「每个 commit 都跑过」。**
