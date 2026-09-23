@@ -547,6 +547,66 @@ B `[0,0,5,10]`（面积 50），并集 100、交集 50，IoU = 0.5 在二进制�
 
 ---
 
+## 2h. Task 78 实施期实测到的偏离与发现（真链路第一次跑通时撞出来的六个坑）
+
+``c0518e6``（Task 78）落地，`make ci` 全绿（`920 passed / 16 skipped / coverage 98%`）。这一节的六条里，**前四条全是
+「不报错、只是结果不对」那一族**——没有一条会让调用方看到异常，全部是跑真权重 + 真照片时
+撞出来的；它们没有一条能靠读 1.0 的源码发现，因为 1.0 的代码在同样的位置也是这么写的。
+
+| # | 事项 | 判决 / 处置 |
+|---|---|---|
+| 61 | **`FACE_VALIDITY_VERIFIED` / `FACE_VALIDITY_UNCERTAIN` 落在 `domain/identity/models.py`**，不在适配器里。计划与 1.0 都把这两个串写成适配器里的裸字面量。 | **改**。理由是 Task 79 的 seed 用例也要写同一个值，而 `application-purity` 契约不许 application 层 import infrastructure——常量留在适配器里，用例就只能再抄一遍字面量，那正是「一个值散落三处」的开头 |
+| 62 | **`FACE_MODEL_ROOT` 在 1.0 是两个意思。** `FaceAnalysis(root=...)` 收的是 insightface 的**根**（模型在 `<root>/models/<name>/`），而 `_load_buffalo_recognition` 把同一个变量直接当**模型目录**用；两者只在默认值下碰巧一致（`~/.insightface` vs `~/.insightface/models`）。**实测代价**：把模型目录当 root 传进去，insightface 找不到模型会**去 GitHub 下载**——进程挂在一条到 github.com 的 HTTPS 连接上，`utime` 只有 1.55 秒、`pytest` 一个字都不打，直到超时。第一次真跑就是这么卡住的。 | **改**：`FACE_MODEL_ROOT` 只保留一个意思（insightface 根），模型目录由 `MODELS_SUBDIR` 派生；并在 `_build_analysis` 加一条 **fail-fast**（模型目录不存在直接抛）。「静默联网挂死」于是变成一条 `error` 字段里的降级 |
+| 63 | **insightface 的 `providers` 必须是裸字符串列表**，与 `provider_options` 是两个**平行**列表。给它 onnxruntime 那种 `(name, options)` 元组，它打一行 `EP Error ... Falling back to ['CPUExecutionProvider']` 然后**在 CPU 上把整条链路跑完**。 | **改**（`provider_chain(...)` + `face_onnx_provider_options(...)`）。这是第 56 条「静默退化成 CPU」的同族第二例：上一例是运行库没预载，这一例是入参形态不对，**两例的观测点都是 `session.get_providers()`** |
+| 64 | **第三级（整图兜底）接活**——处置证据 8 那条死路径：1.0 调的是恒为 `None` 的 `identity_adapter`，`AttributeError` 被裸 `except` 吞掉，永远返回 `[]`。2.0 把它接在真实的识别 session 上。**照搬的四个常数（置信度 0.99 / 质量 0.8 / 面积比 1.0 / frontal）从来没有被任何一张真照片检验过**——它们随死路径一起躺了不知道多久。 | **改 + 如实登记**：常数原样照搬（这样以后想调的人有一个可比的对象），但它们**不是实测值**，注释里写明了 |
+| 65 | **`detect()` 在权重缺席时直接返回空表**（1.0 判的是 `FACE_ENABLED`）。 | **改**。缺权重是允许的部署形态，不是异常；判 `available` 让「这台机器没有人脸能力」与「这张图没有脸」在调用方是两件事 |
+| 66 | **真权重那层用例的取样从 6 张改成 10 张。** 实测：这一册相册**前 6 张（远景合影）一张 ≥64px 的脸都没有**，取 6 张会得到「一张脸都没有」——用例红了，而红的是**测试的假设**不是代码。 | **改**，并把「这一批里必须有脸」写成一条显式的失败信息（同 `test_face_detector.py` 那条全景断言）。**这是 S4「只断言数量」那条教训的另一面**：数量写死会随数据变红，完全不写又会漏掉「一张脸都没有」这种真故障 |
+
+### 真数据实测（2026-09-23，整册 53 张，与 Task 77 用的是同一批）
+
+| 量 | 实测 |
+|---|---|
+| RetinaFace 候选 | **315** |
+| 过 `FACE_MIN_SIZE=64` 的候选 | **117** |
+| 适配器输出的人脸（每张都带 512 维向量） | **117** |
+| 其中 `verified` | **30** |
+| 有候选的照片 | 46 / 53 |
+| 适配器有输出的照片 | **32 / 53** |
+| 整册耗时 | 69 秒（一次加载 session） |
+
+provider 链实测是 `['CUDAExecutionProvider', 'CPUExecutionProvider']`——第 62/63 两条修完之后，
+检测与识别**都真的在 GPU 上**。
+
+**`FACE_MIN_SIZE=64` 是这条链路上真正的瓶颈，而它是照搬来的**：1.0 的部署脚本
+（`start_sentrix_api_8091.sh`）里没有设这个变量，所以默认值 64 一直在生效。一册远景合影
+里 315 个候选有 198 个小于 64px，全被丢掉。**这一条不改**——它属于「多小的脸才算一个人」
+的**产品口径**，不是 bug；但「检出了多少张脸」这个数字对它是敏感的，所以记在这里。
+
+### 两条判定差一个量级（第 59 条的验收）
+
+真照片上 **117 张脸带向量、只有 30 张 `verified`**。所以「有向量」与「够格进簇」必须分成
+两条断言：Task 77 那条 `test_retinaface_landmarks_do_not_survive_the_geometry_gate` 钉的是
+「照搬 RetinaFace 的关键点会全灭」，Task 78 的
+`test_scrfd_landmarks_are_what_lets_a_real_face_be_verified` 钉的是「换成 SCRFD 之后真的有
+30 张活下来」——**两条合起来才构成「替换是必要的、而且有效」**。
+
+### 红灯 B（定点变异）实测结果
+
+每个任务挑要害行为改掉实现里那一行、重跑门禁，让红灯**指向具体的断言**，然后改回。
+脚本带 `apply()`：变异后先确认那一行真的变成了变异后的形态，否则中止
+（`sed` 不匹配时静默成功，会把红灯变成一次没人验的空操作——第 60 条的教训）。
+
+| 变异 | 红的那条用例 |
+|---|---|
+| 分数闸门 `score >= 0.7` → `score > 0.7` | `test_the_score_gate_is_seventy_hundredths` |
+| 资格闸门去掉质量那一半（`... and quality >= min_quality`） | `test_the_quality_gate_is_what_separates_verified_from_eligible` |
+| 面积闸门整条删掉（`... and area_ratio >= 0.003`） | `test_the_area_gate_is_three_thousandths` |
+| 放大重试的框不换算回原图（`value / scale` → `value`） | `test_an_identity_photo_falls_back_to_an_upscaled_retry` |
+
+原文在 `/home/asus/s5verify/logs/task78-redB.txt`。
+
+---
+
 ## 3. 这份文档没有做的事（如实记录）
 
 1. **没有跑 1.0 的测试套件。** 所有 1.0 的行为都是从**源码 + 行号**读出来的，
