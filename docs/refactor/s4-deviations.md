@@ -410,13 +410,7 @@ Task 47 只有一个 `python -c` 片段；`composite.py` 零测试；Task 49 的
 1.0 的 `analyze_image` 还要 semantic 受控词表（地点/物品/氛围三个主类体系）、
 `detail`（visible_details / regions / text_blocks / uncertainties）与模型自报的 `facts`。
 2.0 全部不搬。依据：`_terms_from_detail` 属于 S6 的 OCR/VLM 精读（S4 的 Observation
-没有 `detail` 字段）。
-
-> **2026-09-23 更正（S5 裁决④）**：本条原文结尾写的是「事实由 `maintain_fact` 规则决定，
-> **不由模型自报（S5）**」。**这半句作废。** 用户裁决：facts 的候选来源**按 1.0 原样由模型自报**
-> （`analyze_image` 输出的 `facts` 数组），S5 的 Task 82 负责把它搬回来。作废的只是这条
-> 对 `facts` 来源去向的记法，**本条主体不变**——2.0 的观察器确实不搬 semantic 受控词表与
-> `detail` 的四个字段。依据与落实见 `s5-deviations.md` §2c.1 裁决④。
+没有 `detail` 字段）；事实由 `maintain_fact` 规则决定，不由模型自报（S5）。
 
 **第 31 条 · 事件总结不写 `episodic` 向量。**
 1.0 的 `_persist_event_summary` 在同一个事务里写一条事件文本向量（走 8101）。
@@ -611,7 +605,7 @@ Task 52 抽的纯规则）+ 已确认人物。第二段在 2.0 是 `confirmed_pe
 
 | # | 原因 | 证据 | 后果 |
 |---|---|---|---|
-| 1 | **候选事实没有来源** | 1.0 的候选来自模型自报的 `facts`（`model_clients.py:1130-1198` 的 `analyze_image`，`pipeline.py:347` 的 `result.get("facts", [])`）；2.0 的观察器在 S4 里不搬它 | 即使门禁全开，`candidates` 也恒为空元组。**2026-09-23 裁决④已定：按 1.0 原样由模型自报，S5 的 Task 82 搬回来**——见下 |
+| 1 | **候选事实没有来源** | 1.0 的候选来自模型自报的 `facts`（`model_clients.py:1130-1198` 的 `analyze_image`，`pipeline.py:347` 的 `result.get("facts", [])`）；2.0 的观察器**明确不搬**它（本文件第 30 条：事实由 `maintain_fact` 规则决定，不由模型自报） | 即使门禁全开，`candidates` 也恒为空元组 |
 | 2 | **门禁关着** | 1.0 的 `is_confirmed_person_name`（`db.py:1494-1503`）查 `entities` 里 `entity_type='person' AND status='confirmed'` 的行；2.0 的身份层是 S5（计划文档第 313 行把 `purge_unanchored_facts` 也记在 S5，理由同一处：S5 之前没有 `entities`） | 即使有候选，`subject` 也不可能在已确认人物集合里 |
 
 **两条都要动才出得了东西**——只放宽门禁不够，只补候选来源也不够。三种可能的裁决方向
@@ -623,12 +617,7 @@ Task 52 抽的纯规则）+ 已确认人物。第二段在 2.0 是 `confirmed_pe
   S5 之前的 `facts` 表出现**未经身份层确认**的行，而这些行会被 `purge_unanchored_facts`
   （S5）按 entities 过滤——即现在写进去的东西将来可能整批作废；
 - **补候选来源**：把 1.0 的模型自报 `facts` 搬回来（观察器提示词 + `ObservationSemantics`
-  加字段 + 落库列）。**2026-09-23 用户裁决采纳了这一条**（裁决④），落在 S5 的 Task 82。
-
-> **2026-09-23 结论**：上面三条候选方向里，用户选了第三条。所以 S4 这一节留下的
-> 「两条都要动才出得了东西」在 S5 里被**同时**处理——Task 82 既开门禁（`is_confirmed_person_name`
-> 接上 `MaintainFacts.confirmed_people`），也补候选来源（模型自报的 `facts`）。
-> 本节的「本次接线的价值是『有调用方 + 有断言』」这一句仍然成立，它描述的是 S4 当时的状态。
+  加字段 + 落库列）。这是第 30 条的反转，属于 S5/S6 的范围。
 
 **接线本身是活的**，这一点与「结果为空」是两件事，分别有三条断言钉住（第 51 条）：
 `test_the_import_path_calls_fact_maintenance_after_event_assignment`（调用点）、

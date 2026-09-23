@@ -10,62 +10,6 @@
 | 在线匹配余弦阈值 | 0.30（硬编码，无 env 可配） | `backend/db.py:4815` |
 | 全局重聚类阈值 | 0.30 | `backend/face_clustering.py:67` |
 | 质量阈值 | 0.30 | `backend/face_clustering.py:67` |
-| **身份向量模型** | **buffalo_l / `w600k_r50.onnx`，112×112，`(x−127.5)/128.0`，512 维** | `backend/model_clients.py:1690-1716`、`:1772-1787`、`:1799-1840` |
-| 人脸检测 | RetinaFace r50 ONNX，BGR + mean 104/117/123，priors `STEPS=[8,16,32]`、NMS 0.4、置信筛 0.05；**两趟**（粗 1024/128，空了才细 640/256 且阈值降到 0.1） | `backend/face_detector.py:1-181` |
-| SCRFD 复核闸门 | `FACE_MIN_SIZE=64`、`FACE_VERIFIED_SCRFD_SCORE=0.7`、`FACE_VERIFIED_MIN_AREA=0.003`、`FACE_IDENTITY_MIN_QUALITY=0.55`；**只有 verified 才准建簇** | `backend/model_clients.py:1718-1840` |
-| 贪心多视角聚类的六个默认参数 | `threshold=0.30` / `prototype_threshold=0.30` / `prototype_limit=6` / `model_identity="all"` / `max_prototypes_per_view=3` / `minimum_quality=0.1` | `backend/face_clustering.py:59-66` |
-
-> **2026-09-23 实测补齐（S5 Task 69）**。上一版这张表只记了三个阈值，而实施时逐行读
-> `face_clustering.py` / `face_embeddings.py` 并做变异检查（32 处变异，31 处被测试杀掉）
-> 之后，实测出下面九条**表里没写、但不写就会做错**的行为。前八条是 1.0 的真实语义，
-> 第九条是 1.0 的缺陷，移植时照抄并单独登记。
->
-> **0. 身份向量是 buffalo_l，不是 AdaFace——这一条是更正。**
-> 本文件从写下第一版起就没有出现过 AdaFace（`git log -p --all -- docs/refactor/behaviour-baseline.md`
-> 对 `adaface` 零命中），但项目里一直流传着「AdaFace 是人脸身份向量」的说法
-> （`scripts/runtime/start_sentrix_api_8091.sh` 里导出 `FACE_EMBEDDING_MODE=adaface`
-> 与四个 `ADAFACE_*`，环境的 brief 也照抄了它）。**实测那是死配置**：
-> `face_embedding_is_adaface()` 全仓零调用；`FaceAdapter.__init__` 把 `identity_adapter`
-> 设为 `None`（`model_clients.py:1629`）之后再无第二处赋值，唯一调用点 `app.py:2299`
-> 必抛 `AttributeError` 并被上一行的裸 `except Exception: return []` 吞掉；
-> 1.0 自己的测试把它标成
-> `@unittest.skip("legacy identity_adapter contract removed; identity is fixed to buffalo_l")`
-> （`tests/test_face_clustering.py:126`）。真正写出 `embedding_model` 的是
-> `_detect_retina_tiled_unlocked` 的两个分支，**都写死 `"buffalo_l"`**。所以这张表现在
-> 有了一行确切的值，而那一行不是 AdaFace。见 `s5-deviations.md` 证据 1/2/3。
->
-> 1. **`continue` 与 `break` 等价。** `_best_compatible_cluster` 的候选簇已按
->    `(-score, cluster.id)` 降序排过，第一个低于阈值的后面必然都低于阈值。1.0 用的是
->    `continue`，照抄。**这条写不成测试**——把 `continue` 改成 `break` 没有任何用例会红，
->    变异检查里它是 32 处变异中唯一存活的那处。只能靠读代码，如实登记为「未被门禁覆盖」。
-> 2. **「同姿态桶为空 → 直接命中」不是无门槛的。** 阈值检查（`cluster.best_score` 对
->    **原型**取最大）发生在 `_same_view_members` **之前**；空桶分支绕过的只是 `_matches`
->    （逐成员比对），不是阈值本身。
-> 3. **承 2，后果比想象的强。** 一个 `profile_left` 新样本只要与簇里任一**原型**够像，
->    就能无条件并入，**哪怕它与簇里某些成员的余弦是 −0.64**。1.0 自带的
->    `test_frontal_and_profile_views_share_multi_view_cluster` 正是靠这条把侧脸并进只有
->    正脸的簇。这同时划定了「`unknown` 必须匹配全部成员」这条防线的**真实适用范围**：
->    它只对 `pose_bucket == "unknown"` 的样本生效；姿态桶确实存在、只是不等于新样本姿态的
->    样本，走的是另一条路。**这是本表里最容易做错的一条**——按「相似度必须过人脸级阈值」
->    去重写，会把多视角簇拆成两个。
-> 4. **`noise=True` ⟺ 单例 + 低于质量门。** 低于质量门的样本进不了匹配，而 noise 簇又被
->    排除出候选。它仍然会进 `result.clusters` 与 `labels`，**不是被丢掉**。
-> 5. **`_update_prototypes` 的排序 / 截断只在追加新桶时跑。** 同桶原地替换直接返回、不重排
->    （替换只在 quality 变大时发生，而排序键首项就是 `-quality`，所以行为等价）。
-> 6. **`p10` 的退化条件是 `len(sims) <= 2`**——两个成员也退化，不是 `< 2`。
-> 7. **模型身份与 `protected_cluster` 都是整簇否决**，不是按成员过滤：签名对不上就整簇跳过。
-> 8. **1.0 的四个纯函数里一行 `os` 都没有。** `os.getenv("ADAFACE_*")` 全在被判死的
->    适配器里，不在 `normalize_embedding` / `pose_bucket` / `compute_face_quality` /
->    `FaceClusterer` 里。所以移植这四个函数**不会产生任何 env 派生常量**。
-> 9. **`compute_face_quality` 最后那次 `_clamp` 是恒等。** 四项都非负、权重和为 1.0，
->    上界恰好 1.0——那次 clamp **不可达**。照抄保留（改动它等于改掉一个不可达分支，
->    收益为零而差异真实存在）。
-> 10. **`recluster_faces(threshold=0.30, minimum_quality=0.55)` 的 `minimum_quality`
->     与 `FaceClusterer` 自身默认的 `0.30` 不一致。** 1.0 的「两个 0.30」之外还有第三个
->     数值 0.55，只出现在那个 benchmark-only 的函数里，别把它当成人脸质量门的值。
->
-> **移植时唯一一处字节级偏离**：2.0 的 `cosine` 给 `zip(...)` 加了 `strict=True`
-> （ruff 的 B905 要求；长度已在上一步判断过，行为不变）。
 
 ## 检索融合
 
