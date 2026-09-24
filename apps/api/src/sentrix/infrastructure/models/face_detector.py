@@ -28,6 +28,7 @@ import numpy as np
 from sentrix.infrastructure.models.onnx_runtime import (
     RETINAFACE_PROVIDERS_ENV,
     face_onnx_providers,
+    require_requested_providers,
 )
 
 STEPS = (8, 16, 32)
@@ -243,8 +244,16 @@ class RetinaFaceTiledDetector:
                     import onnxruntime
 
                     providers = face_onnx_providers(RETINAFACE_PROVIDERS_ENV)
-                    self._session = onnxruntime.InferenceSession(self.model_path, providers=providers)
-                    self._input_name = str(self._session.get_inputs()[0].name)
+                    session = onnxruntime.InferenceSession(self.model_path, providers=providers)
+                    # 请求了 CUDA 而落在 CPU 上时在这里抛。**异常原样穿出 ``_load``**：上面那个
+                    # ``except`` 改写 ``error`` 之后重抛，所以调用方拿到的是同一个异常，不是
+                    # 一句日志（第 111 条那道防线，见 onnx_runtime）。
+                    #
+                    # ``self._session`` **过完守卫才赋值**：先赋值的话，抛错之后它已经非空，
+                    # 下一次 ``_load`` 在这里就 return 了——硬报错只响一次，之后静默降级。
+                    require_requested_providers(session, RETINAFACE_PROVIDERS_ENV, label="RetinaFace 检测")
+                    self._input_name = str(session.get_inputs()[0].name)
+                    self._session = session
                 except Exception as error:  # 权重缺失/损坏：记下来，由调用方决定降级
                     self.error = str(error)
                     raise

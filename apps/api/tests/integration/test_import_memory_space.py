@@ -137,8 +137,21 @@ def test_a_cluster_can_exist_in_the_database_and_still_be_invisible_on_the_peopl
     """**反向的那一半。** 不建空间行时，簇确实在库里，而簇列表一个都读不到。
 
     这一条不是「顺便验一下旧行为」：它把「人物页为空」这件事的物理原因钉在
-    ``memory_spaces`` 上——把内连接换成左连接，它会立刻变红，而那时「空」与「没有」
-    就被混成同一件事了（第 47 条）。
+    ``memory_spaces`` 上——少了那一行，「空」与「没有」就被混成同一件事了（第 47 条）。
+
+    **它红在哪一步是量过的，订正见第 113 条。** 原话写的是「把内连接换成左连接，它会
+    立刻变红」——**不成立**：``list_clusters`` 的约束是**两半**，``JOIN memory_spaces ms
+    ON ms.id = fc.scope_id`` ∧ ``ms.include_in_people = 1``，而只换成 ``LEFT JOIN``（M6）
+    时，没匹配上的行被补 ``NULL``、``NULL = 1`` 不成立，谓词自己就把它们挡掉了——两半在
+    这个查询里是**等价的**，所以没有任何用例能把它们分开。把整条约束一起拿掉（M6b）才会
+    红，红的正是这一条。
+
+    谓词那一半另有两条门禁，不靠这一条：
+    ``test_identity_repositories.test_list_clusters_honours_include_in_people`` 与
+    ``test_identity_routes.test_clusters_from_a_hidden_space_never_enter_the_people_view``
+    （造一行 ``include_in_people = 0`` 的空间）。两半各有各的用例，合起来才是那条约束
+    ——所以这里**不**再补一条「钉住内连接」的用例：想钉的是那句话，不是 ``INNER JOIN``
+    这个写法。
 
     **顺带纠正第 97 条的一处措辞。** 那条说 ``list_people`` 也内连 ``memory_spaces``
     ——不是：它用的是 ``scope_id NOT IN (SELECT id FROM memory_spaces WHERE

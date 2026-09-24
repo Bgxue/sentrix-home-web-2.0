@@ -24,6 +24,12 @@ model，存进去的位置是 version），但**有真实后果**：它参与 ``
 **为什么对齐走 insightface 的 ``norm_crop`` 而不是按框裁。** 按五个关键点仿射对齐出来的
 112×112 才是 ArcFace 训练时的输入分布；按框裁出来的图识别率会掉，而且掉的方式是
 「余弦都差不多」，不是报错——那是这一层最贵的失败形态。
+
+**这一层的三个 session 建完都要过 CUDA 防线**（``onnx_runtime.require_requested_providers``）：
+insightface 的两个模块会话在 ``_build_analysis`` 里逐个读、独立加载的 w600k_r50 在
+``_load_buffalo_recognition`` 里读。**只有 ``CudaProviderMissingError`` 不被本模块的
+``except Exception`` 吞掉**——那些 ``except`` 的成立条件是「人脸是可选能力」，而依赖装错
+不是这个条件（第 111 条）。
 """
 
 from __future__ import annotations
@@ -46,11 +52,14 @@ from sentrix.infrastructure.models.face_detector import (
     landmark_sanity,
 )
 from sentrix.infrastructure.models.onnx_runtime import (
+    CUDA_EXECUTION_PROVIDER,
     FACE_PROVIDERS_ENV,
+    CudaProviderMissingError,
     face_gpu_inference_gate,
     face_onnx_provider_options,
     face_onnx_providers,
     provider_chain,
+    require_requested_providers,
 )
 
 # 身份向量走 buffalo_l 的 w600k_r50：1.0 的两个返回分支都把 ``embedding_model`` 写死成
@@ -230,6 +239,10 @@ class FaceAdapter:
                 return []
             with face_gpu_inference_gate():
                 return self._detect_unlocked(image)
+        except CudaProviderMissingError:
+            # 「人脸是可选能力」不覆盖这一条：它说的是依赖装错了，不是这台机器没有 GPU。
+            # 吞掉它，下一个看到的仍然是「导入很慢 / 一张脸都没有」那个外表（第 111 条）。
+            raise
         except Exception as error:  # 人脸是可选能力，不该让整条导入链失败
             self.error = str(error)
             return []
@@ -356,13 +369,20 @@ class FaceAdapter:
         产物（1.0 在 import 期就构造 ``FaceAdapter``，加载只可能发生一次）。2.0 的适配器
         由容器构造，这里要立住的是另一件事——检测器、分析器、识别 session **要么都还没有，
         要么都有**，否则第一条导入会看到半建好的状态。
+
+        **识别 session 先建。** 它是这里唯一会抛错的步骤（检测器那一步不在这里：它的
+        ``_session`` 自己守懒加载，抛错后仍是 ``None``，所以下一次调用会再抛一次，是黏的）。
+        而这道守卫写的是 ``self._app is not None``，先建 ``_app`` 的话：一次退化抛错之后
+        ``_app`` 已经非空，第二次调用直接从这里返回、``_recognition_session`` 永远是
+        ``None``——**硬报错只响一次，之后整条链路静默降级成「一张脸都没有」**，而
+        ``_uncertain`` 对 ``_recognition_session is None`` 的处置正是返回空表。
         """
         if self._app is not None:
             return
         with self._load_lock:
             if self._app is None:
-                self._app = self._build_analysis()
                 self._recognition_session = self._load_buffalo_recognition()
+                self._app = self._build_analysis()
 
     def _build_analysis(self) -> Any:
         """建 buffalo_l 的 ``FaceAnalysis``：SCRFD 检测 + ArcFace 识别两个模块。
@@ -392,8 +412,16 @@ class FaceAdapter:
             root=self._model_root,
         )
         det_size = int(os.getenv(DET_SIZE_ENV, str(DEFAULT_DET_SIZE)))
-        use_cuda = "CUDAExecutionProvider" in provider_chain(FACE_PROVIDERS_ENV)
+        use_cuda = CUDA_EXECUTION_PROVIDER in provider_chain(FACE_PROVIDERS_ENV)
         analysis.prepare(ctx_id=0 if use_cuda else -1, det_size=(det_size, det_size))
+        # 逐个模块读实际链路。``FaceAnalysis`` 自己**没有** ``get_providers``——provider 是
+        # 传给每个模型各自的 ``InferenceSession`` 的，退化也发生在那一个个 session 上，所以
+        # 判据只能逐个模块读；读这个对象的任何属性都测不出退化。
+        for taskname, model in analysis.models.items():
+            session = getattr(model, "session", None)
+            if session is None:
+                raise RuntimeError(f"buffalo_l 的 {taskname} 模块没有建出 ONNX session")
+            require_requested_providers(session, FACE_PROVIDERS_ENV, label=f"buffalo_l {taskname}")
         return analysis
 
     def _load_buffalo_recognition(self) -> Any:
@@ -409,7 +437,13 @@ class FaceAdapter:
             if not Path(self.recognition_path).is_file():
                 return None
             providers = face_onnx_providers(FACE_PROVIDERS_ENV)
-            return onnxruntime.InferenceSession(self.recognition_path, providers=providers)
+            session = onnxruntime.InferenceSession(self.recognition_path, providers=providers)
+            require_requested_providers(session, FACE_PROVIDERS_ENV, label="buffalo_l w600k_r50")
+            return session
+        except CudaProviderMissingError:
+            # 下面那个 ``return None`` 是「权重缺失」的合法降级。退化不是——把它折进 None，
+            # 上层看到的是「这条兜底路没有向量」，与真实原因无关。
+            raise
         except Exception:
             return None
 

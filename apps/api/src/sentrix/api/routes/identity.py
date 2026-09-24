@@ -443,13 +443,6 @@ async def seed_person_identity(
         # 1.0 的 ``files`` 是必填，所以这条在 1.0 不存在；两条入口之后它是新的边界：
         # 一个两个都没给请求不是「预置不出人」，是请求本身不成立（400，不是 422）。
         raise InvalidRequestError("files or face_instance_ids is required")
-    # 空间行（第 104 条的裁决，2026-09-24）。1.0 的预置路由走 ``create_asset``，ensure 在
-    # 那个函数里（``db.py:1462``）——它是 1.0 唯一的资产写入点。2.0 的预置路由有**两条**
-    # 入口，而实例那条一张资产都不写，把 ensure 接在 ``_store_seed_photo`` 上会漏掉它；
-    # 落点因此取两条入口的公共点（第 102 条挑 ``ImportAssets.execute`` 是同一条理由）。
-    # ``list_clusters`` **内连** ``memory_spaces``，少了这一行，全新 scope 上预置出来的簇
-    # 在审阅页里读不出来——不是「少一条数据」，是「这个人不存在」。
-    container.spaces.ensure(scope_id, scope_id)
     photos = [
         _store_seed_photo(
             container,
@@ -469,6 +462,21 @@ async def seed_person_identity(
             photos=photos,
             face_instance_ids=instance_ids,
         )
+        # 空间行（第 104 条的裁决，2026-09-24；落点改到校验之后是第 114 条）。
+        #
+        # **位置是按 1.0 的流程位置定的，不是按它的单行顺序。** 1.0 的预置路由走
+        # ``create_asset``（``app.py:2337``），ensure 在那个函数里（``db.py:1462``）——
+        # ``create_asset`` 是「建空间 + 建资产」在**同一个流程**里，所以一个什么都没建的请求
+        # 根本走不到那一行。照抄它的单行顺序（ensure 排在写库之前）会把这条语义丢掉：404
+        # （``face_instance_ids`` 指向不存在的实例）与 422（一张脸都没检出）都是在**写任何东西
+        # 之前**判出来的，把它们排到 ensure 之后就说明「被拒的请求也建了空间」——而 1.0 里那行
+        # 之所以在写之前，是因为它**后面紧接着就在写**，不是因为它该排在所有校验之前。
+        #
+        # 落点仍是两条入口的公共点（第 102 条挑 ``ImportAssets.execute`` 是同一条理由：实例
+        # 那条入口一张资产都不写，接在 ``_store_seed_photo`` 上会漏掉它）。``list_clusters``
+        # **内连** ``memory_spaces``，少了这一行，全新 scope 上预置出来的簇在审阅页里读不出来
+        # ——不是「少一条数据」，是「这个人不存在」。
+        container.spaces.ensure(scope_id, scope_id)
     except SeedInstanceNotFoundError as error:
         # 调用方指向了一个不存在的对象 → 404。与「图里没有人脸」（422）分开：
         # 一个要换 id，一个要换图。

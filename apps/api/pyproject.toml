@@ -25,11 +25,19 @@ dependencies = [
     # 三维单位向量上。1.0 没有这一层；scipy 也不是 1.0 的依赖之外的额外负担——
     # 1.0 venv 里本来就有 scipy 1.15.3（reverse_geocoder 用它）。
     "scipy>=1.15,<2",
-    # 人脸链路（S5b）。三个包在 153 上是**试装验证过的**（见 s5-deviations 第 55/56 条）：
+    # 人脸链路（S5b）。三个包在 153 上是**试装验证过的**（见 s5-deviations 第 55/56/111 条）：
     # onnxruntime-gpu 的 CUDA EP 只有先预载 cu13 运行库才起得来，否则**静默退化成 CPU**；
     # insightface 依赖未加约束的 ``onnxruntime``（CPU 版），两个发行包共用同一个
     # ``onnxruntime`` 命名空间，所以两个都钉在**同一个版本**、且 GPU 那个最后装
     # （install 顺序写在 docs/runbooks 里，不是靠 pip 自己决定）。
+    #
+    # **这条约束现在有运行时的一半。** 上面那个命名空间把戏已经咬过三次（第 111 条那次是
+    # 真实仓库的 venv 被覆盖成 CPU 版，``make ci`` 21 分钟 → 55 分钟而外表是「卡住」），所以
+    # `onnx_runtime.require_requested_providers` 会在每个 session 建完时读
+    # ``get_providers()``：**请求了 CUDA 而实际只有 CPU 就直接抛错拒启**，报错里给出的修复
+    # 命令钉的正是下面这个版本号——两处必须一起改，改一处另一处就成了谎话。
+    # 纯 CPU 部署是合法形态，但要**显式**声明：``FACE_PROVIDERS=CPUExecutionProvider``
+    # （``RETINAFACE_PROVIDERS`` 同）。
     "onnxruntime-gpu==1.30.0",
     "insightface==1.0.1",
     # headless：服务端不装 GUI 那份，1.0 两份都装了是因为它还要在开发机上跑预览。

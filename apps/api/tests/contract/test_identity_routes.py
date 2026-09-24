@@ -766,6 +766,36 @@ def test_seeding_into_a_fresh_scope_registers_the_space_so_the_cluster_is_visibl
     assert [item["id"] for item in body["clusters"]] == [response.json()["cluster_id"]]
 
 
+def test_a_rejected_seed_leaves_no_space_row(identity_client: TestClient):
+    """**一个什么都没建的请求不留痕**——ensure 排在所有校验之后（第 114 条）。
+
+    这里钉 404（``face_instance_ids`` 指向不存在的实例，``SeedIdentity.execute`` 第一件事
+    就把它判掉）。原实现把 ``ensure`` 放在路由开头（照 1.0 那行的**单行顺序**），于是一个
+    被拒的请求留下一行空空间：这个 scope 从此「登记过」，而那次请求一件东西都没建。
+
+    位置是按 1.0 的**流程位置**定的：1.0 的 ``create_asset`` 把「建空间 + 建资产」放在同一个
+    流程里，所以一个什么都没建的请求根本走不到那一行；照着单行顺序抄才会把它挪到校验之前。
+
+    **它红在位置、不在「有没有调过 ensure」**：把那一行挪回路由开头（M7），空间行就回来了，
+    这条变红，而正向那条 ``test_seeding_into_a_fresh_scope_...`` 仍然绿——两条一起才把位置
+    钉住（只留正向的话，挪回开头也全绿）。
+    """
+    add_embedded_instance(identity_client, "fi_mom", embedding=[1.0, 0.0, 0.0, 0.0])
+
+    response = identity_client.post(
+        "/api/v1/people/seed",
+        data={"name": "妈妈", "scope_id": FRESH, "face_instance_ids": "fi_ghost"},
+    )
+
+    assert response.status_code == 404, response.text
+    assert identity_client.app.state.container.spaces.get(FRESH) is None
+    with _db(identity_client).connect() as connection:
+        clusters = connection.execute(
+            "SELECT COUNT(*) FROM face_clusters WHERE scope_id = ?", (FRESH,)
+        ).fetchone()
+    assert clusters[0] == 0
+
+
 def test_a_cluster_in_a_scope_without_a_space_row_is_invisible_on_the_review_page(
     client: TestClient,
 ):

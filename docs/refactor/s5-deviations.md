@@ -1365,6 +1365,8 @@ VLM（8100）/ buffalo_l）。两个 scope、同一份输入，差别只有「�
 3. 2017-11-05 那 4 个事件之间的分隔**不是「缺一个人」造成的**：那天检出的 33 张脸里
    **30 张 `validity='uncertain'`**，按 enrollment 的资格闸门（`identity_eligible`）根本不参与
    匹配；剩下 3 张属于别的簇。person 分量在那些 fold 上本就是 0。
+   （**这一组数带口径**：33/30 是那次跑的原始读法，**第 110 条**复核时复现不出来、并把它
+   与另一套可复现的口径 35/33 并列登记了。引用这天时连口径一起写。）
 
 **一处必须记住的口径**：`events.aggregation_breakdown_json` 存的是**最后一次 fold 的分数**，
 不是事件级聚合（`_fold` 每次覆盖写）。所以「person_score > 0 的事件数」是一个**快照**，
@@ -1428,16 +1430,51 @@ ensure 在那个函数里（`db.py:1462`）——而 `create_asset` 是 1.0 **�
 **实测数字**（取自第 108 条那次真数据 e2e）：2017-11-05 那天检出**33 张脸**，其中
 **30 张 `validity='uncertain'`**。
 
-**复核：这个数字本轮复现不出来，口径必须先钉死。** 顺手在第 108 条那次运行留下的两个
-库里（`/tmp/s5e2e-verdict/sentrix.db`、`/tmp/s5e2e-identity/sentrix.db`，只读）按
-「`face_instances` 内连 `assets`、取 `captured_at` 是那天」数，两个 scope 各是
-**35 张脸 / 33 张 `uncertain`**——与「33 / 30」对不上。顺带量到的另外两个数：那天
-**16 条观察、只有 5 条带脸**（35 张脸来自这 5 张合影）。
+**两套口径，各记各的（2026-09-25 钉死）。** 上一轮写的是「这个数字复现不出来」——现在
+把那句话也钉死：**不是有两个口径，是可复现的口径只有一个。**
 
-两个数指向的是同一件事（那天绝大多数脸进不了匹配池），但**计数口径第 108 条没有写死**：
-是「整天的全部实例」还是「某个事件那几条观察」，是「落库的全部」还是「走到 fold 的那一批」。
-**待办的第一件事就是把这个口径钉死**——否则后来人会拿着一个复现不出来的数字去找原因，
-而那正是这条待办想避免的。
+| 口径 | 表与连接 | 过滤 | 结果 |
+|---|---|---|---|
+| **乙 · 本轮复核（可复现）** | `face_instances fi JOIN assets a ON a.id = fi.asset_id` | `a.scope_id = <scope>` ∧ `substr(a.captured_at, 1, 10) = '2017-11-05'` | **35 张脸 / 33 `uncertain`**，另 **2 张 `verified`** |
+| **甲 · 第 108 条转述（不可复现）** | 第 108 条**没有写** | 第 108 条**没有写** | 33 张脸 / 30 `uncertain` |
+
+**口径乙的原始输出**（`/tmp/count_calib.py`，只读，`/tmp/s5e2e-verdict` 与
+`/tmp/s5e2e-identity` 两个库；**四个 scope 逐位相同**）：
+
+```
+--- scope=s5-after ---
+  A file_name LIKE '2017-11-05%'      : faces=35 uncertain=33
+  B substr(captured_at,1,10)     : faces=35 uncertain=33
+  observations(captured_at=那天) : 16，其中带脸的 5
+  只进 A 的资产（文件名前缀命中、captured_at 不是那天）: 0
+  只进 B 的资产（captured_at 是那天、文件名前缀不命中）: 0
+
+--- scope=s5-before ---（同上，逐位相同）
+--- scope=album-a ---（同上）
+--- scope=album-b ---（同上）
+```
+
+**口径甲为什么复现不出来——这一条也是量过的，不是猜的。** 把四种自然口径在**现存的全部
+三个 e2e 库、四个 scope** 上各跑一遍（`/tmp/probe_calib.py`）：
+
+```
+/tmp/s5e2e-verdict/sentrix.db  scope=s5-after
+  1 assets.captured_at              faces= 35 uncertain= 33 verified=  2
+  2 observations.captured_at        faces= 35 uncertain= 33 verified=  2
+  3 file_name LIKE                  faces= 35 uncertain= 33 verified=  2
+  4 观察落在事件里(event_observations)  faces= 35 uncertain= 33 verified=  2
+```
+
+**四种全部是 35 / 33**（s5-before、album-a、album-b 同样）。所以「33 / 30」不落在任何一条
+自然口径上；它更可能来自一次中间状态的运行，而那次运行的库已经不在盘上。**注意不是要把它
+凑成 35 / 33**：两个数都留在这里，各自带口径，谁也不覆盖谁。
+
+**同一件事的另两个数（口径乙）**：那天 **16 条观察**，其中**只有 5 条带脸**；35 张脸全部
+来自这 5 张合影。下面「那天能进匹配池的只有 3 张」那句用的是**口径甲**，换到口径乙是
+**2 张 `verified`**——两个数说的是同一件事（绝大多数脸进不了池），但**引用时要把口径带上**。
+
+**将来引用这一天的脸数，必须连口径一起写**：写「35 / 33（口径乙）」或直接给出 SQL。
+**口径没钉死的数字就是下一个争议**——这一条自己就是这句话的实例。
 
 **为什么它是那天的大杠杆。** `identity_eligible` 是「够格进簇」那道门，它要求
 `validity == 'verified'` 且 `quality >= 0.55`（`face_adapter.py:578`）。uncertain 的那些脸
@@ -1447,7 +1484,8 @@ ensure 在那个函数里（`db.py:1462`）——而 `create_asset` 是 1.0 **�
 
 **它与「事件归并没变好」的关系——不是主因，是同一天的第二条线索。** 第 108 条查到的主因是
 **数据分布**：预置的那个人在 2017-11-05 一张照片里都没出现（那天 0 条提及）。两条叠起来才是
-「那天分不出人」的完整图景：一条是「他不在」，一条是「就算他在，30/33 的脸也进不了池子」。
+「那天分不出人」的完整图景：一条是「他不在」，一条是「就算他在，那天绝大多数脸也进不了
+池子」（口径甲 30/33、口径乙 33/35，见上面的表）。
 **只解掉一条，那天仍然分不出人**——这也是「它不是唯一原因」的确切意思。
 
 **成因方向（未查）。** `validity` 全仓只有一个判断点（`face_adapter.py:549`）：
@@ -1459,12 +1497,14 @@ validity = FACE_VALIDITY_VERIFIED if (
 ```
 
 四个合取项是 SCRFD 的置信度（默认 0.7）、与 RetinaFace 的**框一致**、**关键点合理**、
-人脸面积占比（默认 0.003）。30/33 落进 uncertain，意味着至少有一项在那天的照片上普遍不
-成立——是检测质量（小脸 / 模糊 / 侧脸）、姿态分桶、还是光照，**未查**。
+人脸面积占比（默认 0.003）。下面这些比例都取自**口径甲**（第 108 条那组数；口径乙是
+33/35，见上面的表——两套说的是同一件事）：**30/33 落进 uncertain**，意味着至少有一项在那
+天的照片上普遍不成立——是检测质量（小脸 / 模糊 / 侧脸）、姿态分桶、还是光照，**未查**。
 
-**待办（用户 2026-09-24 裁决：先记下不查）**：把那天的 33 张脸逐张落一份四元组
-（`score` / `agreed` / `sane` / `area_ratio`），看是哪一项在挡。**不据此调任何阈值**——与
-第 108 条结尾是同一条纪律：调阈值是另一条产品决定，需要它自己的对照。
+**待办（用户 2026-09-24 裁决：先记下不查）**：把那天的脸逐张落一份四元组
+（`score` / `agreed` / `sane` / `area_ratio`），看是哪一项在挡。**脸数按口径乙取 35 张**
+（口径甲那个 33 复现不出来，拿它去对会永远差 2）。**不据此调任何阈值**——与第 108 条结尾
+是同一条纪律：调阈值是另一条产品决定，需要它自己的对照。
 
 ### C. 第 101 条那条 2.6 倍
 
@@ -1514,3 +1554,236 @@ validity = FACE_VALIDITY_VERIFIED if (
 
 **给后来人留一条**：第 109 条落地期间那两次被外部信号杀掉的 `make ci`（都跑在 CPU 版下）
 **不是基线**——55 分钟那一档是「`onnxruntime` 被覆盖成 CPU 版」的产物，不是这棵树应有的耗时。
+
+
+## 2m. 收尾（2026-09-25）：CUDA 防线 + 三处尾
+
+### A. 裁决一：建完人脸 session 就拒绝启动
+
+#### 第 112 条 · CUDA 静默退化的防线：读 `session.get_providers()`，不一致就抛错拒启
+
+**用户 2026-09-25 裁决**：「建完人脸 session 后，如果『请求了 CUDA 而实际只有 CPU』→
+**直接报错拒启**」。理由是这条退化已经咬过三次：① `get_available_providers()` 里照样有
+CUDA（第 56 条）；② insightface 的 `providers` 传元组被静默降级成 CPU（一行警告，
+`_build_analysis` 的注释）；③ 第 111 条那次真实仓库的 venv 被依赖安装覆盖成 CPU 版，
+`make ci` 21 分钟 → 55 分钟，而**外衣是「卡住」**（进度条过期 + `futex` 是 starlette portal
+在等结果 + 172 线程是 onnxruntime 按 32 核开的正常池）。
+
+**判据只能是 `session.get_providers()`。** `get_available_providers()` 在退化时给出**相反的
+答案**，所以它既不能用来判、也不能用来「先看一眼就算修好了」。防线本体是
+`onnx_runtime.require_requested_providers`：实际链里没有 `CUDAExecutionProvider` 而请求的链
+里有 → 抛 `CudaProviderMissingError`。
+
+**三个装配点都接了**（这是「落点在 session 建立处」的确切落法）：
+
+| 落点 | session 从哪来 | 为什么不能只接一个 |
+|---|---|---|
+| `face_detector.RetinaFaceTiledDetector._load` | `onnxruntime.InferenceSession(model_path, providers=...)` | 检测器不经过 `FaceAdapter` 的 `_ensure_loaded` |
+| `face_adapter._build_analysis` | `FaceAnalysis` 里**每个模块各自**的 `InferenceSession` | `FaceAnalysis` 自己**没有** `get_providers`——退化发生在两个模块会话上 |
+| `face_adapter._load_buffalo_recognition` | w600k_r50 的独立 `InferenceSession` | 它的失败路径是 `return None`（合法降级），不显式放过就会被折进去 |
+
+**两条容易被漏掉、都补了用例的副作用：**
+
+1. **裸 `except Exception` 会把这道理吞掉。** 人脸链路上一共有六处，存在理由是「人脸是
+   可选能力，不该让整条导入链失败」。这一条**不在那个理由里**——它说的是依赖装错了，不是
+   这台机器没有 GPU。所以 `detect` 与 `_load_buffalo_recognition` 各加了一条**显式重抛**；
+   吞掉的后果与没加防线一模一样（`detect` 返回空表，调用方看到「这张图里没有人脸」）。
+2. **硬报错必须是黏的。** 两处「先赋值再守卫」会让报错只响一次、之后静默降级：
+   `RetinaFaceTiledDetector._load` 先写 `self._session` 再守卫 → 第二次调用在
+   `self._session is not None` 处 return；`_ensure_loaded` 先建 `_app` 再建识别 session →
+   `_app` 非空后第二次直接返回、`_recognition_session` 永远是 `None`（而 `_uncertain` 对
+   `None` 的处置正是返回空表）。两处都改成**过完守卫才赋值 / 识别 session 先建**。
+
+**逃生阀：不留新的 env，就用 `provider_env` 自己。** 理由——「没有 GPU 的机器」与「这台机器
+没请求 GPU」是两件事，而后者已经有一个显式开关了：把 `FACE_PROVIDERS` /
+`RETINAFACE_PROVIDERS` 设成 `CPUExecutionProvider`，那时压根没有「请求了 CUDA」这回事，
+防线不参与。**再加一个 `SENTRIX_..._ALLOW_CPU` 只会多一条「请求了 CUDA 但允许退化」的岔路，
+而那正是要禁掉的组合**；而「纯 CPU 部署」这个合法形态并没有被堵死，只是必须由部署者写出来。
+报错正文里直接给了这两条指示（装 GPU 版的 `pip install --force-reinstall --no-deps
+onnxruntime-gpu==<当前版本>`，或显式声明纯 CPU），因为**只说「CUDA 没生效」的报错，下一个
+人还得再查一遍**。
+
+**`pyproject.toml` 同步。** 那条注释原来只描述陷阱（「两个发行包共用同一个命名空间、GPU 那个
+最后装」），现在点明它同时是**报错里修复命令的版本来源**，并写明两处必须一起改——改一处，
+另一处就成了谎话。
+
+**门禁 14 条**（`apps/api/tests/unit/test_face_provider_guard.py`，不碰权重、不碰 GPU）：
+判据本身 5 条（正向拿到 CUDA 不抛 / 反向 CPU 抛 / 报错可执行 / 逃生阀生效 / 两个变量不互相
+顶替），三个装配点各正反两条，外加「黏」与「不被裸 except 吞」两条。
+
+**定点变异（每一条都跑在 `MALLOC_ARENA_MAX=2 OMP_NUM_THREADS=4` 下，脚本 `/tmp/s5mutants.py`，
+还原覆盖每一个被改的文件）：**
+
+| 变异 | 改什么 | 指定用例 |
+|---|---|---|
+| M8 | 删掉 RetinaFace `_load` 里的守卫 | `test_the_detector_refuses_to_start_when_the_session_degrades_to_cpu` → **failed** |
+| M9 | 删掉 `_build_analysis` 里的守卫 | `test_the_buffalo_analysis_refuses_to_start_when_a_module_session_degrades` → **failed** |
+| M10 | 删掉 `_load_buffalo_recognition` 的守卫（退回 `return None`） | `test_the_standalone_recognition_session_refuses_instead_of_returning_none` → **failed** |
+| M11 | 删掉 `detect` 里那条显式重抛 | `test_the_adapter_does_not_swallow_the_guard_in_its_broad_except` → **failed** |
+| M12 | 删掉 `_load_buffalo_recognition` 里那条显式重抛 | `test_the_standalone_recognition_session_refuses_instead_of_returning_none` → **failed** |
+| M13 | 把 `_app` 排回识别 session 之前 | `test_a_degraded_chain_keeps_refusing_on_every_later_call` → **failed** |
+| M14 | 退化时不抛、改成记 `error` 后照常返回 | `test_the_detector_refuses_to_start_when_the_session_degrades_to_cpu` → **failed** |
+
+原始输出：
+
+```
+### M8 · 去掉 RetinaFace 检测 session 的守卫
+FAILED apps/api/tests/unit/test_face_provider_guard.py::test_the_detector_refuses_to_start_when_the_session_degrades_to_cpu
+### pytest exit=1
+### M11 · 让 detect 的裸 except 把守卫吞掉（删掉那条显式重抛）
+FAILED apps/api/tests/unit/test_face_provider_guard.py::test_the_adapter_does_not_swallow_the_guard_in_its_broad_except
+### pytest exit=1
+### M13 · _ensure_loaded 里把 _app 排到识别 session 之前（报错不再黏）
+FAILED apps/api/tests/unit/test_face_provider_guard.py::test_a_degraded_chain_keeps_refusing_on_every_later_call
+### pytest exit=1
+### M14 · 退化成 CPU 时不抛，改成记 error 后照常返回
+FAILED apps/api/tests/unit/test_face_provider_guard.py::test_the_detector_refuses_to_start_when_the_session_degrades_to_cpu
+### pytest exit=1
+未达预期的变异数 = 0
+```
+
+**正向也在真机器上量过**（权重真、CUDA 真，不是假件）：
+
+```
+RetinaFace session providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+Applied providers: ['CUDAExecutionProvider', 'CPUExecutionProvider'], with options: {…}
+find model: /home/asus/.insightface/models/buffalo_l/det_10g.onnx detection
+find model: /home/asus/.insightface/models/buffalo_l/w600k_r50.onnx recognition
+```
+
+`test_face_detector.py` + `test_face_embedding.py` 共 22 条全绿（`PYTEST_EXIT=0`）。
+`CUDAExecutionProvider` 那一行是 `session.get_providers()` 的实测输出——**这道理没有把
+好机器拦在门外**，这正是「不许一律抛」那条正向用例要钉的东西。
+
+### B. 订正一处撒谎的 docstring
+
+#### 第 113 条 · `test_import_memory_space` 的反向用例红在 **M6b**，不是 M6
+
+原 docstring 写「把内连接换成左连接，它会立刻变红」——**实测不成立**。`list_clusters` 的约束
+是**两半**：`JOIN memory_spaces ms ON ms.id = fc.scope_id` ∧ `ms.include_in_people = 1`。
+只换成 `LEFT JOIN`（M6）时，没匹配上的行被补 `NULL`、`NULL = 1` 不成立，**谓词自己就把它们
+挡掉了**——两半在这个查询里**等价**，所以没有任何用例能把它们分开；要 M6b（整条约束一起
+拿掉）才红。
+
+原始输出（`/tmp/s5mutants.py`）：
+
+```
+### M6 · list_clusters 的 INNER JOIN 换成 LEFT JOIN（docstring 原来说它「立刻变红」）
+### 文件 apps/api/src/sentrix/infrastructure/persistence/repositories/faces.py，期望 1 passed
+### pytest exit=0
+### M6b · 把整条 memory_spaces 约束（JOIN + 谓词）一起拿掉
+FAILED apps/api/tests/integration/test_import_memory_space.py::test_a_cluster_can_exist_in_the_database_and_still_be_invisible_on_the_people_page
+### pytest exit=1
+```
+
+**没有补新用例，理由写在订正后的 docstring 里**：想钉的是**那句话**，不是 `INNER JOIN` 这个
+写法；而谓词那一半已经各有门禁（`test_identity_repositories.test_list_clusters_honours_include_in_people`
+与 `test_identity_routes.test_clusters_from_a_hidden_space_never_enter_the_people_view`），
+两半合起来才是那条约束。**再补一条「钉住内连接」的用例是做不到的**——那两半等价，任何用例
+都分不开它们；硬写一条只会在下次换实现时变成一个假门禁。
+
+### C. 裁决三：`ensure` 挪到校验之后
+
+#### 第 114 条 · 被拒的预置请求**不留空间行**——位置按 1.0 的流程位置定，不按它的单行顺序
+
+第 109 条把 `container.spaces.ensure(scope_id, scope_id)` 放在路由**开头**（任何写库之前），
+并在那里登记了一处「已知副作用：404 会留下一行空空间」。**用户 2026-09-24/25 裁决：挪到校验
+之后。**
+
+**为什么这不是「与 1.0 说岔了」。** 第 109 条当时看的是一行代码的**单行顺序**（1.0 里
+ensure 确实排在写之前），而它该看的是**流程位置**：1.0 的预置路由走 `create_asset`
+（`app.py:2337`），ensure 在那个函数里（`db.py:1462`）——`create_asset` 是「建空间 + 建资产」
+**在同一个流程里**，所以 1.0 里**一个什么都没建的请求根本走不到那一行**。照抄单行顺序反而
+把这条语义丢了：404（`face_instance_ids` 指向不存在的实例）与 422（检不出人脸）都是在
+**写任何东西之前**判出来的，把它们排到 ensure 之后，就等于「被拒的请求也建了空间」。
+1.0 那行之所以在写之前，是因为它**后面紧接着就在写**，不是因为它该排在所有校验之前。
+
+**落点仍然是两条入口的公共点**（第 102 条的同一条理由）：实例那条入口一张资产都不写，
+接在 `_store_seed_photo` 上会漏掉它。挪动只改变它相对**校验**的位置。
+
+**门禁**：`test_identity_routes.test_a_rejected_seed_leaves_no_space_row`（只走 HTTP：404 之后
+`container.spaces.get(FRESH) is None` 且该 scope 一条簇都没有）。它与第 109 条那条正向用例
+**成对**——只留正向的话，把 ensure 挪回开头同样全绿。
+
+**定点变异 M7：把 ensure 挪回路由开头 → 这条变红**（原始输出见 `/tmp/s5mutants.py`）：
+
+```
+### M7 · 把 ensure 挪回路由开头（第 114 条之前的位置）
+### 文件 apps/api/src/sentrix/api/routes/identity.py，期望 1 failed
+FAILED apps/api/tests/contract/test_identity_routes.py::test_a_rejected_seed_leaves_no_space_row
+### pytest exit=1
+```
+
+**仍未消掉的一处失败残留（登记不改）**：照片入口在 `SeedIdentity.execute` 判 422 之前就已经
+把资产与观察落了库（`_store_seed_photo` 在路由里、在 `execute` 之前）。那一处的修法要么把
+照片写进用例层、要么给整个请求开事务——两者都超出这一条的边界，且与 1.0 的「先写资产再
+判」同形。**这一条只消掉空间行那一处。**
+
+### D. 本轮 `make ci` 的原始状态：**环境红**，不是代码红
+
+第一次完整 `make ci` 的原始结果（`/tmp/s5c/ci_real-20260925-001811.log`，
+`MALLOC_ARENA_MAX=2 OMP_NUM_THREADS=4`，跑在真实仓库）：
+
+```
+### 起跑 2026-09-25T00:19:41+08:00 load1=0.55
+ruff check → All checks passed!   ruff format --check → 223 files already formatted
+mypy → Success: no issues found in 137 source files
+lint-imports → Contracts: 5 kept, 0 broken.
+check_reachability → 0 个问题   check_capability_map → 0 个问题
+check_module_map → 0 个问题     export_openapi --check → openapi 契约一致
+14 failed, 1051 passed, 16 skipped, 11 warnings in 452.14s (0:07:32)
+make: *** [Makefile:56：coverage] 错误 1
+### CI_EXIT=2
+### 耗时 457 秒（7分37秒）
+```
+
+**30 条异常分两族，同一个环境变化：**
+
+| 族 | 条数 | 文件 | 直接原因 |
+|---|---:|---|---|
+| 失败 | 14 | `e2e/test_visual_search.py`(6) · `integration/test_face_detector.py`(6) · `integration/test_face_embedding.py`(2) | `torch.OutOfMemoryError` / `onnxruntime ... Fail: Failed to allocate memory` —— GPU0 满了 |
+| 跳过 | 10 | `integration/test_chinese_clip.py` | 同一个 OOM：`ChineseClipVisualEmbedder` 建不起来 → `available` 假 → 夹具 `pytest.skip("chinese-clip 权重不可用: OutOfMemoryError…")` |
+| 跳过 | 6 | `e2e/test_assistant_turn.py` | 8100 的 `/v1/chat/completions` 返回 **404**（同期 `/v1/models` 仍 200） |
+
+**GPU0 的实况**（`nvidia-smi`，跑 CI 时与事后各看一次，逐位相同）：24576 MiB 里用了 22718，
+只剩 **1409 MiB**。占用者：
+
+| 进程 | 身份 | 占用 |
+|---|---|---:|
+| 2022870 `VLLM::EngineCore`（父 2022624 = 监听 8100 的 `vllm`） | 8100 / 8500 | 19092 MiB |
+| 1507974 | 1.0 的 8091 | 2458 MiB |
+| 3623789 | 2.0 的 8191 | 1134 MiB |
+
+**基线那一次（第 111 条后记的 20:08 / `1066 passed` / 0 skipped）跑在 vLLM 起来之前**：
+`VLLM::EngineCore` 的 `etime` 起算于 2026-09-24 14:47，而基线是 11:33。所以 7 分 32 秒 / 14 red
+**不是「这棵树该有的另一档」**，是机器状态变了——第 111 条那条「55 分钟不是基线」的提醒，
+这里是同一个形状。
+
+**证明它与本次改动无关（量出来的，不是推出来的）**：把工作树 `git stash push -u` 回
+`dcfb5cf`（未改动），跑同一批文件：
+
+```
+### 在**未改动**的树上跑同一批文件
+### BEFORE_TREE_EXIT=1  耗时 24s
+FAILED apps/api/tests/e2e/test_visual_search.py::… (5 条)
+FAILED apps/api/tests/integration/test_face_detector.py::… (6 条)
+FAILED apps/api/tests/integration/test_face_embedding.py::… (2 条)
+### 还原 OK（git status 与 stash 前逐行相同）
+```
+
+**逐条同样红。** 反过来，把单个文件放进**全新的进程**跑（没有同进程里 CLIP 先抢显存）就绿：
+
+```
+apps/api/tests/integration/test_face_detector.py → 6 passed
+    RetinaFace session providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+apps/api/tests/integration/test_chinese_clip.py  → 10 passed, 0 skipped
+apps/api/tests/unit + tests/contract + test_import_memory_space + test_identity_repositories
+                                                 → 全绿（TOUCHED_EXIT=0）
+```
+
+第一条那个 `['CUDAExecutionProvider', …]` 还顺带正面证明了第 112 条的防线**没有把好机器
+拦在门外**：真拿到 CUDA 时它放行。
+
+**处置：不动。** 8100 / 8500 / 8091 都不在可动范围内（用户明令），而且这不是这棵树的缺陷。
+**下一次拿「1066 passed / 0 skipped / 20 分钟」当基线之前，先看 `nvidia-smi` 的
+`memory.free` 与 8100 的 `/v1/chat/completions`。**
