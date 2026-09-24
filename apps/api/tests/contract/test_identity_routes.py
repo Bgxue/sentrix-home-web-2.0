@@ -25,6 +25,7 @@ NOW = "2026-09-23T10:00:00+00:00"
 
 HOME = "album1"
 HIDDEN = "album-eval"
+FRESH = "album-fresh"
 
 
 def _db(client: TestClient):
@@ -722,3 +723,70 @@ def test_an_empty_name_is_still_rejected_before_either_entrance(identity_client:
 
     assert response.status_code == 400
     assert _error(response) == ("invalid_request", "name is required")
+
+
+# ---- 预置建空间行（第 104 条的裁决，2026-09-24）-----------------------------------
+
+
+def add_bare_cluster(client: TestClient, cluster_id: str, *, scope_id: str) -> None:
+    """一行**什么都没有**的簇，直接插——绕开预置路由，单独钉「可见性由空间行决定」。"""
+    with _db(client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO face_clusters"
+            " (id, scope_id, status, member_count, confidence, created_at, updated_at)"
+            " VALUES (?, ?, 'pending', 1, 1.0, ?, ?)",
+            (cluster_id, scope_id, NOW, NOW),
+        )
+
+
+def test_seeding_into_a_fresh_scope_registers_the_space_so_the_cluster_is_visible(
+    identity_client: TestClient,
+):
+    """预置也要建空间行——1.0 的预置走 ``create_asset``，那里面就有 ensure（``db.py:1462``）。
+
+    第 104 条：2.0 的 ``_store_seed_photo`` 直接 ``asset_repository.add``，于是往一个全新
+    scope 预置身份、又不导入任何照片时，那个簇在审阅页里看不见。1.0 是建的
+    （``app.py:2337``），这里补成一致。
+
+    **只走 HTTP。** 同构构造的用例证明不了生产装配（第 107 条 M2）：装配点漏了
+    ``container.spaces``，自己传协作者的集成用例照样是绿的。
+    """
+    add_embedded_instance(identity_client, "fi_mom", embedding=[1.0, 0.0, 0.0, 0.0])
+
+    response = identity_client.post(
+        "/api/v1/people/seed",
+        data={"name": "妈妈", "scope_id": FRESH, "face_instance_ids": "fi_mom"},
+    )
+
+    assert response.status_code == 201, response.text
+    space = identity_client.app.state.container.spaces.get(FRESH)
+    assert space is not None
+    assert (space.id, space.name, space.kind, space.status) == (FRESH, FRESH, "household", "active")
+    body = identity_client.get("/api/v1/face-clusters", params={"scope_id": FRESH}).json()
+    assert [item["id"] for item in body["clusters"]] == [response.json()["cluster_id"]]
+
+
+def test_a_cluster_in_a_scope_without_a_space_row_is_invisible_on_the_review_page(
+    client: TestClient,
+):
+    """反向那一半：同一个簇，只差一行空间行，``/face-clusters`` 就从看不见变成看得见。
+
+    ``list_clusters`` 里的 ``memory_spaces`` 约束是**有意为之**（``faces.py:139``：内连 +
+    ``ms.include_in_people = 1``），所以「少一行空间」在审阅页上的表现是「这个簇不存在」，
+    「空」与「没有」从此被混成同一件事。``/people`` 不受影响，它用的是子查询（第 103 条）。
+
+    定点变异量过这道门禁的边界：**把整条约束去掉**（M6b）这条立刻变红；只把 INNER JOIN
+    换成 LEFT JOIN（M6）**不会**——``include_in_people = 1`` 那个谓词自己就够把没登记过的
+    scope 挡掉（``NULL = 1`` 不成立）。两处合起来才是那条约束。
+
+    它钉的是物理原因；预置路由自己那条反向门禁是定点变异（删掉 ``seed_person_identity``
+    里的 ``container.spaces.ensure``（M5）→ 上面那条用例变红）。
+    """
+    add_bare_cluster(client, "cluster_orphan", scope_id=FRESH)
+
+    assert client.get("/api/v1/face-clusters", params={"scope_id": FRESH}).json() == {"clusters": []}
+
+    client.app.state.container.spaces.ensure(FRESH, FRESH)
+
+    body = client.get("/api/v1/face-clusters", params={"scope_id": FRESH}).json()
+    assert [item["id"] for item in body["clusters"]] == ["cluster_orphan"]

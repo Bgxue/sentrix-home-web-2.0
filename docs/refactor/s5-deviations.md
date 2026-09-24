@@ -1261,6 +1261,8 @@ scope_id NOT IN (SELECT id FROM memory_spaces WHERE include_in_people = 0)
 
 #### 第 104 条 · 预置路由（`/people/seed`）仍然不建空间行——而 1.0 是建的
 
+**（2026-09-24 裁决三已关闭本条：「补，与 1.0 一致」。落点与门禁见第 109 条。）**
+
 1.0 的预置路由走 `store.create_asset`（`app.py:2337`），那里面就有 ensure；2.0 的
 `_store_seed_photo` 直接 `asset_repository.add`（模块注释写明「不走导入链」）。于是
 **往一个全新 scope 预置身份、又不导入任何照片时，那个簇在 `/face-clusters` 里看不见**。
@@ -1374,3 +1376,134 @@ VLM（8100）/ buffalo_l）。两个 scope、同一份输入，差别只有「�
 **结论与后续**：要让「事件归并得更好」在这一册上可见，缺的不是入口，是
 **数据分布**——最大那个人不覆盖 2017-11-05。这一条是数据事实，本轮到此为止，
 **不据此调任何阈值**（调阈值是另一条产品决定，需要它自己的对照）。
+
+
+## 2l. 收尾（2026-09-24）：第 104 条的裁决落地 + 三条登记
+
+### A. 裁决三：`/people/seed` 也建空间行
+
+#### 第 109 条 · 落点是 `seed_person_identity` 路由，不是 `_store_seed_photo`——预置有**两条**入口
+
+第 104 条登记的问题是「2.0 的预置路由不建空间行，而 1.0 建」。2026-09-24 用户裁决
+**「补，与 1.0 一致」**，本条是它的实施记录。
+
+**1.0 的落点，与它在 2.0 为什么不对应。** 1.0 的预置路由走 `create_asset`（`app.py:2337`），
+ensure 在那个函数里（`db.py:1462`）——而 `create_asset` 是 1.0 **唯一的资产写入点**，所以
+在 1.0「落点在 `create_asset`」与「落点在预置路由」是同一句话。2.0 之后不再同一：裁决二
+给预置加了**实例入口**，那条路径一张资产都不写。把 ensure 接在 `_store_seed_photo` 上，
+往全新 scope 按实例预置（不传 `files`）出来的簇**仍然看不见**——与第 104 条要修的是同一个
+缺陷，只是换了一条入口。
+
+落点因此取**两条入口的公共点**：`seed_person_identity` 里、任何写库之前的一行
+`container.spaces.ensure(scope_id, scope_id)`。理由与第 102 条「接在 `ImportAssets.execute`
+而不是 `ImportAlbum` 上」逐字相同（公共落点，不是某一条入口的落点）；`name = scope_id`、
+`kind` 取签名默认 `household`，也与第 102 条同一份取值。
+
+**一处已知副作用，登记不改。** ensure 排在写库之前（1.0 的顺序），所以一个**被拒**的请求
+（`face_instance_ids` 指向不存在的实例 → 404）会留下那一行空间。它与 1.0 的 `create_asset`
+同形（1.0 同样是先 ensure 再写），而 2.0 的预置路由本来就有失败残留——照片入口在
+`_seed_identity` 判 422 之前就已经把资产落了库。把 ensure 挪到成功之后能消掉这一行，代价是
+与 1.0 的顺序不再一致。两害相权取「与 1.0 一致」。
+
+**门禁两条，一正一反，都只走 HTTP**（理由与第 107 条 M2 相同：同构构造的用例证明不了
+生产装配）：
+
+| 用例 | 钉的东西 |
+|---|---|
+| `test_seeding_into_a_fresh_scope_registers_the_space_so_the_cluster_is_visible` | 往全新 scope 按实例预置 → `/face-clusters` 看得见这个簇 |
+| `test_a_cluster_in_a_scope_without_a_space_row_is_invisible_on_the_review_page` | 反向那一半：同一行簇，加空间行之前读不出来、之后读得出来 |
+
+**定点变异 M5：注释掉 `container.spaces.ensure(scope_id, scope_id)` → 第一条变红**（原始
+输出见交付报告）。
+
+**另一条量的是门禁的边界，记在这里免得后来人白改。** M6 把 `list_clusters` 的
+`INNER JOIN memory_spaces` 改成 `LEFT JOIN`，反向那条**不会**红——`ms.include_in_people = 1`
+那个谓词自己就够把没登记过的 scope 挡掉（`NULL = 1` 不成立）；M6b 把整条约束（JOIN +
+谓词）一起拿掉才会红。这条边界写进了用例的 docstring。
+
+### B. 登记不查
+
+#### 第 110 条 · 2017-11-05 的 33 张脸里 30 张 `validity='uncertain'`（待办，本轮不查）
+
+**实测数字**（取自第 108 条那次真数据 e2e）：2017-11-05 那天检出**33 张脸**，其中
+**30 张 `validity='uncertain'`**。
+
+**复核：这个数字本轮复现不出来，口径必须先钉死。** 顺手在第 108 条那次运行留下的两个
+库里（`/tmp/s5e2e-verdict/sentrix.db`、`/tmp/s5e2e-identity/sentrix.db`，只读）按
+「`face_instances` 内连 `assets`、取 `captured_at` 是那天」数，两个 scope 各是
+**35 张脸 / 33 张 `uncertain`**——与「33 / 30」对不上。顺带量到的另外两个数：那天
+**16 条观察、只有 5 条带脸**（35 张脸来自这 5 张合影）。
+
+两个数指向的是同一件事（那天绝大多数脸进不了匹配池），但**计数口径第 108 条没有写死**：
+是「整天的全部实例」还是「某个事件那几条观察」，是「落库的全部」还是「走到 fold 的那一批」。
+**待办的第一件事就是把这个口径钉死**——否则后来人会拿着一个复现不出来的数字去找原因，
+而那正是这条待办想避免的。
+
+**为什么它是那天的大杠杆。** `identity_eligible` 是「够格进簇」那道门，它要求
+`validity == 'verified'` 且 `quality >= 0.55`（`face_adapter.py:578`）。uncertain 的那些脸
+**根本不参与匹配**：按第 108 条记的那组数字，那天能进匹配池的只有 3 张，而这 3 张还属于
+别的簇。于是那天每一次 fold 的 person 分量本来就是 0，加不加预置的人都一样
+（按本轮复核的那组数字，能进池的比例同样是极少数：35 张里 33 张被挡）。
+
+**它与「事件归并没变好」的关系——不是主因，是同一天的第二条线索。** 第 108 条查到的主因是
+**数据分布**：预置的那个人在 2017-11-05 一张照片里都没出现（那天 0 条提及）。两条叠起来才是
+「那天分不出人」的完整图景：一条是「他不在」，一条是「就算他在，30/33 的脸也进不了池子」。
+**只解掉一条，那天仍然分不出人**——这也是「它不是唯一原因」的确切意思。
+
+**成因方向（未查）。** `validity` 全仓只有一个判断点（`face_adapter.py:549`）：
+
+```python
+validity = FACE_VALIDITY_VERIFIED if (
+    score >= verified_score and agreed and sane and area_ratio >= verified_min_area
+) else FACE_VALIDITY_UNCERTAIN
+```
+
+四个合取项是 SCRFD 的置信度（默认 0.7）、与 RetinaFace 的**框一致**、**关键点合理**、
+人脸面积占比（默认 0.003）。30/33 落进 uncertain，意味着至少有一项在那天的照片上普遍不
+成立——是检测质量（小脸 / 模糊 / 侧脸）、姿态分桶、还是光照，**未查**。
+
+**待办（用户 2026-09-24 裁决：先记下不查）**：把那天的 33 张脸逐张落一份四元组
+（`score` / `agreed` / `sane` / `area_ratio`），看是哪一项在挡。**不据此调任何阈值**——与
+第 108 条结尾是同一条纪律：调阈值是另一条产品决定，需要它自己的对照。
+
+### C. 第 101 条那条 2.6 倍
+
+#### 第 111 条 · 实测成因：真实仓库 venv 里的 onnxruntime 是 **CPU 版**（GPU 版被覆盖了）
+
+**两次运行的原始数字**（日志都还在盘上）：
+
+| 运行 | 日志 | pytest 结果 |
+|---|---|---|
+| 隔离副本 | `/tmp/ci-isolated.log` | `1064 passed ... in 1272.17s (0:21:12)` |
+| 真实仓库 | `/tmp/ci-real.log` | `1064 passed ... in 3326.84s (0:55:26)` |
+
+同一批 1064 条、同一棵树，差 **2.62 倍**。真实仓库上还有更早的一轮（`/tmp/real-ci.log`：
+`1050 passed ... in 3496.72s (0:58:16)`，那是第 108 条之前的树），同样在 55 分钟这一档。
+
+**根因：两个 venv 里的 `onnxruntime` 不是同一个发行包。**
+
+| | 真实仓库 `.venv` | 隔离副本 `.venv` |
+|---|---|---|
+| `onnxruntime.get_device()` | `CPU` | `GPU` |
+| `get_available_providers()` | `['AzureExecutionProvider', 'CPUExecutionProvider']` | `['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']` |
+| `libonnxruntime.so.1.30.0` | 28,985,152 B · md5 `579ada21…` · mtime `09-23 21:43` | 29,062,976 B · md5 `bfea1df5…` · mtime `09-23 18:58` |
+| 5 张真照片（预载 torch 后） | 2.41 s，session providers = `['CPUExecutionProvider']` | 1.15 s，session providers = `['CUDAExecutionProvider', …]` |
+
+`apps/api/pyproject.toml:29-33` 自己写着这条陷阱：「insightface 依赖未加约束的
+``onnxruntime``（CPU 版），两个发行包共用同一个 ``onnxruntime`` 命名空间，所以两个都钉在
+**同一个版本**、且 GPU 那个最后装」。**「最后装」这一条在真实仓库的 venv 里没有成立**：
+那个 venv 里整个 `onnxruntime/` 包目录的 mtime 是 `09-23 21:43`（副本是 18:58），
+一次依赖安装把 CPU 版铺在了后面，`libonnxruntime.so` 因此被覆盖成 CPU 构建。此后每一次
+`make ci` 里 `FaceAnalysis` 都请求 CUDA、实际落在 CPU 上——**静默退化**，正是
+`onnx_runtime.py` 模块注释第 56 条描述的那一种（「日志里看不出来」）。
+
+耗时差因此落在**跑真人脸检测的那几条**上：`make ci` 里走 onnxruntime 的真推理只有人脸检测
+这一条链（VLM 观察器与文本模型在契约与 e2e 里都换成了假件；`chinese_clip.py` 那条走 torch，
+两个 venv 都吃 GPU，不受这条影响）。它在真实仓库上落 CPU、在副本上落 GPU；其余一千多条
+用例两边同样是 CPU，差别不在那里。
+
+**处置：只登记，不动。** 这是**机器上的 venv 状态**，不是仓库里的代码；修法是让 GPU 版最后
+落（`pip install --force-reinstall --no-deps onnxruntime-gpu==1.30.0`）。本轮按「查清就好」
+的裁决**没有动真实仓库的 `.venv`**——它现在这个状态正好是那两次 55 分钟运行的复现条件。
+**顺带一条给后来人**：第 109 条这次 `make ci` 也是在 CPU 版下跑的，耗时同样是 55 分钟那一档，
+**不能拿它当「这次改动变慢了」的证据**。

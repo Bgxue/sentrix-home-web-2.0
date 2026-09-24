@@ -443,6 +443,13 @@ async def seed_person_identity(
         # 1.0 的 ``files`` 是必填，所以这条在 1.0 不存在；两条入口之后它是新的边界：
         # 一个两个都没给请求不是「预置不出人」，是请求本身不成立（400，不是 422）。
         raise InvalidRequestError("files or face_instance_ids is required")
+    # 空间行（第 104 条的裁决，2026-09-24）。1.0 的预置路由走 ``create_asset``，ensure 在
+    # 那个函数里（``db.py:1462``）——它是 1.0 唯一的资产写入点。2.0 的预置路由有**两条**
+    # 入口，而实例那条一张资产都不写，把 ensure 接在 ``_store_seed_photo`` 上会漏掉它；
+    # 落点因此取两条入口的公共点（第 102 条挑 ``ImportAssets.execute`` 是同一条理由）。
+    # ``list_clusters`` **内连** ``memory_spaces``，少了这一行，全新 scope 上预置出来的簇
+    # 在审阅页里读不出来——不是「少一条数据」，是「这个人不存在」。
+    container.spaces.ensure(scope_id, scope_id)
     photos = [
         _store_seed_photo(
             container,
