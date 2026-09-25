@@ -30,6 +30,7 @@ from sentrix.domain.assistant.models import (
     ToolCall,
     TurnStatus,
 )
+from sentrix.domain.assistant.ports import ModelServiceError
 from sentrix.domain.assistant.tools import TOOL_SPECS
 from sentrix.infrastructure.persistence.repositories.conversations import (
     SqliteConversationRepository,
@@ -675,11 +676,12 @@ def test_a_persistently_empty_answer_ends_as_parse_failure(env):
 # ---- 规划：1.0 goal_planner 的失败与重试 ------------------------------------
 
 
-def test_a_planner_that_cannot_be_reached_ends_as_planner_blocked(env):
+def test_a_planner_that_cannot_be_reached_says_the_model_service_is_down(env):
     """``planner_call_error`` 的收尾：1.0 ``runtime.py:1828`` 的 ``planner_blocked``。
 
-    文案是生产轨迹里的原文（``data/sentrix.db`` 里 2,126 条 ``planner_blocked`` 的 answer）。
-    拿一条编出来的需求继续往下检索，比诚实地说「规划不出来」更糟。
+    **终止原因照 1.0 记 ``planner_blocked``**（与生产库里那 2,126 条可比），**但文案说
+    的是模型服务**（用户 2026-09-25 裁决二）。端点不可达是基础设施故障：照着「规划不出来」
+    说，用户会去换个问法重问，而该做的是去看那个端点。
     """
     _conversations, _turns, conversation, _db = env
     model = ScriptedModel([final("不该被用到")], planner=RuntimeError("connection refused"))
@@ -689,9 +691,59 @@ def test_a_planner_that_cannot_be_reached_ends_as_planner_blocked(env):
     result = run_turn.run(turn_id)
 
     assert model.calls == []  # 主循环一次都没进
+    assert result.answer == "模型服务当前不可用，因此这一轮没有开始检索。"
+    assert result.termination_reason is TerminationReason.PLANNER_BLOCKED
+    assert result.status is TurnStatus.PARTIAL
+
+
+def test_the_model_service_message_carries_the_endpoint(env):
+    """「可执行」就是这一条：说明里带着端点地址，用户与运维据此能直接去查。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [final("不该被用到")],
+        planner=ModelServiceError("模型端点 http://127.0.0.1:8100/v1 不可达：connection refused"),
+    )
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = start(run_turn, conversation)
+    result = run_turn.run(turn_id)
+
+    assert "模型服务当前不可用" in result.answer
+    assert "http://127.0.0.1:8100/v1" in result.answer
+    assert "无法可靠规划" not in result.answer
+
+
+def test_an_unusable_plan_still_says_the_planning_failed(env):
+    """模型答了但规划结果不可用——**这才**是规划问题，文案照 1.0 的原文。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final("不该被用到")], planner=PlannerScript(["我不会规划。"]))
+    run_turn = build(env, model, StubToolbox())
+
+    turn_id = start(run_turn, conversation)
+    result = run_turn.run(turn_id)
+
     assert result.answer == "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
     assert result.termination_reason is TerminationReason.PLANNER_BLOCKED
     assert result.status is TurnStatus.PARTIAL
+
+
+def test_the_two_planner_failures_do_not_share_a_message(env):
+    """反向门禁（裁决二）：两条路必须给出**不同**的用户可见文案。
+
+    合并成一句是最省事的写法，也正是这次要改掉的东西——把基础设施故障说成理解能力不足。
+    这条用例不认某一句具体措辞，只认「两者不是同一句」：将来谁把它们并回去，无论改成
+    什么字，这里都会红。
+    """
+    _conversations, _turns, conversation, _db = env
+
+    def answer(planner: object) -> str:
+        run_turn = build(env, ScriptedModel([final("不该被用到")], planner=planner), StubToolbox())
+        return run_turn.run(start(run_turn, conversation)).answer
+
+    service_down = answer(RuntimeError("connection refused"))
+    unusable_plan = answer(PlannerScript(["我不会规划。"]))
+
+    assert service_down != unusable_plan
 
 
 def test_a_garbled_plan_is_retried_with_the_error_fed_back(env):

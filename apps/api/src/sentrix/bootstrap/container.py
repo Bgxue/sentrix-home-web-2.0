@@ -50,6 +50,7 @@ from sentrix.domain.retrieval.ports import (
 from sentrix.domain.spaces.ports import SpaceRepository
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
+from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
@@ -150,6 +151,9 @@ class Container:
         # 词法投影的 geo/time/file 锚点取自 asset 与 asset_places（不是 observation），
         # 所以写侧要先把这两个仓储拿在手上。
         lexical = SqliteLexicalIndex(database, observations, assets=assets, places=asset_places)
+        # 对话与视觉是**同一个端点**（8100），所以共用同一个探测。分两个实例会让同一个
+        # 进程里存两份可能不一致的答案，还要多探一轮。
+        served_model = ServedModel(settings.vlm_base_url)
         return cls(
             settings=settings,
             database=database,
@@ -178,12 +182,12 @@ class Container:
             face_detector=FaceAdapter(),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
-                settings.chat_model_name,
+                served_model,
                 timeout_s=settings.chat_timeout_s,
             ),
             vlm_observer=OpenAIVlmObserver(
                 settings.vlm_base_url,
-                settings.vlm_model_name,
+                served_model,
                 timeout_s=settings.vlm_timeout_s,
             ),
             conversation_repository=SqliteConversationRepository(database),

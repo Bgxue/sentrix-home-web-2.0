@@ -44,13 +44,18 @@ def requires_the_real_environment() -> None:
     import httpx
 
     from sentrix.config import Settings
+    from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
     base_url = Settings().vlm_base_url
     try:
+        # 名字**问端点要**，不写常量：这个守卫的职责就是「这层能不能跑」，写死名字的话
+        # 换过后端之后它会自信地打一个 404，然后把这层 e2e 判成「环境不可用」跳过——
+        # 守卫与生产走同一条路（ServedModel），才验得到真东西。
+        model_name = ServedModel(base_url).current()
         response = httpx.post(
             f"{base_url.rstrip('/')}/chat/completions",
             json={
-                "model": Settings().chat_model_name,
+                "model": model_name,
                 "messages": [{"role": "user", "content": "好"}],
                 "max_tokens": 4,
             },

@@ -1787,3 +1787,218 @@ apps/api/tests/unit + tests/contract + test_import_memory_space + test_identity_
 **处置：不动。** 8100 / 8500 / 8091 都不在可动范围内（用户明令），而且这不是这棵树的缺陷。
 **下一次拿「1066 passed / 0 skipped / 20 分钟」当基线之前，先看 `nvidia-smi` 的
 `memory.free` 与 8100 的 `/v1/chat/completions`。**
+
+## 2n. 收尾（2026-09-25）：vLLM 与 llama.cpp 都当后端 + 规划失败的文案分岔
+
+用户 2026-09-25 的两条裁决，起因是一次**实测**：8100 上跑的已经从 llama.cpp 换成 vLLM
+（`gemma4-12b-it`，有人 09-24 14:47 起，占 19092 MiB），2.0 配的 `chat_model_name =
+"gemma4-qat-iq3xxs"` 于是 404：
+
+```
+{"error":{"message":"The model `gemma4-qat-iq3xxs` does not exist.","type":"NotFoundError",
+"param":"model","code":404}}
+```
+
+`planner_call_error` → `planner_blocked` → 用户看到「当前问题的证据需求无法可靠规划，因此
+暂时无法确认。」
+
+**日志把真因留全了**（`ChatModelError: 模型返回 404：{...}` + `规划失败: reason=planner_call_error`）。
+问题不在日志，在两处：**常量绑定了后端**，以及**给用户的文案把基础设施故障说成了理解能力
+不足**。
+
+### 裁决一：同一份客户端，vLLM 与 llama.cpp 都要能用
+
+两个后端的差别只有一处：**校不校验模型名**。llama.cpp 不校验（随便传都能用），vLLM 校验
+（名字对不上 404）。所以写死的常量等价于「把这个客户端钉在写常量时的那个后端上」，而
+换后端是**运维动作**，代码这边一点动静都没有。
+
+**1.0 已经有先例，照它的形状做**：
+
+| 位置 | 做法 | 这次用/不用 |
+| --- | --- | --- |
+| `backend/model_clients.py:522-570`（`GammaClient.__init__`） | `SENTRIX_LLM_BACKEND` 开关 + 每个后端一份默认名字（`openai` → `gemma4-12b-it`，`ollama` → `gemma4:12b`） | **不用**。它解决的是「协议不同」（Ollama 走 `/api/chat`、payload 形状也不同）。这两个后端协议完全相同，再用开关就是拿配置追运行时状态——`config.py` 自己点名的坏法 |
+| `backend/runtime_providers.py:416-439`（`OpenAICompatibleInferenceProvider.health` / `list_models`） | 打 `GET {base_url}/models`，取 `body["data"][].id` | **用**。形状逐条照搬（含去空 id），但 1.0 只把它当健康检查的副产物、用哪个名字仍由配置决定；2.0 把它当**唯一**的名字来源 |
+| `backend/model_clients.py:295-360`（`OllamaBackend`，`/api/chat`） | 另一套协议 | 不碰（Ollama 在「不碰」名单里） |
+| `backend/model_clients.py:455-500`（`E2BBackend`） | 已退役（冻结） | 不碰 |
+
+**落地**：新增 `infrastructure/assistant/model_endpoint.py` 的 `ServedModel`——问端点
+`GET /v1/models`，只认 `data[].id`，去重（多副本 vLLM 同名字不算「多个模型」）。
+
+- **探测失败一律抛 `ModelServiceError`**（domain 的 `domain/assistant/ports.py` 新声明），
+  不猜、不退回常量、不静默：端点不可达 / 非 200 / 不是 JSON / 一个模型都没有 / 多于一个，
+  五种全报，文案里带端点地址。多于一个**不挑一个「看起来对」的**——挑错了就是 404，而且
+  没有依据说该挑哪个。
+- **`chat_model_name` / `vlm_model_name` 两个配置项删掉**。留着它们等于留一个「看起来
+  能配、其实请求不看它」的口子——正是 `config.py` 开头写的那种「配置与代码互相矛盾」。
+  反向门禁：`apps/api/tests/unit/test_config.py::test_no_model_name_is_configurable`。
+- **视觉观察器同样接上**（`OpenAIVlmObserver`，与对话同一个 8100、同一个常量）。它的
+  失败本来就按「观察是增强」降级成 `None`，但那条 `log.warning` 里现在带着端点地址与原因
+  ——降级是设计好的，静默不是。
+
+**缓存策略（成本在这儿）**：每个回合至少一次规划 + N 次主循环，每次都探会把请求数翻倍。
+所以进程内缓存，TTL 60 秒；**TTL 不是唯一的失效路径**——请求撞上 404 时作废缓存重探一次，
+**只有重探拿回来的名字真的变了才重发**（没变说明这个 404 是别的意思，拿同一个名字再问一次
+只会拿到同一个错）。于是「换后端」的可见窗口不是 60 秒，而是**换完之后的第一个请求**。
+对话与视觉**共用同一个 `ServedModel`**（同一端点，分两份会存两个可能不一致的答案）。
+
+### 裁决二：`planner_call_error` 下的两种情形，文案必须分开
+
+原来是**一条**文案：`PLANNER_BLOCKED_ANSWER = "当前问题的证据需求无法可靠规划，因此暂时
+无法确认。"`（1.0 生产库 2,126 条 `planner_blocked` 的 answer，逐字）。
+
+现在按 `fallback_reason` 分岔（`run_turn._planner_failure_answer`）：
+
+| 失败原因 | 用户看到 | 说明 |
+| --- | --- | --- |
+| `planner_call_error`（端点不可达 / 超时 / 名字对不上 / 多个模型） | 「模型服务当前不可用，因此这一轮没有开始检索。（模型端点 http://… 不可达：…）」 | 基础设施故障。带上端点自己的说明（含地址），用户与运维据此能直接去查 |
+| `invalid_planner_action` / `scope_mismatch` / `no_requirements` | 原句不动 | 模型答了，但规划结果不可用——这才是规划问题 |
+
+**`termination_reason` 仍是 `planner_blocked`**（两条都是）：裁决的原话是「在
+`planner_call_error` 这个内部原因下，两种情形给不同的用户可见文案」，而且 1.0 的库拿
+`planner_blocked` 记这类失败，保持可比。变的只有用户可见文案。
+
+**反向门禁**：`test_the_two_planner_failures_do_not_share_a_message` 不看具体措辞，只断言
+两者**不是同一句**——将来谁把它们并回去，无论改成什么字都会红。
+
+
+### 本次交付的 `make ci`（改动的树上，2026-09-25T09:52:48+08:00 起跑，load1=1.85）
+
+```
+All checks passed!                    # ruff
+225 files already formatted           # ruff format --check
+Success: no issues found in 138 source files   # mypy strict
+Contracts: 5 kept, 0 broken.          # lint-imports
+reachability: 0 个问题
+capability-map: 0 个问题
+module-map: 0 个问题
+openapi 契约一致
+18 failed, 1075 passed, 10 skipped, 11 warnings in 495.97s (0:08:15)   # pytest --cov
+make: *** [Makefile:56：coverage] 错误 1
+```
+
+**CI_EXIT=2，耗时 499 秒（8分19秒）。** 非 pytest 的门禁全绿；红只红在 pytest，而且
+**18 条全是环境红，没有一条是代码红**。链子停在 `coverage`，`web-check` 没跑到。
+
+#### 14 条：GPU 被 vLLM 占满（与前一轮同因，机器状态，不是这棵树）
+
+```
+FAILED apps/api/tests/e2e/test_visual_search.py::…                (6 条)
+FAILED apps/api/tests/integration/test_face_detector.py::…        (6 条)
+FAILED apps/api/tests/integration/test_face_embedding.py::…       (2 条)
+```
+
+报错是被测代码**引擎内部**的分配失败，不是断言失败：
+
+```
+[E:onnxruntime:, inference_session.cc:3106 operator()] … CUBLAS failure 3:
+the resource allocation failed ; GPU=0 ; expr=cublasCreate(&cublas_handle_);
+```
+
+`nvidia-smi` 实测：`24111 MiB / 24576 MiB` 已被占用，其中 19092 MiB 是**别人**在 8100 上
+起的 vLLM（2026-09-24 14:47，`vllm serve … --gpu-memory-utilization 0.76`）。这三个文件
+与本次改动没有任何交集——`git diff --name-only` 里没有它们依赖的任何生产文件。
+
+#### 4 条：`test_assistant_turn` 从**跳过**变成**失败**——是本次改动把掩护撤掉了
+
+```
+FAILED apps/api/tests/e2e/test_assistant_turn.py::test_asking_for_photos_returns_openable_originals
+FAILED apps/api/tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers
+FAILED apps/api/tests/e2e/test_assistant_turn.py::test_the_turn_records_the_whole_reasoning_chain
+FAILED apps/api/tests/e2e/test_assistant_turn.py::test_a_follow_up_question_sees_the_previous_turn
+```
+
+这四个文件的 module 级守卫原本拿 `Settings().chat_model_name`（写死的旧名字）去打 8100，
+必然 404，于是**整层 e2e 被静默跳过**——第 112-114 条那次 CI 记录的「6 条因为 404 而跳过」
+就是它们。守卫改成与生产同一条路（`ServedModel`）之后名字对了，守卫放行，这四条**第一次
+真的跑起来**，于是暴露出一个此前没人看见的、**比模型名更硬的 vLLM 差异**：
+
+```
+WARNING sentrix.assistant.run_turn: 模型调用失败: 模型端点 http://127.0.0.1:8100/v1 上的
+gemma4-12b-it 返回 400：{"error":{"message":"\"auto\" tool choice requires
+--enable-auto-tool-choice and --tool-call-parser to be set","type":"BadRequestError",…}}
+```
+
+直接对 8100 实测（`.venv/bin/python /tmp/probe_tools.py`）：
+
+```
+无 tools                  : 200
+tools + tool_choice=auto  : 400  "auto" tool choice requires --enable-auto-tool-choice …
+tools，不给 tool_choice    : 400  （同上——vLLM 在带 tools 时默认就是 auto，省略躲不掉）
+tools + tool_choice=required: 400  tool_choice="required" requires --tool-call-parser to be set
+```
+
+**只要请求里带 `tools` 就 400**，与客户端怎么填 `tool_choice` 无关。8100 的实际启动命令
+（`/proc/2022624/cmdline`）里没有这两个 flag：
+
+```
+vllm serve /home/asus/models/gemma-4-12B-it --host 0.0.0.0 --port 8100
+  --served-model-name gemma4-12b-it --dtype bfloat16 --quantization bitsandbytes
+  --load-format bitsandbytes --tensor-parallel-size 1 --gpu-memory-utilization 0.76
+  --max-model-len 8192 --max-num-seqs 12 --trust-remote-code --mm-processor-cache-gb 0
+  --limit-mm-per-prompt {"image":5,"video":0,"audio":1}
+```
+
+llama.cpp 是**原生**支持 tools 的（1.0 ``chat_client`` 的模块注释：「实测 8100 的 llama.cpp
+原生支持 tools，``finish_reason="tool_calls"``」），所以这一条在 llama.cpp 时代不存在。它是
+裁决一那份「两个后端都要能用」清单里的**第三处差异**（前两处：模型名校不校验、launcher
+参数），而且**客户端修不了**：vLLM 没带 tool parser 就是不能吐 tool_calls，2.0 又不管理
+8100 的进程（「2.0 只连它，不管理它」）。
+
+**处置：不动。** 8100 在用户明令的「不要碰」名单里，重启它不在本次授权内。**要让 vLLM 这条
+后端真正可用，8100 必须以 `--enable-auto-tool-choice --tool-call-parser <parser>` 重启**
+（parser 按模型选，gemma 系通常 `pythonic`/`hermes` 之一，需实测确认）。在那之前，2.0 的助手
+**能规划、不能跑工具循环**——见下面那次实测。
+### 实测：8191（旧进程）vs 8193（本次改动的代码）问同一句话
+
+8191 是 09-23 起就挂着的进程，跑的是改动前的代码，**不能重启**（用户明令）。所以另起一个
+实例（8193）用**本次改动的工作树**、`SENTRIX_DATA_DIR` 指向 `data/` 的副本（不动真 `data/`，
+用完即删），两边问同一句「给我看看海边的照片」：
+
+```
+=== 改动前的进程 8191（09-23 起，跑的是旧代码） ===
+### BEFORE (http://127.0.0.1:8191) conversation=conv_9645ccf2f8ed turn=turn_20260925020240609107
+status            : partial
+termination_reason: planner_blocked
+answer            : 当前问题的证据需求无法可靠规划，因此暂时无法确认。
+attachments       : 0
+
+=== 改动后的代码 8193 ===
+### AFTER (http://127.0.0.1:8193) conversation=conv_0cd8b7a9c876 turn=turn_20260925020242716828
+status            : failed
+termination_reason: model_error
+answer            : 这一轮没有检索到照片。还差这些没能确认：包含海边场景的照片集合；将海边的照片展示给用户。（本轮因「模型不可用」提前结束。）
+attachments       : 0
+```
+
+**8191 的日志（真因一直是留全的）**：
+
+```
+sentrix.infrastructure.assistant.chat_client.ChatModelError: 模型返回 404：
+  {"error":{"message":"The model `gemma4-qat-iq3xxs` does not exist.","type":"NotFoundError",…}}
+规划失败: turn=turn_20260925020240609107 reason=planner_call_error
+```
+
+**8193 的日志（规划那一步已经过去了）**：
+
+```
+模型调用失败: 模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400：
+  {"error":{"message":"\"auto\" tool choice requires --enable-auto-tool-choice and
+   --tool-call-parser to be set",…}}
+```
+
+**读法：**
+
+- `规划失败` / `planner_call_error` **不再出现** → 裁决一在真环境里成立：名字是问来的，
+  404 消失。8193 的回答里那两条「还差这些没能确认：包含海边场景的照片集合；将海边的照片
+  展示给用户」正是**规划器的输出**——规划成功地跑完了，这一点由它自己证明。
+- 失败点从**规划**移到了**工具循环**，原因是 8100 缺 tool-call 启动参数（见上一节），
+  不是本次改动的缺陷，也不是 2.0 能在客户端修的。
+- 8191 那句「当前问题的证据需求无法可靠规划」正是裁决二要改掉的**基础设施故障被说成理解
+  能力不足**；改动的树上这条路径由 `test_a_planner_that_cannot_be_reached_says_the_model_
+  service_is_down` 与契约测试 `test_a_dead_endpoint_is_reported_as_the_model_service` 钉住
+  （都带端点地址）。
+
+**遗留（如实）**：工具循环那条收尾走的还是 1.0 的 `MODEL_ERROR` 文案「这次没能完成检索：
+模型不可用。」——它说的是模型服务（口径正确），但**没带端点、没带服务端给的原因**，不如
+规划那条可执行。裁决二的原文只点了 `planner_call_error`，所以本次没有顺手改它；要不要按
+同一条理由推广到 `MODEL_ERROR`，留给你定。

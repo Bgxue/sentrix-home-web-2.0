@@ -25,8 +25,28 @@ from sentrix.domain.assistant.result_set import ResultSet
 from sentrix.domain.assistant.tools import ToolSpec
 
 
+class ModelServiceError(RuntimeError):
+    """模型服务**这一侧**出的问题：端点不可达 / 超时 / 模型名对不上 / 响应不可识别。
+
+    **它为什么必须是一个 domain 里的类型，而不是让调用方去认异常字符串。**
+    规划失败底下有两条完全不同的路（用户 2026-09-25 裁决二）：
+
+    - 模型服务挂了——基础设施故障，用户该被告知去看那个端点；
+    - 模型答了，但答的东西规划不出需求——模型能力问题。
+
+    两者的用户可见文案必须不同，而 ``application`` 层按分层契约**不许** import
+    ``sentrix.infrastructure``（``pyproject.toml`` 的 ``application-purity``），
+    于是它认不到 ``infrastructure`` 里那个异常类。把「服务这一侧」的形状声明在端口
+    旁边：实现端口的适配器抛它，用端口的用例 catch 它，两边都只依赖 domain。
+    """
+
+
 class ChatModel(Protocol):
-    """OpenAI 兼容的对话模型端点。2.0 只连它，不管理它的进程。"""
+    """OpenAI 兼容的对话模型端点。2.0 只连它，不管理它的进程。
+
+    实现这个端口时，**服务这一侧**的失败抛 ``ModelServiceError``——调用方靠它把
+    「基础设施故障」与「模型答得不好」分开收尾。
+    """
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]) -> ModelReply: ...
 

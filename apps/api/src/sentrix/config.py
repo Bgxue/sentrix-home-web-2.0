@@ -26,14 +26,16 @@ class Settings(BaseSettings):
     vlm_base_url: str = "http://127.0.0.1:8100/v1"
     text_embedder_url: str = "http://127.0.0.1:8101"
 
-    # 8100 上 llama-server 的模型别名。它不是可切换的「方案」——换模型要连着重建索引，
-    # 那是一次迁移（见 domain/retrieval/scheme.py），不是一个环境变量。这里之所以可配，
-    # 是因为 llama-server 的 --alias 由部署方决定，与 2.0 的代码无关。
-    chat_model_name: str = "gemma4-qat-iq3xxs"
+    # **模型名不在这里。** 8100 上跑 llama.cpp 还是 vLLM、名字叫什么，由部署方决定，而且
+    # 会在 2.0 运行期间被换掉——2026-09-24 实测：8100 从 llama.cpp 换成 vLLM，2.0 配的
+    # ``gemma4-qat-iq3xxs`` 立刻 404，助手整条链路停摆。写一个常量在这儿，就是拿配置去追
+    # 运行时的状态，正是本模块开头点名的那种坏法（「1.0 的失败模式是 ~126 env flags whose
+    # values disagreed with each other and with the code」）。
+    # 名字由 infrastructure/assistant/model_endpoint.py 问端点自己的 ``GET /v1/models``
+    # 得到；探测失败就大声报错，不退回任何默认值。
     chat_timeout_s: float = 120.0
 
-    # 视觉观察走同一个 llama-server 的同一个别名（multimodal 可用）。
-    vlm_model_name: str = "gemma4-qat-iq3xxs"
+    # 视觉观察走同一个端点（multimodal 可用），模型名同样来自探测。
     # 一张图最多 3 次调用（首轮 / 补全 / 中文化），每次是一次带图的推理，比纯文本慢得多；
     # 整册导入是**串行**的（单卡 GPU），所以这个超时按单次调用算，不是按一张图算。
     vlm_timeout_s: float = 180.0

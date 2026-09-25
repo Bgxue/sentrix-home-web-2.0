@@ -25,6 +25,11 @@
 
 模型不可用、HTTP 失败、返回的不是 JSON——一律返回 ``None``：观察是**增强**，
 不是导入的前置条件。1.0 在 ``pipeline`` 里也是这么收尾的（异常吞掉、留下无向量的资产）。
+**探测不到模型名（``ModelServiceError``）也走这一条**，但那条 ``log.warning`` 里带着端点
+地址与原因——降级是设计好的，静默不是。
+
+**模型名同样不写死**：观察与对话打的是同一个 8100，写死名字的后果与对话侧一样（换后端
+就 404）。名字由 ``ServedModel`` 问端点要，见 ``assistant/model_endpoint.py``。
 """
 
 from __future__ import annotations
@@ -38,9 +43,11 @@ from typing import Any
 
 import httpx
 
+from sentrix.domain.assistant.ports import ModelServiceError
 from sentrix.domain.media.models import MODEL_FACT_CONFIDENCE, ObservationFact
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.infrastructure.assistant.chat_client import MAX_ANSWER_TOKENS
+from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
 log = logging.getLogger(__name__)
 
@@ -174,14 +181,15 @@ def semantics_from_payload(payload: dict[str, Any]) -> ObservationSemantics:
 class OpenAIVlmObserver:
     """实现 ``VlmObserver`` 端口。模型进程的生命周期不归 2.0 管。"""
 
-    def __init__(self, base_url: str, model: str, *, timeout_s: float = 180.0) -> None:
+    def __init__(self, base_url: str, model: ServedModel, *, timeout_s: float = 180.0) -> None:
         self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self._model = model
         self._timeout = timeout_s
 
     @property
     def model_id(self) -> str:
-        return self._model
+        """这个观察器实际会请求的模型名。探不到就如实抛 ``ModelServiceError``——不编一个。"""
+        return self._model.current()
 
     def observe(self, path: Path) -> ObservationSemantics | None:
         image = _encode_image(Path(path))
@@ -220,16 +228,16 @@ class OpenAIVlmObserver:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         if image is not None:
             content.append({"type": "image_url", "image_url": {"url": image}})
-        body = {
-            "model": self._model,
-            "messages": [{"role": "user", "content": content}],
-            "max_tokens": MAX_ANSWER_TOKENS,
-        }
         try:
+            body = {
+                "model": self._model.current(),
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": MAX_ANSWER_TOKENS,
+            }
             response = httpx.post(self._endpoint, json=body, timeout=self._timeout)
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as error:
+        except (httpx.HTTPError, ModelServiceError, ValueError) as error:
             log.warning("视觉观察调用失败，本次观察跳过: %s", error)
             return None
         return parse_json_object(_first_content(payload))

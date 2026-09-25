@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sentrix.domain.assistant.models import ChatMessage, ModelReply, ToolCall
+from sentrix.domain.assistant.ports import ModelServiceError
 from sentrix.main import create_app
 
 
@@ -72,10 +73,15 @@ def planner_reply(*evidence_types: str, goal: str = "看海边的照片") -> Mod
 
 
 class FailingModel:
-    """整个端点都挂了——规划与主循环一起失败。"""
+    """整个端点都挂了——规划与主循环一起失败。
+
+    抛的是 ``ModelServiceError``（``ChatModel`` 端口对「服务这一侧失败」的契约形状，
+    见 ``domain/assistant/ports.py``），不是裸 ``RuntimeError``：假件比真件宽松，就验不出
+    「上层只认那个类型」这类问题。
+    """
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
-        raise RuntimeError("端点挂了")
+        raise ModelServiceError("模型端点 http://127.0.0.1:8100/v1 不可达：connection refused")
 
 
 class DiesAfterPlanning:
@@ -234,13 +240,17 @@ def test_the_complete_frame_does_not_repeat_the_progress_array(client: TestClien
     assert [item["status"] for item in complete["requirements"]] == ["open", "open"]
 
 
-def test_a_dead_endpoint_is_reported_as_planner_blocked(settings):
+def test_a_dead_endpoint_is_reported_as_the_model_service(settings):
     """端点整个挂掉时，失败发生在**规划**这一步——1.0 也是这么记的。
 
     1.0 ``runtime.py:1828``：``planner_call_error`` 走到最后就是 ``planner_blocked``，
-    status 是 ``partial``，answer 是「当前问题的证据需求无法可靠规划，因此暂时无法确认。」
-    （生产库里 2,126 条轨迹的原文）。1.0 的毛病不在这里——它把这类失败也压成了
-    ``status="complete"``，2.0 如实报成 ``partial``。
+    status 是 ``partial``。1.0 的毛病不在这里——它把这类失败也压成了 ``status="complete"``，
+    2.0 如实报成 ``partial``。
+
+    **但文案说的必须是模型服务**（用户 2026-09-25 裁决二）。1.0 生产库里那 2,126 条
+    ``planner_blocked`` 的 answer 全是「当前问题的证据需求无法可靠规划，因此暂时无法确认。」
+    ——那是把基础设施故障说成了理解能力不足：用户会去换个问法重问，而该做的是去看那个
+    端点。这里把端点自己的说明（含地址）一并交给用户。
     """
     client = build_client(settings, FailingModel())
     _conversation_id, turn_id = run_turn(client)
@@ -249,7 +259,9 @@ def test_a_dead_endpoint_is_reported_as_planner_blocked(settings):
 
     assert complete["status"] == "partial"
     assert complete["termination_reason"] == "planner_blocked"
-    assert complete["answer"] == "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
+    assert "模型服务当前不可用" in complete["answer"]
+    assert "http://127.0.0.1:8100/v1" in complete["answer"]
+    assert "无法可靠规划" not in complete["answer"]
 
 
 def test_a_model_that_dies_after_planning_is_reported_as_failed(settings):

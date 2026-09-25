@@ -32,7 +32,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sentrix.application.assistant.goal_planner import GoalPlanner
+from sentrix.application.assistant.goal_planner import (
+    PLANNER_CALL_ERROR,
+    GoalPlanner,
+    PlannerResult,
+)
 from sentrix.application.assistant.judge import FaithfulnessJudge
 from sentrix.application.assistant.tools import (
     AssistantToolbox,
@@ -83,9 +87,29 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 # 提醒一次，再空就按 ``PARSE_FAILURE`` 收尾，用确定性兜底把已有证据说清楚。
 PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
 
-# 规划失败（1.0 ``planner_call_error`` / ``invalid_planner_action`` 的收尾）。文案是 1.0
-# 生产轨迹里那句话，逐字：``data/sentrix.db`` 里 2,126 条 ``planner_blocked`` 的 answer。
+# 规划失败的收尾文案有两条，**按失败原因分岔**（用户 2026-09-25 裁决二）。合成一条是有害的：
+# 把「端点挂了」说成「规划不出来」，用户会以为是自己问得不好，于是换个问法接着问；而该做
+# 的事是去看那个端点。这正是 2.0 助手在 8100 被换成 vLLM 之后的表现——真因（``404 The model
+# `gemma4-qat-iq3xxs` does not exist``）在日志里留全了，用户看到的却是「理解不了」。
+#
+# 1) 模型答了，但规划结果不可用（``invalid_planner_action`` / ``scope_mismatch`` /
+#    ``no_requirements``）。文案是 1.0 生产轨迹里那句话，逐字：``data/sentrix.db`` 里
+#    2,126 条 ``planner_blocked`` 的 answer。
 PLANNER_BLOCKED_ANSWER = "当前问题的证据需求无法可靠规划，因此暂时无法确认。"
+
+# 2) 模型服务这一侧挂了（``planner_call_error``：端点不可达 / 超时 / 模型名对不上 /
+#    端点同时服务了多个模型）。说的是模型服务，不说是规划——并把端点自己的说明接在后面，
+#    那句话里有地址，用户与运维据此能直接去查。
+MODEL_SERVICE_ANSWER = "模型服务当前不可用，因此这一轮没有开始检索。"
+
+
+def _planner_failure_answer(planned: PlannerResult) -> str:
+    """规划失败时给用户看的那句话。分岔依据是 ``fallback_reason``，不是文案措辞。"""
+    if planned.fallback_reason != PLANNER_CALL_ERROR:
+        return PLANNER_BLOCKED_ANSWER
+    if not planned.detail:
+        return MODEL_SERVICE_ANSWER
+    return f"{MODEL_SERVICE_ANSWER}（{planned.detail}）"
 
 
 class TurnNotFoundError(DomainError, LookupError):
@@ -240,9 +264,16 @@ class RunTurn:
             if not planned.ok:
                 # 1.0 ``runtime.py:1828``：规划不出来就以 planner_blocked 收场，不再往下走。
                 # 拿一条编出来的需求去检索，比诚实地说规划失败更糟。
-                log.warning("规划失败: turn=%s reason=%s", turn_id, planned.fallback_reason)
+                # 终止原因仍是 ``planner_blocked``（与 1.0 的库可比），但**文案按原因分岔**：
+                # 服务侧挂掉时说模型服务，模型自己规划不出时才说规划。
+                log.warning(
+                    "规划失败: turn=%s reason=%s detail=%s",
+                    turn_id,
+                    planned.fallback_reason,
+                    planned.detail,
+                )
                 session.state.finish(TerminationReason.PLANNER_BLOCKED)
-                answer = PLANNER_BLOCKED_ANSWER
+                answer = _planner_failure_answer(planned)
             else:
                 session.ledger.requirements = list(planned.requirements or ())
                 self._publish(

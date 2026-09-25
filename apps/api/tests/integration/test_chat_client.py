@@ -15,21 +15,45 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from sentrix.domain.assistant.models import ChatMessage, ChatRole, ToolCall
+from sentrix.domain.assistant.ports import ModelServiceError
 from sentrix.domain.assistant.tools import TOOL_SPECS
 from sentrix.infrastructure.assistant.chat_client import ChatModelError, OpenAIChatModel
+from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
 
 class _Handler(BaseHTTPRequestHandler):
     received: list[dict] = []
     response: dict = {}
     status: int = 200
+    # 这个假端点**服务哪些模型名**。POST 里带的名字不在其中就回 vLLM 那个 404，
+    # 形状照抄实测响应（``{"error":{"message":"The model `X` does not exist.",
+    # "type":"NotFoundError","code":404}}``）。llama.cpp 不校验名字，所以它没有这一条
+    # ——这里选严的那个，宽的那个（不校验）是它的子集。
+    served: list[str] = ["test-model"]
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
+        payload = json.dumps(self._models()).encode()
+        self._send(payload, 200)
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         type(self).received.append({"path": self.path, "body": body})
-        payload = json.dumps(type(self).response).encode()
-        self.send_response(type(self).status)
+        if body.get("model") not in type(self).served:
+            message = f"The model `{body.get('model')}` does not exist."
+            payload = json.dumps(
+                {"error": {"message": message, "type": "NotFoundError", "code": 404}}
+            ).encode()
+            self._send(payload, 404)
+            return
+        self._send(json.dumps(type(self).response).encode(), type(self).status)
+
+    @classmethod
+    def _models(cls) -> dict:
+        return {"object": "list", "data": [{"id": name, "object": "model"} for name in cls.served]}
+
+    def _send(self, payload: bytes, status: int) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -56,6 +80,16 @@ def _reset_handler() -> None:
     _Handler.received = []
     _Handler.response = {}
     _Handler.status = 200
+    _Handler.served = ["test-model"]
+
+
+def chat_model(server: str) -> OpenAIChatModel:
+    """被测客户端：名字由 ``ServedModel`` 问端点要，与生产装配完全一样。
+
+    测试里不再传字符串——构造参数已经收成一个 ``ServedModel``，因为「客户端能拿一个
+    写死的名字」正是 2026-09-24 那次事故的入口。
+    """
+    return OpenAIChatModel(server, ServedModel(server))
 
 
 def reply(content: str = "好的。", tool_calls: list[dict] | None = None) -> dict:
@@ -78,7 +112,7 @@ def messages() -> list[ChatMessage]:
 def test_a_plain_reply_is_parsed(server: str):
     _Handler.response = reply("这是你要的海边照片。")
 
-    result = OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
 
     assert result.content == "这是你要的海边照片。"
     assert result.tool_calls == ()
@@ -100,7 +134,7 @@ def test_native_tool_calls_are_parsed(server: str):
         ],
     )
 
-    result = OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
 
     assert result.wants_tools is True
     assert result.tool_calls[0].name == "search_memories"
@@ -111,7 +145,7 @@ def test_native_tool_calls_are_parsed(server: str):
 def test_the_tools_field_carries_standard_json_schema(server: str):
     _Handler.response = reply()
 
-    OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    chat_model(server).complete(messages(), TOOL_SPECS)
 
     sent = _Handler.received[0]["body"]
     assert sent["tool_choice"] == "auto"
@@ -133,7 +167,7 @@ def test_the_system_message_is_first_and_only_once(server: str):
     """
     _Handler.response = reply()
 
-    OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    chat_model(server).complete(messages(), TOOL_SPECS)
 
     roles = [message["role"] for message in _Handler.received[0]["body"]["messages"]]
     assert roles == ["system", "user"]
@@ -147,16 +181,14 @@ def test_a_system_message_in_the_middle_is_refused_before_the_request(server: st
     ]
 
     with pytest.raises(ChatModelError):
-        OpenAIChatModel(server, "test-model").complete(broken, TOOL_SPECS)
+        chat_model(server).complete(broken, TOOL_SPECS)
 
     assert _Handler.received == []
 
 
 def test_a_conversation_must_start_with_a_system_message(server: str):
     with pytest.raises(ChatModelError):
-        OpenAIChatModel(server, "test-model").complete(
-            [ChatMessage(ChatRole.USER, "没有 system")], TOOL_SPECS
-        )
+        chat_model(server).complete([ChatMessage(ChatRole.USER, "没有 system")], TOOL_SPECS)
 
     assert _Handler.received == []
 
@@ -177,7 +209,7 @@ def test_tool_results_are_sent_back_with_their_call_id(server: str):
         ChatMessage(ChatRole.TOOL, '{"result_set_id": "rs_1"}', tool_call_id="call_abc"),
     ]
 
-    OpenAIChatModel(server, "test-model").complete(conversation, TOOL_SPECS)
+    chat_model(server).complete(conversation, TOOL_SPECS)
 
     sent = _Handler.received[0]["body"]["messages"]
     assert sent[2]["tool_calls"][0]["id"] == "call_abc"
@@ -205,7 +237,7 @@ def test_an_assistant_tool_call_message_sends_null_content(server: str):
         ChatMessage(ChatRole.TOOL, "{}", tool_call_id="c1"),
     ]
 
-    OpenAIChatModel(server, "test-model").complete(conversation, TOOL_SPECS)
+    chat_model(server).complete(conversation, TOOL_SPECS)
 
     sent = _Handler.received[0]["body"]["messages"]
     assert sent[2]["content"] is None
@@ -214,28 +246,90 @@ def test_an_assistant_tool_call_message_sends_null_content(server: str):
     assert sent[0]["content"] == "你是家庭相册助手。"
 
 
-def test_a_non_200_response_becomes_a_chat_model_error(server: str):
+def test_a_non_200_response_is_a_model_service_error(server: str):
+    """非 200 是**服务这一侧**的失败，所以是 ``ModelServiceError``——用户会看到
+    「模型服务当前不可用」，而不是「规划不出来」."""
     _Handler.status = 500
     _Handler.response = {"error": "boom"}
 
-    with pytest.raises(ChatModelError) as error:
-        OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    with pytest.raises(ModelServiceError) as error:
+        chat_model(server).complete(messages(), TOOL_SPECS)
 
     assert "500" in str(error.value)
 
 
-def test_an_unreachable_endpoint_becomes_a_chat_model_error():
-    model = OpenAIChatModel("http://127.0.0.1:1/v1", "test-model", timeout_s=1.0)
+def test_an_unreachable_endpoint_is_a_model_service_error():
+    """端点整个连不上时，**探测**就先炸了（``/v1/models`` 打不通）。"""
+    model = OpenAIChatModel(
+        "http://127.0.0.1:1/v1", ServedModel("http://127.0.0.1:1/v1", timeout_s=1.0), timeout_s=1.0
+    )
 
-    with pytest.raises(ChatModelError):
+    with pytest.raises(ModelServiceError) as error:
         model.complete(messages(), TOOL_SPECS)
 
+    assert "不可达" in str(error.value)
 
-def test_an_unrecognisable_body_becomes_a_chat_model_error(server: str):
+
+def test_an_unrecognisable_body_is_a_model_service_error(server: str):
     _Handler.response = {"nope": True}
 
-    with pytest.raises(ChatModelError):
-        OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    with pytest.raises(ModelServiceError):
+        chat_model(server).complete(messages(), TOOL_SPECS)
+
+
+# ---- 后端被换掉（裁决一的那次事故） -----------------------------------------
+
+
+def test_the_swapped_backend_is_picked_up_on_the_same_request(server: str):
+    """8100 从 llama.cpp 换成 vLLM 的那一刻：下一个请求自己重新问、自己用新名字成功。
+
+    这是缓存策略的另一半——TTL 决定「多久白探一次」，这条决定「换完之后多久恢复」。
+    只靠 TTL 的话，换后端之后会有一整个 TTL 窗口的请求全部以 404 收场。
+    """
+    _Handler.served = ["gemma4-qat-iq3xxs"]
+    _Handler.response = reply("这是你要的海边照片。")
+    model = chat_model(server)
+
+    assert model.complete(messages(), TOOL_SPECS).content == "这是你要的海边照片。"
+
+    # 运维把 8100 换成了 vLLM，服务的是另一个名字。客户端手里还是旧的那个（缓存没过期）。
+    _Handler.served = ["gemma4-12b-it"]
+
+    # 同一个请求里自己恢复：带旧名字撞 404 → 重探 → 用新名字重发 → 成功。
+    assert model.complete(messages(), TOOL_SPECS).content == "这是你要的海边照片。"
+
+    assert [item["body"]["model"] for item in _Handler.received] == [
+        "gemma4-qat-iq3xxs",  # 换后端之前的那次
+        "gemma4-qat-iq3xxs",  # 换后端之后的第一次：手里还是旧名字，撞 404
+        "gemma4-12b-it",  # 重探之后重发，用的是端点现在真正服务的名字
+    ]
+
+
+def test_a_404_that_is_not_a_swapped_backend_is_not_retried(server: str):
+    """名字没变过就不重发：拿同一个名字再问一次只会拿到同一个错，白花一次调用。
+
+    端点长这样：「``/v1/models`` 说服务 test-model，``/v1/chat/completions`` 却 404」——
+    路由没挂对、反向代理配错都会长成这样。它与「后端被换掉」的区别只有一个：重探拿回来
+    的名字**没变**。
+    """
+    _Handler.status = 404
+    _Handler.response = {"error": "not found"}
+
+    with pytest.raises(ModelServiceError):
+        chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert len(_Handler.received) == 1, "名字没变就只该打一次"
+
+
+def test_a_chat_call_on_an_endpoint_with_no_models_fails_loudly(server: str):
+    """探测失败在**发请求之前**就收场：不会带着一个猜出来的名字打过去。"""
+    _Handler.served = []
+
+    with pytest.raises(ModelServiceError) as error:
+        chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert "没有任何模型" in str(error.value)
+    assert _Handler.received == []
 
 
 def test_max_tokens_follows_the_behaviour_baseline_formula(server: str):
@@ -243,7 +337,7 @@ def test_max_tokens_follows_the_behaviour_baseline_formula(server: str):
     _Handler.response = reply()
     long_question = "问" * 9000
 
-    OpenAIChatModel(server, "test-model").complete(
+    chat_model(server).complete(
         [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, long_question)],
         TOOL_SPECS,
     )
@@ -254,6 +348,6 @@ def test_max_tokens_follows_the_behaviour_baseline_formula(server: str):
 def test_a_short_prompt_gets_the_full_answer_budget(server: str):
     _Handler.response = reply()
 
-    OpenAIChatModel(server, "test-model").complete(messages(), TOOL_SPECS)
+    chat_model(server).complete(messages(), TOOL_SPECS)
 
     assert _Handler.received[0]["body"]["max_tokens"] == 1501

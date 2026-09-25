@@ -3,14 +3,21 @@
 http 那一层不在这里打真端点（8100 是 1.0 的服务，生命周期不归 2.0 管）；
 ``_chat`` 用 monkeypatch 换成脚本化的假回复，验的是 1.0 ``analyze_image`` 的三段结构：
 首轮 → 只回分类时补一次 → 出现拉丁文字时中文化，**三段三调用，一次不多**。
+
+「端点挂了要返回 ``None``」那两条打的是**本文件自己起的**本地 HTTP 服务：探测与调用
+都是真 HTTP，只是端点归测试管，不打 8100。
 """
 
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 from sentrix.infrastructure.media.vlm_observer import (
     MAX_MODEL_CALLS,
     OBSERVATION_CONFIDENCE,
@@ -18,6 +25,38 @@ from sentrix.infrastructure.media.vlm_observer import (
     parse_json_object,
     semantics_from_payload,
 )
+
+
+class _Endpoint(BaseHTTPRequestHandler):
+    """只会应答 ``/v1/models``；对话端点故意答 503。"""
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
+        payload = b'{"object":"list","data":[{"id":"fake-vlm","object":"model"}]}'
+        self._send(payload, 200)
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
+        self._send(b'{"error":"boom"}', 503)
+
+    def _send(self, payload: bytes, status: int) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def endpoint() -> Iterator[str]:
+    httpd = HTTPServer(("127.0.0.1", 0), _Endpoint)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_port}/v1"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 @pytest.mark.parametrize(
@@ -109,7 +148,9 @@ class ScriptedObserver(OpenAIVlmObserver):
     """把 ``_chat`` 换成脚本：按调用序返回预置回复，并记录次数。"""
 
     def __init__(self, replies: list[dict | None]) -> None:
-        super().__init__("http://127.0.0.1:8100/v1", "fake")
+        # ``_chat`` 被整个替换掉了，探测永远不会发生。这里故意给一个连不上的地址：
+        # 哪天有人把这个覆盖删了，测试会立刻炸，而不是悄悄去打真的 8100。
+        super().__init__("http://127.0.0.1:1/v1", ServedModel("http://127.0.0.1:1/v1", timeout_s=1.0))
         self.replies = replies
         self.calls: list[object] = []
         self.prompts: list[str] = []
@@ -254,16 +295,20 @@ def test_the_first_call_carries_the_image_and_the_canonicalization_does_not(imag
     assert observer.calls[1] is not None, "补全那一轮同样要看图"
 
 
-def test_a_model_failure_returns_none(monkeypatch, image):
-    """端点连不上时 httpx 抛的是 ``ConnectError``（``HTTPError`` 的子类），必须被吞掉。"""
-    import httpx
+def test_a_chat_failure_returns_none(endpoint, image):
+    """对话端点报错时返回 ``None``：观察是**增强**，不是导入的前置条件。"""
+    observer = OpenAIVlmObserver(endpoint, ServedModel(endpoint))
 
-    observer = OpenAIVlmObserver("http://127.0.0.1:8100/v1", "fake")
+    assert observer.observe(image) is None
 
-    def boom(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr("sentrix.infrastructure.media.vlm_observer.httpx.post", boom)
+def test_an_unreachable_endpoint_returns_none(image):
+    """连不上时 httpx 抛 ``ConnectError``（``HTTPError`` 的子类），探测那一层也一样。
+
+    这里连探测都过不去——一个连不上的端点连「我服务谁」都答不出来。
+    """
+    dead = "http://127.0.0.1:1/v1"
+    observer = OpenAIVlmObserver(dead, ServedModel(dead, timeout_s=1.0))
 
     assert observer.observe(image) is None
 
