@@ -351,3 +351,97 @@ def test_a_short_prompt_gets_the_full_answer_budget(server: str):
     chat_model(server).complete(messages(), TOOL_SPECS)
 
     assert _Handler.received[0]["body"]["max_tokens"] == 1501
+
+
+# ---- 思考通道不能漏进用户可见的答案 -------------------------------------------
+#
+# 实测（2026-09-25，8100 的 vLLM + gemma-4-12B-it）：工具往返两轮之后，模型给出的
+# 最终 content 是 ``'<|channel>thought\n<channel|>为您找到了去年在海边的照片，请查看。'``
+# —— 前半段是 Gemma 4 的思考通道标记，用户不该看到。
+#
+# **为什么只能在客户端剥、不能加服务端 flag。** 8100 是 1.0 与 2.0 共用的端点，
+# ``--reasoning-parser`` 一加，8091 那边 1.0 的答案也跟着变。所以剥的动作落在 2.0
+# 自己的客户端里。
+#
+# **为什么不是 ``chat_template_kwargs={"enable_thinking": False}``。** 实测 vLLM
+# 0.26.0 确实支持这个 per-request 字段（``enable_thinking=True`` 会改变输出，说明它
+# 被吃进去了），但 gemma-4 模板里 ``enable_thinking | default(false)`` 本来就是 False
+# ——传 False 与不传逐字相同，挡不住这段标记。所以只能在响应侧剥。
+
+_THOUGHT = "<|channel>thought\n<channel|>"
+
+
+def test_a_thought_channel_is_not_shown_in_the_answer(server: str):
+    """空思考通道 + 答案：用户只该看到答案那一半。"""
+    _Handler.response = reply(f"{_THOUGHT}为您找到了去年在海边的照片，请查看。")
+
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert result.content == "为您找到了去年在海边的照片，请查看。"
+    assert "<|channel>" not in result.content
+    assert "<channel|>" not in result.content
+    # 空的思考通道没有内容可留。
+    assert result.thought == ""
+
+
+def test_a_non_empty_thought_channel_is_kept_but_off_the_answer(server: str):
+    """模型真的推理了：推理过程不出现在答案里，也不无声丢掉——它留在 ``ModelReply`` 上。
+
+    丢掉是错的（这是模型的推理，是这一回合唯一能解释「它为什么这么答」的东西），
+    塞进答案是错的（用户问的是照片，不是模型的独白）。所以：答案给用户，
+    推理挂在回复对象上，同一条 DEBUG 日志留痕。
+    """
+    _Handler.response = reply(
+        "<|channel>thought\n用户问的是海边，我应该先查检索再交付原图。\n<channel|>为您找到了 2 张海边的照片。"
+    )
+
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert result.content == "为您找到了 2 张海边的照片。"
+    assert result.thought == "用户问的是海边，我应该先查检索再交付原图。"
+
+
+def test_a_dangling_channel_close_is_dropped(server: str):
+    """半截标记也要清掉：``enable_thinking=True`` 下实测到 ``'<channel|>我为您找到了…'``
+    ——只有闭合符、没有开始符，同样不能端给用户。"""
+    _Handler.response = reply("<channel|>我为您找到了这些照片。")
+
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert result.content == "我为您找到了这些照片。"
+
+
+def test_an_unterminated_thought_channel_never_becomes_the_answer(server: str):
+    """思考通道开了就没闭合（截断）：被它吞掉的正文宁可判成「这轮没有答案」，
+    也不能原样端出去。空答案会走 ``parse_failure`` 的重试，带标记的答案是静默的错。"""
+    _Handler.response = reply("<|channel>thought\n用户好像是想找海边的照片……")
+
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert result.content == ""
+    assert result.thought == "用户好像是想找海边的照片……"
+
+
+def test_a_thought_channel_in_the_middle_keeps_both_halves(server: str):
+    """标记出现在正文中间时，只删通道本身，两边的正文都要留下。"""
+    _Handler.response = reply("好的，<|channel>thought\n先查检索。\n<channel|>我这就去找。")
+
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert result.content == "好的，我这就去找。"
+    assert result.thought == "先查检索。"
+
+
+def test_an_answer_without_any_channel_is_untouched(server: str):
+    """反向门禁：剥的动作只删通道，别的一个字都不许动。
+
+    这条不是凑数——它把「顺手 strip 一下」「顺手把空行规整一下」这类跟本次修复
+    无关的行为变更堵在门外。首尾空白照原样透传（``run_turn`` 自己会 strip，
+    那是它的事）。
+    """
+    _Handler.response = reply("  这是你要的海边照片。  ")
+
+    result = chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert result.content == "  这是你要的海边照片。  "
+    assert result.thought == ""

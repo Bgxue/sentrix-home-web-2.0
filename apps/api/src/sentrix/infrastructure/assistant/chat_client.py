@@ -18,11 +18,17 @@
    系统提示词只在开头拼一次，之后不再往里加东西。
 3. **``max_tokens`` 按剩余上下文算。** 1.0 是 ``min(1501, 4400 - prompt_tokens)``，下限
    64（``app.py:2680-2692``）。8100 的 ``--ctx-size`` 是 8192，沿用同一个公式。
+4. **思考通道在这里剥掉。** Gemma 4 的推理写在 ``<|channel>thought\\n……<channel|>`` 里，
+   8100 没开 ``--reasoning-parser``，于是这一段原样落在 ``content`` 上。实测（2026-09-25）
+   工具往返两轮之后模型给出的最终 content 是
+   ``'<|channel>thought\\n<channel|>为您找到了去年在海边的照片，请查看。'``——用户看到
+   的就是这串标记开头的句子。剥的位置只能是这里，理由见 ``split_thought_channel``。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -32,6 +38,13 @@ from sentrix.domain.assistant.models import ChatMessage, ChatRole, ModelReply, T
 from sentrix.domain.assistant.ports import ModelServiceError
 from sentrix.domain.assistant.tools import ToolSpec, openai_tools
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
+
+log = logging.getLogger("sentrix.assistant.chat_client")
+
+# Gemma 4 的通道语法：``<|channel>名字\\n内容<channel|>``。模型只用 ``thought`` 这一个
+# 名字（模板里唯一写死的就是它，见模型目录的 ``chat_template.jinja``）。
+_CHANNEL_OPEN = "<|channel>"
+_CHANNEL_CLOSE = "<channel|>"
 
 # 1.0 app.py:2680-2692 的三个人工常数：给回答留的 token 预算上限、给提示词留的总量、
 # 以及无论上下文多满都必须留下的最小生成量。
@@ -70,6 +83,43 @@ def _dump_message(message: ChatMessage) -> dict[str, Any]:
     if message.role is ChatRole.TOOL:
         payload["tool_call_id"] = message.tool_call_id
     return payload
+
+
+def split_thought_channel(text: str) -> tuple[str, str]:
+    """把 ``content`` 拆成（给用户看的答案，模型的思考）。
+
+    **为什么剥在客户端，而不是让 8100 加 ``--reasoning-parser``。** 8100 是 1.0 与 2.0
+    共用的端点，一个服务端 flag 会把 8091 那边 1.0 的答案也一起改掉。用户 2026-09-25
+    的裁决是「2.0 加就行，别动老代码」，所以这动作只能落在 2.0 自己这一侧。
+
+    **为什么不用 ``chat_template_kwargs={"enable_thinking": False}``。** 实测 vLLM
+    0.26.0 支持这个 per-request 字段（``enable_thinking=True`` 会改变输出，证明它被吃进
+    了模板），但 gemma-4 模板的 ``enable_thinking | default(false)`` 本来就是 False，
+    传 False 与不传逐字相同——挡不住这段标记。不产生做不到，就只能产生后再擦掉。
+
+    **语义照抄模板自己的 ``strip_thinking`` 宏**（``chat_template.jinja:156``）：它是模型
+    作者对这段标记的定义，2.0 没有理由另发明一套。逐条对应：
+
+    - 闭合的通道整个删掉，两边正文都留下；
+    - 只有开始符、没有闭合符（被截断）时，它后面的一切都不算答案——宁可这轮判成
+      「没有内容」（``run_turn`` 会走 ``parse_failure`` 重试），也不能把半截标记端出去；
+    - 只有闭合符、没有开始符（实测于 ``enable_thinking=True``）同样删掉；
+    - **除此之外一个字都不动**，连首尾空白都原样透传。
+
+    ``thought`` 是通道体，每段去掉名字行（``<|channel>`` 后面那一行是通道名）后按序拼起
+    来，空段丢弃。它是真实产出，所以它有个去处，不是被静默扔掉。
+    """
+    kept: list[str] = []
+    thought: list[str] = []
+    for part in text.split(_CHANNEL_CLOSE):
+        head, opened, rest = part.partition(_CHANNEL_OPEN)
+        kept.append(head)
+        if opened:
+            # 第一行是通道名（本例恒为 ``thought``），不是内容。
+            _name, newline, body = rest.partition("\n")
+            if newline and body.strip():
+                thought.append(body.strip())
+    return "".join(kept), "\n".join(thought)
 
 
 def _read_tool_calls(raw: object) -> tuple[ToolCall, ...]:
@@ -144,8 +194,14 @@ class OpenAIChatModel:
             raise ModelServiceError(f"模型响应结构不可识别：{response.text[:200]}") from error
 
         usage = body.get("usage") or {}
+        content, thought = split_thought_channel(str(message.get("content") or ""))
+        if thought:
+            # 不静默：内容留在 ``ModelReply.thought`` 上，这里再留一行痕，便于回答看起来
+            # 「莫名其妙」时倒查模型当时在想什么。
+            log.debug("模型给出了 %d 字的思考通道内容（不展示给用户）", len(thought))
         return ModelReply(
-            content=str(message.get("content") or ""),
+            content=content,
+            thought=thought,
             tool_calls=_read_tool_calls(message.get("tool_calls")),
             finish_reason=str(choice.get("finish_reason") or ""),
             prompt_tokens=int(usage.get("prompt_tokens") or 0),

@@ -2297,3 +2297,236 @@ $ make web-check      # rc=0
 dist/assets/index-CX99wMss.js   240.85 kB │ gzip: 75.79 kB
 ✓ built in 80ms
 ```
+
+---
+
+## 2p. 收尾（2026-09-25 续二）：思考通道漏进用户答案 —— 在 2.0 客户端剥，不动 1.0
+
+用户裁决：**「2.0 加就行，别动老代码」**。
+
+### 现象与根因
+
+工具往返两轮之后，模型给出的**最终 content** 里带着 Gemma 4 的思考通道标记：
+
+```
+=== turn3 finish=stop tc=[]
+   content: '<|channel>thought\n<channel|>为您找到了去年在海边的照片，请查看。'
+```
+
+8100 是 vLLM（`gemma-4-12B-it`，`--served-model-name gemma4-12b-it`），**没开
+`--reasoning-parser`**，于是模型自己写出来的通道标记原样落在 `content` 上，一路端到用户。
+复现的是 2.0 自己的客户端（`OpenAIChatModel.complete`）打真端点，不是伪造响应。
+
+### 候选 a 被实测否掉（这一步必须先做）
+
+`chat_template_kwargs` **确实被 vLLM 0.26.0 支持**——但**修不了这个 bug**。
+
+先证明字段被吃到（`vllm/entrypoints/openai/chat_completion/protocol.py:341` 有它）。
+`enable_thinking=True` 让输出发生变化 —— 字段生效：
+
+```
+--- baseline: HTTP 200   content: '1+1等于2。'
+--- enable_thinking=True: HTTP 200   content: None          <- 行为变了＝字段被吃到
+--- enable_thinking=False: HTTP 200  content: '1+1等于2。'
+```
+
+再证明**它对这个 bug 是空操作**。gemma-4 模板第 186 行是
+`{%- set enable_thinking = enable_thinking | default(false) -%}`——默认本来就是 `False`，
+所以「传 False」与「不传」逐字相同。同一段工具循环跑三种参数：
+
+```
+--- baseline: turn3 finish=stop
+    content: '<|channel>thought\n<channel|>为您找到了去年在海边的照片，请查看。'
+--- chat_template_kwargs={enable_thinking:False}: turn3
+    content: '<|channel>thought\n<channel|>为您找到了去年在海边的照片，请查看。'   <- 一字不差
+--- chat_template_kwargs={enable_thinking:True}: turn2
+    content: '<channel|>我为您找到了去年在海边的照片。请问您想看这些照片吗？'      <- 仍然脏
+```
+
+**`chat_template_kwargs` 不能当反向门禁用**：传一个不存在的键，端点照样 200、照样静默
+忽略 —— 「200 就当它被接受了」是假绿。判据只能是「输出是否真的变了」。
+
+于是走**候选 b：在 2.0 客户端剥**。
+
+### 为什么不加服务端 `--reasoning-parser`
+
+8100 是 1.0 与 2.0 **共用**的端点，一个服务端 flag 会把 8091 那边 1.0 的答案也一起改掉
+—— 正是用户裁决要避免的事。所以剥的动作落在 2.0 自己这一侧
+（`infrastructure/assistant/chat_client.py`），1.0 仓库与 8091 进程一个字没碰。
+
+### 剥在哪、按什么语义
+
+`split_thought_channel()` 在**响应进入 2.0 的唯一那道口子**上剥（`complete()` 的
+`ModelReply` 构造处），于是**规划器与工具循环两条路一起干净**，没有哪个调用方需要记得剥。
+
+语义**照抄模板自己的 `strip_thinking` 宏**（`chat_template.jinja:156`）——那是模型作者对
+这段标记的定义：闭合通道整体删除、两边正文都留下；只有开始符没有闭合符时它后面的一切
+都不算答案；只有闭合符没有开始符（实测于 `enable_thinking=True`）同样删除；
+**除此之外一个字都不动**（连首尾空白都原样透传，`run_turn` 自己会 strip）。
+
+**思考内容不丢，但也不给用户**：它落在 `ModelReply.thought` 上，另留一条 DEBUG 日志。
+本回合唯一能解释「模型为什么这么答」的东西是它，无声丢掉是错的；用户问的是照片，
+不是模型的独白，塞进答案是错的。
+
+### 红 → 绿
+
+先写用例（6 条，`integration/test_chat_client.py`），**全部红**（`AttributeError:
+'ModelReply' object has no attribute 'thought'` + 内容仍带标记），再改代码，**22 passed
+（该文件）**。
+
+改后用**同一个打真端点的复现**核对：
+
+```
+=== turn3 finish=stop tc=[]
+   content: '为您找到了去年在海边的照片，请查看。'
+```
+
+同一段工具循环重复 5 次：
+
+```
+run0..run4: dirty=False answer='为您找到了去年在海边的照片，请查看。'
+带标记的次数: 0 / 5
+```
+
+### 定点变异（带反向门禁）
+
+| 变异 | 结果 |
+|---|---|
+| **M1** 完全不剥（`return text, ""`） | 5 条通道用例转红；**`test_an_answer_without_any_channel_is_untouched` 保持绿** |
+| **M2** 未闭合通道把尾巴当答案（反向门禁） | `test_an_unterminated_thought_channel_never_becomes_the_answer` 转红；无通道用例保持绿 |
+| 还原 | `EXIT=0`，且 `md5sum` 与变异前逐字节相同 |
+
+M1/M2 里那条**始终绿**的用例是反向门禁：它证明这组用例钉的是具体行为，不是
+「只要出现标记就报红」——把剥的动作整个删掉它也不会红，只有真去动它钉的那件事才红。
+
+### 1.0 的 8091 答案：改前 / 改后逐字相同
+
+固定三问（`scope_id=album_b04cfeaca0c3`，`include_debug=true`），改前存快照、改后重打：
+
+```
+=== DIFF 1.0 改前 vs 改后 ===
+IDENTICAL: 1.0 答案一字未变
+```
+
+**一处要如实说**：1.0 这三问答的都是 `planner_blocked` + 同一句固定文案，**不是模型产出
+的答案** —— 它的 LLM 名字写死成 `gemma4-qat-iq3xxs`，而 8100 现在服务的是
+`gemma4-12b-it`（后端从 llama.cpp 换成 vLLM 时改了名）。所以这次「一字未变」只证明了
+没有回归，**没有**证明「1.0 走模型那条路也没变」。真正的结构性保证是：本次改动只落在
+2.0 工作树的三个文件里，8091/8100 的进程、1.0 仓库、8100 的启动参数全部没碰
+（见下面「动过什么」）。**这个写死的名字本身就是 §2n 那条「模型名问端点要」的活证据。**
+
+### 8191 换新代码重启（裁决二）
+
+旧进程是 **2026-09-23 10:40** 起的，跑的是旧代码（模型名还写死）。停掉，用**本次工作树**
+重起，`SENTRIX_DATA_DIR` 沿用旧进程那一份：
+
+```
+=== 旧进程 ===  3623789  Wed Sep 23 10:40:41 2026
+=== 新进程 ===  2922328  Fri Sep 25 13:31:09 2026
+LISTEN 0.0.0.0:8191
+```
+
+`/api/v1/health` → **200**。4274 的 Web 没重启（它只是前端，HMR 自己跟）。
+
+**重启前**（旧代码，同一句话）：
+
+```
+status=partial  termination_reason=planner_blocked
+answer="当前问题的证据需求无法可靠规划，因此暂时无法确认。"
+```
+
+**重启后**（本次工作树，`scope_id=album1`）：
+
+```
+status=partial  termination_reason=answered_with_gap
+answer="我是你的家庭相册助手，可以帮你检索照片并查询已确认人物的档案。"
+```
+
+**交付回合实测**（`album1`，53 张）：
+
+```
+question="把水坝和河流的那几张照片直接发给我"
+status=complete   termination_reason=answered
+answer="这是为您找到的关于水坝和河流的照片。"
+attachment_count=6
+photo_1 asset_1a0e7c379fe5 '2017-11-05 150808.jpg'   ... photo_6 asset_e3798af44527
+```
+
+交付端点核对（真实可打开，且越界 handle 被拦）：
+
+```
+result_set_id=rs_00a2c3684999
+交付原图 photo_1  http=200 type=image/jpeg bytes=128134   -> JPEG 1600x1200
+越界 handle       http=404
+```
+
+重启前那句固定文案 vs 重启后的真答案，说明「模型名写死」在 8191 上是**实际发生**过的坏法。
+
+### 顾虑（如实）
+
+1. **`thought` 现在没有下游消费者。** 它挂在 `ModelReply` 上、留一条 DEBUG 日志，但没有
+   任何一层把它落库或展示。这是有意的（先把「不静默丢」做到），但它确实是一条
+   「有值、无人读」的字段——**如果后续要展示推理过程，接它，不要另外去解析 content。**
+2. **被测的是「模型这次没产生思考内容」这一幕。** 真端点重复 5 次都拿到空思考通道
+   （`thought` 为空），所以「非空思考被保下来」这条只在假端点上钉住过，没在真模型上见过
+   一次非空样本。语义按模板宏照抄，但样本不足。
+3. **`thought` 的通道名是靠第一行切的**（`<|channel>名字\n内容`）。模型只用 `thought`
+   一个名字，所以够用；真出现别的通道名，通道体会被当思考收走。
+4. **`enable_thinking=True` 那一路没被修**（输出变成 `'<channel|>我为您找到了…'`）。它不在
+   生产路径上（模板默认 False），本次只是在实测里见到，如实记一笔。
+
+### 本次交付的 `make ci`（改动树上，2026-09-25T13:11 起跑，load1=0.54）
+
+```
+All checks passed!                              # ruff check
+224 files already formatted                     # ruff format --check
+Success: no issues found in 138 source files    # mypy strict
+Contracts: 5 kept, 0 broken.                    # lint-imports
+reachability: 0 个问题
+capability-map: 0 个问题
+module-map: 0 个问题
+openapi 契约一致
+19 failed, 1084 passed, 10 skipped, 11 warnings in 588.53s (0:09:48)   # pytest --cov
+make: *** [Makefile:56：coverage] 错误 1
+```
+
+**`CI_EXIT=2`，耗时 593 秒（9分53秒）。** 红的是**同一批 19 条 GPU 依赖用例**
+（`test_visual_search` 7 / `test_assistant_turn` 4 / `test_face_detector` 6 /
+`test_face_embedding` 2），`git stash` 到未改动的 HEAD 上跑同一批文件，**失败集合逐行
+相同**：
+
+```
+CONTROL_EXIT=1        # 未改动树，同一批文件
+19 条 FAILED（与改动树逐条相同）
+```
+
+根因在日志里：
+
+```
+11 OutOfMemoryError / CUDA out of memory
+ERROR sentrix.chinese_clip: chinese-clip 加载失败: /home/asus/.cache/clip/clip_cn_vit-l-14.pt
+```
+
+**vLLM 占着 23.7 GB / 24.5 GB**，CLIP 与人脸模型加载不到显存 —— 环境红，不是代码红。
+把这 19 条 deselect 后重跑 `pytest --cov`：**EXIT=0，覆盖率 97.52%（阈值 85%）**。
+
+`make ci` 在 `coverage` 这步就退出（make 遇错即停），链尾 `web-check` 没跑到，单独跑过：
+
+```
+$ make web-check      # rc=0
+8 passed (vitest)
+dist/assets/index-CX99wMss.js   240.85 kB │ gzip: 75.79 kB
+✓ built in 67ms
+```
+
+### 动过什么（共享资源清单）
+
+| 资源 | 动作 |
+|---|---|
+| 1.0 仓库 `/home/asus/Github/Sentrix-Home-Web` | **只读**，未改（本次只 `grep`/`cat` 过） |
+| 8091（1.0 进程 1507974） | 未重启、未改环境 |
+| 8100（vLLM 2596792） | 未重启、未改启动参数、**未加任何 flag** |
+| 8101 / 11434 | 未碰 |
+| 4274（Web 3529372） | 未重启 |
+| `data/` | 未清；本次实测产生的会话与结果集是正常写入 |
+| 8191 | **停旧进程、用本次工作树重起**（用户裁决二要求） |

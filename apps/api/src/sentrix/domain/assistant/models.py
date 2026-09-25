@@ -148,7 +148,16 @@ class ChatMessage:
 
 @dataclass(frozen=True, slots=True)
 class ModelReply:
+    """端点的一次回复。
+
+    ``content`` 是**已经剥掉思考通道**的正文——用户看的那一份。模型的推理过程不在这
+    里面，在 ``thought``：它是真实产出，无声丢掉就等于丢掉了这一回合唯一能解释「模型
+    为什么这么答」的东西；但它也不是答案（用户问的是照片，不是模型的独白）。剥在哪、
+    为什么不能靠服务端 flag 剥，见 ``infrastructure/assistant/chat_client.py``。
+    """
+
     content: str = ""
+    thought: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     finish_reason: str = ""
     prompt_tokens: int = 0
