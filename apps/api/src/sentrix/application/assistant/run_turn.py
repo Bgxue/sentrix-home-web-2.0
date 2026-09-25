@@ -61,7 +61,12 @@ from sentrix.domain.assistant.models import (
     TurnStatus,
 )
 from sentrix.domain.assistant.policy import detect_policy_refusal
-from sentrix.domain.assistant.ports import ChatModel, ConversationRepository, TurnRepository
+from sentrix.domain.assistant.ports import (
+    ChatModel,
+    ConversationRepository,
+    ModelServiceError,
+    TurnRepository,
+)
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
 from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
@@ -367,7 +372,12 @@ class RunTurn:
             except Exception as error:
                 log.warning("模型调用失败: %s", error)
                 state.finish(TerminationReason.MODEL_ERROR)
-                return self._stop(session, TerminationReason.MODEL_ERROR)
+                # 工具循环里的服务侧失败带说明走，与规划那条同一条理由（用户 2026-09-25
+                # 裁决二）：异常文案里已经写着端点与服务端给的原因（8100 缺 tool-call flag
+                # 时那句 400 就是），转述比在上层另拼一句更准；别的原因（2.0 自己拼错了
+                # 请求）不往里塞，免得把内部形状说给用户听——与 ``goal_planner`` 同一条边界。
+                detail = str(error) if isinstance(error, ModelServiceError) else ""
+                return self._stop(session, TerminationReason.MODEL_ERROR, detail=detail)
 
             if not reply.wants_tools:
                 answer = self._judge_answer(session, messages, reply)
@@ -574,7 +584,8 @@ class RunTurn:
         messages.append(ChatMessage(ChatRole.USER, record.question))
         return messages
 
-    def _stop(self, session: _Session, reason: TerminationReason) -> str:
+    def _stop(self, session: _Session, reason: TerminationReason, *, detail: str = "") -> str:
+        """收尾。``detail`` 只由**模型服务这一侧**的失败传入——见 ``_converse`` 的 except。"""
         photo_count = max(
             (int(record.observation.get("total") or 0) for record in session.state.records),
             default=0,
@@ -584,6 +595,7 @@ class RunTurn:
             ledger=session.ledger,
             photo_count=photo_count,
             delivered_count=len(session.delivered.items),
+            detail=detail,
         )
 
     def _tool_event(

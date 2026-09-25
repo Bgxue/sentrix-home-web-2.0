@@ -505,7 +505,52 @@ def test_a_model_failure_ends_the_turn_as_failed_not_complete(env):
 
     assert result.status is TurnStatus.FAILED
     assert result.termination_reason is TerminationReason.MODEL_ERROR
-    assert "模型不可用" in result.answer
+    assert "模型服务不可用" in result.answer
+
+
+def test_a_tool_loop_model_service_failure_carries_the_endpoint(env):
+    """工具循环里的服务侧失败，与规划那条同一条口径（用户 2026-09-25 裁决二）。
+
+    8100 缺 tool-call flag 时回的就是这个 400——根因写在它的正文里，必须走到用户眼前，
+    而不是只说一句「模型不可用」把它留在日志里。llama.cpp 原生支持 tools，这条差异在换
+    后端之前不存在（见 ``docs/refactor/s5-deviations.md`` §2n）。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            ModelServiceError(
+                "模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400："
+                r'{"error":{"message":"\"auto\" tool choice requires --enable-auto-tool-choice'
+                r' and --tool-call-parser to be set"}}'
+            )
+        ]
+    )
+    run_turn = build(env, model, StubToolbox())
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.status is TurnStatus.FAILED
+    assert result.termination_reason is TerminationReason.MODEL_ERROR
+    assert "模型服务不可用" in result.answer
+    assert "http://127.0.0.1:8100/v1" in result.answer
+    assert "--tool-call-parser" in result.answer
+
+
+def test_an_internal_failure_does_not_leak_its_wording_into_the_answer(env):
+    """反向门禁：不是模型服务这一侧的异常，内部形状不许说给用户听。
+
+    与 ``goal_planner`` 给 ``detail`` 设的边界是同一条：那边也只收 ``ModelServiceError``。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([RuntimeError("内部栈里的字眼")])
+    run_turn = build(env, model, StubToolbox())
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert "模型服务不可用" in result.answer
+    assert "内部栈里的字眼" not in result.answer
 
 
 def test_an_unexpected_exception_still_produces_a_named_reason(env):

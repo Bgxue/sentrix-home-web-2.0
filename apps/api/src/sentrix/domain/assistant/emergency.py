@@ -34,8 +34,15 @@ def fallback_answer(
     ledger: EvidenceLedger,
     photo_count: int,
     delivered_count: int,
+    detail: str = "",
 ) -> str:
-    """``photo_count`` / ``delivered_count`` 来自结果集这一侧的事实，不是模型的话。"""
+    """``photo_count`` / ``delivered_count`` 来自结果集这一侧的事实，不是模型的话。
+
+    ``detail`` 是**服务这一侧**自己的说明（``ModelServiceError`` 的文案里已经带好端点与
+    状态码），只有那一类失败才给：与 ``run_turn`` 里规划那条同一条理由（用户 2026-09-25
+    裁决二）——「模型服务不可用」单独一句不可执行，用户与运维照着它不知道该去查哪儿，
+    而服务端那句 400 里写着根因。
+    """
     parts: list[str] = []
     if photo_count > 0:
         parts.append(f"这一轮检索到 {photo_count} 张候选照片。")
@@ -48,7 +55,10 @@ def fallback_answer(
     if missing:
         parts.append(missing)
 
-    parts.append(f"（本轮因「{_REASON_LABEL[reason]}」提前结束。）")
+    tail = f"本轮因「{_REASON_LABEL[reason]}」提前结束"
+    if detail:
+        tail = f"{tail}：{detail}"
+    parts.append(f"（{tail}。）")
     return "".join(parts)
 
 
@@ -63,7 +73,10 @@ _REASON_LABEL: dict[TerminationReason, str] = {
     TerminationReason.TOOL_BUDGET_EXHAUSTED: "工具调用预算用尽",
     TerminationReason.STEP_BUDGET_EXHAUSTED: "模型步数用尽",
     TerminationReason.TIMEOUT: "超时",
-    TerminationReason.MODEL_ERROR: "模型不可用",
+    # 说的是**模型服务**，不是「模型」。这条文案底下是 ``ModelServiceError``（端点不可达 /
+    # 超时 / 模型名对不上 / 服务端 400），用户据此该去看那个端点——「模型不可用」听着像
+    # 模型能力不行，与规划那条要分开的那个理由是同一条（用户 2026-09-25 裁决二）。
+    TerminationReason.MODEL_ERROR: "模型服务不可用",
     TerminationReason.GUARD_BLOCKED: "回答未通过事实校验",
     TerminationReason.CANCELLED: "已取消",
 }

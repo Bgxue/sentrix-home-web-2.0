@@ -2002,3 +2002,298 @@ sentrix.infrastructure.assistant.chat_client.ChatModelError: 模型返回 404：
 模型不可用。」——它说的是模型服务（口径正确），但**没带端点、没带服务端给的原因**，不如
 规划那条可执行。裁决二的原文只点了 `planner_call_error`，所以本次没有顺手改它；要不要按
 同一条理由推广到 `MODEL_ERROR`，留给你定。
+
+---
+
+## 2o. 收尾（2026-09-25 续）：8100 的 vLLM 打开 tool calling + 工具循环失败文案可执行
+
+§2n 末尾那条「遗留（如实）」里的两件事，用户 2026-09-25 裁决落地：
+
+1. 8100 以 `--enable-auto-tool-choice --tool-call-parser <parser>` 重启（§2n 写明的必要条件）；
+2. `MODEL_ERROR` 那条收尾文案按与裁决二同一条理由改成可执行的。
+
+### 影响面：8100 上还有谁（动共享资源前先查）
+
+```
+8100  vLLM gemma4-12b-it，pid 2022624（重启前）→ 2596792（重启后）
+8091  1.0 后端（Sentrix-Home-Web/.venv，env：SENTRIX_OPENAI_API_MODE=vllm、
+      SENTRIX_VLLM_API_URL=http://127.0.0.1:8500、SENTRIX_VLLM_REGISTRY=/home/asus/sentrix-vllm/registry.json）
+8191  2.0 后端（SENTRIX_DATA_DIR=<2.0 仓库>/data）
+8192  s5verify 的 2.0 实例（SENTRIX_DATA_DIR=/home/asus/s5verify/data-web-verify）
+```
+
+**没有远程调用方**：重启前翻 8100 的访问日志（`log/gemma4-12b-it.log`），所有
+`POST /v1/chat/completions` 的 peer 都是 `127.0.0.1`，没有一条来自别的机器；`ss -tn` 也没有
+到 8100 的连接。所以影响面就是上面三个本机后端 + 本机上临时跑的脚本。
+
+**1.0 的 8091 与 2.0 的 8191、8192 在重启窗口内拿不到模型**（不是它们的代码问题：它们都只是
+HTTP 客户端，端点回来即恢复）。用户已裁决重启，故执行；`8091` 事后仍在（见文末）。
+
+重启走 **manager**（`8500` 的 `POST /switch`），不自己 `kill` + 手起 vLLM：2.0 不管理模型
+进程生命周期，这是 manager 的职责（`domain/assistant/ports.py` 的 `ChatModel` 注释：
+「2.0 只连它，不管理它的进程」）。
+
+### flag 落到 registry 的哪一步（含仓库版 vs 部署版的处置）
+
+**结论：只改 registry，两边的 manager 代码一行都不用动。**
+
+`build_command` 早就有 `extra_args` 这条通路（部署版 `sentrix_vllm_manager.py:280`、
+1.0 仓库版 `services/vllm_manager/manager.py:283`，两份同一行）：
+
+```python
+command += [str(item) for item in profile.get("extra_args", [])]
+```
+
+两份的差异只有 4 处、全是环境相关（registry 默认路径、CUDA 的 `PATH`/`CPATH`、 
+`external_url_hint` 里的主机名），`extra_args` 的使用**逐字相同**。所以不存在「改哪个副本
+才对」的问题——需要改的是**它们共同读的那个文件**。
+
+**实际跑的是哪一份**：`8500` 的 `sentrix_vllm_api.py` 起 `subprocess` 调
+`sentrix_vllm_manager.py`（`MANAGER` 常量，可用 `SENTRIX_VLLM_MANAGER` 覆盖；pid 1268 的
+environ 里没有这个覆盖），而 `REGISTRY` 默认 `/home/asus/sentrix-vllm/registry.json`，
+pid 1268 也没有 `SENTRIX_VLLM_REGISTRY` 覆盖 → **读的就是部署版 registry**。
+
+**仓库版 registry 是死副本，且不在 2.0 仓库里**：
+
+| 位置 | 谁读 | 本次动没动 |
+| --- | --- | --- |
+| `/home/asus/sentrix-vllm/registry.json`（15 profiles，部署版） | 8500 → manager；8091 也显式指这里 | **动**（备份 `registry.json.bak-before-toolcall-20260925`） |
+| `Sentrix-Home-Web/configs/sentrix_vllm_registry_192_168_0_153.json`（13 profiles） | 只有「没设 `SENTRIX_VLLM_REGISTRY` 时」的 manager 默认值会用 | **不动**——1.0 仓库只读 |
+| 2.0 仓库 | —— | **`services/vllm_manager/` 在 2.0 仓库里不存在**（任务书假设它在，实测没有）；2.0 侧的 `apps/photobench/config/vllm_targets.json` 是 benchmark 的**客户端目标表**，与模型启动参数无关 |
+
+所以本次的落地物是**部署版 registry 的一个字段**，没有任何仓库文件承载它。这是要说的
+顾虑（见文末）：**`registry.json` 不进版本控制**，下次谁把 1.0 仓库那 13-profile 快照当权威
+铺回去，这两个 flag 就又没了。
+
+改动（`profile.gemma4-12b-it`）：
+
+```json
+"extra_args": ["--enable-auto-tool-choice", "--tool-call-parser", "gemma4"]
+```
+
+`notes` 里同时写上了为什么——这个字段是给人看的，不然下次有人清理「没见过的字段」时会顺手
+删掉。落到了 registry 而不是一次性命令行，所以**下次 manager 重启/switch 仍然带着**：
+
+```
+$ .venv/bin/python sentrix_vllm_manager.py cmd gemma4-12b-it
+... --limit-mm-per-prompt '{"image":5,"video":0,"audio":1}' --enable-auto-tool-choice --tool-call-parser gemma4
+```
+
+重启后的 `state/current.json` 里 `command` 数组末尾也带着这两个 flag（`8500/state` 可直接查）。
+
+### parser 实测选择：`gemma4`，一次选中
+
+**没有猜，也没有挨个试。** 先读模型的 `chat_template.jinja`：它自己声明吐的是
+`<|tool_call>call:name{args}<tool_call|>`（`template:247-264`）；再读 vLLM 0.26.0 的
+tool parser 目录，`gemma4_engine_tool_parser`（注册名 `gemma4`）的 `gemma4_utils` 文档字符串
+逐字写着 `Standard format: <|tool_call>call:name{args}<tool_call|>`——为这个模板而写。
+在此之前先用 `gemma4_utils.parse_tool_calls` 离线喂了两条该格式的样本，确认能解析出
+`{'name': ..., 'arguments': {...}}`，才去重启。所以 `pythonic` / `hermes` / `functiongemma`
+一次都没用上。
+
+重启后的实测（`/tmp/probe_tools_2.py`，四个组合与 §2n 那张表一一对应）：
+
+```
+model = gemma4-12b-it
+无 tools                         : 200
+tools + tool_choice=auto        : 200   finish_reason=tool_calls
+    tool_calls = [{"id": "chatcmpl-tool-b38a6ed32907d2e1", "type": "function",
+                   "function": {"name": "search_memories", "arguments": "{\"query\": \"海边\"}"}}]
+    content    = None
+tools，不给 tool_choice          : 200   （同上，形状一致）
+tools + tool_choice=required    : 200   （同上，content 是 "" 而不是 None）
+```
+
+`id` / `type` / `function.name` / `function.arguments` 四件齐全，`arguments` 是 **JSON 字符串**
+（OpenAI 约定的形状，`chat_client._read_tool_calls` 正是按字符串收的）。
+
+再把两个更硬的地方也测了（`/tmp/probe_loop_2.py`）：
+
+```
+=== A. 强制命名工具 get_original_photos（数组参数）===
+  HTTP 200  finish_reason = stop
+  arguments repr = '{"handles": ["photo_1", "photo_2", "photo_3"]}'   # 是 JSON，不是 Python 的 repr
+=== B. 完整往返：search → tool 结果 → 模型收尾 ===
+  第 1 轮  finish_reason=tool_calls  content=None   search_memories{"query": "海边的照片"}
+  第 2 轮  finish_reason=tool_calls  content=None   get_original_photos{"handles": ["photo_1", "photo_2"]}
+```
+
+第 2 轮是**带着 `content=null` 的 assistant tool_calls + 一条 role=tool 消息**回去问的，
+正是 `chat_client._dump_message` 拼的形状（§2n 记过：`content` 写成 `""` 会让 gemma4 模板
+在工具结果回填后直接吐 EOS）。它没吐 EOS，而且自己接着调了第二个工具。
+
+### 2.0 助手的完整回合（8193，本次工作树 + `data/` 的副本）
+
+```
+### http://127.0.0.1:8193  conversation=conv_76afdb1cb109 turn=turn_20260925022031499325
+question          : 给我看看海边的照片
+status            : complete
+reason(in result) : answered
+answer            : <|channel>thought
+                    <channel|>这是为您找到的关于“海边”的照片。
+delivered photos  : 6
+    - handle=photo_1 asset=asset_75916c8eae1d file=2017-11-05 150755.jpg
+    - handle=photo_2 asset=asset_e3798af44527 file=2017-11-05 161103.jpg
+    - handle=photo_3 asset=asset_ed4863389a07 file=2017-11-05 164457.jpg
+    - handle=photo_4 asset=asset_f0c6509d525f file=IMG_8654.JPG
+    - handle=photo_5 asset=asset_1984dc3ad382 file=IMG_20230806_205817.jpg
+    - handle=photo_6 asset=asset_71615f8e6aaf file=IMG_20230806_205755.jpg
+requirements      :
+    - [satisfied] 包含海边场景的照片集合
+    - [satisfied] 将海边的照片展示给用户
+progress (tool steps):
+    - planning/complete [plan]      已确认需要哪些证据。
+    - action/running     [model_action] 正在执行 search_memories…
+    - tool_result/ok     [tool_result]  结果集里共有 12 张候选照片。
+    - action/running     [model_action] 正在执行 get_original_photos…
+    - tool_result/ok     [tool_result]  已把 6 张照片交给用户。
+```
+
+这是 §2n 那次 `failed` / `model_error` 的**直接对照**：同一条链路（规划 → 工具循环 →
+证据账本 → 答案门禁 → 回答）这次跑完了，两条需求都 `satisfied`，6 张照片真的交付了。
+`8191` 与 `8192` 都没重启（用户明令），8193 用的是本次工作树的代码、`SENTRIX_DATA_DIR`
+指向 `/tmp/sentrix-8193-data`（`data/` 的 `cp -a` 副本，真 `data/` 全程没动）。
+
+**这条实测把 §2n 的判断正面证伪了一半**：§2n 写「在那之前，2.0 的助手能规划、不能跑工具
+循环」——parser 一挂上，工具循环立刻走通，客户端那边一个字都没改，再次说明缺的是
+**服务端的启动参数**，不是 2.0 的代码。
+
+### 裁决二：工具循环的失败文案改成可执行的
+
+§2n 末尾那句中肯的自陈是这次改动的起点：
+
+> 工具循环那条收尾走的还是 1.0 的 `MODEL_ERROR` 文案「这次没能完成检索：模型不可用。」——
+> 它说的是模型服务（口径正确），但**没带端点、没带服务端给的原因**，不如规划那条可执行。
+
+改动三处，与规划那条 `_planner_failure_answer` 同一条边界：
+
+| 位置 | 改了什么 |
+| --- | --- |
+| `domain/assistant/emergency.py` 的 `_REASON_LABEL[MODEL_ERROR]` | `"模型不可用"` → `"模型服务不可用"`。底下是 `ModelServiceError`（端点不可达 / 超时 / 名字对不上 / 服务端 400），「模型不可用」听着像模型能力不行 |
+| `domain/assistant/emergency.py` 的 `fallback_answer` | 新增 `detail: str = ""`，非空时接在尾句里：`（本轮因「模型服务不可用」提前结束：<detail>。）` |
+| `application/assistant/run_turn.py` 的 `_converse` / `_stop` | except 里按 `isinstance(error, ModelServiceError)` 取 `str(error)` 交给 `_stop(..., detail=...)` |
+
+**只收 `ModelServiceError`**，与 `goal_planner.py:97` 给 `PlannerResult.detail` 设的边界是同
+一条：别的原因（2.0 自己拼错了请求）不往里塞，免得把内部形状说给用户听。
+
+真实文案（用上面那个真 400 串渲的，`emergency.fallback_answer` 直出）：
+
+```
+BEFORE 这一轮没有检索到照片。还差这些没能确认：包含海边场景的照片集合；将海边的照片展示给用户。（本轮因「模型不可用」提前结束。）
+AFTER  这一轮没有检索到照片。还差这些没能确认：包含海边场景的照片集合；将海边的照片展示给用户。（本轮因「模型服务不可用」提前结束：模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400：{"error":{"message":"\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set","type":"BadRequestError","param":null,"code":400}}。）
+```
+
+端点、状态码、**服务端给的原因**（连缺哪个 flag 都写着）三样都在。
+
+**钉住它的用例**（都带端点断言，与规划那条 `test_the_model_service_message_carries_the_endpoint` 对齐）：
+
+- `unit/test_assistant_guard.py::test_the_fallback_carries_the_service_side_reason_when_there_is_one`
+- `unit/test_assistant_guard.py::test_the_fallback_invents_no_endpoint_when_there_is_no_detail`
+- `integration/test_run_turn.py::test_a_tool_loop_model_service_failure_carries_the_endpoint`
+- `integration/test_run_turn.py::test_an_internal_failure_does_not_leak_its_wording_into_the_answer`
+- `contract/test_assistant_events.py::test_a_model_that_dies_after_planning_is_reported_as_failed`
+  （假件 `DiesAfterPlanning` 跟着改成抛 `ModelServiceError`，文案就是那句真 400——与
+  `FailingModel` 同一条理由：假件比真件宽松，就验不出「上层只认那个类型」这类问题）
+
+**定点变异带反向门禁**（两条都改坏、跑完改回来）：
+
+```
+### M1 · 兜底忽略 detail（服务侧说明又掉回日志）
+    FAILED unit/…::test_the_fallback_carries_the_service_side_reason_when_there_is_one
+    FAILED integration/…::test_a_tool_loop_model_service_failure_carries_the_endpoint
+    FAILED contract/…::test_a_model_that_dies_after_planning_is_reported_as_failed
+    exit=1  红（拦住了）
+### M2 · 反向门禁：任何异常都往文案里塞（内部形状泄漏给用户）
+    FAILED integration/…::test_an_internal_failure_does_not_leak_its_wording_into_the_answer
+    exit=1  红（拦住了）
+```
+
+### 顾虑（如实）
+
+**`<|channel>thought\n<channel|>` 漏进了用户可见的答案里。** 上面那次完整回合的 `answer`
+头一行就是这个空思考通道。原因是 8100 没有配 `--reasoning-parser`，gemma4 模板的
+`<|channel>thought … <channel|>` 就留在 `content` 里（vLLM 侧确有对应的
+`gemma4_engine_reasoning_parser`，注册名同为 `gemma4`）。**本次没有顺手加**：用户的裁决是
+「带上那两个 flag」，而这第三个 flag 会改掉 **8091 那边 1.0 的答案**（思考通道一并被摘掉），
+影响面比 tool calling 大，且要再付一次 8100 的重启窗口。**留给用户裁决**——一行 flag 的事，
+但它已经超出本次授权。
+
+**`registry.json` 不进版本控制。** 这两个 flag 目前只活在 153 的
+`/home/asus/sentrix-vllm/registry.json` 里；1.0 仓库那份 13-profile 的
+`configs/sentrix_vllm_registry_192_168_0_153.json` 是只读的、本次没同步。将来谁拿那份快照
+覆盖部署版，tool calling 就又没了，而且症状与 §2n 一模一样（带 tools 的请求 400），
+排查过一遍的人不用再排查第二遍——但没排查过的人会。要根治得让 registry 有版本控制或
+让 manager 读 2.0 仓库里的一份。
+
+### 动过共享资源之后的必查项：1.0 的 8091 仍然活着
+
+8100 是 1.0 的 8091 与 2.0 的 8191 共用的。重启窗口结束后复测：
+
+```
+$ curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/api/health
+200
+$ curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8091/api/family-graph?scope_id=home-default'
+200
+$ curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8191/api/v1/health
+200
+$ curl -s http://127.0.0.1:8100/v1/models | grep -o gemma4-12b-it
+gemma4-12b-it
+```
+
+`8091` / `8101` / `11434` 全程没有重启，8191 也没有（用户明令）。8100 的进程号从
+2022624 换成 2596792，启动命令末尾多了那两个 flag（上面 `cmd` 的输出）。
+
+### 本次交付的 `make ci`（`bf022d4` 的树上，2026-09-25T10:41:47+08:00 起跑，load1=1.0）
+
+```
+All checks passed!                              # ruff check
+225 files already formatted                     # ruff format --check
+Success: no issues found in 138 source files    # mypy strict
+Contracts: 5 kept, 0 broken.                    # lint-imports
+reachability: 0 个问题
+capability-map: 0 个问题
+module-map: 0 个问题
+openapi 契约一致
+19 failed, 1078 passed, 10 skipped, 11 warnings in 554.89s (0:09:14)   # pytest --cov
+make: *** [Makefile:56：coverage] 错误 1
+```
+
+**`CI_EXIT=2`，耗时 554.89 秒（9分14秒）。** 计数对照上一次（同一个 §2n，未改动前）：
+`18 failed, 1075 passed, 10 skipped`——**passed +3 正是本次新增的三条用例**（1080 里绿的
+那批），红的一条没多。
+
+**这 19 条红是环境红，不是代码红**（`git stash` 对照，判据是「同一批红」）：
+
+```
+=== git status (改动前) ===  6 个文件 M
+stash_rc=0
+=== git status (stash 后，应为空) ===
+=== 未改动树上的同一批文件 ===
+BEFORE_TREE_EXIT=1
+19
+=== 改动树 vs 未改动树的失败集合 ===
+IDENTICAL（逐行相同，19 条）
+=== git status (还原后) ===  6 个文件 M
+```
+
+19 条全在两个 GPU 依赖的层（`e2e/test_visual_search.py` 7 条、`e2e/test_assistant_turn.py`
+4 条、`integration/test_face_detector.py` 6 条、`integration/test_face_embedding.py` 2 条），
+根因同一条：
+
+```
+onnxruntime ... CUBLAS failure 3: the resource allocation failed ;
+GPU=0 ; ... expr=cublasCreate(&cublas_handle_);
+```
+
+**vLLM 起来以后一直占着 ~19 GB / 24 GB**（本次重启前后都是），onnxruntime 的 CUDA provider
+拿不到显存。与 §2n 那次是同一个环境状态，与本次改动无关。
+
+**一处要如实说**：`make ci` 在 `coverage` 这步就退出了（make 遇错即停），所以链尾的
+`web-check`（前端 tsc/oxlint/vitest/vite build）**没有在 ci 里跑到**。单独跑过，是绿的：
+
+```
+$ make web-check      # rc=0
+✓ 29 modules transformed.
+dist/assets/index-CX99wMss.js   240.85 kB │ gzip: 75.79 kB
+✓ built in 80ms
+```

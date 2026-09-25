@@ -85,12 +85,20 @@ class FailingModel:
 
 
 class DiesAfterPlanning:
-    """规划照常，进主循环就挂。"""
+    """规划照常，进主循环就挂。
+
+    抛的是 ``ModelServiceError``（与 ``FailingModel`` 同一条理由：假件比真件宽松，就验不出
+    「上层只认那个类型」这类问题）。文案里就是 8100 缺 tool-call flag 时那句真实的 400。
+    """
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
         if not tools:
             return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
-        raise RuntimeError("端点挂了")
+        raise ModelServiceError(
+            "模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400："
+            r'{"error":{"message":"\"auto\" tool choice requires --enable-auto-tool-choice'
+            r' and --tool-call-parser to be set"}}'
+        )
 
 
 def build_client(settings, model) -> TestClient:
@@ -265,7 +273,13 @@ def test_a_dead_endpoint_is_reported_as_the_model_service(settings):
 
 
 def test_a_model_that_dies_after_planning_is_reported_as_failed(settings):
-    """规划成功、主循环才挂时，才是 ``failed`` / ``model_error``。"""
+    """规划成功、主循环才挂时，才是 ``failed`` / ``model_error``。
+
+    **且文案要可执行**（用户 2026-09-25 裁决二）：说模型服务、带端点、带服务端给的原因。
+    8100 没有 ``--enable-auto-tool-choice`` / ``--tool-call-parser`` 时，任何带 ``tools``
+    的请求一律 400（见 ``docs/refactor/s5-deviations.md`` §2n）——那句话里写着根因，
+    不能让它只在日志里落地为止。
+    """
     client = build_client(settings, DiesAfterPlanning())
     _conversation_id, turn_id = run_turn(client)
 
@@ -273,7 +287,9 @@ def test_a_model_that_dies_after_planning_is_reported_as_failed(settings):
 
     assert complete["status"] == "failed"
     assert complete["termination_reason"] == "model_error"
-    assert "模型不可用" in complete["answer"]
+    assert "模型服务不可用" in complete["answer"]
+    assert "http://127.0.0.1:8100/v1" in complete["answer"]
+    assert "--tool-call-parser" in complete["answer"]
 
 
 def test_a_late_subscriber_still_gets_the_whole_turn(client: TestClient):

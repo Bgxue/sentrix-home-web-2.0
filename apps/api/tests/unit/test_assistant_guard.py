@@ -323,7 +323,39 @@ def test_the_fallback_is_honest_when_nothing_was_found():
     )
 
     assert "没有检索到照片" in text
-    assert "模型不可用" in text
+    assert "模型服务不可用" in text
+
+
+def test_the_fallback_carries_the_service_side_reason_when_there_is_one():
+    """服务这一侧的失败要带上端点与服务端给的原因（用户 2026-09-25 裁决二）。
+
+    「模型服务不可用」单独一句不可执行：8100 缺 tool-call flag 时，服务端那句 400 已经把
+    根因写得清清楚楚，它不能只落在日志里。
+    """
+    text = fallback_answer(
+        reason=TerminationReason.MODEL_ERROR,
+        ledger=ledger(EvidenceType.PHOTO_SET),
+        photo_count=0,
+        delivered_count=0,
+        detail='模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400：{"error":…}',
+    )
+
+    assert "模型服务不可用" in text
+    assert "http://127.0.0.1:8100/v1" in text
+    assert "400" in text
+
+
+def test_the_fallback_invents_no_endpoint_when_there_is_no_detail():
+    """反向门禁：没有服务侧说明时不许凭空补一个端点出来。"""
+    text = fallback_answer(
+        reason=TerminationReason.MODEL_ERROR,
+        ledger=ledger(EvidenceType.PHOTO_SET),
+        photo_count=0,
+        delivered_count=0,
+    )
+
+    assert "模型服务不可用" in text
+    assert "http" not in text
 
 
 def test_clarify_answer_is_used_before_a_ledger_exists():
