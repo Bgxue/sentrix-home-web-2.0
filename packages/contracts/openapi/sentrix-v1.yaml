@@ -975,6 +975,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory-spaces:
+    get:
+      tags:
+      - spaces
+      summary: List Memory Spaces
+      operationId: list_memory_spaces_api_v1_memory_spaces_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  items:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  type: array
+                type: object
+                title: Response List Memory Spaces Api V1 Memory Spaces Get
 components:
   schemas:
     AssetListResponse:

@@ -1,0 +1,38 @@
+/* 可复用展示组件。
+ *
+ * 逐行移植 1.0 ``src/styles.css``：页头与按钮在 ``:77-90``，区块在 ``:110-112``，
+ * 空状态在 ``:142``。**只搬 F1 用得到的那些**——页面专属的样式（时间线、人物图谱、
+ * 导入流水线等）随它们在 F2–F5 各自的页面一起搬，不提前抄一份没人用的。 */
+
+/* ---- 页头（对应 1.0 的 pageHeader(kicker, title, description, action)）---- */
+
+.page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 30px; }
+.eyebrow, .section-kicker { color: var(--green); font-size: 10px; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; margin: 0 0 12px; }
+.page-heading h1 { font-size: clamp(28px, 3vw, 42px); letter-spacing: -.045em; line-height: 1.1; margin: 0; max-width: 850px; }
+.page-description { max-width: 680px; color: var(--muted); font-size: 13px; line-height: 1.7; margin: 12px 0 0; }
+
+/* ---- 按钮 ---- */
+
+.button { min-height: 38px; border: 1px solid transparent; border-radius: 9px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.button.primary { background: var(--lime); color: var(--ink); }
+.button.primary:hover { background: #c4ff61; }
+.button.ghost { border-color: var(--line); background: #fff; color: var(--ink); }
+.button.ghost:hover { background: var(--soft); }
+.button.small { min-height: 29px; padding: 0 10px; font-size: 10px; }
+.button.full { width: 100%; }
+.text-button { border: 0; background: transparent; padding: 4px 0; color: var(--green); font-weight: 750; font-size: 11px; }
+.text-button:hover { color: var(--ink); }
+.icon { display: inline-block; }
+
+/* ---- 区块 ---- */
+
+.content-section { margin-top: 42px; }
+.section-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 17px; }
+.section-head h2 { font-size: 21px; letter-spacing: -.035em; margin: 0; }
+
+/* ---- 空状态（对应 1.0 的 emptyState(title, description, action)）---- */
+
+.empty-search { padding: 85px 20px; text-align: center; border: 1px dashed var(--line); border-radius: 14px; }
+.empty-symbol { width: 50px; height: 50px; border-radius: 50%; margin: 0 auto 18px; display: grid; place-items: center; background: var(--lime); font-size: 25px; }
+.empty-search h2 { font-size: 24px; margin: 0 0 8px; }
+.empty-search p { color: var(--muted); font-size: 12px; margin: 0 auto; max-width: 420px; line-height: 1.7; }

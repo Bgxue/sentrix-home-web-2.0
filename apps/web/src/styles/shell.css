@@ -1,0 +1,55 @@
+/* 壳层：侧边栏 / 顶栏 / 内容区。
+ *
+ * 逐行移植 1.0 ``src/styles.css:27-76``。类名一个不改——F6 要拿 2.0 的截图与 1.0 逐页
+ * 对拍，同名同类才好对照。 */
+
+.app-shell { min-height: 100vh; display: flex; background: var(--surface); }
+
+.sidebar { width: 240px; height: 100vh; position: sticky; top: 0; align-self: flex-start; background: var(--ink); color: #fff; padding: 24px 14px 18px; display: flex; flex-direction: column; flex: 0 0 240px; overflow-y: auto; }
+.brand-lockup { display: flex; align-items: center; gap: 10px; padding: 0 10px 26px; }
+.brand-lockup strong { display: block; font-size: 17px; letter-spacing: -.02em; }
+.brand-lockup small { display: block; color: #8e958a; font-size: 10px; margin-top: 3px; }
+.brand-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: var(--lime); color: var(--ink); font-weight: 850; }
+.space-switcher { padding: 11px 10px; border: 1px solid #30342f; border-radius: 12px; display: flex; align-items: center; gap: 9px; margin-bottom: 26px; }
+.space-switcher b, .space-switcher small { display: block; }
+.space-switcher b { font-size: 11px; }
+.space-switcher small { color: #858d82; font-size: 9px; margin-top: 3px; }
+.space-switcher .muted { margin-left: auto; color: #858d82; }
+.side-label { padding: 0 11px 9px; color: #737a70; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.side-label.lower { margin-top: 23px; }
+.main-nav { display: grid; gap: 3px; }
+.nav-item { min-height: 40px; border: 0; border-radius: 9px; background: transparent; color: #aeb5a9; display: flex; align-items: center; gap: 10px; padding: 0 11px; text-align: left; font-size: 12px; }
+.nav-item:hover { color: #fff; background: #242823; }
+.nav-item.active { color: var(--ink); background: var(--lime); font-weight: 750; }
+.nav-item .icon { width: 18px; color: var(--lime); font-size: 17px; text-align: center; }
+.nav-item.active .icon { color: var(--ink); }
+.nav-item em { margin-left: auto; padding: 2px 6px; border-radius: 999px; color: var(--ink); background: var(--lime); font-size: 9px; font-style: normal; }
+.nav-item.active em { background: var(--ink); color: var(--lime); }
+.sidebar-footer { margin-top: auto; padding: 15px 11px 0; border-top: 1px solid #30342f; color: #737a70; font-size: 9px; }
+.local-pulse { display: flex; align-items: center; gap: 7px; color: #c8cec2; margin-bottom: 8px; }
+.local-pulse i, .live-label i, .online-pill i{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--lime); box-shadow: 0 0 0 3px rgba(179,255,56,.1); }
+
+.main-content { min-width: 0; flex: 1; }
+.topbar { height: 72px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 34px; position: sticky; top: 0; z-index: 4; background: rgba(255,255,255,.94); backdrop-filter: blur(12px); }
+.breadcrumbs { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.breadcrumbs b { color: var(--line); }
+.breadcrumbs strong { color: var(--ink); }
+.breadcrumbs button { border: 0; background: transparent; padding: 0; color: var(--muted); font-size: 12px; cursor: pointer; }
+.breadcrumbs button:hover { color: var(--ink); }
+.breadcrumbs .crumb-back { display: inline-flex; align-items: center; gap: 4px; color: var(--green); font-weight: 700; }
+.top-actions { display: flex; gap: 14px; align-items: center; }
+.icon-button, .top-user { border: 0; background: transparent; color: var(--muted); }
+.icon-button { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-size: 15px; }
+.icon-button:hover { background: var(--soft); color: var(--ink); }
+.icon-button.bordered { border: 1px solid var(--line); }
+.top-user { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink); }
+.top-user .muted { color: var(--faint); }
+.avatar { display: inline-grid; place-items: center; border-radius: 50%; color: var(--ink); font-weight: 800; background: var(--lime); }
+.avatar.tiny { width: 25px; height: 25px; font-size: 10px; }
+.avatar.large { width: 48px; height: 48px; font-size: 16px; }
+.avatar.peach, .person-avatar.peach { background: var(--peach); }
+.avatar.gray, .person-avatar.gray { background: #dce0d9; }
+.avatar.blue, .person-avatar.blue { background: var(--blue); }
+.avatar.mint, .person-avatar.mint { background: var(--mint); }
+
+.view-root { padding: 34px 38px 80px; max-width: 1500px; margin: 0 auto; }

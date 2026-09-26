@@ -1,0 +1,52 @@
+/* 设计令牌与基础元素。
+ *
+ * 逐行移植 1.0 ``src/styles.css:1-26``（``:root`` 在 ``:3-21``，基础元素在
+ * ``:1,:22-26``）。**只搬不重写**——这一份是 1.0 已经验证过的观感，重构时不趁机
+ * 调配色或字号：调了就与 1.0 的截图对不上，「迁移而非重设计」也就无从验证。
+ *
+ * 与 1.0 的两处差异，都在下面各自写明理由。 */
+
+img { image-orientation: from-image; }
+
+:root {
+  /* 基调与面 */
+  --ink: #151613;
+  --muted: #73776e;
+  --faint: #9da39a;
+  --line: #e4e8df;
+  --surface: #ffffff;
+  --soft: #f5f7f1;
+
+  /* 强调色 */
+  --lime: #b3ff38;
+  --green: #20824f;
+
+  /* 头像与卡片底色 */
+  --mint: #dcece1;
+  --peach: #f4dfce;
+  --blue: #dce6f2;
+  --lavender: #e5e1f0;
+
+  --shadow: 0 18px 50px rgba(21, 22, 19, .07);
+
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: var(--surface);
+  font-synthesis: none;
+
+  /* 2.0 与 1.0 的差异之一：**明确声明浅色**。
+   * 1.0 这里是 ``color-scheme: light dark``，但它自己只做了浅色一套——系统开深色时
+   * 浏览器会把表单控件、滚动条画成深色，于是出现「浅色卡片 + 深色输入框」的错配。
+   * 2.0 要么两套都做，要么明确一套；这里选后者。 */
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: var(--surface); overflow-x: hidden; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+
+/* 2.0 与 1.0 的差异之二：``#root`` 要撑满视口。
+ * 1.0 的壳挂在 ``<body>`` 上，2.0 挂在 React 的 ``#root`` 里；不给高度的话
+ * ``.sidebar`` 的 ``height: 100vh`` 之外那套 flex 布局拿不到可分配空间。 */
+#root { min-height: 100vh; }

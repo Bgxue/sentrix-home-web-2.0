@@ -508,3 +508,36 @@ export async function batchConfirmPeople(
     body: JSON.stringify({ items }),
   });
 }
+
+/** 本地服务健康。字段就是后端 `/health` 的三个（`apps/api/src/sentrix/api/routes/health.py`）。 */
+export interface HealthResponse {
+  status: string;
+  version: string;
+  database: string;
+}
+
+export async function fetchHealth(): Promise<HealthResponse> {
+  return request<HealthResponse>("/health");
+}
+
+/**
+ * 记忆空间（相册）列表。
+ *
+ * 形状对齐 1.0 的消费处 `src/app.js:1161`：`spaceResult[0].value.spaces || []`，
+ * 即后端给 `{spaces: [...]}`。四个字段就是 `memory_spaces` 的四列，没有派生字段。
+ */
+export interface MemorySpace {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+}
+
+interface MemorySpaceListResponse {
+  spaces: MemorySpace[];
+}
+
+export async function listMemorySpaces(): Promise<MemorySpace[]> {
+  const body = await request<MemorySpaceListResponse>("/memory-spaces");
+  return body.spaces;
+}
