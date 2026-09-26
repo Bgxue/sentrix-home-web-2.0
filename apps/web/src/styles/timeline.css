@@ -1,0 +1,27 @@
+/* 时间线页。逐行移植 1.0 `src/styles.css:143`（`.timeline-layout` / `.timeline-main` /
+ * `.side-inspector` / `.inspector-note`）与 `:147`（`.empty-queue`）。 */
+
+.timeline-layout { display: grid; grid-template-columns: 1fr 280px; gap: 34px; }
+.timeline-main { position: relative; border-left: 1px solid var(--line); padding-left: 28px; }
+.side-inspector { border: 1px solid var(--line); border-radius: 13px; padding: 19px; height: fit-content; }
+.side-inspector h2 { font-size: 19px; line-height: 1.35; }
+.side-inspector > p:not(.section-kicker) { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.inspector-note { border-left: 2px solid #557ba7; padding: 11px 0 11px 12px; color: var(--muted); font-size: 10px; }
+.inspector-note strong, .inspector-note small { display: block; }
+.inspector-note strong { color: #557ba7; margin-bottom: 6px; }
+.inspector-note small { line-height: 1.6; }
+
+.empty-queue { padding: 38px; border: 1px dashed var(--line); text-align: center; }
+.empty-queue span { color: var(--green); font-size: 23px; }
+.empty-queue strong, .empty-queue p { display: block; }
+.empty-queue strong { margin-top: 8px; font-size: 12px; }
+.empty-queue p { color: var(--muted); font-size: 10px; }
+
+.filter-row, .people-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 22px; }
+.filter-spacer { flex: 1; }
+.filter-chip { border: 1px solid var(--line); border-radius: 999px; background: #fff; padding: 8px 12px; color: var(--muted); font-size: 10px; }
+.text-button { border: 0; background: transparent; padding: 4px 0; color: var(--green); font-weight: 750; font-size: 11px; }
+.icon-button { border: 0; background: transparent; color: var(--muted); width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-size: 15px; }
+.icon-button.bordered { border: 1px solid var(--line); }
+.timeline-filter-note { color: var(--faint); font-size: 10px; margin: -12px 0 18px; }
+.timeline-count { color: var(--muted); font-size: 10px; }

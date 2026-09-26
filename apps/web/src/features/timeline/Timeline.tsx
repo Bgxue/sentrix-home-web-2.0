@@ -39,9 +39,12 @@ export function Timeline({ scopeId }: { scopeId: string }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<TimelinePhoto | null>(null);
+  // 刷新：把 nonce 并进 key，首屏那个 effect 的依赖跟着变，自然重跑。
+  // 比另写一条 reload 路径好——两条路径迟早会漂开。
+  const [nonce, setNonce] = useState(0);
   const sentinel = useRef<HTMLDivElement | null>(null);
 
-  const key = `${scopeId}\u0000${place}`;
+  const key = `${scopeId}\u0000${place}\u0000${nonce}`;
   // 「首屏还在加载」是**推导**出来的：当前这组筛选条件的页面还没到，就是加载中。
   // 用一个 state 去记它就得在 effect 里同步 setState，那会级联渲染
   // （oxlint 的 react(set-state-in-effect) 报的就是这件事，它给的解法正是
@@ -104,21 +107,46 @@ export function Timeline({ scopeId }: { scopeId: string }) {
 
   return (
     <section className="timeline">
-      <div className="timeline-bar">
-        <h2>时间线</h2>
+      <div className="filter-row">
         {/* 地点筛选走后端：前端只把用户输入原样传过去，不做任何地名计算。 */}
         <input
+          className="filter-chip"
           aria-label="按地点筛选"
           placeholder="按地点筛选（后端匹配）"
           value={place}
           onChange={(event) => setPlace(event.target.value)}
         />
-        <span className="timeline-count">
-          {shown} / {total} 个事件
-        </span>
+        {place ? (
+          <button type="button" className="text-button" onClick={() => setPlace("")}>
+            清除筛选
+          </button>
+        ) : null}
+        <span className="filter-spacer" />
+        <span className="timeline-count">{shown} / {total} 个事件</span>
+        <button
+          type="button"
+          className="icon-button bordered"
+          aria-label="刷新时间线"
+          onClick={() => setNonce((value) => value + 1)}
+        >
+          ↻
+        </button>
       </div>
+      {/* 1.0 的筛选行还有「有人物 / 有地点」两片，那是它在**一次全量拉回的列表**上做
+          客户端筛选。2.0 的 /timeline 是分页的，照搬会变成「只在当前这一页里筛」——
+          结果看起来对、实际漏掉后面所有页，而且不报错。后端目前只有 place 一个
+          筛选参数，所以那两片等后端出了布尔参数再加。 */}
+      <p className="timeline-filter-note">
+        按人物或有无地点筛选需要后端加参数，当前只支持按地点文字匹配。
+      </p>
       {error ? <p className="error">{error}</p> : null}
-      {days.length === 0 && !loading ? <p>还没有事件。先导入一批照片。</p> : null}
+      {days.length === 0 && !loading ? (
+        <div className="empty-queue">
+          <span aria-hidden="true">↕</span>
+          <strong>{place ? "这个地点还没有事件" : "还没有事件"}</strong>
+          <p>{place ? "换一个地点词，或清除筛选查看全部。" : "导入并处理资料后，记忆会自动出现在这里。"}</p>
+        </div>
+      ) : null}
       {days.map((day) => (
         <div className="timeline-day" key={day.date}>
           <h3>{day.date}</h3>
