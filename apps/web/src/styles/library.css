@@ -1,0 +1,37 @@
+/* 资料库页。逐行移植 1.0 `src/styles.css` 的对应规则，类名不改。
+ *
+ * `.filter-*` :143 · `.library-summary` :145 · `.album-*` :152,:154 ·
+ * `.asset-*` :136,:155,:162-167 */
+
+.filter-row, .people-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 22px; }
+.filter-spacer { flex: 1; }
+.filter-chip { border: 1px solid var(--line); border-radius: 999px; background: #fff; padding: 8px 12px; color: var(--muted); font-size: 10px; }
+.filter-chip.active, .filter-chip:hover { border-color: var(--lime); background: #effbdc; color: var(--ink); }
+.sort-label { color: var(--muted); font-size: 10px; }
+
+.library-summary { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 22px; }
+.library-summary div { padding: 18px 20px; border-right: 1px solid var(--line); }
+.library-summary div:last-child { border-right: 0; }
+.library-summary strong, .library-summary span { display: block; }
+.library-summary strong { font-size: 22px; }
+.library-summary span { color: var(--muted); font-size: 10px; margin-top: 6px; }
+.library-summary .muted-stat { background: var(--soft); }
+
+.album-summary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: -4px 0 15px; color: var(--muted); font-size: 10px; }
+.album-summary-row strong { color: var(--ink); font-size: 11px; }
+.album-summary-row span { display: inline-flex; align-items: center; gap: 5px; }
+
+.asset-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.asset-card { padding: 0; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; background: #fff; text-align: left; }
+.asset-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
+.asset-thumb { position: relative; min-height: 150px; overflow: hidden; background: var(--soft); display: grid; place-items: center; color: var(--muted); }
+.asset-thumb img, .asset-thumb video { width: 100%; height: 100%; min-height: 150px; object-fit: cover; display: block; }
+.asset-thumb b { position: absolute; left: 10px; bottom: 10px; padding: 4px 7px; background: rgba(255,255,255,.9); color: var(--ink); border-radius: 4px; font-size: 9px; }
+.asset-type-mark { font-size: 14px; font-weight: 700; }
+.asset-info { padding: 11px; }
+.asset-info strong, .asset-info small, .asset-info span { display: block; }
+.asset-info strong { font-size: 11px; }
+.asset-info small { color: var(--muted); font-size: 9px; margin-top: 5px; }
+.asset-info span { color: var(--green); font-size: 9px; margin-top: 9px; }
+.asset-info-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.asset-info-head strong { min-width: 0; }
