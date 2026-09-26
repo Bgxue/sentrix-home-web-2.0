@@ -565,3 +565,11 @@ export async function importAsset(file: File, scopeId: string): Promise<ImportRe
   form.append("scope_id", scopeId);
   return request<ImportResponse>("/media/import", { method: "POST", body: form });
 }
+
+/** 某个相册范围下的会话列表。`GET /api/v1/assistant/conversations`。 */
+export async function listConversations(scopeId: string): Promise<ConversationSummary[]> {
+  const body = await request<{ items: ConversationSummary[] }>(
+    `/assistant/conversations?scope_id=${encodeURIComponent(scopeId)}`,
+  );
+  return body.items;
+}

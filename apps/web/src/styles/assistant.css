@@ -1,0 +1,10 @@
+/* 助手页。`assistant-layout` 的列宽照 1.0 `src/app.js:622-623` 的结构（左栏 + 主区）。 */
+
+.assistant-layout { display: grid; grid-template-columns: 250px 1fr; gap: 22px; align-items: start; }
+.conversation-rail { display: grid; gap: 6px; border: 1px solid var(--line); border-radius: 13px; padding: 14px; position: sticky; top: 88px; }
+.rail-item { border: 1px solid transparent; border-radius: 9px; background: transparent; padding: 10px 11px; text-align: left; display: grid; gap: 4px; }
+.rail-item:hover { background: var(--soft); }
+.rail-item.active { background: var(--soft); border-color: var(--line); }
+.rail-item strong { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-item small { color: var(--muted); font-size: 9px; }
+.rail-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 10px 0; }

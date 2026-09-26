@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-import { createConversation, deliveredPhotoUrl } from "../../shared/api/client";
+import { deliveredPhotoUrl } from "../../shared/api/client";
 import { useTurnStream } from "./useTurnStream";
 
 interface Exchange {
@@ -17,18 +17,19 @@ interface Exchange {
  * 交付的照片只来自后端 ``complete`` 帧里的 ``attachments``——那是**模型显式调用
  * get_original_photos 交出去的那些**。前端不自己从候选里挑图，也不做任何相关性判断。
  */
-export function AssistantPanel({ scopeId }: { scopeId: string }) {
-  const [conversationId, setConversationId] = useState<string | null>(null);
+export function AssistantPanel({ conversationId }: { conversationId: string | null }) {
+  // 面板**不收 scopeId**：会话的创建与切换在 AssistantPage，scope 是那一层的事。
+  // 收一个自己不用的 prop 会让人以为这里也参与范围决策。
   const [text, setText] = useState("");
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   const { progress, result, busy, error, ask } = useTurnStream();
   const settled = useRef<string | null>(null);
 
+  // 换会话就清屏。回合是落库的，历史在服务端，重新进入时由上层决定要不要回放。
   useEffect(() => {
-    createConversation(scopeId)
-      .then((conversation) => setConversationId(conversation.id))
-      .catch(() => setConversationId(null));
-  }, [scopeId]);
+    setExchanges([]);
+    settled.current = null;
+  }, [conversationId]);
 
   // ``complete`` 到了就把答案补到最后一条提问上——回合是先落库再执行的，
   // 提问在发出去的那一刻就已经显示出来了。
