@@ -22,7 +22,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
+from conftest import skip_or_fail_on_load_error
 
 from sentrix.infrastructure.models.face_detector import (
     DEFAULT_MODEL_PATH,
@@ -41,10 +43,26 @@ SAMPLE_SIZE = 6
 MIN_PHOTOS_WITH_FACES = 4
 MIN_TOTAL_FACES = 10
 
-pytestmark = pytest.mark.skipif(
-    not Path(DEFAULT_MODEL_PATH).is_file(),
-    reason=f"缺 RetinaFace 权重 {DEFAULT_MODEL_PATH}",
-)
+
+@pytest.fixture(scope="module", autouse=True)
+def requires_a_loadable_detector() -> None:
+    """守卫查的是**能不能加载**，不是**权重在不在**。
+
+    原先这里是 ``pytest.mark.skipif(not Path(DEFAULT_MODEL_PATH).is_file(), ...)``——
+    一个**代理判据**：权重文件在、显存不够时它不跳过，用例在运行期炸成
+    ``CUBLAS failure 3`` / ``bfc_arena`` 分配失败（2026-09-26 实测：8100 的 vLLM
+    占住 24 GB 里的 22 GB）。报出来的失败读起来像实现坏了，实际是环境。
+
+    判据与 ``test_chinese_clip.py`` 一致：**真的加载一次**，加载不成就跳，并把真实
+    错因写进 reason。权重确实缺失仍是允许的部署形态，那条分支保留在前面。
+    """
+    instance = RetinaFaceTiledDetector()
+    if not instance.available:
+        pytest.skip(f"缺 RetinaFace 权重 {DEFAULT_MODEL_PATH}")
+    try:
+        instance.detect(np.zeros((64, 64, 3), dtype=np.uint8))
+    except Exception as error:  # noqa: BLE001 - 加载失败的形状由 onnxruntime 决定
+        skip_or_fail_on_load_error(str(error), what="RetinaFace")
 
 
 @pytest.fixture(scope="module")

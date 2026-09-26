@@ -30,6 +30,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from conftest import skip_or_fail_on_load_error
 
 from sentrix.infrastructure.models.face_adapter import (
     DEFAULT_MODEL_NAME,
@@ -52,8 +53,8 @@ REAL_RECOGNITION = Path.home() / ".insightface" / MODELS_SUBDIR / DEFAULT_MODEL_
 # ``FACE_MIN_SIZE``（64px），取 6 张会得到「一张脸都没有」——那是**数据**如此，不是链路坏了，
 # 但用例会红，而红的是测试的假设。10 张覆盖到有脸的那几张，同时把耗时压在十几秒。
 SAMPLE_SIZE = 10
-HAS_REAL_WEIGHTS = REAL_RECOGNITION.is_file()
-needs_weights = pytest.mark.skipif(not HAS_REAL_WEIGHTS, reason=f"缺 buffalo_l 识别权重 {REAL_RECOGNITION}")
+# 真权重的门槛**不能只看文件在不在**——那是代理判据。可见的守卫挪进 ``real_faces``
+# 夹具里（真加载一次），理由写在那里。
 
 
 # ---- 假件 --------------------------------------------------------------------------
@@ -583,9 +584,28 @@ def real_faces() -> list[tuple[str, list[Any]]]:
 
     两条真权重用例都读它，而不是各跑一遍：每张照片要走一遍 RetinaFace 分块 + 每张
     候选一次 SCRFD 复核，重复跑等于把 CI 的时间翻倍而一条新信息都不加。
+
+    **守卫也在这里。** 原先两条真权重用例各挂 ``@needs_weights``，而那个标记只查
+    ``REAL_RECOGNITION.is_file()``——文件在、显存不够时不跳过，用例在运行期报
+    「前 10 张照片一张脸都没检出」，读起来像数据问题或实现 bug，实际是环境
+    （2026-09-26 实测：8100 的 vLLM 占住 24 GB 里的 22 GB）。判据改成**真的加载
+    一次**，与 ``test_chinese_clip.py`` 一致。
     """
     adapter = FaceAdapter()
-    return [(name, adapter.detect(path)) for name, path in real_photos(SAMPLE_SIZE)]
+    if not adapter.available:
+        pytest.skip(f"缺 buffalo_l 识别权重 {REAL_RECOGNITION}")
+    try:
+        faces = [(name, adapter.detect(path)) for name, path in real_photos(SAMPLE_SIZE)]
+    except Exception as error:  # noqa: BLE001 - 只有 CudaProviderMissingError 会穿出来
+        skip_or_fail_on_load_error(str(adapter.error or error), what="buffalo_l")
+    # **异常接不住的那一路。** ``detect()`` 对除 ``CudaProviderMissingError`` 外的异常是
+    # **吞掉并返回 []**（它自己的理由：「人脸是可选能力，不该让整条导入链失败」），错因
+    # 记在 ``adapter.error``。于是「模型加载不了」与「这批照片本来就没脸」在返回值上
+    # 长得一模一样，断言会去怪数据——实测全量 CI 里正是这样红了 2 条，而单独跑同一个
+    # 文件却是绿的（两个场景的内存压力不同）。
+    if adapter.error:
+        skip_or_fail_on_load_error(adapter.error, what="buffalo_l")
+    return faces
 
 
 def real_photos(limit: int) -> list[tuple[str, Path]]:
@@ -603,7 +623,6 @@ def real_photos(limit: int) -> list[tuple[str, Path]]:
     return photos
 
 
-@needs_weights
 def test_real_photos_yield_buffalo_embeddings(real_faces: list[tuple[str, list[Any]]]) -> None:
     """真权重下的形状：每一张脸都是 512 维、都标着 buffalo_l。
 
@@ -620,7 +639,6 @@ def test_real_photos_yield_buffalo_embeddings(real_faces: list[tuple[str, list[A
             assert face.validity in {"verified", "uncertain"}
 
 
-@needs_weights
 def test_scrfd_landmarks_are_what_lets_a_real_face_be_verified(
     real_faces: list[tuple[str, list[Any]]],
 ) -> None:

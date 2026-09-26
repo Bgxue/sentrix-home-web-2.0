@@ -19,10 +19,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from conftest import skip_or_fail_on_load_error
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from sentrix.infrastructure.models.chinese_clip import DEFAULT_CHECKPOINT
 from sentrix.main import create_app
 
 PHOTO_FIXTURES = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
@@ -38,9 +38,11 @@ def requires_the_real_environment() -> None:
 
     两样缺一就跳过，并给出可执行的提示——与同目录 ``test_visual_search.py`` 对权重的
     处理保持一致（设计 §9.1：模型与真实功能验证由使用者负责，自动层只保证链路没坏）。
+
+    视觉权重那一条**不在这里判**：本夹具拿不到 app 实例，而另建探针会让探针自己占住
+    显存、app 再建第二个就 OOM（实测）。那一条由 ``require_visual_embedder`` 在真正
+    用到嵌入器的地方判，判据取 app 自己的实例。
     """
-    if not DEFAULT_CHECKPOINT.is_file():
-        pytest.skip(f"chinese-clip 权重不可用: {DEFAULT_CHECKPOINT}")
     import httpx
 
     from sentrix.config import Settings
@@ -78,7 +80,30 @@ def client(settings) -> TestClient:
     return TestClient(create_app(settings))
 
 
+def require_visual_embedder(client: TestClient) -> None:
+    """视觉嵌入器加载不到就跳过，而不是让断言去背这个锅。
+
+    判据取 **app 自己的**那个嵌入器（``container.visual_embedder``）——既真实，又不
+    额外占显存。两个坑都踩过，都记在这里：
+
+    - 原先的守卫查的是**代理判据**（``DEFAULT_CHECKPOINT.is_file()``）：权重文件在、
+      显存不够时不跳过，用例在运行期报「导入必须写成视觉向量」，读起来像实现坏了
+      （2026-09-26 实测：8100 的 vLLM 占住 24 GB 里的 22 GB，CLIP 在 ``model.to(device)``
+      处 OOM）；
+    - 改成在这里另建一个 ``ChineseClipVisualEmbedder()`` 探针**反而更糟**：探针自己
+      占住显存，app 再建第二个就 OOM，于是守卫不跳、测试照红（实测仍有 3 条红）。
+    """
+    embedder = client.app.state.container.visual_embedder
+    if not embedder.available:
+        skip_or_fail_on_load_error(embedder.load_error, what="chinese-clip")
+
+
 def import_photo(client: TestClient, name: str, payload: bytes) -> str:
+    # 守卫必须在 POST **之前**：``ChineseClipVisualEmbedder._load()`` 失败时**不缓存**
+    # 失败，所以「import 那一刻失败、紧接着重试却成功」是可能的。放在后面查会读到真值，
+    # 断言却拿着过期的 ``indexed: False`` 去红（实测 1 条）。放在前面还有第二个好处：
+    # 这一次 ``available`` 会把模型真的加载并缓存住，随后这次 import 看到的是同一个状态。
+    require_visual_embedder(client)
     response = client.post(
         "/api/v1/media/import",
         files={"file": (name, payload, "image/jpeg")},

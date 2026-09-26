@@ -13,6 +13,30 @@ from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.main import create_app
 
+# ---- 加载失败：环境原因才跳过，代码原因必须红 --------------------------------------
+#
+# 守卫一旦对**任何**加载失败都 pytest.skip，模型加载的代码级损坏（模型名写错、import
+# 路径变了、权重格式不对）就会被静默跳掉——`test_chinese_clip.py` 与两个 e2e 会一起
+# 跳过，没有任何一条自动化用例会红。跳过只对「**这个部署跑不了**」成立。
+#
+# 这份名单是**白名单**：只认下面这些措辞。不在名单里的错因一律 pytest.fail，让用例红。
+ENVIRONMENTAL_LOAD_FAILURES = (
+    "checkpoint missing",  # chinese_clip._load 自己写的措辞
+    "out of memory",  # torch / CUDA
+    "outofmemoryerror",
+    "cublas",  # onnxruntime CUDA provider 建不起来
+    "bfc_arena",  # onnxruntime 分配器分配失败
+    "no registered plugin ep device",  # CUDA EP 在这台机器上不可用
+)
+
+
+def skip_or_fail_on_load_error(error: str, *, what: str) -> None:
+    """加载失败时的分流：环境原因 skip，其余 fail。"""
+    lowered = error.lower()
+    if any(marker in lowered for marker in ENVIRONMENTAL_LOAD_FAILURES):
+        pytest.skip(f"{what} 在这个部署上加载不了（环境，不是代码）: {error}")
+    pytest.fail(f"{what} 加载失败，且错因不像环境问题——按代码问题处理: {error}")
+
 
 class FakeVisualEmbedder:
     """契约测试用的确定性嵌入器。
