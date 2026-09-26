@@ -289,3 +289,143 @@ class FaceDetection:
     validity: str = FACE_VALIDITY_VERIFIED
     identity_ready: bool = True
     identity_eligible: bool | None = None
+
+
+# ---- S5c：外观证据 / 人物瞬间 / 关系 / 画像 ----------------------------------------
+#
+# 这四张表的建表语句都在迁移 0006 里（外观证据与关系随 S5a 建，人物瞬间与画像修订随
+# 裁决②解冻后建）。它们的**写入者**在 S5c——所以模型放在这里、写者放在本切片。
+
+# 画像修订的来源。裁决②把「谁触发的」收成一个受控词表：``pipeline`` 是导入后自动跑
+# 那一条，``manual`` 是显式请求，``repair`` 是校验不过之后的二次生成。
+# 1.0 这里是裸字面量（``person_insights.py:250`` 的 ``"pipeline"``），2.0 收一份：
+# 它同时是落库的值与判据，漂开一次就查不出「哪些画像是自动生成的」。
+PORTRAIT_TRIGGER_PIPELINE = "pipeline"
+PORTRAIT_TRIGGER_MANUAL = "manual"
+
+# 画像校验的**来源**（裁决：缺陷 2 的修法）。
+#
+# 模型的输出与确定性兜底是两种东西：前者的长度是模型自由发挥的，80–500 字是对它的
+# **约束**；后者的长度由模板唯一决定，把它也按 80–500 判，等于要求模板恰好落在那个
+# 区间里——1.0 的兜底模板实测 41 字，于是「兜底」永远通不过自己的校验，那条降级链
+# 的最后一格是假的。所以长度这条只对模型输出成立，由这个取值区分。
+PORTRAIT_SOURCE_MODEL = "model"
+PORTRAIT_SOURCE_DETERMINISTIC = "deterministic"
+
+PORTRAIT_STATUS_ACTIVE = "active"
+PORTRAIT_STATUS_USER_LOCKED = "user_locked"
+PORTRAIT_STATUS_SUPERSEDED = "superseded"
+
+MOMENT_STATUS_ACTIVE = "active"
+
+RELATIONSHIP_STATUS_PENDING = "pending"
+RELATIONSHIP_STATUS_CONFIRMED = "confirmed"
+# 1.0 ``db.py:5604`` 的 ``r.status != 'retracted'``：撤回过的关系不是「不存在」，
+# 是「存在过但已撤回」——它留在库里供审计，只是不进人物画像的证据包。
+RELATIONSHIP_STATUS_RETRACTED = "retracted"
+
+
+@dataclass(frozen=True, slots=True)
+class PersonMomentRecord:
+    """``person_moments`` 一行：这个人在这一条观察里做了什么。
+
+    ``interaction_target_ids`` 是**已解析成 person_id** 的互动对象（1.0 在
+    ``person_moments.py:167-172`` 把模型给的 P 标签翻成人，翻不出来的直接丢掉）——
+    落库的因此不是标签，是 id。``status`` 只有 ``active`` 一种在 2.0 被写出来，
+    ``list_person_moments`` 默认就按它筛。
+    """
+
+    id: str
+    scope_id: str
+    person_id: str
+    cluster_id: str
+    event_id: str
+    observation_id: str
+    asset_id: str
+    face_instance_id: str
+    action_text: str
+    interaction_target_ids: tuple[str, ...]
+    interaction_text: str
+    participation_style: str
+    visible_affect: str
+    social_role_cues: tuple[str, ...]
+    narrative_note: str
+    confidence: float
+    model_name: str
+    prompt_version: str
+    status: str
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipRecord:
+    """``relationships`` 一行 + 两端实体的名字。
+
+    ``subject_name`` / ``object_name`` 来自 ``JOIN entities``：证据包要的是**人话的
+    关系**（「张三 — 母亲 — 李四」），只给 id 的包对模型没有信息量。两端都是 person
+    实体这条过滤在 SQL 里（1.0 ``db.py:5603``），由 ``list_person_relationships`` 负责。
+    """
+
+    id: str
+    scope_id: str
+    subject_entity_id: str
+    predicate: str
+    object_entity_id: str
+    inverse_predicate: str | None
+    status: str
+    confidence: float
+    evidence_ids: tuple[str, ...]
+    revision: int
+    created_at: datetime | None
+    updated_at: datetime | None
+    subject_name: str = ""
+    object_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PortraitRevisionRecord:
+    """``person_portrait_revisions`` 一行：第 ``revision`` 版画像。
+
+    ``status`` 的三态与 1.0 相同：``active`` 是当前生效的，``superseded`` 是被下一版
+    顶掉的，``user_locked`` 是用户锁住的——锁住之后 ``create_portrait_revision``
+    **直接返回当前版本、不写新行**（1.0 ``db.py:6380``），这是用户在画像上唯一的
+    否决权，所以它必须是一条写在写入口的判据，而不是界面上的一个禁用按钮。
+    """
+
+    id: str
+    scope_id: str
+    person_id: str
+    revision: int
+    portrait_text: str
+    themes: tuple[dict[str, object], ...]
+    evidence_refs: tuple[dict[str, object], ...]
+    trigger_type: str
+    model_name: str
+    prompt_version: str
+    status: str
+    user_feedback: str | None
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AppearanceEvidenceRecord:
+    """``person_appearance_evidence`` 一行：这个人这段裁剪里的衣物描述。
+
+    唯一键是 ``(person_id, face_instance_id, model_name)``——换一个模型就是另一条
+    证据，不覆盖旧模型的结论（否则换模型重跑一次就把可比性抹掉了）。
+    """
+
+    id: str
+    person_id: str
+    face_instance_id: str
+    observation_id: str
+    asset_id: str
+    crop_bbox: tuple[float, ...]
+    clothing: tuple[str, ...]
+    confidence: float
+    model_name: str
+    status: str
+    created_at: datetime | None
+    updated_at: datetime | None
