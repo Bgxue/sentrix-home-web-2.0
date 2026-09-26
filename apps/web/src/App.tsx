@@ -1,55 +1,31 @@
-import { useEffect, useState } from "react";
+/**
+ * 应用入口：路由宿主。
+ *
+ * 1.0 用 `useState` 切视图（`src/app.js` 的 `state.view`），刷新会回到首页、也没法把
+ * 链接分享到具体页面。2.0 改为 URL 路由（用户 2026-09-25 裁决③）。
+ *
+ * 旧的 `styles.css` **暂时保留**：现有的 Timeline / PeopleView / AssistantPanel /
+ * AssetGrid / SearchBox 五个组件还在用它里面的类名，它们会在 F2–F5 各自迁进新骨架时
+ * 一起换掉，届时删掉那份。
+ */
 
-import { AssistantPanel } from "./features/assistant/AssistantPanel";
-import { AssetGrid } from "./features/library/AssetGrid";
-import { PeopleView } from "./features/people/PeopleView";
-import { SearchBox } from "./features/search/SearchBox";
-import { SearchResults } from "./features/search/SearchResults";
-import { Timeline } from "./features/timeline/Timeline";
-import { listAssets, type AssetSummary, type SearchResponse } from "./shared/api/client";
+import { BrowserRouter, Route, Routes } from "react-router";
 
-const SCOPE_ID = "album1";
-
-type View = "timeline" | "library" | "people";
+import { ROUTES, SHELL } from "./app/router";
+import { ScopeProvider } from "./app/ScopeProvider";
 
 export default function App() {
-  const [view, setView] = useState<View>("timeline");
-  const [assets, setAssets] = useState<AssetSummary[]>([]);
-  const [results, setResults] = useState<SearchResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    listAssets(SCOPE_ID)
-      .then(setAssets)
-      .catch((cause: Error) => setError(cause.message));
-  }, []);
-
   return (
-    <main className="app">
-      <h1>Sentrix Home 2.0</h1>
-      <nav className="views">
-        <button type="button" onClick={() => setView("timeline")} aria-pressed={view === "timeline"}>
-          时间线
-        </button>
-        <button type="button" onClick={() => setView("library")} aria-pressed={view === "library"}>
-          全部照片
-        </button>
-        <button type="button" onClick={() => setView("people")} aria-pressed={view === "people"}>
-          人物
-        </button>
-      </nav>
-      <AssistantPanel scopeId={SCOPE_ID} />
-      <SearchBox scopeId={SCOPE_ID} onResults={setResults} />
-      {error ? <p className="error">{error}</p> : null}
-      {results ? (
-        <SearchResults response={results} onClose={() => setResults(null)} />
-      ) : view === "timeline" ? (
-        <Timeline scopeId={SCOPE_ID} />
-      ) : view === "library" ? (
-        <AssetGrid assets={assets} />
-      ) : (
-        <PeopleView scopeId={SCOPE_ID} />
-      )}
-    </main>
+    <BrowserRouter>
+      <ScopeProvider>
+        <Routes>
+          <Route element={<SHELL />}>
+            {Object.entries(ROUTES).map(([path, Page]) => (
+              <Route key={path} path={path} element={<Page />} />
+            ))}
+          </Route>
+        </Routes>
+      </ScopeProvider>
+    </BrowserRouter>
   );
 }
