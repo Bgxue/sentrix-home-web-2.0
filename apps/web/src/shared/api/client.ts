@@ -541,3 +541,27 @@ export async function listMemorySpaces(): Promise<MemorySpace[]> {
   const body = await request<MemorySpaceListResponse>("/memory-spaces");
   return body.spaces;
 }
+
+/** 导入的响应体（`apps/api/src/sentrix/api/schemas/media.py` 的 `ImportResponse`）。 */
+export interface ImportResponse {
+  asset_id: string;
+  observation_id: string | null;
+  media_type: string;
+  status: string;
+  deduplicated: boolean;
+  /** 有没有真的写成视觉向量。1.0 的「导入成功但没有向量」在接口上完全不可见。 */
+  indexed: boolean;
+}
+
+/**
+ * 导入一个文件。`POST /api/v1/media/import`。
+ *
+ * 用 multipart：`file` 是文件本身、`scope_id` 是表单字段。**不要手写 Content-Type**——
+ * 浏览器要给 multipart 带上 boundary，手写会把 boundary 弄丢。
+ */
+export async function importAsset(file: File, scopeId: string): Promise<ImportResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("scope_id", scopeId);
+  return request<ImportResponse>("/media/import", { method: "POST", body: form });
+}

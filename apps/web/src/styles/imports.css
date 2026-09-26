@@ -1,0 +1,37 @@
+/* 导入页。逐行移植 1.0 `src/styles.css:147`（`.import-*` / `.dropzone` / `.pipeline-*`
+ * / `.queue-*` / `.empty-queue`），类名不改。 */
+
+.import-layout { display: grid; grid-template-columns: 1fr 360px; gap: 18px; }
+.dropzone { min-height: 286px; border: 1px dashed #b7c4b0; border-radius: 14px; background: #fbfdf8; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 11px; text-align: center; }
+.dropzone input { display: none; }
+.drop-icon { width: 45px; height: 45px; display: grid; place-items: center; border-radius: 50%; background: var(--lime); font-size: 22px; }
+.dropzone strong { font-size: 14px; }
+.dropzone small { color: var(--muted); font-size: 10px; }
+.import-notice { display: flex; gap: 12px; margin-top: 13px; padding: 15px; border: 1px solid #d7e2ef; border-radius: 11px; background: #f7faff; }
+.notice-mark { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--blue); color: #557ba7; font-weight: 800; font-size: 11px; }
+.import-notice strong { display: block; color: #557ba7; font-size: 11px; }
+.import-notice p { color: var(--muted); font-size: 10px; line-height: 1.6; margin: 6px 0 0; }
+.import-status { border: 1px solid var(--line); border-radius: 14px; padding: 19px; }
+.import-status h2 { font-size: 20px; margin: 23px 0 12px; }
+.live-label { color: var(--muted); font-size: 10px; display: inline-flex; align-items: center; gap: 6px; }
+.pipeline-row { display: flex; align-items: center; gap: 9px; padding: 12px 0; border-top: 1px solid var(--line); }
+.pipeline-state { width: 19px; height: 19px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; background: var(--soft); color: var(--muted); }
+.pipeline-state.done { background: var(--lime); color: var(--ink); }
+.pipeline-state.active { background: var(--mint); color: var(--green); }
+.pipeline-row div { flex: 1; }
+.pipeline-row strong, .pipeline-row small { display: block; }
+.pipeline-row strong { font-size: 10px; }
+.pipeline-row small { color: var(--muted); font-size: 9px; margin-top: 4px; }
+.pipeline-row em { color: var(--muted); font-size: 9px; font-style: normal; }
+.queue-list { border-top: 1px solid var(--line); }
+.queue-row { min-height: 62px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
+.queue-type { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 7px; background: var(--soft); font: 800 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.queue-row > div { flex: 1; }
+.queue-row strong, .queue-row small { display: block; }
+.queue-row strong { font-size: 11px; }
+.queue-row small { color: var(--muted); font-size: 9px; margin-top: 4px; }
+.queue-status { font-size: 9px; }
+.queue-status.queued { color: var(--green); }
+
+.panel-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.queue-status { color: var(--muted); }
