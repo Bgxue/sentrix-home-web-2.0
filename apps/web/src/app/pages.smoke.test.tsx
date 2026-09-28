@@ -10,7 +10,7 @@
  * 「测试每次都显式传参导致默认路径从未被执行」就是这个形状）。
  */
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -39,17 +39,16 @@ const EMPTY_SPACES = [{ id: "album1", name: "第一册", kind: "benchmark", stat
 
 // jsdom 没有 IntersectionObserver，而时间线用它做无限滚动。桩成「什么都不观察」——
 // 冒烟测的是「这一页能不能渲染」，不是滚动加载那一段。
-class NoopIntersectionObserver implements IntersectionObserver {
-  readonly root = null;
-  readonly rootMargin = "";
-  readonly thresholds: readonly number[] = [];
+// 不写成 `implements IntersectionObserver`：那个接口有几个 jsdom 用不到的成员
+// （scrollMargin 之类），逐一对齐只会让这条桩随 DOM 类型定义一起腐烂。
+const NoopIntersectionObserver = class {
   observe(): void {}
   unobserve(): void {}
   disconnect(): void {}
-  takeRecords(): IntersectionObserverEntry[] {
+  takeRecords(): never[] {
     return [];
   }
-}
+};
 vi.stubGlobal("IntersectionObserver", NoopIntersectionObserver);
 
 function mockClient(hasData: boolean) {
@@ -106,11 +105,21 @@ function mockClient(hasData: boolean) {
               ],
             },
           ],
+          scope_id: "album1",
+          offset: 0,
+          limit: 5,
           total: 1,
         }
-      : { days: [], total: 0 },
+      : { scope_id: "album1", offset: 0, limit: 5, total: 0, days: [] },
   );
-  vi.mocked(client.searchAssets).mockResolvedValue({ items: [], degraded: false, channels: [] });
+  vi.mocked(client.searchAssets).mockResolvedValue({
+    query: "测试",
+    backend: "test",
+    degraded: false,
+    degraded_reason: "",
+    authoritative_vectors: 0,
+    items: [],
+  });
 }
 
 function renderPage(path: string) {
