@@ -41,13 +41,7 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # ``docs/refactor/2026-09-24-s5c-implementation-plan.md`` 的任务表里已具名；
 # 按反向规则，它们一旦真被生产调用，这里必须删掉对应条目。
 PENDING_WIRING: dict[str, str] = {
-    "sentrix.domain.identity.appearance": "T85c/T85d",
     "sentrix.domain.identity.insights": "T86g",
-    "sentrix.domain.identity.moments": "T86e/T86f",
-    "sentrix.domain.identity.portrait": "T86g",
-    "sentrix.infrastructure.media.person_vision": "T86e/T86f",
-    "sentrix.infrastructure.media.person_vision_model": "T86f/T86g/T85d",
-    "sentrix.infrastructure.persistence.repositories.appearance": "T85d",
     "sentrix.infrastructure.persistence.repositories.moments": "T86f",
     "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
     "sentrix.infrastructure.persistence.repositories.relationships": "T86h",

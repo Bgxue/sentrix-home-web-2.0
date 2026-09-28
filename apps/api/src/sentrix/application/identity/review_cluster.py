@@ -6,12 +6,13 @@
 :5290。四件事回答的是同一个问题的四个答案：这一簇脸是不是一个人？
 是（confirm）／不是（reject）／和另一簇是同一个（merge）／里面混进了别人（split）。
 
-**确认之后事件侧要跟着改什么，这一层不自己算。** 1.0 的 ``confirm_face_cluster``
+**确认之后要跟着改什么，这一层不自己算。** 1.0 的 ``confirm_face_cluster``
 在同一个函数里既写身份（entities / mentions）又刷事件参与者、重分段、重建人物画像。
-2.0 把那三件事拆到 ``ConfirmedPersonEvents``（Task 81）与人物画像（Task 86，S5c）：
-它们读的正是这里写的提及，直接内联就是一个循环。``confirm`` 与 ``_merge_into_person``
-在写完提及之后各调一次 ``ConfirmedPersonEvents``，**依赖是构造参数、不是可选回调**——
-S4 栽过「零调用的纯规则」，一个现在没人传的钩子和它同类。
+2.0 把那几件事拆了出去：事件侧是 ``ConfirmedPersonEvents``（Task 81），外观证据是
+``ObserveAppearance``（Task 85d），人物画像是 Task 86（S5c）。它们读的正是这里写的
+提及，直接内联就是一个循环。``confirm`` 与 ``_merge_into_person`` 在写完提及之后各调
+一次前两个，**依赖是构造参数、不是可选回调**——S4 栽过「零调用的纯规则」，一个现在
+没人传的钩子和它同类。
 
 **顺序在这里是硬约束**：提及先写、投影后刷。反过来外部键（``entity_mentions``）是空的，
 参与者投影刷出来的就是一份没有人的名单——不报错，只是事件摘要里永远没有名字。
@@ -25,6 +26,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from sentrix.application.identity.observe_appearance import ObserveAppearance
 from sentrix.application.memories.assign_events import ConfirmedPersonEvents
 from sentrix.domain.errors import DomainError
 from sentrix.domain.identity.models import (
@@ -121,10 +123,14 @@ class ReviewCluster:
         entities: EntityRepository,
         facts: FactRepository,
         events: ConfirmedPersonEvents,
+        appearance: ObserveAppearance,
     ) -> None:
         self._faces = faces
         self._entities = entities
         self._facts = facts
+        # 确认之后的外观取样（Task 85d）。与 ``events`` 同理，**不是可选回调**——
+        # 1.0 的 ``_refresh_confirmed_person`` 无条件调它。
+        self._appearance = appearance
         # 确认之后的事件侧（参与者投影 + 重分段）。**不是可选参数**：一次确认如果不刷
         # 投影，事件里就查不到这个人，而那是「按人找照片」唯一的桥——少接一处不会报错。
         self._events = events
@@ -185,6 +191,11 @@ class ReviewCluster:
             self._write_family_role(scope_id, clean_name, role, observation_ids)
         # 1.0 ``db.py:5179-5180`` 的两句。**必须排在上面那些提及之后**：投影读的就是
         # ``entity_mentions``，提及还没写出来时刷出来的是一份空名单。
+        # 1.0 ``_refresh_confirmed_person`` 的第一件事就是它，排在事件侧之前。
+        # **必须排在提及之后**：取样那条 SQL 与仓储的第三重守卫读的都是
+        # ``entity_mentions``，提及还没写出来时它一张脸都挑不到——不报错，只是这个
+        # 人永远没有外观证据。与下面那两句是同一个约束。
+        self._appearance(entity.id)
         self._events.refresh_participants(observation_ids)
         self._events.resegment(entity.id)
         return ConfirmResult(entity=entity, merged_into=None)
@@ -224,6 +235,7 @@ class ReviewCluster:
         )
         # 同名合并那一路在 1.0 里也刷投影与重分段（``db.py:5233-5234``），目标换成了
         # 被并入的那个人——实例挂到他名下了，他的事件才是要改的那些。
+        self._appearance(target.id)
         self._events.refresh_participants([instance.observation_id for instance in instances])
         self._events.resegment(target.id)
         return ConfirmResult(entity=target, merged_into=target.id)

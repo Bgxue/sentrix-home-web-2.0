@@ -64,12 +64,13 @@ def seeded_db(migrations_ready_db: Database) -> Database:
 
 
 @pytest.fixture
-def review(seeded_db: Database, confirmed_person_events) -> ReviewCluster:
+def review(seeded_db: Database, confirmed_person_events, observe_appearance) -> ReviewCluster:
     return ReviewCluster(
         faces=SqliteFaceRepository(seeded_db),
         entities=SqliteEntityRepository(seeded_db),
         facts=SqliteFactRepository(seeded_db),
         events=confirmed_person_events(seeded_db),
+        appearance=observe_appearance(seeded_db),
     )
 
 

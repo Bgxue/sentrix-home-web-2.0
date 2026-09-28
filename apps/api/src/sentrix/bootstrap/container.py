@@ -24,7 +24,14 @@ from sentrix.domain.assistant.ports import (
     TurnEventBroker,
     TurnRepository,
 )
-from sentrix.domain.identity.ports import EntityRepository, FaceDetector, FaceRepository
+from sentrix.domain.identity.ports import (
+    AppearanceRepository,
+    EntityRepository,
+    FaceDetector,
+    FaceRepository,
+    PersonCropRenderer,
+    PersonVision,
+)
 from sentrix.domain.media.ports import (
     AssetRepository,
     MediaStorage,
@@ -53,11 +60,14 @@ from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
+from sentrix.infrastructure.media.person_vision import PillowPersonCropRenderer
+from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
 from sentrix.infrastructure.persistence.database import Database
+from sentrix.infrastructure.persistence.repositories.appearance import SqliteAppearanceRepository
 from sentrix.infrastructure.persistence.repositories.asset_places import SqliteAssetPlaceRepository
 from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
@@ -131,6 +141,14 @@ class Container:
     # 所以容器构造期没有模型开销，缺权重的机器上它会自己退化成空表（``available``）。
     face_detector: FaceDetector
 
+    # 外观证据与人物画像的三个模型入口（S5c）。与 ``vlm_observer`` 共用同一个端点与
+    # 同一份 ``ServedModel`` 探测；**构造它不建连接**，模型不可用时各方法返回 ``None``。
+    appearance_repository: AppearanceRepository
+    person_vision: PersonVision
+    # 头肩裁剪件（Task 85c）。按端口声明，不写具体类——装配点的可替换性只在类型上
+    # 才算数（module-map 开头那条不变量）。
+    person_crop_renderer: PersonCropRenderer
+
     chat_model: ChatModel
     vlm_observer: VlmObserver
     conversation_repository: ConversationRepository
@@ -180,6 +198,13 @@ class Container:
             face_repository=SqliteFaceRepository(database),
             entity_repository=entities,
             face_detector=FaceAdapter(),
+            appearance_repository=SqliteAppearanceRepository(database),
+            person_vision=OpenAIPersonVision(
+                settings.vlm_base_url,
+                served_model,
+                timeout_s=settings.vlm_timeout_s,
+            ),
+            person_crop_renderer=PillowPersonCropRenderer(),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
                 served_model,

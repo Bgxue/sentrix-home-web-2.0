@@ -205,3 +205,56 @@ def confirmed_person_events():
         )
 
     return _build
+
+
+@pytest.fixture
+def observe_appearance():
+    """造一个 ``ObserveAppearance``：确认之后的第三步（外观取样，Task 85d）。
+
+    装配写在这里一份，理由与 ``confirmed_person_events`` 逐字相同：它是
+    ``ReviewCluster`` 的必填构造参数，三个用例文件各写一遍，迟早有一处漏掉某个仓储，
+    然后那条用例测的是一个与生产不同的组合。
+
+    **模型一路是不通的**——``_UnavailablePersonVision`` 三个方法都返回 ``None``。
+    簇审阅那些用例验的是身份与事件，不是外观；而「模型不可用」正是生产上没配模型时
+    的真实状态（见 ``PersonVision`` 的 docstring：模型不可用一律返回 ``None``，
+    外观是增强、不是确认的前置条件）。所以确认路径在这些用例里照样得走完，
+    而不是被这个新钩子弄红。
+    """
+
+    from sentrix.application.identity.observe_appearance import ObserveAppearance
+    from sentrix.infrastructure.media.person_vision import PillowPersonCropRenderer
+    from sentrix.infrastructure.persistence.repositories.appearance import (
+        SqliteAppearanceRepository,
+    )
+    from sentrix.infrastructure.persistence.repositories.assets import (
+        SqliteObservationRepository,
+    )
+    from sentrix.infrastructure.persistence.repositories.entities import SqliteEntityRepository
+    from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
+
+    class _UnavailablePersonVision:
+        @property
+        def model_id(self) -> str:
+            return "unavailable"
+
+        def write_person_portrait(self, pack):
+            return None
+
+        def analyze_person_moments(self, path, labels, context=None):
+            return None
+
+        def analyze_person_appearance(self, path, metadata=None):
+            return None
+
+    def _build(db: Database) -> ObserveAppearance:
+        return ObserveAppearance(
+            faces=SqliteFaceRepository(db),
+            entities=SqliteEntityRepository(db),
+            observations=SqliteObservationRepository(db),
+            appearances=SqliteAppearanceRepository(db),
+            crops=PillowPersonCropRenderer(),
+            vision=_UnavailablePersonVision(),
+        )
+
+    return _build

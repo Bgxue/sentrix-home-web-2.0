@@ -347,6 +347,24 @@ class SqliteFaceRepository:
             ).fetchall()
         return [_row_to_instance(row) for row in rows]
 
+    def best_instance_for_person_in_event(self, person_id: str, event_id: str) -> FaceInstanceRecord | None:
+        """1.0 ``app.py:2026-2028``。两个 JOIN 都省不掉：``entity_mentions`` 决定
+        「这张脸算不算他的」，``event_observations`` 决定「这张脸在不在这个事件里」。
+        少了后者，每个事件取到的都会是全局最好的那张——一个人只会在自己最常出现的
+        那个事件里有外观证据。
+        """
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_INSTANCE_COLUMNS} FROM face_instances fi"
+                " JOIN assets a ON a.id = fi.asset_id"
+                " JOIN entity_mentions em ON em.face_instance_id = fi.id"
+                " JOIN event_observations eo ON eo.observation_id = fi.observation_id"
+                " WHERE em.entity_id = ? AND eo.event_id = ?"
+                " ORDER BY fi.quality DESC, fi.detection_confidence DESC LIMIT 1",
+                (person_id, event_id),
+            ).fetchone()
+        return _row_to_instance(row) if row else None
+
     def get_instance(self, instance_id: str) -> FaceInstanceRecord | None:
         with self._database.connect() as connection:
             row = connection.execute(

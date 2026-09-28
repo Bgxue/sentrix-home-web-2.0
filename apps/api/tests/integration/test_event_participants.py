@@ -469,7 +469,7 @@ def test_a_missing_entity_is_not_an_error(db: Database, projector: ConfirmedPers
 
 
 def test_confirming_a_cluster_merges_the_two_events_its_photos_created(
-    db: Database, entities: SqliteEntityRepository, confirmed_person_events
+    db: Database, entities: SqliteEntityRepository, confirmed_person_events, observe_appearance
 ):
     """这一条是这条路径的**验收句**：确认之前两张照片在两个事件里，确认之后在一个里。
 
@@ -504,6 +504,7 @@ def test_confirming_a_cluster_merges_the_two_events_its_photos_created(
         entities=entities,
         facts=SqliteFactRepository(db),
         events=confirmed_person_events(db),
+        appearance=observe_appearance(db),
     )
 
     result = review.confirm(cluster.id, name="妈妈")

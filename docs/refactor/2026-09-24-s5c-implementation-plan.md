@@ -104,14 +104,14 @@
 | # | 任务 | 依赖 | 状态 |
 |---|---|---|---|
 | **T85a** | `domain/identity/appearance.py` 裁剪几何（`expanded_person_crop`） | — | ✅ **完成** |
-| T85b | `domain/identity/ports.py` + `repositories/appearance.py`（外观证据读写） | T85a | ⬜ 未开始 |
-| T85c | `infrastructure/media/person_vision.py` 人物裁剪取样适配器（PIL 边界） | T85a | ⬜ 未开始 |
-| T85d | `application/identity/observe_appearance.py`（每人每事件取一张 → 模型 → 落库）+ 接进 `review_cluster.confirm` | T85b/T85c | ⬜ 未开始 |
+| T85b | `domain/identity/ports.py` + `repositories/appearance.py`（外观证据读写） | T85a | ✅ **完成** |
+| T85c | `infrastructure/media/person_vision.py` 人物裁剪取样适配器（PIL 边界） | T85a | ✅ **完成** |
+| T85d | `application/identity/observe_appearance.py`（每人每事件取一张 → 模型 → 落库）+ 接进 `review_cluster.confirm` | T85b/T85c | ✅ **完成** |
 | **T86a** | `domain/identity/moments.py` 词表 + 归一化 + 提示词 | — | ✅ **完成** |
-| T86b | `domain/identity/ports.py` + `repositories/moments.py`、`relationships.py`（含裁决② 的 `list_person_relationships`）、`portraits.py` | — | ⬜ 未开始 |
+| T86b | `domain/identity/ports.py` + `repositories/moments.py`、`relationships.py`（含裁决② 的 `list_person_relationships`）、`portraits.py` | — | ✅ **完成** |
 | **T86c** | `domain/identity/portrait.py` 证据包 / 强制校验 / 确定性兜底 | T86a | ✅ **完成** |
-| T86d | `domain/identity/insights.py` 核心人物排序 / 代表照选择 | — | ⬜ 未开始 |
-| T86e | `infrastructure/media/person_vision.py` 带编号预览渲染 + 模型端口（moments / appearance / portrait 三个方法） | T86a | ⬜ 未开始 |
+| T86d | `domain/identity/insights.py` 核心人物排序 / 代表照选择 | — | ✅ **完成** |
+| T86e | `infrastructure/media/person_vision.py` 带编号预览渲染 + 模型端口（moments / appearance / portrait 三个方法） | T86a | ✅ **完成** |
 | T86f | `application/identity/extract_moments.py`（`moments` 阶段） | T86a/T86b/T86e | ⬜ 未开始 |
 | T86g | `application/identity/run_insights.py` 5 阶段编排（含缺陷 3 的日志落点：2.0 没有 run 表） | T86c/T86d/T86f | ⬜ 未开始 |
 | T86h | `api/routes/insights.py` + `main.py` + 容器装配 | T86g | ⬜ 未开始 |

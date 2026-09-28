@@ -87,6 +87,18 @@ def render_numbered_preview(
         return handle.name, label_map
 
 
+class PillowPersonCropRenderer:
+    """``PersonCropRenderer`` 的实现。方法体就一行——**这一层本身没有逻辑**。
+
+    单独一个类而不是把 ``render_person_crop`` 直接当实现：application 只认端口，
+    而端口的方法叫 ``render``。这个类的全部职责是让 ``PIL`` 与 ``Image.open`` 的名字
+    停在 infrastructure 这一侧（同 ``PillowMetadataReader`` / ``PillowPreviewEncoder``）。
+    """
+
+    def render(self, asset_path: str | Path, bbox: Sequence[float] | None) -> tuple[str, list[int]]:
+        return render_person_crop(asset_path, bbox)
+
+
 def render_person_crop(
     asset_path: str | Path,
     bbox: Sequence[float] | None,

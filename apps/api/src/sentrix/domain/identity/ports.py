@@ -13,6 +13,7 @@ property 时，mypy 的 ``arg-type`` 不允许一个只读 property 去满足「
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Protocol
 
 from sentrix.domain.identity.models import (
@@ -98,6 +99,18 @@ class FaceRepository(Protocol):
         ...
 
     def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]: ...
+
+    def best_instance_for_person_in_event(self, person_id: str, event_id: str) -> FaceInstanceRecord | None:
+        """这个人在这个事件里质量最高的那张脸；没有就是 ``None``。
+
+        1.0 ``app.py:2026-2028`` 的 SQL，逐字搬：质量优先、检测置信度次之。
+
+        一个事件里同一个人可能被拍到二十次（``ObserveAppearance`` 的 docstring 写明
+        为什么只取一张）。**只认经 ``entity_mentions`` 确认给了他的实例**——那与外观
+        证据仓储的第三重守卫是同一条判据，这里先挡一次，好让「他不在这个事件里」与
+        「模型没看清」在调用方看来是两件事。
+        """
+        ...
 
     def find_instance(self, cluster_id: str, instance_id: str) -> FaceInstanceRecord | None:
         """只在**这个簇里**找这张脸。拆分的合法性就是这一条：实例不属于该簇 → 404。"""
@@ -591,6 +604,27 @@ class RelationshipRepository(Protocol):
     def retract(self, relationship_id: str) -> RelationshipRecord | None:
         """撤回：转 ``retracted`` 并 ``revision + 1``。**不删行**——撤回也要留痕。"""
         ...
+
+
+class PersonCropRenderer(Protocol):
+    """按人脸框裁出「头 + 上半身」并落成临时 JPEG。实现在
+    ``infrastructure/media/person_vision.py``。
+
+    **存在的理由就是分层契约。** ``application-purity`` 禁止 application import
+    infrastructure，而裁剪要 PIL——几何本身是纯的（``domain/identity/appearance.py``
+    的 ``expanded_person_crop`` 收的是一个只有 width/height/crop 的 Protocol），
+    但「打开哪个文件、写哪个临时文件」是 IO，只能在 infrastructure。同
+    ``PillowMetadataReader`` / ``PillowPreviewEncoder``：那两个类的名字里带 Pillow
+    不是啰嗦，是这条契约的凭证。
+
+    返回 ``(临时图路径, 源坐标)``。**临时文件由调用方删**——它就活在这一次模型调用里
+    （``person_vision`` 的 docstring 写明：裁剪件从不作为 Asset 或长期文件保存）。
+
+    ``ValueError`` 照常抛（框退化 / 图太小），由调用方决定这算不算一次失败：
+    在 ``ObserveAppearance`` 里算——那张照片跳过，整批继续。
+    """
+
+    def render(self, asset_path: str | Path, bbox: Sequence[float] | None) -> tuple[str, list[int]]: ...
 
 
 class PersonVision(Protocol):

@@ -44,6 +44,7 @@ from sentrix.api.schemas.identity import (
     SplitClusterRequest,
 )
 from sentrix.application.identity.name_person import NamePerson
+from sentrix.application.identity.observe_appearance import ObserveAppearance
 from sentrix.application.identity.review_cluster import ReviewCluster
 from sentrix.application.identity.seed_identity import (
     NoSeedFacesError,
@@ -106,12 +107,24 @@ def _confirmed_person_events(container: Container) -> ConfirmedPersonEvents:
     )
 
 
+def _observe_appearance(container: Container) -> ObserveAppearance:
+    return ObserveAppearance(
+        faces=container.face_repository,
+        entities=container.entity_repository,
+        observations=container.observation_repository,
+        appearances=container.appearance_repository,
+        crops=container.person_crop_renderer,
+        vision=container.person_vision,
+    )
+
+
 def _review_cluster(container: Container) -> ReviewCluster:
     return ReviewCluster(
         faces=container.face_repository,
         entities=container.entity_repository,
         facts=container.fact_repository,
         events=_confirmed_person_events(container),
+        appearance=_observe_appearance(container),
     )
 
 
