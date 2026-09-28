@@ -32,10 +32,16 @@ class EventRepository(Protocol):
     def list_active(self, scope_id: str, *, limit: int) -> Sequence[EventRecord]: ...
 
     def list_by_scope(
-        self, scope_id: str, *, limit: int, offset: int = 0, place: str = ""
-    ) -> Sequence[EventRecord]: ...
+        self, scope_id: str | None, *, limit: int, offset: int = 0, place: str = ""
+    ) -> Sequence[EventRecord]:
+        """``scope_id=None`` 表示**跨全部相册**（1.0 ``db.py:1514`` 的 ``if scope_id:``）。
 
-    def count_by_scope(self, scope_id: str, *, place: str = "") -> int: ...
+        空与 ``"home-default"`` 是两件事：前者是用户选了「全部相册」，后者是一个
+        真叫 home-default 的空间。
+        """
+        ...
+
+    def count_by_scope(self, scope_id: str | None, *, place: str = "") -> int: ...
 
     def apply_summary(
         self,

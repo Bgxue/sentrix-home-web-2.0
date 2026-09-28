@@ -144,3 +144,21 @@ def test_place_filter_is_applied_by_the_backend(client: TestClient, tmp_path: Pa
     assert [item["id"] for day in hit.json()["days"] for item in day["events"]] == [event.id]
     assert miss.json()["days"] == []
     assert miss.json()["total"] == 0
+
+
+def test_the_timeline_without_a_scope_covers_every_album(client: TestClient, tmp_path: Path) -> None:
+    """**空 scope = 全部相册**，与资料库那条同一形状，但根因多一层。
+
+    `read_timeline` 里原有一句 `target_scope = scope_id or DEFAULT_SCOPE_ID`，把空值
+    **强行兜底**成 `home-default` 再去过滤——而那个空间在 2.0 的空库里根本不存在。
+    表现是「时间线一个事件都没有」，而事件其实好好地在一个具体相册里。
+
+    1.0 `db.py:1514` 的 `if scope_id:` 才是这个语义：不传 = 不按空间过滤。
+    """
+    client.post("/api/v1/imports", json={"directory": str(album(tmp_path, count=3)), "scope_id": "album1"})
+
+    everything = client.get("/api/v1/timeline", params={"scope_id": ""}).json()
+    one_album = client.get("/api/v1/timeline", params={"scope_id": "album1"}).json()
+
+    assert everything["total"] == one_album["total"] > 0, "空 scope 必须覆盖到具体相册里的事件"
+    assert everything["scope_id"] == "", "回给调用方的是用户请求的范围，不是内部的兜底值"

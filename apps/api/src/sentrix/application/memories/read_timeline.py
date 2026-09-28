@@ -102,7 +102,12 @@ class ReadTimeline:
         匹配发生在 SQL 里（``place`` / ``admin_district`` 的子串），不是取回来再过滤——
         否则每一页的条数会随筛选条件变化，分页就说不清「还有没有下一页」。
         """
-        target_scope = scope_id or DEFAULT_SCOPE_ID
+        # **空 scope 表示全部相册，不兜底成某个空间。** 这里原先是
+        # ``scope_id or DEFAULT_SCOPE_ID``——把「用户在界面上选了全部相册」与
+        # 「用户想查一个叫 home-default 的空间」当成了同一件事，而后者在 2.0 的
+        # 空库里根本不存在。表现是「时间线一个事件都没有」，而事件其实好好地
+        # 在 album1 里（17 个）。1.0 ``db.py:1514`` 的 ``if scope_id:`` 就是这个意思。
+        target_scope = scope_id or None
         page_size = max(1, min(int(limit), MAX_LIMIT))
         start = max(0, int(offset))
         events = list(
@@ -122,7 +127,9 @@ class ReadTimeline:
             days[-1].events.append(self._expand(event))
 
         return TimelineResult(
-            scope_id=target_scope,
+            # 回给调用方的是**用户请求的范围**，不是内部用于过滤的值：
+            # 全部相册用空串表示（前端 `src/app.js` 的约定）。
+            scope_id=target_scope or "",
             days=tuple(TimelineDay(date=day.date, events=tuple(day.events)) for day in days),
             total=self._events.count_by_scope(target_scope, place=place),
             offset=start,

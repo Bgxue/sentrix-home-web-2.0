@@ -30,9 +30,17 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _scope_clause(scope_id: str, place: str) -> tuple[str, tuple[object, ...]]:
-    clause = " WHERE scope_id = ? AND status = 'active'"
-    params: list[object] = [scope_id]
+def _scope_clause(scope_id: str | None, place: str) -> tuple[str, tuple[object, ...]]:
+    """拼 WHERE。``scope_id=None`` = 跨全部相册（1.0 ``db.py:1514`` 的 ``if scope_id:``）。
+
+    无条件写 ``WHERE scope_id = ?`` 会让空串查 ``scope_id = ''``，返回空表——
+    **而那个空表看起来与「这个范围真的没有事件」一模一样**。
+    """
+    clause = " WHERE status = 'active'"
+    params: list[object] = []
+    if scope_id is not None:
+        clause += " AND scope_id = ?"
+        params.append(scope_id)
     if place:
         clause += " AND (place LIKE ? OR admin_district LIKE ?)"
         params.extend((f"%{place}%", f"%{place}%"))
@@ -127,7 +135,7 @@ class SqliteEventRepository:
         return [_row_to_event(row) for row in rows]
 
     def list_by_scope(
-        self, scope_id: str, *, limit: int, offset: int = 0, place: str = ""
+        self, scope_id: str | None, *, limit: int, offset: int = 0, place: str = ""
     ) -> Sequence[EventRecord]:
         clause, params = _scope_clause(scope_id, place)
         with self._database.connect() as connection:
@@ -138,7 +146,7 @@ class SqliteEventRepository:
             ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def count_by_scope(self, scope_id: str, *, place: str = "") -> int:
+    def count_by_scope(self, scope_id: str | None, *, place: str = "") -> int:
         clause, params = _scope_clause(scope_id, place)
         with self._database.connect() as connection:
             row = connection.execute(f"SELECT COUNT(*) AS n FROM events{clause}", params).fetchone()

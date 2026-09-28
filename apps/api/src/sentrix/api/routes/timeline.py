@@ -86,14 +86,16 @@ def _summarize_event(container: Container) -> SummarizeEvent:
 
 @router.get("/timeline")
 def read_timeline(
-    scope_id: str = "home-default",
+    # 空串与不传都表示**全部相册**（1.0 的 `if scope_id:`）。默认值从 "home-default"
+    # 改成 "" 是行为修正：原来不传会去查一个叫 home-default 的空间，而它不存在。
+    scope_id: str = "",
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     offset: int = Query(0, ge=0),
     place: str = Query("", max_length=60, description="地点筛选，服务端按地点/行政区匹配"),
     container: Container = Depends(get_container),
 ) -> TimelineResponse:
     result = _read_timeline(container).execute(
-        scope_id=scope_id, limit=limit, offset=offset, place=place.strip()
+        scope_id=scope_id or None, limit=limit, offset=offset, place=place.strip()
     )
     return TimelineResponse(
         scope_id=result.scope_id,
