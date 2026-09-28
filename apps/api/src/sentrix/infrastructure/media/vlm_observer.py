@@ -178,6 +178,33 @@ def semantics_from_payload(payload: dict[str, Any]) -> ObservationSemantics:
     )
 
 
+def chat_json(
+    endpoint: str, model: ServedModel, prompt: str, image: str | None, timeout_s: float
+) -> dict[str, Any] | None:
+    """一次「提示词（+ 图）→ JSON 对象」的往返。任何失败都返回 ``None``。
+
+    ``OpenAIVlmObserver`` 与 ``person_vision_model.OpenAIPersonVision`` 共用这一段：
+    请求体的形状（``content`` 是块数组、图走 ``image_url`` 的 data URL）与失败口径只在
+    这一处，改一次两边都动——两条链路都不许把「模型没答」升级成「导入失败」。
+    """
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if image is not None:
+        content.append({"type": "image_url", "image_url": {"url": image}})
+    try:
+        body = {
+            "model": model.current(),
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": MAX_ANSWER_TOKENS,
+        }
+        response = httpx.post(endpoint, json=body, timeout=timeout_s)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ModelServiceError, ValueError) as error:
+        log.warning("视觉调用失败，本次结果跳过: %s", error)
+        return None
+    return parse_json_object(_first_content(payload))
+
+
 class OpenAIVlmObserver:
     """实现 ``VlmObserver`` 端口。模型进程的生命周期不归 2.0 管。"""
 
@@ -225,22 +252,7 @@ class OpenAIVlmObserver:
         return semantics_from_payload(parsed)
 
     def _chat(self, prompt: str, image: str | None) -> dict[str, Any] | None:
-        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        if image is not None:
-            content.append({"type": "image_url", "image_url": {"url": image}})
-        try:
-            body = {
-                "model": self._model.current(),
-                "messages": [{"role": "user", "content": content}],
-                "max_tokens": MAX_ANSWER_TOKENS,
-            }
-            response = httpx.post(self._endpoint, json=body, timeout=self._timeout)
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ModelServiceError, ValueError) as error:
-            log.warning("视觉观察调用失败，本次观察跳过: %s", error)
-            return None
-        return parse_json_object(_first_content(payload))
+        return chat_json(self._endpoint, self._model, prompt, image, self._timeout)
 
 
 def _first_content(payload: object) -> str:

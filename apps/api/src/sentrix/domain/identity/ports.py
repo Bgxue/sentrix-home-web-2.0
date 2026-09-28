@@ -8,8 +8,7 @@ domain 只声明形状，SQL 在 infrastructure。两个仓储分开不是因为
 **成员一律声明成方法，只读属性用 ``@property``。** 沿用
 ``domain/retrieval/ports.py`` 里 ``VisualEmbedder`` 的注解：适配器把只读属性实现成
 property 时，mypy 的 ``arg-type`` 不允许一个只读 property 去满足「可写变量」的协议约定。
-本文件目前没有属性成员，这条备忘留给下一个往这里加属性的人——写成裸属性名会红。
-"""
+本文件里 ``PersonVision.model_id`` 就是按这条写的属性成员。"""
 
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from sentrix.domain.identity.models import (
     ENTITY_STATUS_PENDING,
     PORTRAIT_TRIGGER_MANUAL,
     PROPERTY_SOURCE_DERIVED,
+    AppearanceEvidenceRecord,
     EntityMentionRecord,
     EntityPropertyRecord,
     EntityRecord,
@@ -590,4 +590,89 @@ class RelationshipRepository(Protocol):
 
     def retract(self, relationship_id: str) -> RelationshipRecord | None:
         """撤回：转 ``retracted`` 并 ``revision + 1``。**不删行**——撤回也要留痕。"""
+        ...
+
+
+class PersonVision(Protocol):
+    """人物视觉的三个模型入口：画像 / 瞬间 / 外观。实现在 ``infrastructure/media/person_vision_model.py``。
+
+    三条方法各喂一条链路，**都不在导入的前置路径上**：模型不可用、读不了图、返回的不是
+    JSON——一律返回 ``None``。1.0 把这三条写在同一个客户端上
+    （``backend/model_clients.py:1291`` / ``:1316`` / ``:1332``），2.0 收成端口，是为了让
+    用例拿到的是一句「谁会调模型」，而不是一个能问端点要模型名的具体类。
+
+    三者的输入输出形状各按 1.0：
+
+    - ``write_person_portrait`` 收 ``portrait.compile_portrait_evidence`` 的证据包，
+      返回 ``normalize_writer_output`` 的形状（``portrait_text`` + ``themes``）——校验与
+      兜底不在这一步，仍由 ``portrait.py`` 那两个纯函数决定；
+    - ``analyze_person_moments`` 收带编号预览图（``person_vision.render_numbered_preview``
+      的产物）与本次真实画出的标签表，返回 ``{"moments": [...]}``，其中每条已经过了一遍
+      ``normalize_person_moments`` 的词表；
+    - ``analyze_person_appearance`` 收 ``appearance.expanded_person_crop`` 的产物，返回
+      ``{"clothing": [...], "confidence": float}``。
+
+    ``model_id`` 是**这次会请求的模型名**，供落库时记 ``model_name``
+    （``MomentRepository.upsert``）。1.0 把 ``self.model`` 塞在
+    ``analyze_person_appearance`` 的返回值里（``:1350``），2.0 提到端口上——与
+    ``VlmObserver.model_id`` 同一条口径。
+    """
+
+    @property
+    def model_id(self) -> str: ...
+
+    def write_person_portrait(self, pack: Mapping[str, object]) -> dict[str, object] | None: ...
+
+    def analyze_person_moments(
+        self,
+        path: str,
+        labels: Sequence[str],
+        context: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None: ...
+
+    def analyze_person_appearance(
+        self,
+        path: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None: ...
+
+
+class AppearanceRepository(Protocol):
+    """外观证据的读写。SQL 在 ``infrastructure/persistence/repositories/appearance.py``。
+
+    **写入口有三重守卫**（1.0 ``db.py:4485-4497``）：人存在且已确认、人脸实例存在、
+    以及**这个实例真的经 ``entity_mentions`` 确认给了这个人**。第三重挡的是
+    「把 A 的衣服记到 B 头上」——那正是这个功能最要紧的一种错。
+
+    唯一键是 ``(person_id, face_instance_id, model_name)``：换模型是**另一条**证据，
+    不覆盖旧模型的结论。
+    """
+
+    def record(
+        self,
+        *,
+        person_id: str,
+        face_instance_id: str,
+        crop_bbox: Sequence[float],
+        clothing: Sequence[str],
+        confidence: float,
+        model_name: str,
+    ) -> AppearanceEvidenceRecord:
+        """记一条，或覆盖同一 ``(人, 实例, 模型)`` 的那条。
+
+        ``observation_id`` / ``asset_id`` **从人脸实例带出来**，不由调用方传——
+        传进来的可能与实例对不上，而那种不一致事后从证据行上看不出来。
+        """
+        ...
+
+    def get(self, evidence_id: str) -> AppearanceEvidenceRecord | None: ...
+
+    def list_for(
+        self, person_id: str, *, include_empty: bool = False, limit: int = 500
+    ) -> Sequence[AppearanceEvidenceRecord]:
+        """这个人的外观证据，置信度降序。
+
+        ``include_empty=False`` 会滤掉 ``clothing`` 为空表的那些——**空表不是
+        「没穿衣服」，是「模型没能可靠归属给目标人物」**。
+        """
         ...
