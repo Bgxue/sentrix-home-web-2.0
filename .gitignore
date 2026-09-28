@@ -14,6 +14,10 @@ apps/photobench/config/vllm_targets.json
 .ruff_cache/
 .mypy_cache/
 .coverage
+# 并行 coverage 的临时分片（pytest-cov 写 .coverage.<host>.pid<N>.<随机>）。
+# 只忽略 .coverage 会让每一次 make ci 都在仓库里留下一个未跟踪文件，
+# 而 git add -A 会把它提交进去。
+.coverage.*
 htmlcov/
 apps/web/node_modules/
 apps/web/dist/
