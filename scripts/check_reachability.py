@@ -45,6 +45,7 @@ PENDING_WIRING: dict[str, str] = {
     "sentrix.domain.identity.insights": "T86g",
     "sentrix.domain.identity.moments": "T86e/T86f",
     "sentrix.domain.identity.portrait": "T86g",
+    "sentrix.infrastructure.persistence.repositories.moments": "T86f",
     "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
 }
 # 更早的一次：Task 75 落地后这张表曾**空过**——S5a 登记的三条（``review_cluster`` /

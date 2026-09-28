@@ -13,7 +13,7 @@ property 时，mypy 的 ``arg-type`` 不允许一个只读 property 去满足「
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from sentrix.domain.identity.models import (
@@ -29,6 +29,7 @@ from sentrix.domain.identity.models import (
     FaceDetection,
     FaceInstanceRecord,
     FacePrototypeRecord,
+    PersonMomentRecord,
     PersonNameMatch,
     PortraitRevisionRecord,
 )
@@ -489,4 +490,52 @@ class PortraitRepository(Protocol):
 
     def set_lock(self, revision_id: str, locked: bool) -> PortraitRevisionRecord | None:
         """锁 / 解锁一版。锁上转 ``user_locked``、解开转回 ``active``（1.0 ``db.py:6431``）。"""
+        ...
+
+
+class MomentRepository(Protocol):
+    """人物瞬间的读写。SQL 在 ``infrastructure/persistence/repositories/moments.py``。
+
+    **跨空间是一条硬不变量**：一条瞬间引用的六个对象（人 / 簇 / 事件 / 观察 /
+    资产 / 人脸实例）必须同属一个记忆空间，否则 ``upsert`` 抛 ``ValueError``
+    （1.0 ``db.py:6176``）。一处瞬间牵扯两个空间意味着上游的归属算错了——
+    这种错不会自己暴露，只会让画像把两个空间的人混成一个。
+    """
+
+    def upsert(
+        self,
+        *,
+        person_id: str,
+        observation_id: str,
+        prompt_version: str,
+        cluster_id: str,
+        event_id: str,
+        asset_id: str,
+        face_instance_id: str,
+        action_text: str = "",
+        interaction_target_ids: Sequence[str] = (),
+        interaction_text: str = "",
+        participation_style: str = "",
+        visible_affect: str = "",
+        social_role_cues: Sequence[str] = (),
+        narrative_note: str = "",
+        selection: Mapping[str, object] | None = None,
+        confidence: float = 0.0,
+        model_name: str = "unknown",
+    ) -> PersonMomentRecord:
+        """落一条瞬间。同一 ``(person_id, observation_id, prompt_version)`` 再写就是更新。
+
+        更新**不含** ``scope_id`` / ``person_id`` / ``observation_id`` /
+        ``prompt_version``——那四个是 upsert 的键，改了就不是同一条了。
+        """
+        ...
+
+    def list_for(
+        self,
+        *,
+        person_id: str | None = None,
+        scope_id: str | None = None,
+        status: str = "active",
+    ) -> Sequence[PersonMomentRecord]:
+        """按条件列瞬间，``created_at DESC``。``status=None`` 表示不按状态筛。"""
         ...
