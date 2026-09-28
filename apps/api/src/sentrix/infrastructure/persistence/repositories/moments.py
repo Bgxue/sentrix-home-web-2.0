@@ -9,10 +9,11 @@
 
 1. **没有 ``run_id``**：1.0 那列指向 ``person_insight_runs``，而那张表在 0006 里没建
    （``0006_identity.sql:234`` 写明这一列随之取消）。照抄 1.0 的列清单会直接报错。
-2. **``selection`` 写得进、读不回**：表里有 ``selection_json``，写入照旧（1.0 的
-   upsert 就写它），但 ``PersonMomentRecord`` 没有这个字段，所以读路径不还原它。
-   **这是一处不对称**——不是这次的疏漏，是记录类型在 S5c 就定成那样的。消费方
-   （T86f 的瞬间抽取）一旦需要它，就得先给记录加字段再改读路径。
+2. **``selection`` 在 T86f 之后读写对称了**。此前是一处不对称：表里有
+   ``selection_json``、写入照旧，但 ``PersonMomentRecord`` 没有这个字段，读路径不还原
+   它。当初把这件事挂在消费方名下是对的——T86f（瞬间抽取）正是那个消费方，它落地时
+   一并给记录加了 ``selection`` 字段、把 ``selection_json`` 补进 ``_COLUMNS``。
+   留一个只写不读的列等于「接了一半」：数据进去了，谁都拿不出来。
 3. **1.0 的兜底 ``scopes[0] if scopes else "home-default"`` 没搬**：六个引用列都有
    外键、六张表的 ``scope_id`` 都是 ``NOT NULL``，所以 ``scopes`` 不可能为空，
    那半句永远走不到。理由与 portraits 里去掉的那条完全相同。
@@ -33,7 +34,7 @@ _COLUMNS = (
     "id, scope_id, person_id, cluster_id, event_id, observation_id, asset_id,"
     " face_instance_id, action_text, interaction_target_ids_json, interaction_text,"
     " participation_style, visible_affect, social_role_cues_json, narrative_note,"
-    " confidence, model_name, prompt_version, status, created_at, updated_at"
+    " selection_json, confidence, model_name, prompt_version, status, created_at, updated_at"
 )
 
 # 1.0 ``_scope_for``（``db.py:6082-6089``）的 kind → 表名映射。**只留 2.0 用得上的**：
@@ -66,6 +67,16 @@ def _load_list(raw: object) -> tuple[str, ...]:
     except json.JSONDecodeError:
         return ()
     return tuple(str(item) for item in parsed) if isinstance(parsed, list) else ()
+
+
+def _load_object(raw: object) -> Mapping[str, object]:
+    """``selection_json`` 一格。解不出来就是空表——那一列 ``NOT NULL DEFAULT '{}'``，
+    所以「空」与「没有」在库里本来就是同一个值。"""
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _timestamp(raw: object) -> datetime | None:
@@ -267,6 +278,7 @@ def _record(row: sqlite3.Row | None) -> PersonMomentRecord | None:
         visible_affect=row["visible_affect"],
         social_role_cues=_load_list(row["social_role_cues_json"]),
         narrative_note=row["narrative_note"],
+        selection=_load_object(row["selection_json"]),
         confidence=float(row["confidence"]),
         model_name=row["model_name"],
         prompt_version=row["prompt_version"],

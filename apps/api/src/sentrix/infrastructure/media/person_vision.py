@@ -99,6 +99,19 @@ class PillowPersonCropRenderer:
         return render_person_crop(asset_path, bbox)
 
 
+class PillowPersonPreviewRenderer:
+    """``PersonPreviewRenderer`` 的实现。方法体一行——**这一层本身没有逻辑**。
+
+    同 ``PillowPersonCropRenderer``：application 只认端口，而端口的方法叫 ``render``。
+    这个类的全部职责是让 ``PIL`` 与 ``ImageDraw`` 的名字停在 infrastructure 这一侧。
+    """
+
+    def render(
+        self, asset_path: str | Path, faces: Sequence[Mapping[str, Any]]
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
+        return render_numbered_preview(asset_path, faces)
+
+
 def render_person_crop(
     asset_path: str | Path,
     bbox: Sequence[float] | None,

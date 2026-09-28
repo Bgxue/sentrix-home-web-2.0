@@ -42,6 +42,7 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # 按反向规则，它们一旦真被生产调用，这里必须删掉对应条目。
 PENDING_WIRING: dict[str, str] = {
     "sentrix.domain.identity.insights": "T86g",
+    "sentrix.application.identity.extract_moments": "T86g",
     "sentrix.infrastructure.persistence.repositories.moments": "T86f",
     "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
     "sentrix.infrastructure.persistence.repositories.relationships": "T86h",

@@ -37,6 +37,12 @@ PERSON_MOMENT_PROMPT = (
 
 # 1.0 ``person_moments.py:23``。归一化时白名单外的一律折成「无法判断」——
 # 参与方式是受控词表，不是自由文本。
+# 1.0 ``person_moments.py:186`` 的字面量。它是 ``person_moments`` 唯一键的一部分
+# （``(person_id, observation_id, prompt_version)``），所以它的含义是**提示词的版本**：
+# 改了 ``PERSON_MOMENT_PROMPT`` 就必须改它，否则重跑会把上一版提示词抽出来的瞬间
+# 当成本版的一部分更新掉——两次结论混在同一行里，事后分不开。
+PERSON_MOMENT_PROMPT_VERSION = "person-moment-v1"
+
 PARTICIPATION_STYLES = frozenset({"组织", "照顾", "陪伴", "共同参与", "旁观", "拍摄", "无法判断"})
 DEFAULT_PARTICIPATION_STYLE = "无法判断"
 

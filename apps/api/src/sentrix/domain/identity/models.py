@@ -20,7 +20,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 
 # ---- 取值常量 --------------------------------------------------------------------
@@ -356,6 +357,13 @@ class PersonMomentRecord:
     status: str
     created_at: datetime | None
     updated_at: datetime | None
+    # ``select`` 阶段写在选项上的那包元数据（``insights.select_representatives`` 的
+    # ``selection_json``）：版本 / 质量 / 体态可见度 / 去重阈值 / 事件覆盖数。
+    # **1.0 里它从来没落过库**——那个阶段算的是 ``selection_json``，而写入端读的是
+    # ``selection``，键名对不上（见 ``s5-deviations.md`` 第 135 条）。T86f 把它接上了。
+    # 声明成 ``Mapping`` 而不是 ``dict``：读侧只该读它，改它没有意义。
+    # **必须排在最后**：它有默认值，而 dataclass 不允许默认值后面再跟无默认值的字段。
+    selection: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

@@ -112,7 +112,7 @@
 | **T86c** | `domain/identity/portrait.py` 证据包 / 强制校验 / 确定性兜底 | T86a | ✅ **完成** |
 | T86d | `domain/identity/insights.py` 核心人物排序 / 代表照选择 | — | ✅ **完成** |
 | T86e | `infrastructure/media/person_vision.py` 带编号预览渲染 + 模型端口（moments / appearance / portrait 三个方法） | T86a | ✅ **完成** |
-| T86f | `application/identity/extract_moments.py`（`moments` 阶段） | T86a/T86b/T86e | ⬜ 未开始 |
+| T86f | `application/identity/extract_moments.py`（`moments` 阶段） | T86a/T86b/T86e | ✅ **完成** |
 | T86g | `application/identity/run_insights.py` 5 阶段编排（含缺陷 3 的日志落点：2.0 没有 run 表） | T86c/T86d/T86f | ⬜ 未开始 |
 | T86h | `api/routes/insights.py` + `main.py` + 容器装配 | T86g | ⬜ 未开始 |
 | T86i | **裁决④**：导入路由批末自动触发画像 | T86h | ⬜ 未开始 |

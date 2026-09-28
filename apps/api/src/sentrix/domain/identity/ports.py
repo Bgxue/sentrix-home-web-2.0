@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from sentrix.domain.identity.models import (
     DEFAULT_SCOPE_ID,
@@ -625,6 +625,27 @@ class PersonCropRenderer(Protocol):
     """
 
     def render(self, asset_path: str | Path, bbox: Sequence[float] | None) -> tuple[str, list[int]]: ...
+
+
+class PersonPreviewRenderer(Protocol):
+    """在一张原图上画出人脸框与 ``P1`` / ``P2`` 标签，返回
+    ``(临时图路径, 标签 → 身份)``。实现在 ``infrastructure/media/person_vision.py``。
+
+    与 ``PersonCropRenderer`` 同一条理由（``application-purity`` 不许 application
+    import infrastructure，而画框要 PIL），但两件事不一样：那个裁**一个人**给外观证据
+    用，这个画**一屋子人**给瞬间抽取用——模型要靠标签才能把 ``interaction_labels`` 里
+    的 ``P2`` 指回具体某个人。所以后者返回的那张表是**归属的唯一依据**，不是附带信息。
+
+    没有框的人脸按 1.0 的做法把标签画在左上角依次排下来，**而不是丢掉这一项**——
+    丢了他，模型会看到一个跳号的 ``P1``、``P3``，然后开始猜 ``P2`` 去哪了。
+
+    **临时文件由调用方删。** ``ValueError`` / ``OSError`` 照常抛，由调用方决定这算不算
+    一次失败（``ExtractMoments`` 里算：那张照片跳过，整批继续）。
+    """
+
+    def render(
+        self, asset_path: str | Path, faces: Sequence[Mapping[str, Any]]
+    ) -> tuple[str, dict[str, dict[str, Any]]]: ...
 
 
 class PersonVision(Protocol):

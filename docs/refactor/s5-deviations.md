@@ -2791,3 +2791,82 @@ import 或 `TYPE_CHECKING` 绕过——那样只是把违规藏进类型检查�
 **这一轮两次都是项目的门禁抓到的，不是我**：上一次是 pre-commit 的 doc-checks 抓到
 module-map 漏了两条边（T85c），这一次是全量测试抓到分层违规（T85d）。这恰好说明那两道
 门禁值得留着——它们抓的正是作者本人看不见的那类错。
+
+### 第 135 条 · `selection` 那一包元数据**从来没落过库**：两端各自都对，断的是键名
+
+1.0 的 `select` 阶段专门算了这包东西（`person_insights.py:103`）：
+
+```python
+item["selection_json"] = {
+    "version": "representative-v1",
+    "quality": ...,
+    "body_visibility": ...,
+    "duplicate_threshold": ...,
+    "event_coverage": ...,
+}
+```
+
+而写入端读的是另一个名字（`db.py:6204`）：
+
+```python
+data.get("narrative_note") or "", json_value(data.get("selection"), {}),
+```
+
+`person_moments.py` 全文没有往 payload 里放过 `selection` 键（`grep` 只命中 `extract`
+的循环变量名），于是 `data.get("selection")` 恒为 `None`、`json_value(None, {})` 恒为
+`{}`。**那一列在 1.0 里永远是空对象。**
+
+**真库对拍不了**：`data/sentrix.db` 的 `person_moments` 是 **0 行**——这个功能在 1.0
+生产上从没跑过（与「`SENTRIX_PERSON_INSIGHT_SCOPES` allowlist 从没生效过」吻合）。
+所以判据只能是结构的：select 阶段算了它、表里有这一列、写入端在读它，**唯一断的是
+键名**。三处合起来足够强，T86f 按证据接上。
+
+**这一条与本项目那个反复出现的家族同形，但形态又新了一号。** 前几次是「判据本身是空
+的」（代理条件、恒真断言、素材不在被测集合里）；这次两端**各自都是对的**：select
+阶段老实算了一包数据，写入端老实地读一个键、老实地 `json_value` 兜底、老实地写进
+`ON CONFLICT DO UPDATE`。没有任何一行代码是错的，也没有任何门禁能发现——因为要发现
+它，得同时看两个文件的两个字符串，而它们各自读起来都通顺。**唯一断掉的地方是一个
+词。**
+
+**顺带补完的读路径。** T86b 的 `moments.py` docstring 事先把这件事挂在了消费方名下
+（原话：「消费方（T86f 的瞬间抽取）一旦需要它，就得先给记录加字段再改读路径」）。
+T86f 现在正是那个消费方，所以一并做了：`PersonMomentRecord` 加 `selection` 字段、
+`selection_json` 补进 `_COLUMNS`、`_record` 还原它。留一个**只写不读**的列等于「接了一半」
+——数据进去了，谁都拿不出来，而那与「压根没写」在外部看来完全一样。
+
+### 第 136 条 · 冗余判据：定点变异改不红它，**而那不等于用例漏了**
+
+S5c 这一轮撞出三条这样的行，都是 1.0 原样搬过来的：
+
+| 位置 | 那一行 | 为什么改它不改变行为 |
+|---|---|---|
+| `repositories/faces.py` | SQL 的 `LIMIT 1` | 结果集不变（`ORDER BY` 还在），Python 那边取的是 `fetchone()` |
+| `media/person_vision.py` | `is_file()` 那一句 | 文件不存在时 `Image.open` 抛的 `FileNotFoundError` 本来就是 `OSError`，被同一个 `except` 接住 |
+| `application/identity/extract_moments.py` | `if result is None: return 0` | 下一句 `isinstance(raw, list)` 对 `None` 给出同样的结果 |
+
+**共同形状**：某一行的效果已经由**相邻的另一行**产生了。删掉它、或把它改成相反的
+分支，外部行为一模一样——所以没有任何用例能变红，**而这与用例写得好不好无关**。
+
+**为什么值得单独记一条。** 一个只看「变异有没有变红」的流程会把这三条报成
+「用例没咬住这条规则」，而接下来有两条**都更糟**的应对：
+
+1. **当成死代码删掉**——它们不是死代码。`LIMIT 1` 让意图写在 SQL 里、`is_file()` 省掉
+   一次异常往返、`result is None` 把「模型不可用」这条端口契约写在读它的地方。删掉
+   之后代码仍然对，但**读的人少了一条线索**。判据与「被不可变 schema 挡住的分支」
+   （portraits 里去掉的那条 `or "home-default"`）不同：那一条是**到不了**，这三条是
+   **到得了但另有同效路径**。
+2. **造一个不可能的输入把它弄红**——「在库里种一个 `id=""` 的退化实体」就是这个路子。
+   它能让变异变红，但代价是引入一个生产上不存在的状态。**这一条在这一轮真的发生了**
+   （`test_a_label_whose_person_id_is_empty_is_dropped_while_the_others_land`），
+   处理方式是可接受的：那条用例的 docstring 把「为什么必须种这个退化实体」写清楚了
+   ——不种的话 `str("")` 会被下游 `_in_scope` 顺手挡掉，`person_id` 那半判据与
+   「查不到这个人」就没有可观察的区别。**说清楚了就不是伪装。**
+
+**口径**：变异脚本现在把这类单列成「已知空操作」，并写明原因，**不计进「变红」那一格**
+也不计进「没变红」。数字分开报，读的人才知道那一条到底证明了什么。把空操作混进「变红」
+就是这一轮修掉的另一个假象（见第 132 条：语法错误被记成变红，是同一类账目问题的另一面）。
+
+**顺带一条**：`extract_moments` 里 `not info.get("person_id")` 这半判据在 2.0 被
+`_in_scope` 双重覆盖了——任何空值折成字符串之后都查不到实体。1.0 没有 `_in_scope`
+的前置过滤，所以那半在 1.0 是真的在挡东西；2.0 里它是纵深防御，留着（判据同上：它是
+1.0 的原文，且说明「没有归属的人不产生瞬间」这条意图），但**不假装它单独被验到了**。
