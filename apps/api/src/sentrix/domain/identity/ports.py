@@ -19,6 +19,7 @@ from typing import Protocol
 from sentrix.domain.identity.models import (
     DEFAULT_SCOPE_ID,
     ENTITY_STATUS_PENDING,
+    PORTRAIT_TRIGGER_MANUAL,
     PROPERTY_SOURCE_DERIVED,
     EntityMentionRecord,
     EntityPropertyRecord,
@@ -29,6 +30,7 @@ from sentrix.domain.identity.models import (
     FaceInstanceRecord,
     FacePrototypeRecord,
     PersonNameMatch,
+    PortraitRevisionRecord,
 )
 
 
@@ -436,4 +438,55 @@ class EntityRepository(Protocol):
 
     def event_ids(self, entity_id: str) -> Sequence[str]:
         """这个人牵涉到的事件：提及桥 / 事件参与者投影 / 实体-观察关联三条来源的并集。"""
+        ...
+
+
+class PortraitRepository(Protocol):
+    """画像修订的读写。SQL 在 ``infrastructure/persistence/repositories/portraits.py``。
+
+    **写入口有一条否决权**：``create`` 在当前生效版本是 ``user_locked`` 时
+    **直接返回当前版本、不写新行**（1.0 ``db.py:6380``）。这是用户在画像上唯一的
+    否决权，所以它必须是写入口的判据，而不是界面上的一个禁用按钮——界面上禁用了，
+    别的调用方（导入后的自动触发）照样会写进去。
+    """
+
+    def get(self, revision_id: str) -> PortraitRevisionRecord | None:
+        """按 id 取一版。找不到返回 ``None``（由调用方决定这是 404 还是别的）。"""
+        ...
+
+    def get_active(self, person_id: str) -> PortraitRevisionRecord | None:
+        """当前生效的那一版：``status IN ('active', 'user_locked')`` 里 ``revision`` 最大的一条。
+
+        **``user_locked`` 也算「生效」**：锁住的是「这一版别被顶掉」，不是「这一版作废」。
+        """
+        ...
+
+    def list_for_person(self, person_id: str) -> Sequence[PortraitRevisionRecord]:
+        """这个人的全部修订，按 ``revision DESC``。"""
+        ...
+
+    def create(
+        self,
+        person_id: str,
+        *,
+        portrait_text: str,
+        prompt_version: str,
+        themes: Sequence[dict[str, object]] = (),
+        evidence_refs: Sequence[dict[str, object]] = (),
+        trigger_type: str = PORTRAIT_TRIGGER_MANUAL,
+        model_name: str = "unknown",
+    ) -> PortraitRevisionRecord:
+        """落一版新画像，并把上一版转 ``superseded``。
+
+        ``revision`` 是上一版 +1；没有上一版时从 1 开始。
+        **当前版本 ``user_locked`` 时不写新行，原样返回它。**
+        """
+        ...
+
+    def set_feedback(self, revision_id: str, feedback: str | None) -> PortraitRevisionRecord | None:
+        """记用户对某一版的反馈（不新建版本）。"""
+        ...
+
+    def set_lock(self, revision_id: str, locked: bool) -> PortraitRevisionRecord | None:
+        """锁 / 解锁一版。锁上转 ``user_locked``、解开转回 ``active``（1.0 ``db.py:6431``）。"""
         ...
