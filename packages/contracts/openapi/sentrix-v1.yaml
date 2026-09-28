@@ -56,7 +56,7 @@ paths:
         required: false
         schema:
           type: string
-          default: home-default
+          default: ''
           title: Scope Id
       - name: limit
         in: query
