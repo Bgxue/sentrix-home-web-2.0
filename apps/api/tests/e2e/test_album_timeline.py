@@ -10,6 +10,9 @@
 真链路是「真 EXIF → 真地点解析（PyGeoCN 面 + GeoNames 点）→ 真归并 → 真时间线」。
 视觉嵌入同样换成假件（真模型是 1.6GB 权重 + GPU 推理）。批末的事件总结也会打 8100
 （同一个端点的文本模型），所以文本模型一并换成假件——见 ``FakeChatModel``。
+T86i 之后还多了第四条：**导入批末自动跑一趟画像**（裁决④），它走 ``PersonVision``，
+所以那一个也换成假件——见 ``FakePersonVision``。**每加一条模型路径，这里就要多一个桩**：
+少一个，这条 e2e 就会去打真端点，而它本来连的是 8100（1.0 的服务，生命周期不归 2.0）。
 
 断言里的两个地名是**实测值**，不是推断：
 
@@ -102,6 +105,70 @@ class FakeVlmObserver:
         )
 
 
+class FakePersonVision:
+    """画像流水线的那三个模型入口（Task 86e）。
+
+    **T86i 之后才有这个桩**：导入批末会自动跑一趟画像（裁决④），而那趟走的是
+    ``PersonVision``——与上面三个适配器并列的第四条模型路径。少这个桩，e2e 的导入
+    就会打 8100 的真端点。
+
+    三个方法都返回确定性的形状，让流水线走完五阶段：瞬间抽取拿到空表（不落瞬间）、
+    画像写手返回一段**过得了校验**的文本（``portrait.validate_portrait`` 对
+    ``source="model"`` 有汉字数与主题数两条下限，见 T86c）。这里给一段足够长的、
+    带两个主题的文本，好让 ``write_portraits`` 真的落一版——**这条 e2e 只关心
+    「导入 + 批末画像不会把整批弄挂」，画像内容本身的规则在 test_portrait.py 里验。**
+    """
+
+    model_id = "fake-person-vision"
+
+    def write_person_portrait(self, pack):  # noqa: ANN001
+        return {
+            "portrait_text": self._text(pack),
+            "themes": [
+                {
+                    "title": "常出现的场合",
+                    "summary": "从照片看，这个人常出现在家庭聚会与其他人的合影里。",
+                    "evidence_refs": self._refs(pack),
+                },
+                {
+                    "title": "常做的事",
+                    "summary": "从照片看，这个人常在饭桌旁与家人一起活动，偶尔在户外。",
+                    "evidence_refs": self._refs(pack),
+                },
+            ],
+        }
+
+    def analyze_person_moments(self, path, labels, context=None):  # noqa: ANN001
+        # 空表：批末画像这一步不该在 e2e 里产生瞬间——要么没有核心人物，要么有也不
+        # 需要在这里验它的内容。``ExtractMoments`` 对空表是正常返回 0。
+        return {"moments": []}
+
+    def analyze_person_appearance(self, path, metadata=None):  # noqa: ANN001
+        return {"clothing": [], "confidence": 0.0}
+
+    @staticmethod
+    def _text(pack) -> str:  # noqa: ANN001
+        # 长度要过 ``MIN_HANZI``（80）。证据包是嵌套的：``pack["person"]["display_name"]``
+        # （``compile_portrait_evidence`` 的返回形状）。
+        person = (pack or {}).get("person") or {}
+        name = str(person.get("display_name") or "这个人")
+        return (
+            f"从这批照片看，{name}经常出现在家庭活动的场合里：多数照片是室内聚会，"
+            "也有几张在户外。照片里这个人总是和其他家人在一起，偶尔单独出镜。"
+            "这些描述只依据画面中可见的动作与场合，不涉及健康、收入或其他敏感属性。"
+        )
+
+    @staticmethod
+    def _refs(pack) -> list[dict[str, object]]:  # noqa: ANN001
+        # 引用要落在证据包里真有的瞬间上——``normalize_writer_output`` 的引用守卫会丢掉
+        # 不存在的 id（T86c 修掉的那个后门）。没有瞬间时给空表。
+        moments = list((pack or {}).get("moments") or [])
+        for item in moments:
+            if isinstance(item, dict) and item.get("id"):
+                return [{"kind": "person_moment", "id": item["id"]}]
+        return []
+
+
 class FakeChatModel:
     """批末事件总结用的确定性文本模型（真件是 8100 上的 llama-server）。
 
@@ -161,6 +228,8 @@ def album_client(tmp_path, monkeypatch) -> TestClient:
         visual_embedder=FakeVisualEmbedder(),
         vlm_observer=FakeVlmObserver(),
         chat_model=FakeChatModel(),
+        # 第四条模型路径，T86i（裁决④）之后才有：导入批末的画像流水线。
+        person_vision=FakePersonVision(),
     )
     return TestClient(app)
 

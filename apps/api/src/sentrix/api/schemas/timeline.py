@@ -56,6 +56,22 @@ class ImportFailure(BaseModel):
     reason: str
 
 
+class InsightCounts(BaseModel):
+    """批末自动跑画像那一趟的计数（Task 86i，裁决④）。
+
+    六个字段就是 ``application/identity/run_insights.py`` 的 ``InsightRun``。直接回给
+    调用方而不是只落日志：这一趟会走几十次模型调用、让本来就长的导入请求再长一截，
+    **"到底跑了没有、跑了多少"必须能从响应里看见**——否则它就是一个没人能观测的副作用。
+    """
+
+    ranked: int
+    core: int
+    selections: int
+    moments: int
+    moment_failures: int
+    portraits: int
+
+
 class ImportBatchResponse(BaseModel):
     scope_id: str
     directory: str
@@ -67,3 +83,7 @@ class ImportBatchResponse(BaseModel):
     # 这个数小于 ``events`` 说明有事件被折叠进了已总结过的那个（1.0 亦然）。
     summarized: int
     failures: list[ImportFailure]
+    # 批末自动跑的那一趟画像。**没有新照片时是 None**（判据在路由里，理由写在那儿）。
+    # 用 ``None`` 而不是全 0 的计数对象：那两件事不一样——「没跑」与「跑了但一个人都
+    # 没认出来」在排查时是完全不同的结论。
+    insights: InsightCounts | None = None

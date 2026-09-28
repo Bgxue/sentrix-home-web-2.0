@@ -66,6 +66,24 @@ def _run_insights(container: Container) -> RunInsights:
     )
 
 
+def run_insights_for_scope(container: Container, scope_id: str) -> dict[str, int]:
+    """跑一趟并返回那六个计数。**给别的路由用**（``routes/timeline.py`` 的批末画像）。
+
+    单独一个函数而不是让调用方自己去拼 ``RunInsights``：装配那几个仓储的写法只该有
+    一份，两处各拼一次迟早会漂。判据（空 ``scope_id`` 报 400）**不在这里**——那是
+    HTTP 层的事，这个函数只接已经校验过的值。
+    """
+    run = _run_insights(container)(scope_id)
+    return {
+        "ranked": run.ranked,
+        "core": run.core,
+        "selections": run.selections,
+        "moments": run.moments,
+        "moment_failures": run.moment_failures,
+        "portraits": run.portraits,
+    }
+
+
 @router.post("/person-insights/run")
 def run_person_insights(
     payload: RunInsightsRequest, container: Container = Depends(get_container)
@@ -77,15 +95,7 @@ def run_person_insights(
     scope_id = payload.scope_id.strip()
     if not scope_id:
         raise InvalidRequestError("scope_id is required")
-    run = _run_insights(container)(scope_id)
-    return {
-        "ranked": run.ranked,
-        "core": run.core,
-        "selections": run.selections,
-        "moments": run.moments,
-        "moment_failures": run.moment_failures,
-        "portraits": run.portraits,
-    }
+    return run_insights_for_scope(container, scope_id)
 
 
 @router.get("/person-insights")

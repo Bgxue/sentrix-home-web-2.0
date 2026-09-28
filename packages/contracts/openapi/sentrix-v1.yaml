@@ -589,12 +589,27 @@ paths:
       tags:
       - timeline
       summary: Import Album
-      description: '整册导入。**同步执行**：2.0 没有任务队列，装作异步只会把「跑到哪了」藏起来。
+      description: '整册导入 + **批末自动跑一趟人物画像**（裁决④）。**同步执行**：2.0 没有任务队列，
+
+        装作异步只会把「跑到哪了」藏起来。
 
 
-        整册导入要串行走模型调用，所以这个请求会跑很久——客户端的超时必须自己调大，
+        整册导入要串行走模型调用，本切片又在这个请求的末尾加了一整趟画像流水线（每个核心
 
-        这一点写在 ``docs/runbooks/geonames-data.md`` 的相邻章节（导入一节）。'
+        人物至少一次模型调用，加上 moments 阶段每人每资产一次），所以这个请求会跑很久——
+
+        客户端的超时必须自己调大，这一点写在 ``docs/runbooks/geonames-data.md`` 的相邻章节
+
+        （导入一节）。**这是裁决④ 明确接受的代价**，记账在
+
+        ``docs/refactor/2026-09-24-s5c-implementation-plan.md`` 第 0 节。
+
+
+        **画像那一趟抛出来会让整个请求 500，而照片其实已经入库了。** 不吞是有意的：吞掉
+
+        之后「画像从来没生成过」会变成一个没人看得见的状态，而重跑一次导入的代价由去重
+
+        兜住（``deduplicated`` 那一列）。判据与 ``RunInsights`` 自己的 docstring 一致。'
       operationId: import_album_api_v1_imports_post
       requestBody:
         content:
@@ -1704,6 +1719,10 @@ components:
             $ref: '#/components/schemas/ImportFailure'
           type: array
           title: Failures
+        insights:
+          anyOf:
+          - $ref: '#/components/schemas/InsightCounts'
+          - type: 'null'
       type: object
       required:
       - scope_id
@@ -1768,6 +1787,43 @@ components:
       - deduplicated
       - indexed
       title: ImportResponse
+    InsightCounts:
+      properties:
+        ranked:
+          type: integer
+          title: Ranked
+        core:
+          type: integer
+          title: Core
+        selections:
+          type: integer
+          title: Selections
+        moments:
+          type: integer
+          title: Moments
+        moment_failures:
+          type: integer
+          title: Moment Failures
+        portraits:
+          type: integer
+          title: Portraits
+      type: object
+      required:
+      - ranked
+      - core
+      - selections
+      - moments
+      - moment_failures
+      - portraits
+      title: InsightCounts
+      description: '批末自动跑画像那一趟的计数（Task 86i，裁决④）。
+
+
+        六个字段就是 ``application/identity/run_insights.py`` 的 ``InsightRun``。直接回给
+
+        调用方而不是只落日志：这一趟会走几十次模型调用、让本来就长的导入请求再长一截，
+
+        **"到底跑了没有、跑了多少"必须能从响应里看见**——否则它就是一个没人能观测的副作用。'
     MergeClustersRequest:
       properties:
         target_cluster_id:
