@@ -57,12 +57,14 @@ def _has_gps(container: Container, asset_id: str) -> bool:
 @router.get("/search")
 def search_assets(
     q: str = Query(..., min_length=1, max_length=200, description="内容词，例如 桥 / 海边 / 红色"),
-    scope_id: str = "home-default",
+    # 空串与不传都表示**全部相册**（1.0 的 `if scope_id:`）。默认值从 "home-default"
+    # 改成 "" 是行为修正：原来不传会去查一个叫 home-default 的空间，而它不存在。
+    scope_id: str = "",
     limit: int = Query(20, ge=1, le=100),
     container: Container = Depends(get_container),
 ) -> SearchResponse:
     use_case = build_retrieve_evidence(container)
-    result = use_case.execute(EvidenceRequest(text=q, scope_id=scope_id, limit=limit))
+    result = use_case.execute(EvidenceRequest(text=q, scope_id=scope_id or None, limit=limit))
 
     items: list[SearchHit] = []
     for hit in result.hits:

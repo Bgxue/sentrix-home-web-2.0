@@ -80,15 +80,19 @@ class RetrieveMetadata:
             return []
         internal_limit = max(int(limit or 20), METADATA_RECALL_LIMIT)
 
-        target_scope = scope_id or DEFAULT_SCOPE_ID
-        candidates: list[Asset] = list(self._assets.list_by_scope(target_scope, limit=ASSET_SCAN_LIMIT))
+        # ``scope_id=None`` = 跨全部相册（1.0 的 ``if scope_id:``）。**不兜底成某个空间**：
+        # 那会把「用户在界面上选了全部相册」与「查一个叫 home-default 的空间」当成同一件事，
+        # 而后者在 2.0 的空库里根本不存在——表现是检索一个东西都搜不到。
+        candidates: list[Asset] = list(self._assets.list_by_scope(scope_id, limit=ASSET_SCAN_LIMIT))
         places = self._places.get_many([asset.id for asset in candidates])
         allowed_media = set(media_types)
         denied_media = set(negated_media)
 
         hits: list[CandidateHit] = []
         for asset in candidates:
-            if asset.scope_id != target_scope:
+            # 二次过滤：``list_by_scope`` 已经按 scope 筛过了，这里只是不让上游改动
+            # 悄悄放过跨空间的候选。**但 None 时不能过滤**——那正是「全部相册」。
+            if scope_id is not None and asset.scope_id != scope_id:
                 continue
             if allowed_media and asset.media_type not in allowed_media:
                 continue

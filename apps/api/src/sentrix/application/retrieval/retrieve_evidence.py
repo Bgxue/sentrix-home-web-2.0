@@ -77,7 +77,9 @@ class EvidenceRequest:
     """
 
     text: str
-    scope_id: str = "home-default"
+    # None = 跨全部相册（1.0 `db.py:1514` 的 `if scope_id:`）。原先默认 `"home-default"`，
+    # 那是一个**具体的空间**——不传 scope 时去查它，而它在 2.0 的空库里不存在。
+    scope_id: str | None = None
     limit: int = 20
     media_types: tuple[MediaType, ...] = ()
     negated_media: tuple[MediaType, ...] = ()

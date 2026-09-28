@@ -243,3 +243,26 @@ def test_the_endpoint_reports_only_the_channels_that_exist(channel_client: TestC
         "visual_ann",
         "lexical",
     }
+
+
+def test_search_without_a_scope_covers_every_album(scripted_client: TestClient) -> None:
+    """**空 scope = 全部相册**，与资料库、时间线同一形状，但根因深一层。
+
+    `retrieve_metadata.execute` 收的已经是 `str | None`，却先
+    `target_scope = scope_id or DEFAULT_SCOPE_ID`，再拿那个兜底值做**第二次**过滤。
+    所以有两处会一起错：兜底值本身，以及用兜底值做的后半段过滤。
+
+    因此断言的是「空 scope 覆盖到两个相册、具体 scope 只覆盖自己的」——
+    只断言「有命中」的话，第二次过滤那一半仍然可能是错的。
+    """
+    red = jpeg_bytes("red")
+    album1_id = import_photo(scripted_client, red, scope_id="album1")
+    album2_id = import_photo(scripted_client, red, scope_id="album2")
+
+    everything = scripted_client.get("/api/v1/search", params={"q": "红色", "scope_id": ""}).json()
+    one_album = scripted_client.get("/api/v1/search", params={"q": "红色", "scope_id": "album1"}).json()
+
+    assert {item["asset"]["id"] for item in everything["items"]} == {album1_id, album2_id}, (
+        "空 scope 必须跨两个相册"
+    )
+    assert [item["asset"]["id"] for item in one_album["items"]] == [album1_id]

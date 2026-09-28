@@ -44,7 +44,8 @@ OVERSAMPLE_FACTOR = 4
 @dataclass(frozen=True, slots=True)
 class VisualSearchRequest:
     text: str
-    scope_id: str = "home-default"
+    # None = 跨全部相册，理由同 `EvidenceRequest.scope_id`。
+    scope_id: str | None = None
     limit: int = 20
 
 
