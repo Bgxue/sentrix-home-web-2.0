@@ -1,0 +1,13 @@
+/* 设置页的两块：审计动作与它的结果。 */
+
+.audit-list { display: grid; gap: 12px; }
+.audit-list > div { display: grid; gap: 6px; justify-items: start; }
+.audit-list small { color: var(--muted); font-size: 10px; line-height: 1.6; max-width: 620px; }
+.audit-list code { background: var(--soft); border-radius: 4px; padding: 1px 4px; font-size: 10px; }
+.audit-result { display: grid; gap: 5px; margin-top: 16px; padding: 15px 17px; border: 1px solid #d8efac; border-radius: 11px; background: #eefbdc; }
+.audit-result strong { font-size: 12px; }
+.audit-result span { font-size: 11px; }
+.audit-result small { color: var(--muted); font-size: 10px; }
+.privacy-list { display: grid; gap: 10px; }
+.privacy-list > div { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 9px; font-size: 11px; }
+.privacy-list b { color: var(--green); }

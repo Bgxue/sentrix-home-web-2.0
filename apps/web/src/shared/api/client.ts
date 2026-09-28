@@ -573,3 +573,30 @@ export async function listConversations(scopeId: string): Promise<ConversationSu
   );
   return body.items;
 }
+
+/** 全局重聚类的返回体（`api/schemas/maintenance.py` 的 `ReclusterFacesResponse`）。 */
+export interface ReclusterFacesResponse {
+  instances: number;
+  clusters: number;
+  noise: number;
+  attached_uncertain: number;
+  retired_clusters: number;
+  retired_candidates: number;
+  threshold: number;
+  minimum_quality: number;
+}
+
+/**
+ * 全局重聚类。`POST /api/v1/maintenance/recluster-faces`。
+ *
+ * `scopeId` 传 `null` 表示**跨空间**重算。那不是「默认空间」——两者在两处不同：
+ * 跨空间时 `list_verified_instances` 不按 asset 的 scope 过滤，而认领不确定人脸时
+ * 按每条实例自己的空间找目标（schema 的 docstring 写明了这一点）。
+ */
+export async function reclusterFaces(scopeId: string | null): Promise<ReclusterFacesResponse> {
+  return request<ReclusterFacesResponse>("/maintenance/recluster-faces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope_id: scopeId }),
+  });
+}
