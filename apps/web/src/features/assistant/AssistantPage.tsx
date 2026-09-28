@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { useScope } from "../../app/ScopeProvider";
 import {
@@ -22,6 +23,10 @@ import "../../styles/assistant.css";
 
 export function AssistantPage() {
   const { scopeId } = useScope();
+  // 概览页的提问框把问题塞在 `?q=` 里交过来（1.0 的 searchBar() 是直接 push 一个
+  // assistant turn）。读出来交给面板，面板问完就不再重复。
+  const [searchParams] = useSearchParams();
+  const initialQuestion = searchParams.get("q") ?? "";
   const [conversations, setConversations] = useState<readonly ConversationSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +108,7 @@ export function AssistantPage() {
           )}
         </aside>
         <div className="assistant-main">
-          <AssistantPanel conversationId={activeId} />
+          <AssistantPanel conversationId={activeId} initialQuestion={initialQuestion} />
         </div>
       </div>
     </>

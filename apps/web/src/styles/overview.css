@@ -1,0 +1,32 @@
+/* 概览页。逐行移植 1.0 `src/styles.css:92-103`（`.overview-search` 与它的 search-bar
+ * 变体）与 `:104-109`（`.stats-grid` / `.stat-card`）。 */
+
+.overview-search { display: grid; grid-template-columns: .85fr 1.15fr; gap: 36px; align-items: end; padding: 26px 28px; border-radius: 15px; background: var(--ink); color: #fff; margin-bottom: 18px; }
+.overview-search .section-kicker { color: var(--lime); }
+.overview-search h2 { font-size: 22px; letter-spacing: -.03em; margin: 0 0 8px; }
+.overview-search p { color: #9ca498; font-size: 12px; line-height: 1.65; margin: 0; }
+.search-bar { height: 48px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 0 9px 0 14px; }
+.overview-search .search-bar { border-color: #40463d; background: #242823; }
+.search-symbol { color: var(--green); font-size: 20px; }
+.search-bar input { border: 0; outline: 0; min-width: 0; flex: 1; background: transparent; color: var(--ink); font-size: 12px; }
+.overview-search .search-bar input { color: #fff; }
+.search-bar input::placeholder { color: var(--faint); }
+.search-bar button { width: 31px; height: 31px; border: 0; border-radius: 7px; background: var(--lime); color: var(--ink); font-size: 17px; }
+
+.album-context { display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 18px; }
+.album-context strong { font-size: 14px; }
+.album-context small { color: var(--muted); font-size: 10px; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.stat-card { padding: 19px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.stat-card.accent { background: #eefbdc; border-color: #d8efac; }
+.stat-card span, .stat-card small { display: block; color: var(--muted); font-size: 10px; }
+.stat-card strong { display: block; font-size: 25px; letter-spacing: -.04em; margin: 13px 0 7px; }
+.stat-card small { color: var(--faint); }
+
+.event-list { display: grid; gap: 10px; }
+.event-row { display: grid; gap: 5px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 11px; background: #fff; text-align: left; }
+.event-row:hover { box-shadow: var(--shadow); }
+.event-row strong { font-size: 13px; }
+.event-row small { color: var(--muted); font-size: 10px; }
+.event-row span { color: var(--green); font-size: 10px; }

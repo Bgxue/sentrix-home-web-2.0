@@ -17,9 +17,20 @@ interface Exchange {
  * 交付的照片只来自后端 ``complete`` 帧里的 ``attachments``——那是**模型显式调用
  * get_original_photos 交出去的那些**。前端不自己从候选里挑图，也不做任何相关性判断。
  */
-export function AssistantPanel({ conversationId }: { conversationId: string | null }) {
+export function AssistantPanel({
+  conversationId,
+  initialQuestion = "",
+}: {
+  conversationId: string | null;
+  /** 概览页交过来的问题；非空时自动问一次，问过就不再重复。 */
+  initialQuestion?: string;
+}) {
   // 面板**不收 scopeId**：会话的创建与切换在 AssistantPage，scope 是那一层的事。
   // 收一个自己不用的 prop 会让人以为这里也参与范围决策。
+  //
+  // 「问过就不再重复」用一个 ref 记已消费的问题，而不是清 URL：清 URL 会触发
+  // 一次导航，而用户按「后退」时那条 URL 又是对的——两件事会打架。
+  const consumed = useRef<string | null>(null);
   const [text, setText] = useState("");
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   const { progress, result, busy, error, ask } = useTurnStream();
@@ -52,6 +63,15 @@ export function AssistantPanel({ conversationId }: { conversationId: string | nu
       ),
     );
   }, [result]);
+
+  // 自动提问：等会话就绪、且这个问题还没被消费过。
+  useEffect(() => {
+    const trimmed = initialQuestion.trim();
+    if (trimmed === "" || conversationId === null || busy) return;
+    if (consumed.current === `${conversationId}\u0000${trimmed}`) return;
+    consumed.current = `${conversationId}\u0000${trimmed}`;
+    void ask(conversationId, trimmed);
+  }, [ask, busy, conversationId, initialQuestion]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();

@@ -1,47 +1,69 @@
 /**
- * 家庭概览。对应 1.0 `src/app.js:242`（`overview()`，pageHeader 在 `:245`）。
+ * 家庭概览。对应 1.0 `src/app.js:242` 的 `overview()`（pageHeader 在 `:245`）。
  *
- * **只放后端真能给的东西。** 1.0 这里有四张卡（含「待确认事实」）与三张记忆卡
- * （含视频场景记忆），2.0 的 `facts` / `dashboard` / 视频端点都还没有——留个恒为 0
- * 的卡会让人以为那条链路是通的。空状态本身就是 S6–S11 的可见进度表。
+ * 版式照 1.0：范围内卡片 → **深色提问区** → 统计卡 → 最近事件。
+ *
+ * 提问框的行为也是照 1.0 的：那里的 `searchBar()` 是**提交进助手对话**，不是跳到
+ * 检索页。2.0 用 `?q=` 交接——概览把问题塞进 URL，助手页取出后自动问一次。
+ *
+ * **1.0 的四张卡只搬得来三张。** 第四张是「待确认事实」，而 2.0 没有 `facts` /
+ * `dashboard` 端点。留一张恒为 0 的卡比不显示更糟：它看起来像条通的链路。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 
-import { EmptyState } from "../../shared/ui/EmptyState";
+import { useScope } from "../../app/ScopeProvider";
 import { PageHeader } from "../../shared/ui/PageHeader";
 import { Section } from "../../shared/ui/Section";
 import { StatCard } from "../../shared/ui/StatCard";
-import { useScope } from "../../app/ScopeProvider";
-import { fetchHealth, fetchTimeline, listAssets } from "../../shared/api/client";
+import {
+  fetchHealth,
+  fetchTimeline,
+  listAssets,
+  listPeople,
+  type TimelineDay,
+} from "../../shared/api/client";
+import "../../styles/overview.css";
 
 export function OverviewPage() {
   const navigate = useNavigate();
-  const { scopeId } = useScope();
+  const { scopeId, spaces } = useScope();
   const [assets, setAssets] = useState<number | null>(null);
-  const [events, setEvents] = useState<number | null>(null);
+  const [days, setDays] = useState<readonly TimelineDay[]>([]);
+  const [people, setPeople] = useState<number | null>(null);
   const [aiReady, setAiReady] = useState<boolean | null>(null);
+  const [question, setQuestion] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-    Promise.allSettled([listAssets(scopeId), fetchTimeline(scopeId), fetchHealth()]).then(
-      ([assetResult, timelineResult, healthResult]) => {
-        if (cancelled) return;
-        setAssets(assetResult.status === "fulfilled" ? assetResult.value.length : null);
-        setEvents(
-          timelineResult.status === "fulfilled"
-            ? timelineResult.value.days.reduce((sum, day) => sum + day.events.length, 0)
-            : null,
-        );
-        setAiReady(healthResult.status === "fulfilled" && healthResult.value.status === "ok");
-      },
-    );
+    Promise.allSettled([
+      listAssets(scopeId),
+      fetchTimeline(scopeId, 0, 5),
+      fetchHealth(),
+      listPeople(scopeId),
+    ]).then(([assetResult, timelineResult, healthResult, peopleResult]) => {
+      if (cancelled) return;
+      setAssets(assetResult.status === "fulfilled" ? assetResult.value.length : null);
+      setDays(timelineResult.status === "fulfilled" ? timelineResult.value.days : []);
+      setAiReady(healthResult.status === "fulfilled" && healthResult.value.status === "ok");
+      setPeople(peopleResult.status === "fulfilled" ? peopleResult.value.length : null);
+    });
     return () => {
       cancelled = true;
     };
   }, [scopeId]);
 
+  function ask(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = question.trim();
+    if (trimmed === "") return;
+    // 交接到助手页。用 query 而不是全局状态：刷新后问题还在，也能把链接发给别人。
+    navigate(`/assistant?q=${encodeURIComponent(trimmed)}`);
+  }
+
+  const eventCount = days.reduce((sum, day) => sum + day.events.length, 0);
+  const scopeName = spaces.find((space) => space.id === scopeId)?.name ?? "全部相册";
   const show = (value: number | null) => (value === null ? "—" : value);
 
   return (
@@ -57,13 +79,38 @@ export function OverviewPage() {
         }
       />
 
+      <div className="album-context">
+        <span className="section-kicker">当前数据范围</span>
+        <strong>{scopeName}</strong>
+        <small>{scopeId === "" ? "当前正在查看全部相册" : "当前正在查看单个相册"}</small>
+      </div>
+
+      <section className="overview-search">
+        <div>
+          <p className="section-kicker">问 Sentrix</p>
+          <h2>你想找回哪一段记忆？</h2>
+          <p>从人物、时间、地点、物体或一句描述开始，答案会带回原始证据。</p>
+        </div>
+        <form className="search-bar" onSubmit={ask}>
+          <span className="search-symbol" aria-hidden="true">⌕</span>
+          <input
+            aria-label="问 Sentrix"
+            placeholder="例如：去年在海边拍的照片"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+          />
+          <button type="submit" aria-label="提问">→</button>
+        </form>
+      </section>
+
       <section className="stats-grid">
         <StatCard label="已整理内容" value={show(assets)} note="本地 Asset" />
-        <StatCard label="已形成事件" value={show(events)} note="可回到 Observation" />
+        <StatCard label="已形成事件" value={show(eventCount)} note="可回到 Observation" />
+        <StatCard label="已确认人物" value={show(people)} note="来自 /people" />
         <StatCard
           label="本地 AI 状态"
           value={aiReady === null ? "—" : aiReady ? "正常" : "未知"}
-          note={scopeId === "" ? "全部相册" : scopeId}
+          note={scopeName}
           accent
         />
       </section>
@@ -77,16 +124,30 @@ export function OverviewPage() {
           </button>
         }
       >
-        <EmptyState
-          symbol="↕"
-          title="到时间线里看"
-          description="事件按拍摄时间分组，每条都能回到原始证据。"
-          action={
-            <button type="button" className="button small primary" onClick={() => navigate("/timeline")}>
-              打开时间线
-            </button>
-          }
-        />
+        {days.length === 0 ? (
+          <div className="empty-queue">
+            <span aria-hidden="true">↕</span>
+            <strong>还没有事件</strong>
+            <p>导入图片后，处理完成的 Observation 会在这里形成事件。</p>
+          </div>
+        ) : (
+          <div className="event-list">
+            {days.flatMap((day) =>
+              day.events.slice(0, 2).map((event) => (
+                <button
+                  key={event.id}
+                  type="button"
+                  className="event-row"
+                  onClick={() => navigate("/timeline")}
+                >
+                  <strong>{event.title}</strong>
+                  <small>{day.date} · {event.place || "未解析出地点"}</small>
+                  <span>{event.photos.length} 张照片 · 可回到原始证据</span>
+                </button>
+              )),
+            )}
+          </div>
+        )}
       </Section>
     </>
   );
