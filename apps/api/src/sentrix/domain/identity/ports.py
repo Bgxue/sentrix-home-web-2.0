@@ -100,6 +100,35 @@ class FaceRepository(Protocol):
 
     def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]: ...
 
+    def person_candidate_features(self, scope_id: str) -> Sequence[dict[str, Any]]:
+        """核心人物排序的输入：这个空间里每个**未退休**的簇一行特征。
+
+        1.0 ``db.py:6610`` 的原样。列名就是 ``domain/identity/insights.py`` 的
+        ``core_person_score`` 读的那几个（``date_count`` / ``event_count`` /
+        ``co_person_count`` / ``scene_count`` / ``quality`` / ``confirmed``），
+        所以这个查询与那个打分函数是一对，改一边必须改另一边。
+
+        **按簇出而不是按人出**（``person_id`` 取 ``COALESCE(c.entity_id, c.id)``）：
+        还没确认的簇也要参与排序，否则一个刚聚类出来、还没被命名的人永远进不了画像
+        ——而「提醒用户这里有个常在的人」正是这个功能的一半。
+
+        返回的是**行形状的字典**，不是 Record：``rank_core_people`` /
+        ``select_representatives`` 是照着 1.0 的行形状写的纯函数（见 T86d 的决策），
+        在这一层再翻译一次 Record 只会多一层要同步的映射。
+        """
+        ...
+
+    def representative_candidates(self, person_id: str) -> Sequence[dict[str, Any]]:
+        """代表照选择的候选：这个人的簇里所有的脸。
+
+        1.0 ``person_insights.py:262-270`` 的 SQL。``LEFT JOIN event_observations``
+        是**故意的**：没有归到事件里的照片也要进来，否则一个人在「还没分段」的那批
+        照片里就一张代表照都选不出来。代价是那些行的 ``event_id`` 为 ``None``，而
+        ``select_representatives`` 的「每事件最多 per_event 张」会把它们全算作同一个
+        （空）事件——1.0 原样，不修。
+        """
+        ...
+
     def best_instance_for_person_in_event(self, person_id: str, event_id: str) -> FaceInstanceRecord | None:
         """这个人在这个事件里质量最高的那张脸；没有就是 ``None``。
 

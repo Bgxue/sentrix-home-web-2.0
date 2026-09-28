@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from sentrix.domain.identity.models import (
     CLUSTER_STATUS_CONFIRMED,
@@ -346,6 +347,80 @@ class SqliteFaceRepository:
                 params,
             ).fetchall()
         return [_row_to_instance(row) for row in rows]
+
+    def person_candidate_features(self, scope_id: str) -> Sequence[dict[str, Any]]:
+        """1.0 ``db.py:6612-6647``，逐字。"""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    c.id AS cluster_id,
+                    COALESCE(c.entity_id, c.id) AS person_id,
+                    c.member_count AS member_count,
+                    COUNT(DISTINCT substr(o.captured_at, 1, 10)) AS date_count,
+                    COUNT(DISTINCT eo.event_id) AS event_count,
+                    (
+                        SELECT COUNT(DISTINCT ep.person_id)
+                        FROM event_participants ep
+                        WHERE ep.event_id IN (
+                            SELECT DISTINCT eo2.event_id
+                            FROM event_observations eo2
+                            JOIN face_instances fi2 ON fi2.observation_id = eo2.observation_id
+                            WHERE fi2.cluster_id = c.id
+                        )
+                    ) AS co_person_count,
+                    COUNT(DISTINCT COALESCE(e.place, '') || '|' || COALESCE(e.activity, ''))
+                        AS scene_count,
+                    (
+                        SELECT AVG(quality) FROM (
+                            SELECT fi3.quality AS quality
+                            FROM face_instances fi3
+                            WHERE fi3.cluster_id = c.id
+                            ORDER BY fi3.quality DESC
+                            LIMIT 3
+                        )
+                    ) AS quality,
+                    CASE WHEN ent.status = 'confirmed' THEN 1 ELSE 0 END AS confirmed
+                FROM face_clusters c
+                LEFT JOIN face_instances fi ON fi.cluster_id = c.id
+                LEFT JOIN observations o ON o.id = fi.observation_id
+                LEFT JOIN event_observations eo ON eo.observation_id = o.id
+                LEFT JOIN events e ON e.id = eo.event_id
+                LEFT JOIN entities ent ON ent.id = c.entity_id
+                WHERE c.scope_id = ? AND c.status != 'rejected'
+                GROUP BY c.id""",
+                (scope_id,),
+            ).fetchall()
+        return [
+            {
+                "person_id": row["person_id"],
+                "cluster_id": row["cluster_id"],
+                "date_count": int(row["date_count"] or 0),
+                "event_count": int(row["event_count"] or 0),
+                "member_count": int(row["member_count"] or 0),
+                "co_person_count": int(row["co_person_count"] or 0),
+                "scene_count": int(row["scene_count"] or 0),
+                "quality": float(row["quality"] or 0),
+                "confirmed": bool(row["confirmed"]),
+            }
+            for row in rows
+        ]
+
+    def representative_candidates(self, person_id: str) -> Sequence[dict[str, Any]]:
+        """1.0 ``person_insights.py:262-270``，逐字。"""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """SELECT fi.id AS face_instance_id, fi.asset_id, fi.quality,
+                    COALESCE(fi.area_ratio, 0) AS body_visibility,
+                    o.captured_at, eo.event_id, fi.cluster_id, c.entity_id AS person_id
+                FROM face_instances fi
+                JOIN face_clusters c ON c.id = fi.cluster_id
+                JOIN observations o ON o.id = fi.observation_id
+                LEFT JOIN event_observations eo ON eo.observation_id = o.id
+                WHERE c.entity_id = ? AND c.status != 'rejected'""",
+                (person_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def best_instance_for_person_in_event(self, person_id: str, event_id: str) -> FaceInstanceRecord | None:
         """1.0 ``app.py:2026-2028``。两个 JOIN 都省不掉：``entity_mentions`` 决定

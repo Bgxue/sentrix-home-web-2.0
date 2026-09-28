@@ -244,6 +244,12 @@ def _evidence_ref_valid(pack: dict[str, Any], ref: Any) -> bool:
     return False
 
 
+# 1.0 person_insights.py:251 的字面量。与 PERSON_MOMENT_PROMPT_VERSION 同一条
+# 口径：它标识的是**提示词的版本**，写了它的画像行能解释「这一版是哪套提示词产出的」。
+# 改了 PERSON_PORTRAIT_PROMPT 就必须改它，否则两版结论混在一条时间线上分不开。
+PERSON_PORTRAIT_PROMPT_VERSION = "person-portrait-v1"
+
+
 def validate_portrait(
     pack: dict[str, Any],
     portrait: dict[str, Any],

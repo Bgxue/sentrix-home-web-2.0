@@ -43,6 +43,7 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 PENDING_WIRING: dict[str, str] = {
     "sentrix.domain.identity.insights": "T86g",
     "sentrix.application.identity.extract_moments": "T86g",
+    "sentrix.application.identity.run_insights": "T86h",
     "sentrix.infrastructure.persistence.repositories.moments": "T86f",
     "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
     "sentrix.infrastructure.persistence.repositories.relationships": "T86h",
