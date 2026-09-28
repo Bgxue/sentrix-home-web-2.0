@@ -35,22 +35,18 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # 模块 -> 会把它接上生产的任务。**每个条目都必须写明任务，否则它就是一个说不出
 # 理由的例外**——而说不出理由的例外名单会把这条不变量重新变成摆设。
 #
-# 2026-09-26 新增三条：S5c 的三个纯规则模块从隔离副本 ``s5verify/repo`` 搬回主仓库时
-# 带来的（用户裁决：写进 PENDING_WIRING）。这是「本切片先落地、随后接线」的标准情形，
-# **不是墓碑**——三个模块的用例已全绿（42 条用例 + 40 条定点变异），接线任务在
-# ``docs/refactor/2026-09-24-s5c-implementation-plan.md`` 的任务表里已具名；
-# 按反向规则，它们一旦真被生产调用，这里必须删掉对应条目。
-PENDING_WIRING: dict[str, str] = {
-    "sentrix.domain.identity.insights": "T86g",
-    "sentrix.application.identity.extract_moments": "T86g",
-    "sentrix.application.identity.run_insights": "T86h",
-    "sentrix.infrastructure.persistence.repositories.moments": "T86f",
-    "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
-    "sentrix.infrastructure.persistence.repositories.relationships": "T86h",
-}
-# 更早的一次：Task 75 落地后这张表曾**空过**——S5a 登记的三条（``review_cluster`` /
-# ``name_person`` / ``seed_identity``）都被 ``api/routes/identity.py`` 构造了，于是按
-# 反向规则逐条删掉。空表不等于这条纪律作废，机制一直在，上面三条就是它的下一次使用。
+# 2026-09-28：**这张表又空了**，而且是同一条规则自己跑完的结果。
+#
+# S5c 的三个纯规则模块从隔离副本 ``s5verify/repo`` 搬回主仓库时登记了三条
+# （2026-09-26），随后 T86b–T86h 逐个接线：每接上一个，这个检查就报红要求删掉对应
+# 条目，删到最后一个不剩。中间还一度涨到六条（T85c/T85d/T86f 各自新落地的模块也先
+# 登记、后接线），同样是被这个检查逐条清掉的。
+#
+# **空表不等于这条纪律作废。** 它此前也空过一次：Task 75 落地后，S5a 登记的三条
+# （``review_cluster`` / ``name_person`` / ``seed_identity``）都被
+# ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。机制一直在，下一次有
+# 「本切片先落地、随后接线」的模块时它还会被用上——那时请照上面那句写给任务。
+PENDING_WIRING: dict[str, str] = {}
 
 
 def module_name(path: Path, src: Path) -> str:

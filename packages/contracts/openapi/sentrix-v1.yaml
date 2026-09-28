@@ -995,6 +995,149 @@ paths:
                   type: array
                 type: object
                 title: Response List Memory Spaces Api V1 Memory Spaces Get
+  /api/v1/person-insights/run:
+    post:
+      tags:
+      - insights
+      summary: Run Person Insights
+      description: '同步跑一趟五个阶段，返回计数。**不返回 run 对象——没有那个东西。**
+
+
+        空 ``scope_id`` 报 400（1.0 原样）：这是重活，不该替调用方猜一个空间去写。'
+      operationId: run_person_insights_api_v1_person_insights_run_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunInsightsRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: integer
+                type: object
+                title: Response Run Person Insights Api V1 Person Insights Run Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/person-insights:
+    get:
+      tags:
+      - insights
+      summary: List Person Insights
+      description: '这个空间里的人物按核心度分档，各带当前生效的画像。
+
+
+        ``tier`` 由 ``rank_core_people`` 判（跨够天数且排进前 ``CORE_PEOPLE_LIMIT`` 的算
+
+        ``core``），路由只负责把记录字段搬进响应——**不在这里重算分数**。'
+      operationId: list_person_insights_api_v1_person_insights_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Person Insights Api V1 Person Insights Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people/{person_id}/portrait:
+    get:
+      tags:
+      - insights
+      summary: Get Person Portrait
+      description: '这个人当前生效的那一版画像。没有就是 404。
+
+
+        ``user_locked`` 也算生效（``PortraitRepository.get_active`` 的 docstring：
+
+        锁住的是「这一版别被顶掉」，不是「这一版作废」）。'
+      operationId: get_person_portrait_api_v1_people__person_id__portrait_get
+      parameters:
+      - name: person_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Person Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Person Portrait Api V1 People  Person Id  Portrait
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/people/{person_id}/portrait-feedback:
+    post:
+      tags:
+      - insights
+      summary: Set Person Portrait Feedback
+      description: '记用户对**当前生效那版**的反馈。不新建版本。
+
+
+        找不到当前版本就 404——1.0 在 ``app.py:1776`` 也是先取再写；这里把那个顺序收进
+
+        路由，因为「先取哪一版」是读侧的事（``get_active``），不是仓储写方法该猜的。'
+      operationId: set_person_portrait_feedback_api_v1_people__person_id__portrait_feedback_post
+      parameters:
+      - name: person_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Person Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PortraitFeedbackRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Set Person Portrait Feedback Api V1 People  Person
+                  Id  Portrait Feedback Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -1739,6 +1882,21 @@ components:
       - aliases
       title: PersonPayload
       description: 一个人物实体。``confirmed`` 与 ``status`` 并存是 1.0 的契约（``app.py:1518``）。
+    PortraitFeedbackRequest:
+      properties:
+        feedback:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Feedback
+      type: object
+      title: PortraitFeedbackRequest
+      description: '用户对某一版画像的反馈。
+
+
+        ``feedback`` 允许 ``None``：**清空反馈与没写过反馈是同一件事**，用 ``None`` 表达
+
+        比空串准确（``PortraitRepository.set_feedback`` 的签名也是 ``str | None``）。'
     ProgressEventPayload:
       properties:
         text:
@@ -1890,6 +2048,16 @@ components:
       - entity
       - aliases
       title: RenamePersonResponse
+    RunInsightsRequest:
+      properties:
+        scope_id:
+          type: string
+          title: Scope Id
+      type: object
+      required:
+      - scope_id
+      title: RunInsightsRequest
+      description: 跑一趟画像流水线。
     SearchHit:
       properties:
         asset:

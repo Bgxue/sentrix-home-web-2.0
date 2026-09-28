@@ -29,8 +29,12 @@ from sentrix.domain.identity.ports import (
     EntityRepository,
     FaceDetector,
     FaceRepository,
+    MomentRepository,
     PersonCropRenderer,
+    PersonPreviewRenderer,
     PersonVision,
+    PortraitRepository,
+    RelationshipRepository,
 )
 from sentrix.domain.media.ports import (
     AssetRepository,
@@ -60,7 +64,10 @@ from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
-from sentrix.infrastructure.media.person_vision import PillowPersonCropRenderer
+from sentrix.infrastructure.media.person_vision import (
+    PillowPersonCropRenderer,
+    PillowPersonPreviewRenderer,
+)
 from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
@@ -80,8 +87,15 @@ from sentrix.infrastructure.persistence.repositories.entities import SqliteEntit
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
 from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
+from sentrix.infrastructure.persistence.repositories.moments import SqliteMomentRepository
 from sentrix.infrastructure.persistence.repositories.participants import (
     SqliteEventParticipantRepository,
+)
+from sentrix.infrastructure.persistence.repositories.portraits import (
+    SqlitePortraitRepository,
+)
+from sentrix.infrastructure.persistence.repositories.relationships import (
+    SqliteRelationshipRepository,
 )
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
@@ -148,6 +162,15 @@ class Container:
     # 头肩裁剪件（Task 85c）。按端口声明，不写具体类——装配点的可替换性只在类型上
     # 才算数（module-map 开头那条不变量）。
     person_crop_renderer: PersonCropRenderer
+    # 带编号预览图（Task 86f）。与上面那个同为 PIL 边界，都是为了让 application
+    # 不 import infrastructure。
+    person_preview_renderer: PersonPreviewRenderer
+
+    # 人物画像三件套（Task 86b）：瞬间 / 关系 / 画像修订。三者都只在画像流水线
+    # （Task 86g）与其读侧路由（Task 86h）上出现。
+    moment_repository: MomentRepository
+    relationship_repository: RelationshipRepository
+    portrait_repository: PortraitRepository
 
     chat_model: ChatModel
     vlm_observer: VlmObserver
@@ -205,6 +228,10 @@ class Container:
                 timeout_s=settings.vlm_timeout_s,
             ),
             person_crop_renderer=PillowPersonCropRenderer(),
+            person_preview_renderer=PillowPersonPreviewRenderer(),
+            moment_repository=SqliteMomentRepository(database),
+            relationship_repository=SqliteRelationshipRepository(database),
+            portrait_repository=SqlitePortraitRepository(database),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
                 served_model,
