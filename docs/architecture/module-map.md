@@ -140,6 +140,7 @@
 | `sentrix/infrastructure/media/__init__.py` | 包标记 | infrastructure | — | — |
 | `sentrix/infrastructure/media/image_io.py` | HEIC 注册与 JPEG 预览编码（`ensure_heif_support` / `encode_jpeg_preview` / `PillowPreviewEncoder`） | infrastructure | — | `sentrix/bootstrap/container.py`、`sentrix/infrastructure/media/metadata.py`、`sentrix/infrastructure/models/chinese_clip.py`、`sentrix/infrastructure/models/face_adapter.py` |
 | `sentrix/infrastructure/media/metadata.py` | EXIF / GPS / 设备抽取（`PillowMetadataReader`），失败降级为 None 并记日志 | infrastructure | `sentrix/domain/media/models.py`、`sentrix/infrastructure/media/image_io.py` | `sentrix/bootstrap/container.py` |
+| `sentrix/infrastructure/media/person_vision.py` | 人物视觉：带编号的预览图渲染（人脸框 + P1/P2 标签 + EXIF 校正，写临时 JPEG）。**一处订正**：1.0 把 bbox 当 (x,y,w,h) 画，而落库的是 (x1,y1,x2,y2)——读 1.0 真实库 30317 条判定（按前者解释会出现 11335 像素宽的脸） | infrastructure | — | — |
 | `sentrix/infrastructure/media/storage.py` | 文件系统媒体存储（`FileSystemMediaStorage` / `sanitise`），实现 domain 的 MediaStorage 端口 | infrastructure | `sentrix/domain/media/models.py` | `sentrix/bootstrap/container.py` |
 | `sentrix/infrastructure/media/vlm_observer.py` | `OpenAIVlmObserver`：8100 的视觉观察器，三段式、每张最多 3 次调用 | infrastructure | `sentrix/domain/assistant/ports.py`、`sentrix/domain/media/models.py`、`sentrix/domain/media/ports.py`、`sentrix/infrastructure/assistant/chat_client.py`、`sentrix/infrastructure/assistant/model_endpoint.py` | `sentrix/bootstrap/container.py` |
 | `sentrix/infrastructure/models/__init__.py` | 包标记 | infrastructure | — | — |

@@ -45,6 +45,7 @@ PENDING_WIRING: dict[str, str] = {
     "sentrix.domain.identity.insights": "T86g",
     "sentrix.domain.identity.moments": "T86e/T86f",
     "sentrix.domain.identity.portrait": "T86g",
+    "sentrix.infrastructure.media.person_vision": "T86e/T86f",
     "sentrix.infrastructure.persistence.repositories.moments": "T86f",
     "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
     "sentrix.infrastructure.persistence.repositories.relationships": "T86h",
