@@ -231,3 +231,34 @@ agent 写进去，它与一块永久墓碑长得一模一样。下一位接手�
   届时才谈得上对拍、取补丁、逐 commit 跑 CI。
 - **真数据端到端（阶段 9）未开始**：没有任何画像被真实生成过，所以「兜底占比」
   「缺陷 1 拦截数」这两个本轮最想要的数字**都还没有**。
+
+---
+
+## 5. T86g 动工前的依赖核查（2026-09-28 核出，**动手前先读这一段**）
+
+T85c / T85d / T86f 落地后核了一遍 `PersonInsightService._run_stage`
+（1.0 ``person_insights.py:198-255``）的五个阶段，2.0 缺的东西比任务表上一行字看起来多：
+
+| 阶段 | 1.0 用的东西 | 2.0 现状 |
+|---|---|---|
+| `rank_people` | `store.person_candidate_features(scope_id)` | **不存在**。`grep -rn person_candidate_features apps/api/src` 零命中——这个查询要新写一个仓储方法（它要拼的列就是 `insights.core_person_score` 读的那几个，形状见 1.0 ``db.py`` 里那个方法） |
+| `select_representatives` | 一段内联 SQL：`face_instances` ⋈ `face_clusters` ⋈ `observations` + LEFT JOIN `event_observations`，按 `c.entity_id = ?` | **不存在**。同样要新写一个仓储方法。注意它带 `LEFT JOIN`——没有事件的照片也要进来（那正是 `per_event` 抽样要处理的） |
+| `extract_moments` | `PersonMomentExtractor` | ✅ T86f 已落地 |
+| `compile_portraits` | `compile_portrait_evidence(store, person_id)` | ✅ T86c 已落地，但 2.0 的签名是 `(person, moments, relationships)`——**材料由调用方取好递进来**，不是收一个 store。所以 T86g 还要负责取这三样 |
+| `write_portraits` | writer → validate → repair → validate → 确定性兜底 → validate → `create_portrait_revision` | 纯函数（`validate_portrait` / `deterministic_portrait`）与仓储（`PortraitRepository.create`）都在，**编排本身没写** |
+
+**另外两处与 1.0 的结构差异**（都是已定的决定，不是缺口）：
+
+1. **没有 run 表**。1.0 的 `run()` 绕着 `person_insight_runs` 转（状态机、`current_stage`
+   断点续跑、`stats["moment_failures"]` 落点）。0006 没建那张表，所以 2.0 的 `RunInsights`
+   是一个**同步跑完五个阶段的函数**——没有 run_id、没有续跑、失败数由
+   `MomentExtraction.failures` 直接返回给调用方。这是计划里写的「缺陷 3 的日志落点」
+   那件事，T86g 必须自己决定这些数字去哪（最省事且不撒谎的做法：作为返回值给调用方，
+   由 T86h 的路由决定是否回给前端）。
+2. **`infer_graph` 整个不搬**（裁决①），所以 `_run_stage` 里那一支与 `_infer_graph`
+   那一大段都不移植。连带 `state["graph"]` 没有消费者。
+
+**动工顺序建议**：两个仓储方法 → `RunInsights` 编排 → 用例（每个阶段各钉一条 +
+一条端到端的阶段顺序）。阶段顺序本身值得钉：1.0 是**固定顺序**（`STAGES` 元组），
+而 `select` 必须排在 `moments` 之前、`compile` 必须排在 `write` 之前——这些依赖是
+数据流的，不是风格的。
