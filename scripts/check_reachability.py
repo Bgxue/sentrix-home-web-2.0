@@ -47,6 +47,7 @@ PENDING_WIRING: dict[str, str] = {
     "sentrix.domain.identity.portrait": "T86g",
     "sentrix.infrastructure.persistence.repositories.moments": "T86f",
     "sentrix.infrastructure.persistence.repositories.portraits": "T86h",
+    "sentrix.infrastructure.persistence.repositories.relationships": "T86h",
 }
 # 更早的一次：Task 75 落地后这张表曾**空过**——S5a 登记的三条（``review_cluster`` /
 # ``name_person`` / ``seed_identity``）都被 ``api/routes/identity.py`` 构造了，于是按

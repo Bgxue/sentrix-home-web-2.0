@@ -32,6 +32,7 @@ from sentrix.domain.identity.models import (
     PersonMomentRecord,
     PersonNameMatch,
     PortraitRevisionRecord,
+    RelationshipRecord,
 )
 
 
@@ -538,4 +539,55 @@ class MomentRepository(Protocol):
         status: str = "active",
     ) -> Sequence[PersonMomentRecord]:
         """按条件列瞬间，``created_at DESC``。``status=None`` 表示不按状态筛。"""
+        ...
+
+
+class RelationshipRepository(Protocol):
+    """关系（家庭图谱的边）的读写。SQL 在 ``repositories/relationships.py``。
+
+    **只写 ``relationships`` 行。** 1.0 的 ``create_relationship`` 在
+    ``status == 'active'`` 时还会调 ``maintain_relationship_claim`` 往事实/声明层写；
+    2.0 把那一半留给 application 编排（``infrastructure-purity`` 契约不允许这一层
+    直接调用例）。**且不回滚**：claim 维护失败时这一行留着——「关系已确认但事实层
+    没有对应声明」是可能出现且被接受的中间状态。
+    """
+
+    def list_person_relationships(self, scope_id: str | None = None) -> Sequence[RelationshipRecord]:
+        """家庭图谱的边：**两端都是 person 实体**、且 ``status != 'retracted'``。
+
+        两端都是 person 这条过滤在 SQL 里（1.0 ``db.py:5603``）：实体表里还有物品、
+        氛围等类型，只按 id 取会把它们一起捞进来。
+        """
+        ...
+
+    def list_for_entity(self, entity_id: str, scope_id: str | None = None) -> Sequence[RelationshipRecord]:
+        """这个人牵涉到的关系，**两个方向都算**（它可能是 subject 也可能是 object）。"""
+        ...
+
+    def create(
+        self,
+        *,
+        subject_entity_id: str,
+        predicate: str,
+        object_entity_id: str,
+        evidence_ids: Sequence[str] = (),
+        confidence: float = 0.5,
+        status: str = "pending",
+    ) -> RelationshipRecord:
+        """建一条关系，或把已有的那条并掉。
+
+        同一 ``(scope, subject, predicate, object)`` 已有 ``active`` / ``pending``
+        的，**不新建**：证据并集、置信度取 ``MAX``、``revision + 1``。
+        两端不在同一个记忆空间时抛 ``ValueError``。
+        """
+        ...
+
+    def confirm(self, relationship_id: str) -> RelationshipRecord | None:
+        """确认：把**同 (subject, predicate, object) 的其它 active 关系转 superseded**，
+        再把这一条转 active。同一对人在同一谓词上只能有一条生效的。
+        """
+        ...
+
+    def retract(self, relationship_id: str) -> RelationshipRecord | None:
+        """撤回：转 ``retracted`` 并 ``revision + 1``。**不删行**——撤回也要留痕。"""
         ...
