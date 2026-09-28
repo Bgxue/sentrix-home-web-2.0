@@ -184,11 +184,15 @@ def _event_id(assigner: AssignEvents, observation: Observation) -> str:
 
 @router.get("/assets")
 def list_assets(
-    scope_id: str = "home-default",
+    # 默认与空串都表示**全部相册**：1.0 的 `list_assets(scope_id=None)` 是 `if scope_id:`
+    # 才加过滤，而前端用 `""` 表达「全部」（`src/app.js` 的约定）。默认值从
+    # `"home-default"` 改成 `""` 是**行为修正**——原来不传 scope 会查一个叫
+    # home-default 的空间，而那个空间在 2.0 的空库里根本不存在。
+    scope_id: str = "",
     limit: int = 200,
     container: Container = Depends(get_container),
 ) -> AssetListResponse:
-    assets = container.asset_repository.list_by_scope(scope_id, min(limit, 1000))
+    assets = container.asset_repository.list_by_scope(scope_id or None, min(limit, 1000))
     return AssetListResponse(items=[to_summary(asset) for asset in assets])
 
 

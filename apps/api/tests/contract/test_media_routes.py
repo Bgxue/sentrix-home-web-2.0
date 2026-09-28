@@ -197,3 +197,29 @@ def test_the_album_route_creates_the_memory_space(client: TestClient, tmp_path):
     space = client.app.state.container.spaces.get("album-batch")
     assert space is not None
     assert space.name == "album-batch"
+
+
+def test_listing_assets_without_a_scope_covers_every_album(client: TestClient) -> None:
+    """**空 scope = 全部相册**（1.0 db.py:1514 的 if scope_id:）。
+
+    这一条不是「顺手加的边界用例」：2.0 原先写成无条件的 WHERE scope_id = ?，
+    于是前端的「全部相册」查的是 scope_id = ''，返回空表——**而那个空表看起来与
+    「这个相册真的没照片」一模一样**。用户看到的是「打开就没图片」，数据其实好好地
+    在库里（scope_id='album1'）。
+    """
+    for scope_id, name in (("album1", "a.jpg"), ("album2", "b.jpg")):
+        response = client.post(
+            "/api/v1/media/import",
+            files={"file": (name, b"\xff\xd8\xff\xd9", "image/jpeg")},
+            data={"scope_id": scope_id},
+        )
+        assert response.status_code == 201, response.text
+
+    everything = client.get("/api/v1/assets", params={"scope_id": ""}).json()["items"]
+    one_album = client.get("/api/v1/assets", params={"scope_id": "album1"}).json()["items"]
+
+    assert len(everything) == 2, "空 scope 必须跨全部相册"
+    assert len(one_album) == 1
+    # 断言**两个相册都被覆盖**，而不只是条数对：条数对但两条都来自 album1 也是错的，
+    # 而那种错在只看计数时看不出来。
+    assert {item["file_name"] for item in everything} == {"a.jpg", "b.jpg"}

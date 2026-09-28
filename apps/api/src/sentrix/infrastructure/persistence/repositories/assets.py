@@ -85,12 +85,19 @@ class SqliteAssetRepository:
             ).fetchone()
         return _row_to_asset(row) if row else None
 
-    def list_by_scope(self, scope_id: str, limit: int = 200) -> Sequence[Asset]:
+    def list_by_scope(self, scope_id: str | None, limit: int = 200) -> Sequence[Asset]:
+        """``scope_id=None`` = 跨全部相册。
+
+        过滤条件**只在有 scope 时才拼**（1.0 ``db.py:1514`` 的 ``if scope_id:``）——
+        写成无条件的 ``WHERE scope_id = ?`` 会让空串查 ``scope_id = ''``，返回空表，
+        而那个空表看起来与「这个相册真的没照片」一模一样。
+        """
+        where, params = ("", ()) if scope_id is None else (" WHERE scope_id = ?", (scope_id,))
         with self._database.connect() as connection:
             rows = connection.execute(
-                f"SELECT {_ASSET_COLUMNS} FROM assets WHERE scope_id = ?"
+                f"SELECT {_ASSET_COLUMNS} FROM assets{where}"
                 " ORDER BY COALESCE(captured_at, created_at) DESC LIMIT ?",
-                (scope_id, limit),
+                (*params, limit),
             ).fetchall()
         return [_row_to_asset(row) for row in rows]
 

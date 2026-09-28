@@ -40,7 +40,13 @@ class AssetRepository(Protocol):
 
     def get(self, asset_id: str) -> Asset | None: ...
 
-    def list_by_scope(self, scope_id: str, limit: int) -> Sequence[Asset]: ...
+    def list_by_scope(self, scope_id: str | None, limit: int) -> Sequence[Asset]:
+        """``scope_id`` 为 ``None`` 表示**跨全部相册**（1.0 ``db.py:1514`` 的 ``if scope_id:``）。
+
+        这不是「默认相册」——空与 ``"home-default"`` 是两件事：前者是用户在界面上选了
+        「全部相册」，后者是一个真叫 home-default 的空间。
+        """
+        ...
 
     def find_by_hash(self, scope_id: str, content_sha256: str) -> Asset | None: ...
 
