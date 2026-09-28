@@ -22,6 +22,9 @@
 框比真脸大一倍左右。它仍然能靠标签完成归属，但那是在一个错框上做的判断。
 
 **临时文件由调用方删除**（1.0 的 docstring 写明：预览图从不作为 Asset 或长期文件保存）。
+
+同一个文件里还有 :func:`render_person_crop`：同一层边界的另一件事——那里裁的是
+**一个人**（外观证据），这里画的是**一屋子人**（瞬间抽取）。
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from sentrix.domain.identity.appearance import expanded_person_crop
 
 # 1.0 ``person_moments.py:100-113`` 的原值。红框、线宽 3、标签画在框上方 14px。
 BOX_OUTLINE = "red"
@@ -80,3 +85,41 @@ def render_numbered_preview(
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as handle:
         image.save(handle.name, format="JPEG", quality=JPEG_QUALITY)
         return handle.name, label_map
+
+
+def render_person_crop(
+    asset_path: str | Path,
+    bbox: Sequence[float] | None,
+) -> tuple[str, list[int]]:
+    """按人脸框裁出「头 + 上半身」并落成 JPEG，返回 ``(临时图路径, 源坐标)``。
+
+    逐行移植 1.0 ``app.py:2038-2042``。它自己不做几何——``expanded_person_crop``
+    （``domain/identity/appearance.py``）算，这里只负责把 PIL 挡在这一层里。
+
+    **EXIF 必须先转正**，与 :func:`render_numbered_preview` 同一条理由：手机照片的
+    bbox 是在转正后的坐标系里算的，不转的话框会整体错位——而那种错看起来像「模型
+    认不出这个人穿了什么」，不像坐标系错了。
+
+    **``ValueError`` 不吞。** 框退化、图太小、裁出来不够大，``expanded_person_crop``
+    一律抛，这里让它穿过去。吞掉就等于「这张脸没有外观证据」，而调用方从返回值上
+    分不出它与「模型说没看清」——前者是这张照片不能用，后者是这个人的外观本来就没
+    有可描述之处，两件事在「兜底占比」这类统计里必须分得开。1.0 是在更外层的循环里
+    统一 catch 的，那一层在 2.0 是 ``application/identity/observe_appearance.py``。
+
+    **临时文件由调用方删除。** 1.0 把临时图落在 ``DATA_DIR``（那是当时的既定做法），
+    2.0 落在系统临时目录——位置不是产品行为，落哪都行，但删不删是。
+    """
+    # 延迟 import：``PIL`` 只有真跑到这一步才需要，而模块顶层的 import 会让
+    # 「只想画预览图」的路径也背上它（1.0 也是在函数里 import 的）。
+    from PIL import Image, ImageOps
+
+    with Image.open(asset_path) as source:
+        # ``exif_transpose`` 与 ``convert`` 各返回一张**新图**，与 ``source`` 无关，
+        # 所以下面把 ``source`` 关掉不影响后面 crop。
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    crop, crop_bbox = expanded_person_crop(image, bbox)
+    # 用 with 的理由同 ``render_numbered_preview``：`delete=False` 保证退出之后文件
+    # 还在，with 保证异常路径上句柄也关得掉。
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as handle:
+        crop.save(handle.name, format="JPEG", quality=JPEG_QUALITY)
+        return handle.name, crop_bbox
