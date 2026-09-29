@@ -58,6 +58,8 @@ PENDING_WIRING: dict[str, str] = {
     # 仓储在 T121b 落地，T121c 的工具才会调它——SQL 本身先由真库集成用例验穿，
     # 但「验穿」不等于「接线」，所以它照样要在例外表里挂到接线那天。
     "sentrix.infrastructure.persistence.repositories.structured": "S6 T121c（query_memory_facts 工具）",
+    # 校验与 spec 派生先落地（可以穷举测试），工具本体与 application 执行器随后。
+    "sentrix.domain.retrieval.fact_query": "S6 T121c（query_memory_facts 工具）",
 }
 
 
