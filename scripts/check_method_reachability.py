@@ -64,6 +64,13 @@ DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
 #     动工前先核依赖、核出缺口再写任务定义，**核查本身就是一个有交付物的任务**。
 #     把它们硬塞进一个编号会更像有归属，实际只是把问题推后。
 PENDING_METHODS: dict[str, str] = {
+    # T121b 的结构化聚合端口：四条方法在 T121c 的工具里被调用。在那之前它们由
+    # 真库集成用例覆盖（`tests/integration/test_structured_query_repository.py`），
+    # 但那不算「接线」——本条门禁判的是生产调用者，用例不是。
+    # `count` 不在这里：它与另外几个端口重名，本检查的唯一性判据对它不成立（见下方盲区）。
+    "StructuredQueryRepository.captured_bound": "S6 T121c（query_memory_facts 工具）",
+    "StructuredQueryRepository.group_counts": "S6 T121c（query_memory_facts 工具）",
+    "StructuredQueryRepository.list_groups": "S6 T121c（query_memory_facts 工具）",
     # —— 审计查出（2026-09-29）——
     # facts 的三条（list_facts / set_status / supersede_others）已在 T113/T114 接线，
     # 按反向规则从这张表里删掉。**这三条是被自己删掉的，不是被人想起来的**——

@@ -47,8 +47,17 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。机制一直在，下一次有
 # 「本切片先落地、随后接线」的模块时它还会被用上——那时请照上面那句写给任务。
 PENDING_WIRING: dict[str, str] = {
-    # T121b 先落筛选条件的派生（纯规则），SQL 与工具在 T121c 接上。
-    "sentrix.domain.retrieval.structured_query": "S6 T121c（query_memory_facts 工具）",
+    # T121b 曾在这里登记 ``sentrix.domain.retrieval.structured_query``，随后被这条反向
+    # 规则自己删掉了：端口 ``domain/retrieval/ports.py`` 要引用 ``StructuredFilter``，
+    # 而 ``ports.py`` 从 ``container.py`` 可达，于是那个模块「被引用过」了。
+    #
+    # **这是一个真实的盲区，记在这里免得下次误以为它被守着**：本检查的粒度是**模块**，
+    # 判据是「有没有被 import 过」。模块内那几个**规则函数**（``derive_filter`` /
+    # ``hard_conditions`` / ``normalize_group_by``）至今没有生产调用者，而只要模块里
+    # 有一个类型被端口引用，整个模块就算接上了。T121c 的工具是它们的第一个真调用者。
+    # 仓储在 T121b 落地，T121c 的工具才会调它——SQL 本身先由真库集成用例验穿，
+    # 但「验穿」不等于「接线」，所以它照样要在例外表里挂到接线那天。
+    "sentrix.infrastructure.persistence.repositories.structured": "S6 T121c（query_memory_facts 工具）",
 }
 
 

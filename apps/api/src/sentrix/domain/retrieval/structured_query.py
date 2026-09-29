@@ -43,6 +43,18 @@ TIME_GROUP_KEYS = ("month", "year", "date")
 
 
 @dataclass(frozen=True, slots=True)
+class GroupCount:
+    """一个分组键与它下面的资产数。
+
+    放在 domain 而不是仓储旁边：端口（``domain/retrieval/ports.py``）要引用它，
+    而端口不能 import infrastructure。
+    """
+
+    group: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
 class StructuredFilter:
     """「筛什么」。SQL 照着它拼 WHERE，不再自己判断。
 
@@ -155,6 +167,7 @@ def normalize_group_by(value: str | None) -> str:
 
 __all__ = [
     "DEFAULT_GROUP_BY",
+    "GroupCount",
     "GROUP_BY_KEYS",
     "TIME_GROUP_KEYS",
     "StructuredFilter",

@@ -326,6 +326,60 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
   1.0 的 PhotoBench 有现成的题可以借；
 - 三个都要有「关掉新通道 / 不接工具」的对照臂，否则「有输出」与「输出是对的」分不开。
 
+### Task 121b · 结构化查询的 SQL 是重写，不是移植
+
+1.0 的 `StructuredMemoryExecutor` 把「筛什么」与「怎么筛」写在同一个类里（311 行）。
+2.0 拆成两半：`domain/retrieval/structured_query.py` 的 `derive_filter`（纯规则，
+可穷举）与 `infrastructure/persistence/repositories/structured.py` 的 `build_base`
+加四个聚合方法（SQL，要对真库）。**拆开的收益在验证方式上**：前半穷举单测，
+后半用「同一份数据、两条路径同一个数」对照——`place_text_matches`（融合后判定）
+与 `place_clause`（召回时 WHERE）必须给出同一个判定，否则同一个问题走统计路径与
+走语义路径会得到两个数。
+
+**三处与 1.0 的差异，每条都有理由**（模块 docstring 有全文）：
+
+| 差异 | 依据 |
+|---|---|
+| `COALESCE(a.derived_kind,'') = ''` 整条删掉 | 2.0 的 `assets` 表既没有 `derived_kind` 也没有 `parent_asset_id`（实测 `PRAGMA table_info`），**根本不建派生资产**；照抄会直接报 no such column |
+| `a.captured_location LIKE ?` 删掉 | 2.0 那一列是 `GpsPoint`，拿 `30.274100,120.155100` 去 `LIKE '%杭州%'` 永远匹配不上——`test_conditions.py:295` 早就为这件事写过用例 |
+| `place` 分组的键改成确定性的 | 1.0 直接读左连接上来的 `o.place`，一个资产有多条观察时取到哪一行由 SQLite 的扫描顺序决定，同一个问题问两次可能给出不同的分组名 |
+
+**时间边界用 `isoformat()` 不用 `str(datetime)`**：`captured_at` 存的是 ISO 串，
+而 `str()` 用空格分隔日期与时间，两者的字典序不同，`>=` 会静默给出错误的边界。
+同理，`derive_filter` 把时间在**派生阶段**就解析成 `(start, end)`，而不是留到拼 SQL
+时现解析——那样「解析失败」会以「拿到 None」的形式悄悄过去。
+
+**定点变异 8 条全部变红，但过程里抓出两条假绿，比变异本身更值得记：**
+
+1. 时间边界那条最初用 `tzinfo=UTC` 造数据，落库成 `2023-11-01T00:00:00+00:00`，
+   比上界 `2023-11-01T00:00:00` 多一个尾巴、字典序更大——把 `<` 改成 `<=` 之后
+   它照样被排除，用例照样绿。**它绿的原因不是边界开闭，是那个时区后缀。**
+   真实库里的值是 naive 的（EXIF 直读），用例改成 naive 之后才真的守住右开；
+2. 通配符那条最初拿 `AB` 去对模式 `%A_B%`，而那个模式要三个字符才匹配得上，
+   `instr` 与 `LIKE` 给出同一个答案，用例对这两种实现**完全没有区分力**。
+   存储值改成 `AXB` 才把它劈开。
+
+**两处需要后续处理，先记在这里：**
+
+- **同一列里 naive 与带偏移量的值并存是一个已知的坑**
+  （`test_time_bounds_compare_as_strings_so_offsets_are_a_hazard` 钉住了它）。
+  时间区间是拿**字符串**比大小的，同一列只要全是同一个偏移量，字典序就等于时间序——
+  今天成立。一条带非 UTC 偏移的记录进来就不成立了（`2023-10-31T20:00:00-05:00`
+  排在 `2023-11-01T00:00:00` 前面）。修法在**写入侧**（落库前归一成一个偏移量），
+  不在读取侧——读取侧替它决定「naive 的值算哪个时区」是猜。
+- **`strip_admin_suffix` 的后缀顺序有个既有缺陷**：`区` 排在 `地区` 前面，
+  于是 `阿里地区` 去掉的是 `区` 不是 `地区`，得到 `阿里地`（1.0 的 `replace` 连招
+  给的是 `阿里`）。也就是说用户说「阿里」时规则 2 在 2.0 里匹配不上。这个顺序在
+  `domain/places/aliases.py`，不在 SQL 那一侧；改它要连带改 `place_text_matches`，
+  单列一条。
+
+**门禁这边有一条盲区被它自己暴露出来**：`check_reachability.py` 的粒度是**模块**，
+判据是「有没有被 import 过」。端口 `domain/retrieval/ports.py` 引用了
+`StructuredFilter`，而 `ports.py` 从 `container.py` 可达，于是
+`structured_query.py` 整个模块就算「接上了」——**模块内的规则函数
+（`derive_filter` / `hard_conditions` / `normalize_group_by`）其实至今没有生产调用者。**
+已在 `check_reachability.py` 的 `PENDING_WIRING` 旁边写明，T121c 是它们的第一个真调用者。
+
 ### Task 127 · 恢复作答的阶梯
 
 **动工前必须先核查**（照 S5c 的 T86g 体例：先核依赖，核出缺口再写任务定义）。

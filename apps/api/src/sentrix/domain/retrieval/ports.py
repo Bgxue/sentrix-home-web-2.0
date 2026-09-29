@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sentrix.domain.media.models import Asset, Observation
+from sentrix.domain.retrieval.structured_query import GroupCount, StructuredFilter
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,3 +245,42 @@ class TextEmbedder(Protocol):
     def dimension(self) -> int: ...
 
     def embed_query(self, text: str) -> Sequence[float]: ...
+
+
+class StructuredQueryRepository(Protocol):
+    """结构化聚合的读取侧：数量 / 极值 / 分组，**全部走 SQL，不经过 ANN**。
+
+    1.0 ``structured_memory.py`` 的 ``StructuredMemoryExecutor`` 把「筛什么」与
+    「怎么筛」写在同一个类里；2.0 拆成两半，这一半只声明**能问什么**——「筛什么」
+    由 ``StructuredFilter`` 决定，实现在 infrastructure。
+
+    放进检索域的端口而不是让调用方直接拿仓储，理由与其余端口一样：调用方在
+    application 层，不该 import 一个 sqlite3 的实现。
+
+    **``captured_at`` 原样给字符串，不给 ``datetime``。** 它在库里就是 ISO 串，
+    解析回 ``datetime`` 只是把同一个值绕一圈，而绕的那一圈会顺手把「这一列里
+    混着 naive 值与带偏移量的值」这件事变成一个异常或者一个静默的时区假设。
+    真要做归一，得先决定 naive 的值算哪个时区——那是**写入侧**的事，不是读取侧
+    能替它决定的。
+    """
+
+    def count(self, filter: StructuredFilter) -> int:
+        """满足筛选条件的资产数。**按资产去重**：一个资产可以有多条观察，
+        一个人可以在一张照片里被提及两次，``COUNT(*)`` 会随观察条数翻倍。"""
+        ...
+
+    def captured_bound(self, filter: StructuredFilter, *, latest: bool) -> str | None:
+        """最早（``latest=False``）或最晚（``latest=True``）的 ``captured_at``。
+
+        空集返回 ``None`` 而不是抛：1.0 的 ``_first_last`` 就是这样，而且
+        「这个条件下没有照片」是一个正常答案，不是错误。
+        """
+        ...
+
+    def group_counts(self, filter: StructuredFilter, group_by: str) -> Sequence[GroupCount]:
+        """按 ``group_by`` 分组计数，**按计数倒序**（1.0 的 ``ORDER BY n DESC, g``）。"""
+        ...
+
+    def list_groups(self, filter: StructuredFilter, group_by: str) -> Sequence[str]:
+        """分组键出现过哪些取值（不计数），按值升序。"""
+        ...
