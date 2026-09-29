@@ -1,0 +1,341 @@
+# S6 实施计划（草案 · 2026-09-29）
+
+## 0. 本文档怎么来的，以及一次修正
+
+### 0.1 第一版跑偏了，错在哪
+
+我先做了一次覆盖审计（把 1.0 的 119 条路由按四域逐条对拍），然后**基于自己的审计结果**
+写了一个「清理收口」的 S6。**而路线图里 S6 早有定义**——设计文档
+`docs/architecture/2026-09-21-sentrix-home-web-2-implementation-design.md` §8「切片与里程碑」：
+
+| # | 切片 | 内容 | 验收 |
+|---|---|---|---|
+| **S6** | **检索补全** | 补齐六路召回 + 硬条件（时间/人物/地点）+ 证据包 + trace；加 `inspect_photo`(VLM) / `read_photo_text`(OCR) / `query_memory_facts` / `query_photo_people` | 证据包和 trace 能展开 |
+| S7 | 家庭关系 | family graph + runs + relationships + membership + 关系确认 | 能建关系，助手能引用 |
+| S8 | 音频与视频 | FunASR 音频、关键帧/场景切分、派生帧可回溯原视频秒数 | 导入视频，场景成型、能跳回原片 |
+
+S3 计划里也留了明确的交接（`2026-09-22-s3-implementation-plan.md:6145`）：
+
+> 留给后续切片的：**双层防伪的语义评审层（S6）**、**恢复作答的四级阶梯（S6/S7）**、
+> **六路取证的补齐（S6）**。
+
+**错在哪**：我把「审计发现了什么」直接当成了「下一步该做什么」，中间少了一步
+**查已定义的切片划分**。这个项目从 1.0 逐行移植、每一步都要有出处，而我在写计划这一步
+偏偏没查出处。**审计的结论不是计划，是计划的输入。**
+
+**保留的部分**：审计本身有效且已复核。它回答的是「1.0 与 2.0 的差在哪」，
+而 S6 要回答的是「差集里哪一块是这一步该做的」——两者不是一回事，但前者是后者的前提。
+§1 是前者的结论，§2 起是后者。
+
+### 0.2 证据来源
+
+- 1.0 的 119 条路由（`grep '@app\.\(get\|post\|put\|patch\|delete\)' backend/*.py`）按四域逐条对拍；
+- 2.0 运行中实例 8191 的 `openapi.json`（39 条端点）；
+- 结构实测：五条 import-linter 契约、`scripts/check_*.py` 的判定逻辑、迁移建表与
+  `git grep` 的引用比对、线上库 `data/sentrix.db` 行数；
+- 路线图：设计文档 §8、S3 计划的交接段、`frozen.md`、`capability-map.jsonl`。
+
+每条结论带 `文件:行`，均可在当前工作树复核。
+
+---
+
+## 1. 覆盖审计的三个结论（Q1 / Q2 / Q3）
+
+### 1.1 框架是否足够清晰？——**骨架清晰，但自检有一条粒度断层**
+
+**正面（实测）**
+
+| 项 | 实测值 |
+|---|---|
+| 五条分层契约 | 全 KEPT；**`ignore_imports` 例外 0 条** |
+| 各层规模 | domain 6.6k / application 5.7k / infrastructure 8.0k / api 2.3k / **bootstrap 仅 258 行** |
+| 应用层分解 | 一个用例一个文件、动词开头（`enroll_face` / `extract_moments` / `retrieve_visual`…） |
+| 生产可达性 | `check_reachability.py` 报 0 问题 |
+| 文档诚实度 | 设计 §2.3 自己删掉一个空头承诺（原写「CI 打印例外条数」，实为 import-linter 不提供该输出） |
+
+**断层：`check_reachability.py` 的判定单位是模块，不是符号**
+
+`scripts/check_reachability.py:178-192` 取 `name`（**模块名**）去问谁用过它：
+
+```python
+callers = {other for other in reachable
+           if other != path and any(target == name and local in used[other]
+                                    for local, target in bound[other].items())}
+wired = bool(callers)
+```
+
+于是 `repositories/facts.py` 因为 `container.py` 构造了 `SqliteFactRepository` 就算「已接线」——
+**它里面 `list_facts` 有没有人调，这个问题从没被问过。**
+
+S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成了可机械判定的东西。
+**但它修的是模块级，同一个失效在方法级复发了**，而且三个域同时中招（见 §1.2 ①）。
+
+**另外两条**
+
+- **没有任何门禁盯 schema**：`ingest_batches` 表建在 `migrations/0002_media.sql:48`、
+  `assets.batch_id` 列建在 `:9`，而全 `src/` 唯一提到它的是
+  `application/media/import_album.py:18` 的一句**注释**；线上库该表 0 行、该列全 NULL。
+- **`check_capability_map.py` 是单向校验**（已在 `s5-deviations.md` 第 41 条登记）：
+  能抓「声称验过、其实没有」，**抓不到「其实验过、却标着 pending」**——
+  `person_moments` 与 `person_portrait_revisions` 就卡在 `pending`，而 S5c 已交付它们
+  （2026-09-29 实测：8 行瞬间 / 2 篇画像 / `model_name: qwen35-q4km`）。
+
+### 1.2 1.0 是否已经完全实现？——**没有**
+
+119 条路由的三分归属：
+
+| 域 | 路由数 | 已实现 | 已冻结（有记录） | **缺失（从没被决定过）** |
+|---|---:|---:|---:|---:|
+| 媒体 / 导入 / 视频 / 观察 | 19 | 7 | 0 | **13** |
+| 记忆 / 事实 / 实体 / 地点 | 15 | 3 | 0 | **12** |
+| 身份 / 人物 / 关系 | 44 | ~22 | ~11 | **~11** |
+| 助手 / 配置 / 运维 | 41 | ~27 | ~9 | **~13** |
+| **合计** | **119** | **~59** | **~20** | **~49** |
+
+**那 49 条之所以要紧，是因为它们从没被决定过要不要做。** 三个值得注意的形状：
+
+**① 代码写好了、没人调**
+
+| 位置 | 状态 |
+|---|---|
+| `repositories/facts.py:145 list_facts` / `:103 set_status` / `:113 supersede_others` | 全仓 **0 调用者** |
+| `repositories/appearance.py:176 list_for`（外观证据读） | **0 调用者**（唯一使用点是 `observe_appearance.record` 的写） |
+| `repositories/relationships.py:113 create` / `:182 confirm` / `:209 retract` | **0 调用者** |
+
+其中 **facts 是一条功能缺陷，不只是缺接口**：写链路完整（`MaintainFacts` + `review_cluster` 的
+家庭角色事实），表有 `status TEXT NOT NULL DEFAULT 'active'`（`0005_timeline.sql:94`），
+`FactStatus` 四值齐全（`domain/memories/facts.py:38-41`）。但 `decide_fact_write` 在「值变了」时
+会插一条 `pending`——**而它永远升不了级、删不掉、也看不见**。
+
+> 精度声明：线上 `album1` 的 `facts` 表 **0 行**（该库导入于 S4/S5b 接线之前），
+> 所以这是**代码可证、数据未显**的潜伏缺陷，不是观察到的现象。
+
+**② 后端有、前端不接**：`GET /assistant/conversations/{id}` 返回 `messages` 与 `turns`
+（`api/routes/assistant.py:137,149-159`），但前端 `shared/api/client.ts` **没有 `getConversation`**
+（全前端 grep 零命中）。`AssistantPanel.tsx:39-43` 明写「重新进入时由上层决定要不要回放」，上层没做。
+**结果：重进一个会话是空白。**
+
+**③ 枚举有、生产者没有**：`TerminationReason.CANCELLED` 在 `run_turn.py:632` 做了映射，
+但全仓**没有任何地方产生它**，`useTurnStream.ts:107` 对 `"cancelled"` 的判断因此是死代码。
+回合跑在 daemon 线程（`assistant.py:225`），前端断开 SSE 只让事件生成器 `return`，
+**worker 照跑到预算耗尽为止**。
+
+### 1.3 缺的是否必要？——**按归属分，不按大小分**
+
+第一版我按「必要性」分了 A/B/C/D 四类，这是错的分类轴——它把「该现在做」「该 S7 做」
+「不建议做」混在了一格里。正确的轴是**归属**：
+
+| 归属 | 内容 |
+|---|---|
+| **S6（检索补全）** | 六路里的 `text_ann` / `adjacency`、硬条件（时间/人物/地点）、证据包与 trace 可展开、语义评审层、恢复作答阶梯、四个工具 |
+| **S6 的前置依赖** | `query_memory_facts` 依赖 facts 读路径（§1.2 ①）；`query_photo_people` 依赖人物检索（S5b 已给 `retrieve_entity`） |
+| **S7（家庭关系）** | family-graph 7 条、relationships 5 条、`person_role_hypotheses`、`find_graph_violations`（`s5-deviations.md` 第 15/35 条已标「随 S7」） |
+| **S8（音频与视频）** | 视频 4 条路由 + 整条抽取/场景链、FunASR |
+| **S9/S10（PhotoBench）** | 评测后端/前端重构 |
+| **S11（服务与部署）** | model-manager 收敛；**`hardware` / `model-profiles` / `runtime-providers` 9 条都归这里**——设计文档 §2.1 明写「2.0 不管理模型进程生命周期」，且 1.0 那 8 条本身只是 8500 的薄代理 |
+| **S6（补，见 §3 第六组）** | **语义实体 / entity-groups / knowledge**——2026-09-29 裁决归 S6。它确实是检索补全的一部分：2.0 的 `retrieve_entity` 目前只服务人物，非人物语义实体是 entity 通道缺的那一半 |
+| **S7（补）** | **恢复作答的四级阶梯**——2026-09-29 裁决归 S7（S3 计划原写「S6/S7」，现定 S7） |
+| **未归属（需裁决）** | 鉴权；observations 原始列表；OCR settings / telemetry / query-gaps；`/api/dashboard`；**回合取消**（语义已裁决「丢弃部分结果」，但它不属检索补全，本切片不排）；**会话历史回放**（后端已有、前端不接，一行 client 函数的事，但同样不属 S6） |
+
+---
+
+## 2. S6 的真实起点
+
+逐条对设计文档 §8 给 S6 的四项内容：
+
+| S6 要求 | 2.0 现状 | 证据 |
+|---|---|---|
+| **六路召回补齐** | **4/6**。缺 `text_ann` 与 `adjacency` | 1.0 有 `retrieval/{visual_ann,text_ann,lexical,metadata,entity,adjacency}.py` 六个；2.0 的召回器只有 `Retrieve{Visual,Lexical,Metadata,Entity}`。`fusion.py:31-38` 的 `DEFAULT_CHANNEL_WEIGHTS` **已经列了六路**（含 `text_ann: 0.5` / `adjacency: 0.5`），`fusion.py:29` 也已声明 `EXPANDER_CHANNELS = ("adjacency",)`——**权重和通道分类都在，召回器不在** |
+| **硬条件（时间/人物/地点）** | **0** | `grep -iE 'hard_filter\|time_range\|person_filter\|place_filter'` 在 `application/retrieval/` 与 `domain/retrieval/` **零命中** |
+| **四个工具** | **4 个全缺** | 2.0 注册的是 `search_memories` / `get_result_page` / `get_original_photos` / `get_person_profile`（`domain/assistant/tools.py:54,81,98,121`）；`inspect_photo` / `read_photo_text` / `query_memory_facts` / `query_photo_people` 全仓零命中 |
+| **证据包 + trace 能展开** | **部分** | `domain/assistant/evidence_ledger.py` 在，`application/retrieval/retrieve_evidence.py` 在（融合 + 缺口传递到 HTTP 响应）；**trace 的展开面未核** |
+| 语义评审层（S3 交接） | **部分** | `domain/assistant/judge.py` 203 行 + `application/assistant/judge.py` 53 行；「双层防伪」的第二层缺否未核 |
+| 恢复作答的四级阶梯（S3 交接） | **移出 S6 → S7**（2026-09-29 裁决） | 仍未核形态：1.0 有 `agent_runtime/runtime.py:93 _ocr_recovery_instruction`、`:274` `system_recovery`、`:436` 的确定性恢复；**「四级阶梯」在 1.0 里我没找到独立形态**（`grep '四级'` 只命中「不确定性用自然语言四级」，那是措辞分级，不是恢复阶梯）。S7 动工前必须先核，不能猜 |
+| 语义实体 / entity-groups / knowledge | **0（并入 S6）** | 2026-09-29 裁决归 S6。`semantic_claims` / `semantic_profiles` 表在 2.0 的 7 个迁移里**根本不存在**；`repositories/entities.py:180` 的列表查询**硬编码 `entity_type = 'person'`**，非人物实体抽取（1.0 `db.py:3840-4032`）没移植 |
+
+**1.0 的调用量给优先级**（25,112 条轨迹全量，设计文档 §1.3）：
+
+| 工具 | 1.0 调用次数 |
+|---|---:|
+| `search_memories` | 17,718 |
+| **`inspect_photo`** | **10,721** |
+| **`read_photo_text`** | **2,867** |
+| `get_result_page` | 1,649 |
+| **`query_memory_facts`** | **1,603** |
+| **`query_photo_people`** | **887** |
+| `get_original_photos` | 4 |
+
+**S6 要补的四个工具在 1.0 的真实调用量是 16,078 次**——不是锦上添花，是助手的主要取证手段。
+没有它们，2.0 的助手只能靠 `search_memories` 一条腿走路。
+
+---
+
+## 3. S6 任务表
+
+任务编号续前端（终于 112），从 113 起。
+
+### 第一组 · 前置（不做，后面的工具接不上）
+
+| Task | 内容 | 为什么是前置 |
+|---|---|---|
+| **113** | facts 读路径接线：`list_facts` 接上 + `GET /facts` | **`query_memory_facts` 没有它就没有数据源**。仓储方法已写好、零调用者，是「接线」不是「新做」 |
+| **114** | facts 状态机闭合：`confirm` / `reject` 两条用例 + 路由，`set_status` / `supersede_others` 接线 | 只接读不接写，`pending` 仍然永久卡死；而 `query_memory_facts` 读到的会是永远升不了级的行 |
+
+### 第二组 · 六路补齐
+
+| Task | 内容 |
+|---|---|
+| **115** | `text_ann` 召回器（1.0 `retrieval/text_ann.py`；写侧 `memory_vectors` 的 `text_ann` route） |
+| **116** | `adjacency` 召回器（1.0 `retrieval/adjacency.py`；扩展通道，`fusion.py:29` 的 `EXPANDER_CHANNELS` 已留位） |
+| **117** | 通道补齐的**对照验收**：同一 query 在补齐前后各跑一次，断言 `channels` 里出现了新键且名次合理 |
+
+### 第三组 · 硬条件
+
+| Task | 内容 |
+|---|---|
+| **118** | 时间硬条件（`time_range`） |
+| **119** | 人物硬条件（`person_id`，接 S5b 的 `retrieve_entity`） |
+| **120** | 地点硬条件（`place`，接 S4 的 `asset_places`） |
+
+> 三个硬条件各自独立成任务，因为 1.0 的失败模式是「硬条件被当成软加权」——
+> 查询「拍过**某个人**的照片」时，如果人物只是加权而不是硬过滤，返回的结果里会混进
+> 没有那个人的照片，而**这个错误在界面上看起来完全正常**。每个都要有「过滤前有、过滤后没有」的用例。
+
+### 第四组 · 四个工具
+
+| Task | 内容 | 依赖 |
+|---|---|---|
+| **121** | `query_memory_facts` | 113 / 114 |
+| **122** | `query_photo_people` | S5b 的 `retrieve_entity` |
+| **123** | `inspect_photo`（VLM，1.0 调用 10,721 次） | 8100 上的视觉端点（当前 qwen3.5-4B + mmproj，已实测可用） |
+| **124** | `read_photo_text`（OCR，1.0 调用 2,867 次） | **动工前核查**：1.0 的 `ocr_tool.py`（638 行）用的是哪个 OCR 后端，2.0 有没有 |
+
+### 第五组 · 收口
+
+| Task | 内容 |
+|---|---|
+| **125** | 证据包 + trace 的可展开面（§8 给 S6 的验收条件就是这一条） |
+| **126** | 语义评审层的第二层（「双层防伪」——**动工前核查 1.0 的第二层是什么**） |
+
+### 第六组 · 语义实体（2026-09-29 裁决并入 S6）
+
+非人物语义实体是 entity 通道缺的那一半：2.0 的 `retrieve_entity` 目前只服务人物
+（`repositories/entities.py:180` 的列表查询**硬编码 `entity_type = 'person'`**）。
+这一组做完，`GET /entities` / `entity-groups` / `knowledge` 三条 1.0 路由才算有落点。
+
+| Task | 内容 | 动工前须核 |
+|---|---|---|
+| **127** | 迁移 0008：`semantic_claims` / `semantic_profiles` 表族 + 非人物实体抽取（1.0 `db.py:3840-4032`） | 1.0 那两张表的**实际列与被引用处**——它们 2.0 一张都没建，抄错列名要等到写入时才炸 |
+| **128** | `GET /entities` + `GET /entities/{id}` + `PUT /entities/{id}/properties/{key}`（接 `repositories/entities.py` 的 `list_people` 放开 person 过滤、`set_property`/`maintain_property`/`list_properties` 三个零调用方法） | `maintain_entity_property_values`（多值合并）在 1.0 只被语义抽取调用，`s5-deviations.md` 第 46 条记过它「本切片没有调用者」——**这就是那个调用者** |
+| **129** | `GET /entity-groups` + `/{id}`（1.0 是 `db.py:4194` 现算的投影，不落表） | 投影的**分组键**是什么 |
+| **130** | `GET /knowledge`（1.0 返回 profiles + claims + spaces 三块） | — |
+| **131** | 把非人物实体接通 `retrieve_entity`，让 entity 通道对语义实体也生效 | 与 119（人物硬条件）的边界：人物是硬条件，语义实体是召回通道，**两者在 1.0 里不是一回事** |
+
+### 收口
+
+| Task | 内容 |
+|---|---|
+| **132** | 收口：`capability-map.jsonl` 补本切片新能力；把 §1.1 的三条自检缺口**或补或正式记入不做** |
+
+### 伴随任务（低成本的防腐，与上面并行）
+
+| Task | 内容 | 为什么现在做 |
+|---|---|---|
+| **133** | **方法级可达性**：新增一条检查，对已判定可达的模块看其公开**方法**有否调用者。§1.2 ① 的三个死方法是现成红灯样本 | 本切片要接大量方法线；接线时正是这条门禁最有用的时候——它会把「还剩几个零调用方法」变成可数的 |
+
+**三条顺序约束**（单独看都对、顺序错了就出错）：
+
+1. **133 要在 113–131 之前或同时**。否则接线全程没有任何东西提醒还剩哪些零调用方法——
+   而「让红色消失」本身是这条门禁最好的一次验证。
+2. **113/114 必须在 121 之前**。`query_memory_facts` 没有 facts 读路径就没有数据源，
+   而直接写工具会得到一个「永远返回空」的工具，读起来像「这个人没有事实」。
+3. **115/116 在 117 之前**——117 是对照验收，没有前两个无从对照。
+
+---
+
+## 4. 逐任务要点（只写不显然的地方）
+
+### Task 114 · facts 状态机的闭合
+
+形状由 1.0 定：`confirm_fact` 是把新值升 `active` **并且**把旧值标 `superseded`，
+两件事在同一事务里（`supersede_others` 就是为它准备的）。2.0 的 `set_status` 与
+`supersede_others` 已写好、签名也对，**只是没有调用者**——先确认这一点再写用例。
+
+回归用例钉那个具体病症：造一条 `pending`，走确认，断言它变成 `active` **且旧值变成 `superseded`**。
+定点变异：去掉 `supersede_others` 的调用，用例必须变红——否则它只验了「状态改了」，
+没验「旧值被作废」，而后者才是「改口」这个动作的全部意义。
+
+### Task 117 / 123 / 124 · 三个「对照验收」
+
+这三个的共同形状是：**新增的能力必须证明它比原来多拿到了东西**，而不是「不报错」。
+
+- 117：同一 query 补齐前后各跑一次，断言 `channels` 里出现了新键、且**名次不是垫底**
+  （垫底意味着它其实没贡献）；
+- 123/124：拿一张**已知内容的照片**跑，断言返回的观察/文字与人工标注一致——
+  1.0 的 PhotoBench 有现成的题可以借；
+- 三个都要有「关掉新通道 / 不接工具」的对照臂，否则「有输出」与「输出是对的」分不开。
+
+### Task 127 · 恢复作答的阶梯
+
+**动工前必须先核查**（照 S5c 的 T86g 体例：先核依赖，核出缺口再写任务定义）。
+要核的是：1.0 的「四级阶梯」到底是哪四级、在哪个文件、由谁触发。
+我这次只 `grep` 到措辞分级（确定→较可能→不确定→无依据），**那不是恢复阶梯**。
+如果核查发现它其实是 S7 的事（S3 计划写的是「S6/S7」），本任务移出 S6。
+
+---
+
+## 5. 不做（按 2026-09-29 裁决与路线图归属）
+
+| 项 | 归属 / 理由 |
+|---|---|
+| 视频（4 条路由 + 抽取链） | **S8**；按裁决**单独排**，本切片不做 |
+| family-graph 7 条、relationships CRUD、角色假设 | **S7**（设计 §8）；`s5-deviations.md` 第 15/35 条已标「随 S7」 |
+| `hardware` / `model-profiles` / `runtime-providers` 9 条 | **S11**；设计 §2.1「2.0 不管理模型进程生命周期」 |
+| PhotoBench 后端 / 前端 | **S9 / S10** |
+| **鉴权** | 裁决：**不着急**。核实过的事实记在此：`api/routes/` 零鉴权依赖，8191/8091 绑 `0.0.0.0`，局域网内任何人可读全部家庭照片、改身份数据。**它不是「缺功能」而是「缺一个设计决定」**，等排期时单独定 |
+| 语义实体 / entity-groups / knowledge | **未归属**：`repositories/entities.py:8-13` 注释推给 S7，但 S7 的定义（设计 §8）里没有它。**列进 §6 待裁决** |
+| observations 原始列表、OCR settings / telemetry / query-gaps、`/api/dashboard` | 未归属，价值判断见 §6 |
+
+**这份「不做」清单要进 `frozen.md`**（或有明确归属的记进对应切片计划），
+否则下一次审计还会把它们当「缺失」重报一遍——本轮审计就已经重报了一批 S7/S11 的东西。
+
+---
+
+## 6. 完成定义
+
+1. §3 的 113–133 全部落地，或逐条写明移出本切片的原因；
+2. 设计 §8 给 S6 的验收条件成立：**证据包和 trace 能展开**；
+3. 六路召回 6/6，且 117 的对照臂证明新通道有实际贡献（名次非垫底）；
+4. 三个硬条件各有「过滤前有、过滤后没有」的用例；
+5. 四个工具在真数据上各跑通一次，且有对照臂（关掉工具时结果确实变差）；
+6. 133 的新门禁**有定点变异证明会红**，且 §1.2 ① 的三个死方法在接线后从红灯变绿；
+7. `capability-map.jsonl` 不含「已实现却标 pending」的条目（`person_moments` /
+   `person_portrait_revisions` 是现成的两条）；
+8. **CI 结果可解释**：当前 `test_the_answer_never_leaks_internal_identifiers` 因
+   qwen3.5-4B 会在正文写 `photo_N` 而常红（裁决：判为模型问题、不修）。
+   本切片不改变这一点，完成定义要说清「CI 红 ≠ 本切片未完成」，并说明是哪一条。
+
+---
+
+## 7. 待裁决
+
+| # | 问题 | 状态 |
+|---|---|---|
+**2026-09-29 全部裁决完毕**（含本文件第一版新提的三条）：
+
+| # | 问题 | 裁决 |
+|---|---|---|
+| ① | 建/删相册 | **加入删除逻辑** |
+| ② | S7 是否存在 | 存在，定义在设计文档 §8；本文件第一版误判为不存在 |
+| ③ | 鉴权 | **不着急** |
+| ④ | 视频 | **单独排**（对应路线图的 S8） |
+| ⑤ | 回合取消后部分结果 | **丢弃** |
+| ⑥ | 记忆空间删除的连带范围 | **删干净**：空间行 + 该 scope 的 assets/observations/events/entities/face_*/facts/…（按 `scope_id` 级联）+ 对应 Qdrant collection + `data/media` 下的实体文件。理由：留半份数据比删两份更糟——剩下的行会以孤儿形态出现在检索里，而**没有任何界面能让人发现它们** |
+| ⑦ | 语义实体 / entity-groups / knowledge | **归 S6**（§3 第六组） |
+| ⑧ | 恢复作答的阶梯 | **归 S7** |
+
+**① + ⑥ 的落点**：建/删相册不属检索补全，**不在 S6 任务表内**——它进 §1.3 的「未归属」栏，
+但**语义已定，不需要再问**：实现时按 ⑥ 的级联范围做，且删除必须是显式确认的不可逆操作。
+
+**仍然没有归属的**（本切片不排，也不需要现在决定）：鉴权、observations 原始列表、
+OCR settings / telemetry / query-gaps、`/api/dashboard`、回合取消、会话历史回放。
