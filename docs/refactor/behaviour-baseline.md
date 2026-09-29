@@ -161,6 +161,44 @@
 > 数据源 GeoNames `ADM4`（11,450 条）+ `PPL`（860,831 条），最近邻点索引。
 > 1.0 零参考。见 `docs/refactor/s4-deviations.md` §1 第 1 项。
 
+## 外观证据 / 人物画像 / 画像流水线（S5c）
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| 头肩裁剪的三个松紧系数 | `HEAD_SCALE=1.35` / `BODY_HEIGHT_SCALE=4.5` / `FACE_TOP_EXPANSION=0.35` | `backend/person_appearance.py:4,21,23` |
+| 裁剪尺寸下限 | 宽 `<24` 或高 `<48` → **抛错，不回退整图** | `backend/person_appearance.py:23` |
+| 外观证据唯一键 | `(person_id, face_instance_id, model_name)`——**换模型是另一条证据** | `backend/db.py:4482` |
+| 外观置信度兜底 | `0.55` | `backend/model_clients.py:1352` |
+| 画像长度 | 汉字数 80–500 | `backend/person_portraits.py`（提示词原文即写死） |
+| 画像主题数 | 2–6 | 同上 |
+| 证据包抽样 | `MAX_MOMENTS=12` / 每事件 `PER_EVENT=2` / 每主题引用 `MAX_REFS_PER_THEME=2` / `TOP_ACTIONS=3` | 同上 |
+| 未确认角色的措辞 | 必须含 `似乎/可能/从照片看/看起来/像是` 之一 | 同上（`_mentions_role`） |
+| 核心人物排序六项权重 | 日期 `0.30` / 事件 `0.20` / 覆盖 `0.15` / 同伴 `0.10` / 场景 `0.10` / 质量 `0.15`（**和恰好 1.0**） | `backend/person_insights.py:31-57` |
+| 排序的满值档 | `DATE_FULL=8.0` / `EVENT_FULL=6.0` / `COVERAGE_FULL=20.0` / `CO_PERSON_FULL=4.0` / `SCENE_FULL=4.0` | 同上 |
+| 确认加成 / 单日惩罚 | `CONFIRMED_BOOST=0.20` / `SINGLE_DAY_PENALTY=0.35` | 同上 |
+| 核心人物门槛 | 上限 `10`，且跨够 `2` 天（`CORE_MIN_DATE_COUNT`） | 同上 |
+| 代表照 | 上限 `12` / 每事件 `2` / 去重阈值 `0.94` | 同上 |
+| 提示词版本 | `person-moment-v1`（`person_moments.py:186`）/ `person-portrait-v1`（`person_insights.py:251`） | 两者都是 upsert 键或画像行的组成部分 |
+
+> **2026-09-29 补记（S5c / Task 87 时才发现缺）**。这一节是 T87 验收时才补进来的——
+> T85a（裁剪几何）、T86c（画像三层）、T86d（排序与代表照）落地时都**没有回来更新这份
+> 基线**。值本身没错（都是从 2.0 已落地的模块里取的，那些模块的 docstring 逐个标了
+> 1.0 行号），但**漏记这件事本身是个缺陷**：基线的用途是「下一次有人要动这些数时，
+> 能查到它们属于 1.0 的行为、动它们就是偏离」，而查不到就会按自己的判断改掉。
+>
+> 三条与「值」同等重要的行为，也一并记在这里：
+>
+> 1. **`select_representatives` 的余弦去重分支在生产上从不执行。** 1.0 唯一的调用点
+>    传的是字面量 `{}`（`person_insights.py:271`），所以「与已选中的任一张余弦 ≥ 0.94
+>    就跳过」那条永远走不到。**2.0 照搬了这个空表**（`run_insights._select`），
+>    把发现记在 `s5-deviations.md` 第 137 条。**动这一条等于改产品行为**，不是修 bug。
+> 2. **`person_portrait_revisions` 的 `user_locked` 是写入口的判据**，不是界面上的
+>    禁用按钮：当前版本被锁住时 `create` 直接返回、不写新行（`db.py:6380`）。
+> 3. **外观证据的三重守卫**（人已确认 / 实例存在 / 该实例经 `entity_mentions` 确认给了
+>    这个人）。1.0 的调用点把守卫的错误连同媒体错误一起 `except` 掉了，所以**第三重
+>    在 1.0 里从来没浮出来过**；2.0 只捕获媒体失败，守卫的错误往外抛
+>    （`s5-deviations.md` 第 131 条）。
+
 ## 模型与嵌入
 
 | 项 | 值 | 位置 |

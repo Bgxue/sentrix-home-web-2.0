@@ -116,7 +116,7 @@
 | T86g | `application/identity/run_insights.py` 5 阶段编排（含缺陷 3 的日志落点：2.0 没有 run 表） | T86c/T86d/T86f | ✅ **完成** |
 | T86h | `api/routes/insights.py` + `main.py` + 容器装配 | T86g | ✅ **完成** |
 | T86i | **裁决④**：导入路由批末自动触发画像 | T86h | ✅ **完成** |
-| T87 | `tests/e2e/test_identity_album.py`（断言内容不只数量） | 全部 | ⬜ 未开始 |
+| T87 | `tests/e2e/test_identity_album.py`（断言内容不只数量） | 全部 | ✅ **完成** |
 
 **状态口径（重要，不要把「已写」读成「已验证」）：**
 
