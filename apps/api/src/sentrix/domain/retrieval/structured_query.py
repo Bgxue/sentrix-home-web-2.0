@@ -40,9 +40,14 @@ from sentrix.domain.retrieval.time_expression import parse_time_expression
 
 # 1.0 ``structured_memory.py:_GROUP_EXPR`` 认得的分组键。``year`` / ``date`` 是 2.0 也有的
 # （1.0 那张表里就在），``place`` / ``media`` 同。
-GROUP_BY_KEYS = ("month", "year", "date", "media", "place")
+GROUP_BY_KEYS = ("month", "year", "date", "media", "place", "status")
 DEFAULT_GROUP_BY = "month"
 # 按时间分组时要求 ``captured_at`` 非空——否则会多出一个「空字符串」分组。
+#
+# ``status`` 是给 ``processing`` 主题用的（导入流水线走到哪一步了），它问的与
+# 「这个相册里有什么」不是同一个问题。白名单在这里是全集，**「只有 processing 才能按
+# status 分组」那条约束在 ``fact_query.ASSET_GROUPS`` / ``PROCESSING_GROUPS`` 里**——
+# 分开放是因为这一层不该知道「主题」这个概念。
 TIME_GROUP_KEYS = ("month", "year", "date")
 
 
@@ -56,6 +61,22 @@ class GroupCount:
 
     group: str
     count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AssetSample:
+    """一条代表观察，用来给统计结果附证据。
+
+    **``asset_id`` 是内部字段。** 投影给模型的那一份只留 ``captured_at`` /
+    ``media_type`` / ``caption``——1.0 的 ``_fact_samples`` 就是在这里做的一次
+    切分（``{key: row.get(key) for key in ("captured_at","media_type","caption")}``），
+    2.0 把它对应到 ``ToolOutcome`` 的 observation / model_visible 两份投影。
+    """
+
+    asset_id: str
+    captured_at: str | None
+    media_type: str
+    caption: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +198,7 @@ def normalize_group_by(value: str | None) -> str:
 
 __all__ = [
     "DEFAULT_GROUP_BY",
+    "AssetSample",
     "GroupCount",
     "GROUP_BY_KEYS",
     "TIME_GROUP_KEYS",

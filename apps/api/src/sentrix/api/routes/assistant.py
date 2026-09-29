@@ -50,6 +50,7 @@ from sentrix.api.schemas.assistant import (
     TurnSummary,
 )
 from sentrix.application.assistant.manage_conversations import ManageConversations
+from sentrix.application.assistant.query_memory_facts import QueryMemoryFacts
 from sentrix.application.assistant.run_turn import (
     RunTurn,
     TurnRequest,
@@ -108,6 +109,10 @@ def _run_turn(container: Container) -> RunTurn:
             assets=container.asset_repository,
             result_sets=container.result_set_repository,
             people=container.person_directory,
+            memory_facts=QueryMemoryFacts(
+                structured=container.structured_query_repository,
+                entities=container.entity_repository,
+            ),
         ),
     )
 

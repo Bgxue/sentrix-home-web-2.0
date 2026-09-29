@@ -26,12 +26,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from sentrix.application.assistant.query_memory_facts import QueryMemoryFacts
 from sentrix.application.retrieval.retrieve_evidence import EvidenceRequest, RetrieveEvidence
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
 from sentrix.domain.assistant.result_set import ResultSet
 from sentrix.domain.media.ports import AssetRepository
+from sentrix.domain.retrieval.fact_query import FactRejection
 
 log = logging.getLogger("sentrix.assistant.tools")
 
@@ -80,11 +82,13 @@ class AssistantToolbox:
         assets: AssetRepository,
         result_sets: ResultSetRepository,
         people: PersonDirectory,
+        memory_facts: QueryMemoryFacts,
     ) -> None:
         self._retrieval = retrieval
         self._assets = assets
         self._result_sets = result_sets
         self._people = people
+        self._memory_facts = memory_facts
 
     def execute(
         self, name: str, arguments: Mapping[str, Any], *, scope_id: str, now: datetime
@@ -97,7 +101,41 @@ class AssistantToolbox:
             return self._deliver(arguments, scope_id=scope_id)
         if name == "get_person_profile":
             return self._person(arguments, scope_id=scope_id)
+        if name == "query_memory_facts":
+            return self._facts(arguments, scope_id=scope_id, now=now)
         return _failure("unknown_tool", f"没有名为 {name} 的工具。")
+
+    # ---- query_memory_facts -------------------------------------------------
+
+    def _facts(self, arguments: Mapping[str, Any], *, scope_id: str, now: datetime) -> ToolOutcome:
+        """精确统计。**与检索工具相反：这里的 ``total`` 是答案本身，要给模型看。**
+
+        ``is_empty_result`` 读的是 ``observation["total"]``，看上去会让「一共 0 张」
+        被当成「检索没找到」。不会——``final_guard`` 先按 ``RETRIEVAL_TOOLS`` 过滤工具名，
+        而本工具不在那个集合里，所以「拒绝」与「空结果」在那一边是分开的。
+        """
+        answer = self._memory_facts.execute(
+            arguments,
+            scope_id=scope_id,
+            viewer_id="owner",
+            conversation_id="tool_loop",
+            now=now,
+        )
+        if isinstance(answer, FactRejection):
+            return ToolOutcome(
+                observation={"status": answer.status, "reason": answer.reason},
+                model_visible={"status": answer.status, "reason": answer.reason},
+                failure_reason=answer.reason,
+            )
+        return ToolOutcome(
+            observation={
+                "fact_type": answer.fact_type,
+                "value": answer.value,
+                "total": answer.total,
+                "filters_applied": dict(answer.filters_applied),
+            },
+            model_visible=answer.visible(),
+        )
 
     # ---- search_memories ----------------------------------------------------
 

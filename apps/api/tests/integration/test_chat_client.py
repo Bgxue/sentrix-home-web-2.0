@@ -151,6 +151,7 @@ def test_the_tools_field_carries_standard_json_schema(server: str):
     assert sent["tool_choice"] == "auto"
     assert [tool["function"]["name"] for tool in sent["tools"]] == [
         "search_memories",
+        "query_memory_facts",
         "get_result_page",
         "get_original_photos",
         "get_person_profile",

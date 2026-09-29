@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from sentrix.application.assistant.query_memory_facts import QueryMemoryFacts
 from sentrix.application.assistant.tools import AssistantToolbox, is_empty_result
 from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_evidence import RetrieveEvidence
@@ -32,8 +33,12 @@ from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
     SqliteObservationRepository,
 )
+from sentrix.infrastructure.persistence.repositories.entities import SqliteEntityRepository
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
+from sentrix.infrastructure.persistence.repositories.structured import (
+    SqliteStructuredQueryRepository,
+)
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
 
 NOW = datetime(2026, 9, 22, 10, 0, tzinfo=UTC)
@@ -134,6 +139,15 @@ def toolbox(migrations_ready_db, tmp_path):
         assets=assets,
         result_sets=result_sets,
         people=StubPeople({"妈妈": PersonProfile(name="妈妈", family_role="母亲", confirmed=True)}),
+        memory_facts=QueryMemoryFacts(
+            structured=SqliteStructuredQueryRepository(
+                migrations_ready_db,
+                # 与 metadata 通道用同一份空别名表：这个夹具测的是工具的信息边界，
+                # 不是地点匹配；别名桥接自己的行为在 test_structured_query_repository.py。
+                EMPTY_ALIASES,
+            ),
+            entities=SqliteEntityRepository(migrations_ready_db),
+        ),
     )
     return build, result_sets
 
@@ -313,3 +327,55 @@ def test_an_unknown_tool_is_reported_not_raised(toolbox):
 
     assert not outcome.ok
     assert outcome.failure_reason == "unknown_tool"
+
+
+# ---- query_memory_facts -----------------------------------------------------
+
+
+def test_memory_facts_counts_the_album(toolbox):
+    """统计工具走的是 SQL，不是检索——所以它数出来的就是资产数本身。
+
+    夹具里有 2 张照片（``asset_0`` / ``asset_1``），搜索那条用例也断言了同一个数。
+    """
+    outcome = run(toolbox, "query_memory_facts", operation="count", subject="asset")
+
+    assert outcome.ok
+    assert outcome.model_visible["value"] == 2
+    assert outcome.model_visible["fact_type"] == "asset_count"
+    assert outcome.model_visible["unit"] == "original_asset"
+    assert outcome.model_visible["coverage"]["complete"] is True
+
+
+def test_memory_facts_never_leaks_an_asset_id_to_the_model(toolbox):
+    """``samples`` 里只有 ``captured_at`` / ``media_type`` / ``caption``。
+
+    1.0 ``_fact_samples`` 的键白名单，也是这个工具与模型之间唯一的边界。
+    """
+    outcome = run(toolbox, "query_memory_facts", operation="first", subject="asset")
+
+    assert outcome.ok
+    samples = outcome.model_visible["samples"]
+    assert samples
+    for sample in samples:
+        assert set(sample) == {"captured_at", "media_type", "caption"}
+    assert "asset_id" not in str(outcome.model_visible)
+
+
+def test_memory_facts_reports_a_rejection_as_a_normal_answer(toolbox):
+    """**被拒是一次正常返回，不是异常。** 模型看到 ``reason`` 才知道下一步怎么改参数。"""
+    outcome = run(toolbox, "query_memory_facts", operation="count", subject="妈妈")
+
+    assert not outcome.ok
+    assert outcome.failure_reason == "unsupported_subject"
+    assert outcome.model_visible["status"] == "unsupported_subject"
+
+
+def test_memory_facts_groups_by_month(toolbox):
+    """两张照片分别在 2019-08-01 与 2019-08-02，所以是同一个分组、计数为 2。"""
+    outcome = run(toolbox, "query_memory_facts", operation="group", subject="asset", group_by="month")
+
+    assert outcome.ok
+    assert outcome.model_visible["value"] == [{"group": "2019-08", "count": 2}]
+    assert outcome.model_visible["unit"] == "original_asset_breakdown"
+    # 分组结果本身已经把内容摊开了，不再附样本——1.0 也是只在非分组时附。
+    assert outcome.model_visible["samples"] == []

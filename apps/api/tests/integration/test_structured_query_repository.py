@@ -492,7 +492,9 @@ def test_a_time_group_skips_assets_without_captured_at(structured, assets):
     add_asset(assets, "asset_1", captured_at=datetime(2023, 10, 1, tzinfo=UTC))
     add_asset(assets, "asset_2", captured_at=None)
 
-    assert structured.list_groups(derive_filter(spec_of()), "month") == ("2023-10",)
+    groups = [item.group for item in structured.group_counts(derive_filter(spec_of()), "month")]
+
+    assert groups == ["2023-10"]
 
 
 def test_group_by_media(structured, assets):
@@ -507,7 +509,7 @@ def test_group_by_media(structured, assets):
 def test_an_unknown_group_key_falls_back_to_month(structured, assets):
     add_asset(assets, "asset_1", captured_at=datetime(2023, 10, 1, tzinfo=UTC))
 
-    assert structured.list_groups(derive_filter(spec_of()), "季度") == ("2023-10",)
+    assert [item.group for item in structured.group_counts(derive_filter(spec_of()), "季度")] == ["2023-10"]
 
 
 @pytest.mark.parametrize(
@@ -550,4 +552,4 @@ def test_group_by_place_is_deterministic_with_several_observations(structured, a
         observations, "obs_2", "asset_1", place="观景台", captured_at=datetime(2023, 9, 1, tzinfo=UTC)
     )
 
-    assert structured.list_groups(derive_filter(spec_of()), "place") == ("观景台",)
+    assert [item.group for item in structured.group_counts(derive_filter(spec_of()), "place")] == ["观景台"]

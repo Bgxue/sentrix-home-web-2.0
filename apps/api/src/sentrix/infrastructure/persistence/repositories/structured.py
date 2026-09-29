@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from sentrix.domain.places.aliases import PlaceAliases
 from sentrix.domain.retrieval.structured_query import (
     TIME_GROUP_KEYS,
+    AssetSample,
     GroupCount,
     StructuredFilter,
     normalize_group_by,
@@ -202,6 +203,12 @@ _GROUP_EXPR = {
     "year": "substr(a.captured_at, 1, 4)",
     "date": "substr(a.captured_at, 1, 10)",
     "media": "a.media_type",
+    # 1.0 把 status 这一支写在 ``_query_memory_facts`` 的 raw SQL 里（``COALESCE(NULLIF(...))``），
+    # 没进 ``_GROUP_EXPR``。2.0 收进来：分组表达式集中在 ``group_expression`` 一处，
+    # 调用方不必为了一个键去走私有的 SQL 分支。
+    # ``NULLIF`` 把空串折成 NULL 再 ``COALESCE`` 到 'unknown'——空串与「没有状态」
+    # 在报表里是同一个意思，而空串单独成一组会让报表多出一行看起来像状态的东西。
+    "status": "COALESCE(NULLIF(a.status, ''), 'unknown')",
     "place": (
         "CASE"
         " WHEN ap.admin_city <> '' THEN ap.admin_city"
@@ -265,15 +272,32 @@ class SqliteStructuredQueryRepository:
         )
         return tuple(GroupCount(group=row["g"], count=int(row["n"] or 0)) for row in rows)
 
-    def list_groups(self, filter: StructuredFilter, group_by: str) -> tuple[str, ...]:
+    def sample_observations(self, filter: StructuredFilter, *, limit: int) -> tuple[AssetSample, ...]:
+        """按筛选条件取几条代表观察，按拍摄时间倒序。
+
+        子查询的别名是 ``o2`` 不是 ``o``：``o`` 已经被 ``build_base`` 的左连接占用了，
+        而 SQLite 里相关子查询会先看到外层作用域里的那个 ``o``——写成 ``o.caption``
+        拿到的是**连接上来的那一行**的 caption，不是「这个资产最近一条观察」的，
+        并且不报错。
+        """
         joins, where, params = build_base(filter, self._aliases)
-        expression = group_expression(group_by)
-        time_filter = " AND a.captured_at IS NOT NULL" if group_by in TIME_GROUP_KEYS else ""
         rows = self._rows(
-            f"SELECT DISTINCT {expression} AS g FROM assets a {joins} WHERE {where}{time_filter} ORDER BY g",
-            params,
+            "SELECT a.id AS asset_id, a.captured_at, a.media_type,"
+            " (SELECT COALESCE(o2.caption, '') FROM observations o2"
+            "  WHERE o2.asset_id = a.id ORDER BY o2.captured_at DESC LIMIT 1) AS caption"
+            f" FROM assets a {joins} WHERE {where}"
+            " ORDER BY a.captured_at DESC LIMIT ?",
+            [*params, limit],
         )
-        return tuple(row["g"] for row in rows)
+        return tuple(
+            AssetSample(
+                asset_id=row["asset_id"],
+                captured_at=row["captured_at"],
+                media_type=row["media_type"],
+                caption=row["caption"] or "",
+            )
+            for row in rows
+        )
 
 
 __all__ = [

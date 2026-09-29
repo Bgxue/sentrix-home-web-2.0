@@ -36,6 +36,12 @@ class EvidenceType(StrEnum):
     PHOTO_SET = "photo_set"
     DELIVERED_PHOTO = "delivered_photo"
     PERSON_PROFILE = "person_profile"
+    # ``query_memory_facts`` 的产物。1.0 的 ``produces_evidence=("structured_fact",)``。
+    #
+    # **它是一条「答案」而不是一条「材料」**：检索工具产出的候选池是用来筛的，
+    # 而这个工具产出的数字本身就是回答。所以它不需要被某个需求码映射——
+    # 账本记下「这一轮拿到过一条精确统计」，门禁不会因为它去逼模型再检索一次。
+    STRUCTURED_FACT = "structured_fact"
 
 
 class RequirementStatus(StrEnum):

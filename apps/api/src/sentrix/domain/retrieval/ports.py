@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sentrix.domain.media.models import Asset, Observation
-from sentrix.domain.retrieval.structured_query import GroupCount, StructuredFilter
+from sentrix.domain.retrieval.structured_query import AssetSample, GroupCount, StructuredFilter
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +281,11 @@ class StructuredQueryRepository(Protocol):
         """按 ``group_by`` 分组计数，**按计数倒序**（1.0 的 ``ORDER BY n DESC, g``）。"""
         ...
 
-    def list_groups(self, filter: StructuredFilter, group_by: str) -> Sequence[str]:
-        """分组键出现过哪些取值（不计数），按值升序。"""
+    def sample_observations(self, filter: StructuredFilter, *, limit: int) -> Sequence[AssetSample]:
+        """取几条代表观察，按拍摄时间倒序，给统计结果附证据。
+
+        **返回值不能直接发给模型**：每条带 ``asset_id``。1.0 的 ``_fact_samples``
+        就是在这里切了一刀，只把 ``captured_at`` / ``media_type`` / ``caption``
+        放进工具返回值；2.0 把那一刀对应到 ``ToolOutcome`` 的两份投影上。
+        """
         ...

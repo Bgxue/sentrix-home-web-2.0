@@ -49,12 +49,22 @@ def declaration(*evidence_types: str, goal: str = "找海边的照片", scope: s
 # ---- 提示词 -----------------------------------------------------------------
 
 
-def test_the_prompt_lists_exactly_the_s3_evidence_registry():
+def test_the_prompt_lists_exactly_the_evidence_registry():
+    """注册表是 ``EvidenceType`` 的全部取值，提示词逐条列出来。
+
+    S6 加了 ``structured_fact``（``query_memory_facts`` 的产物）——它和另外三类一样
+    是「模型可以向规划器声明的需求」，所以照旧由枚举唯一决定，不另开一张表。
+    """
     prompt = build_prompt()
 
     for item in planner_evidence_types():
         assert f"- {item}" in prompt
-    assert planner_evidence_types() == ("delivered_photo", "person_profile", "photo_set")
+    assert planner_evidence_types() == (
+        "delivered_photo",
+        "person_profile",
+        "photo_set",
+        "structured_fact",
+    )
 
 
 def test_the_prompt_never_shows_a_real_scope_id():

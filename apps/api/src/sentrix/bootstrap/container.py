@@ -54,6 +54,7 @@ from sentrix.domain.places.ports import AssetPlaceRepository, PlaceResolver
 from sentrix.domain.retrieval.ports import (
     LexicalIndex,
     LexicalSearch,
+    StructuredQueryRepository,
     TextEmbedder,
     VectorIndex,
     VectorRepository,
@@ -102,6 +103,9 @@ from sentrix.infrastructure.persistence.repositories.relationships import (
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
+from sentrix.infrastructure.persistence.repositories.structured import (
+    SqliteStructuredQueryRepository,
+)
 from sentrix.infrastructure.persistence.repositories.turns import SqliteTurnRepository
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
 from sentrix.infrastructure.places.aliases import load_place_aliases
@@ -149,6 +153,10 @@ class Container:
     # 这里按两个端口分别声明：调用方在类型上就看得出自己只需要其中一侧。
     lexical_index: LexicalIndex
     lexical_search: LexicalSearch
+    # 结构化聚合（S6 T121b）。与上面两个词法端口分开：那两个是**投影**
+    # （可重建的派生表），这个是对 assets / asset_places / entity_mentions
+    # 直接做 SQL 聚合。
+    structured_query_repository: StructuredQueryRepository
 
     # 身份层（S5a）。两个仓储分家的理由写在 domain/identity/ports.py 的模块注释里：
     # 人脸侧的写入者是在线匹配与簇审阅，实体侧的写入者是命名与属性维护。
@@ -187,6 +195,7 @@ class Container:
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
+        place_aliases = load_place_aliases()
         database = Database(settings.database_path, MIGRATIONS_DIR)
         observations = SqliteObservationRepository(database)
         assets = SqliteAssetRepository(database)
@@ -218,12 +227,13 @@ class Container:
                 nearest=GeoNamesNearestResolver(settings.geo_dir),
             ),
             asset_place_repository=asset_places,
-            place_aliases=load_place_aliases(),
+            place_aliases=place_aliases,
             event_repository=SqliteEventRepository(database),
             event_participant_repository=SqliteEventParticipantRepository(database),
             fact_repository=SqliteFactRepository(database),
             lexical_index=lexical,
             lexical_search=lexical,
+            structured_query_repository=SqliteStructuredQueryRepository(database, place_aliases),
             face_repository=SqliteFaceRepository(database),
             entity_repository=entities,
             face_detector=FaceAdapter(),

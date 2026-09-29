@@ -55,11 +55,6 @@ PENDING_WIRING: dict[str, str] = {
     # 判据是「有没有被 import 过」。模块内那几个**规则函数**（``derive_filter`` /
     # ``hard_conditions`` / ``normalize_group_by``）至今没有生产调用者，而只要模块里
     # 有一个类型被端口引用，整个模块就算接上了。T121c 的工具是它们的第一个真调用者。
-    # 仓储在 T121b 落地，T121c 的工具才会调它——SQL 本身先由真库集成用例验穿，
-    # 但「验穿」不等于「接线」，所以它照样要在例外表里挂到接线那天。
-    "sentrix.infrastructure.persistence.repositories.structured": "S6 T121c（query_memory_facts 工具）",
-    # 校验与 spec 派生先落地（可以穷举测试），工具本体与 application 执行器随后。
-    "sentrix.domain.retrieval.fact_query": "S6 T121c（query_memory_facts 工具）",
 }
 
 

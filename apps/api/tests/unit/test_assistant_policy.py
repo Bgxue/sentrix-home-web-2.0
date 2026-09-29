@@ -20,9 +20,16 @@ def call(name: str, **arguments: object) -> ToolCall:
     return ToolCall(call_id=f"call_{name}", name=name, arguments_json=json.dumps(arguments))
 
 
-def test_the_four_tools_are_the_ones_s3_ships():
+def test_the_tool_list_is_exactly_what_ships():
+    """S3 四个 + S6 的 ``query_memory_facts``。
+
+    **这是一个逐字断言的清单，不是 ``>= 4``。** 工具多一个少一个都会改变模型看到的
+    契约，而「多了一个没人注意的工具」正是那种不会报错、只会让模型偶尔调错东西的改动。
+    清单变了就必须在这里显式改一次。
+    """
     assert [spec.name for spec in TOOL_SPECS] == [
         "search_memories",
+        "query_memory_facts",
         "get_result_page",
         "get_original_photos",
         "get_person_profile",
@@ -54,7 +61,7 @@ def test_parameters_are_real_json_schema_not_example_values():
 def test_openai_tools_wraps_each_spec_as_a_function():
     tools = openai_tools()
 
-    assert len(tools) == 4
+    assert len(tools) == len(TOOL_SPECS)
     assert tools[0]["type"] == "function"
     assert tools[0]["function"]["name"] == "search_memories"
     assert tools[0]["function"]["parameters"] == dict(TOOLS_BY_NAME["search_memories"].parameters)

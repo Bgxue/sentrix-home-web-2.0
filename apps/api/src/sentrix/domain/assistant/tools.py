@@ -131,8 +131,75 @@ GET_PERSON_PROFILE = ToolSpec(
     required=("person",),
 )
 
+QUERY_MEMORY_FACTS = ToolSpec(
+    name="query_memory_facts",
+    description=(
+        "精确统计当前相册，答案是一个确定的数字或时间，不经过相似度检索。"
+        "能回答：有多少张原始照片/视频、某个已确认人物出现在多少张照片里、"
+        "最早或最近一次拍摄是什么时候、按月/地点/媒体/处理状态分组各有多少。"
+        "颜色/物体/场景/活动/关系/金额/桌数这类条件本工具答不了，不要拿它硬套；"
+        "也不要把 search_memories 返回的候选数当成统计答案——那个数是候选池的大小，"
+        "不是总数。当前相册范围由系统注入。"
+    ),
+    parameters=_object_schema(
+        {
+            "operation": {
+                "type": "string",
+                "enum": ["count", "exists", "first", "last", "group"],
+                "description": "count 数量；exists 有没有；first 最早一次；last 最近一次；group 分组计数。",
+            },
+            "subject": {
+                "type": "string",
+                "enum": ["asset", "person_appearance", "processing"],
+                "description": (
+                    "统计什么：asset 原始照片/视频；"
+                    "person_appearance 某位已确认人物出现过的照片；processing 导入处理状态。"
+                ),
+            },
+            "group_by": {
+                "type": "string",
+                "enum": ["month", "place", "media", "status"],
+                "description": "只在 operation=group 时需要。status 只能配 subject=processing。",
+            },
+            "filters": _object_schema(
+                {
+                    "time": {
+                        "type": "string",
+                        "description": (
+                            "时间说法，例如 去年、2023年7月、前年夏天。"
+                            "相对时间原样填，由系统换算，不要自己算年份。"
+                        ),
+                    },
+                    "media": {
+                        "type": "string",
+                        "enum": ["image", "video"],
+                        "description": "只统计照片或只统计视频；不区分就省略。",
+                    },
+                    "place": {
+                        "type": "string",
+                        "description": (
+                            "结构化地名（城市/区县/景区/地标），例如 杭州、邓村。"
+                            "活动、主题、目标不要填进来，不确定就留空。"
+                        ),
+                    },
+                    "person": {
+                        "type": "string",
+                        "description": "用户明确提到的已确认人名。角色词（伴娘/兄弟/亲戚）不要填。",
+                    },
+                },
+                [],
+            ),
+        },
+        ["operation", "subject"],
+    ),
+    satisfies=(EvidenceType.STRUCTURED_FACT,),
+    required=("operation", "subject"),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     SEARCH_MEMORIES,
+    QUERY_MEMORY_FACTS,
     GET_RESULT_PAGE,
     GET_ORIGINAL_PHOTOS,
     GET_PERSON_PROFILE,
