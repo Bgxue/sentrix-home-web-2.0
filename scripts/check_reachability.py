@@ -46,7 +46,12 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # （``review_cluster`` / ``name_person`` / ``seed_identity``）都被
 # ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。机制一直在，下一次有
 # 「本切片先落地、随后接线」的模块时它还会被用上——那时请照上面那句写给任务。
-PENDING_WIRING: dict[str, str] = {}
+PENDING_WIRING: dict[str, str] = {
+    # S6 T118 交付了判定规则本身，T119 才把它接进 RetrieveEvidence——
+    # 「先落地、随后接线」正是这张表存在的理由。
+    "sentrix.domain.retrieval.conditions": "S6 T119（融合后的条件排除）",
+    "sentrix.domain.retrieval.time_expression": "S6 T119（经 conditions 被调用）",
+}
 
 
 def module_name(path: Path, src: Path) -> str:
