@@ -46,7 +46,10 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # （``review_cluster`` / ``name_person`` / ``seed_identity``）都被
 # ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。机制一直在，下一次有
 # 「本切片先落地、随后接线」的模块时它还会被用上——那时请照上面那句写给任务。
-PENDING_WIRING: dict[str, str] = {}
+PENDING_WIRING: dict[str, str] = {
+    # T121b 先落筛选条件的派生（纯规则），SQL 与工具在 T121c 接上。
+    "sentrix.domain.retrieval.structured_query": "S6 T121c（query_memory_facts 工具）",
+}
 
 
 def module_name(path: Path, src: Path) -> str:
