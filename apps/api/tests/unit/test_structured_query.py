@@ -79,12 +79,46 @@ def test_a_hard_place_constraint_enters_the_where_clause():
     assert derive_filter(spec).place == "杭州"
 
 
-def test_a_semantic_place_constraint_does_not():
-    """**这是两档严格度的全部区别。** SEMANTIC 档的地点不该排除候选——
-    而 WHERE 一旦加上就是排除，且不会有任何东西告诉你「本来该保留的照片没了」。"""
+def test_a_semantic_place_constraint_also_enters_the_where_clause():
+    """**严格度在这里不起作用。** 1.0 的 ``_place`` 全程没看过 ``strictness``，
+    而 1.0 的工具层把地点条件构造成 ``semantic_required``——按严格度筛的话，
+    每一次带地点的统计都会悄悄退化成整个相册的统计，返回值看起来还很正常。
+
+    两档严格度的差别在**融合之后逐候选判定**上（``conditions.excludes``），
+    对 count/first/last 这类问题，``filters.place`` 就是问题本身。"""
     spec = make_spec(Constraint("place", "杭州", Strictness.SEMANTIC, "direct_or_possible"))
 
-    assert derive_filter(spec).place == ""
+    assert derive_filter(spec).place == "杭州"
+
+
+def test_the_first_place_constraint_wins():
+    """「第一个胜」而不是「后面覆盖前面」。1.0 遍历时碰到第一个非空值就返回；
+    两条约束并存时，谁生效不该取决于 spec 的构造顺序。"""
+    spec = make_spec(
+        Constraint("place", "杭州", DEFAULT, "asset_metadata"),
+        Constraint("place", "上海", DEFAULT, "asset_metadata"),
+    )
+
+    assert derive_filter(spec).place == "杭州"
+
+
+def test_the_first_parseable_time_constraint_wins():
+    """认不出来的那条跳过（1.0 的 ``continue``），但认出来的第一条就定下来。"""
+    spec = make_spec(
+        Constraint("time", "2023年", DEFAULT, "asset_metadata"),
+        Constraint("time", "2021年", DEFAULT, "asset_metadata"),
+    )
+
+    assert derive_filter(spec).time_start == "2023-01-01T00:00:00"
+
+
+def test_an_unparseable_time_constraint_does_not_block_a_later_one():
+    spec = make_spec(
+        Constraint("time", "上上上个月", DEFAULT, "asset_metadata"),
+        Constraint("time", "2023年", DEFAULT, "asset_metadata"),
+    )
+
+    assert derive_filter(spec).time_start == "2023-01-01T00:00:00"
 
 
 def test_a_negated_place_constraint_does_not_enter_the_positive_clause():

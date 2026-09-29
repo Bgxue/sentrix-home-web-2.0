@@ -20,7 +20,11 @@ SQL 才是执行。这里做的是前一半；后一半在 ``infrastructure`` �
 **二、媒体类型的默认值与 1.0 不同点在于「空」的含义。** 1.0 的 ``_media`` 在没有
 media 约束时返回空的两个列表，于是那条 WHERE 不出现——**不过滤**。这一条照抄。
 
-**三、时间用「解析出来的区间」而不是原文。** 1.0 在 ``_base_query`` 里现调
+**三、时间与地点都取「第一个」而不是「最后一个」。** 1.0 的 ``_place`` / ``_time_range``
+都在遍历约束时**碰到第一个可用值就返回**；这里同样第一个胜。写成「后面的覆盖前面的」
+在只有一条约束时看不出区别，两条时给出的区间取决于 spec 的构造顺序。
+
+**四、时间用「解析出来的区间」而不是原文。** 1.0 在 ``_base_query`` 里现调
 ``parse_time_expression``；这里在派生阶段就解析好，把 ``(start, end)`` 放进 filter。
 好处是**解析失败在派生阶段就暴露**（返回 ``None`` → 不加时间条件），而不是留到拼 SQL 时
 才发现拿到的是 ``None``——那时它已经作为「没有时间条件」悄悄过去了。
@@ -95,20 +99,26 @@ def derive_filter(spec: QuerySpec, *, scope_id: str | None = None) -> Structured
                 target.append(constraint.value)
         elif constraint.dimension == "time" and not constraint.negated:
             bounds = parse_time_expression(constraint.value)
-            if bounds is not None:
+            if bounds is not None and time_start is None:
                 # ``isoformat`` 而不是 ``str()``：``captured_at`` 列存的是 ISO 串，
                 # 而 ``str(datetime)`` 用空格分隔日期与时间——两者的字典序不同，
                 # ``>=`` 比较会静默给出错误的边界。
                 time_start = bounds[0].isoformat()
                 time_end = bounds[1].isoformat()
-        elif (
-            constraint.dimension == "place"
-            and not constraint.negated
-            and constraint.strictness is Strictness.HARD
-        ):
-            # **只有 HARD 的地点约束进 WHERE。** SEMANTIC 档的地点不该排除候选——
-            # 那是两档严格度的全部区别，而 WHERE 一旦加上就是排除。
-            place = constraint.value
+        elif constraint.dimension == "place" and not constraint.negated and not place:
+            # **不看严格度，第一条件胜。** 这是 1.0 ``structured_memory.py:_place``
+            # 的行为：它遍历 ``constraints_for("place")`` 并返回第一个非空值，
+            # 全程没有看过 ``strictness``。
+            #
+            # 一度写成了「只有 HARD 才进 WHERE」，那是错的——1.0 的工具层
+            # （``agent_runtime/tools.py:_draft_from_filters``）把地点条件构造成
+            # ``semantic_required``，于是那个写法会让**每一次**带地点的统计都悄悄
+            # 退化成整个相册的统计，而返回值看起来完全正常。
+            #
+            # 两档严格度的差别作用在**融合之后逐候选判定**上（``conditions.excludes``），
+            # 不作用在这里：对 count/first/last 这类问题，``filters.place`` 就是问题本身，
+            # 丢掉它等于答非所问。
+            place = str(constraint.value or "").strip()
 
     entity_ids.extend(spec.entity_ids)
     if time_start:

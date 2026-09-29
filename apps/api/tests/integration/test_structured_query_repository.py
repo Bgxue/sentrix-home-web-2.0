@@ -295,6 +295,10 @@ def test_place_filter_agrees_with_place_text_matches(
 
     ``value`` 为空串时 SQL 走 ``1=1``、Python 走 ``text 非空`` 判断——两条路径都在
     「没给地点」时不过滤，这是 1.0 的行为。
+
+    用例用的是 HARD 档，但**严格度在这里不起作用**（1.0 的 ``_place`` 没看过它，
+    而 1.0 的工具层发的正是 ``semantic_required``）——见
+    ``test_structured_query.py::test_a_semantic_place_constraint_also_enters_the_where_clause``。
     """
     add_asset(assets, "asset_1")
     add_asset(assets, "asset_2")

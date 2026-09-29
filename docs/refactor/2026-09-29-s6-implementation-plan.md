@@ -373,6 +373,24 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
   `domain/places/aliases.py`，不在 SQL 那一侧；改它要连带改 `place_text_matches`，
   单列一条。
 
+**动工 T121c 前读 1.0 的工具层，读回一个自己在 T121b 写错的判断。**
+`derive_filter` 一度写成「只有 HARD 档的地点条件才进 WHERE」，理由是「SEMANTIC 档不该
+排除候选」。1.0 的 `structured_memory.py:_place` **全程没看过 `strictness`**——它遍历
+`constraints_for("place")` 返回第一个非空值；而 1.0 的工具层
+（`agent_runtime/tools.py:_draft_from_filters`）把地点条件构造成 `semantic_required`。
+
+两句合起来：按严格度筛的话，**每一次带地点的统计都会悄悄退化成整个相册的统计**，
+而返回值看起来完全正常（`count=53` 不是错误，只是答非所问）。两档严格度的差别作用在
+**融合之后逐候选判定**上（`conditions.excludes`），不作用在召回/统计的 WHERE 上——对
+count/first/last 这类问题，`filters.place` 就是问题本身。
+
+原用例把这个错误判断钉住了（`test_a_semantic_place_constraint_does_not`），所以变异
+不会红。改成断言正确行为之后，把 HARD 判断植回去立刻红一条。**这是「一条绿的用例
+可以钉住一个错的结论」的第二个例子**，前两个假绿在同一节的上面。
+
+同一次核对还改掉一处：时间与地点都取**第一个**可用约束，不是「后面覆盖前面」。
+1.0 遍历时碰到第一个就返回，写成覆盖的话，两条约束并存时谁生效取决于 spec 的构造顺序。
+
 **门禁这边有一条盲区被它自己暴露出来**：`check_reachability.py` 的粒度是**模块**，
 判据是「有没有被 import 过」。端口 `domain/retrieval/ports.py` 引用了
 `StructuredFilter`，而 `ports.py` 从 `container.py` 可达，于是
