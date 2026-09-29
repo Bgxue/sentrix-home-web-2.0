@@ -45,14 +45,12 @@ from sentrix.domain.media.models import Asset, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES, PlaceAliases
 from sentrix.domain.places.matching import place_text_matches
 from sentrix.domain.places.models import Place
+from sentrix.domain.retrieval.query_contracts import Strictness
 from sentrix.domain.retrieval.time_expression import parse_time_expression
 
-
-class Strictness(StrEnum):
-    """1.0 ``query_contracts.py:9-10`` 的两个字面量。"""
-
-    HARD = "deterministic_hard"
-    SEMANTIC = "semantic_required"
+# ``Strictness`` 从契约层 import，不在这里定义——与 1.0 的层序一致：
+# ``query_contracts`` 定义 HARD / SEMANTIC，``evidence_retrieval``（本模块）引用它们。
+# 反过来会让契约模块依赖一个判分模块，那是错的层序。T121a 把它移了过去。
 
 
 class ConditionStatus(StrEnum):
