@@ -398,6 +398,41 @@ count/first/last 这类问题，`filters.place` 就是问题本身。
 （`derive_filter` / `hard_conditions` / `normalize_group_by`）其实至今没有生产调用者。**
 已在 `check_reachability.py` 的 `PENDING_WIRING` 旁边写明，T121c 是它们的第一个真调用者。
 
+### Task 122 · query_photo_people 的动工前核查（2026-09-29）
+
+照 S5c T86g 与本案 T127 的体例先核依赖。**核出两个缺口，都不是接线问题，是读路径缺一截。**
+
+1.0 的 `_query_photo_people` 做三件事，逐件对到 2.0：
+
+| 1.0 做的事 | 2.0 有吗 |
+|---|---|
+| `rs_store.resolve_handle(result_set_id, handle)` → asset_id | **有**。`ResultSet.resolve(handle)`（`domain/assistant/result_set.py:74`），只是名字短一点 |
+| `_confirmed_photo_identities(store, asset_id)`：`face_instances ⋈ face_clusters ⋈ entities`，按 asset 取回已绑定的人脸（带 bbox / face_instance_id / cluster_id） | **没有**。`FaceRepository` 只有 `get_instance`（单条）与 `list_instances(cluster_id)`（按簇），**没有按 asset 的那一向**。缺 `list_instances_for_asset(asset_id)` |
+| 数 `observations.people_json` 里**没有 `entity_id`** 的条目 = 未确认同行者 | **读不出来**。写入侧确实存了 `{"entity_id":…, "name":…, "status":…}`（`entities.py` 的 `_append_person_snapshot`），但读取侧 `_json_people` 只留名字（`assets.py:148`），`Observation.people` 是 `tuple[str, ...]`——绑定与否这一位在 domain 里被丢掉了 |
+
+第一件事是加一个仓储方法，机械。第二件要想清楚：
+1.0 的「未确认同行者」正是靠这一位算出来的，丢掉它之后这个数字无从计算——
+而它是要回给模型的一句话（「另有 N 名未确认身份同行者」），也是 prompt 里
+「不要给未绑定的人安名字」这条纪律的落点。
+
+两条路：
+
+- **改 `Observation.people` 的类型**，让它带上绑定状态。影响面大：词法投影、
+  事件锚点、参与者投影都读它；
+- **另开一条只读路径**，专供这个工具按 `people_json` 原样取回来。
+
+倾向后者——**先把范围收在这次工具里**。`Observation.people` 是 S4 定下的形状，
+为一个工具去改它，等于让 S4 的模型去背 S6 的需求。
+
+**另外一处与 1.0 不同、要先定口径的：`membership`。** 1.0 逐个人调
+`get_effective_family_membership(scope_id, entity_id)`，那是**家庭图谱**（S7）。
+2.0 现在只有 `PersonDirectory.lookup(name, scope_id).family_role`。所以 T122 要么
+先只回 `family_role`（并在工具描述里说明「尚无关系图谱」），要么把 membership 留空
+标 `unknown`。**不要在 S6 里顺手把家庭图谱做了**——那是 S7 的整个主题。
+
+结论：**T122 从「接线」升级为「补两个读路径 + 接线」**，与 T121 的升级同一形状。
+`asset_handle` 的解析与 scope 校验这两段可以直接照 1.0，没有缺口。
+
 ### Task 127 · 恢复作答的阶梯
 
 **动工前必须先核查**（照 S5c 的 T86g 体例：先核依赖，核出缺口再写任务定义）。
