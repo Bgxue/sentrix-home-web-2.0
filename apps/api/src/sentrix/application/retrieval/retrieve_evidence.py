@@ -40,6 +40,11 @@ from datetime import datetime
 from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
+from sentrix.application.retrieval.retrieve_text_ann import (
+    RetrieveTextAnn,
+    TextSearchRequest,
+    TextSearchResult,
+)
 from sentrix.application.retrieval.retrieve_visual import (
     RetrieveVisual,
     VisualSearchRequest,
@@ -53,6 +58,7 @@ METADATA_CHANNEL = "metadata"
 ENTITY_CHANNEL = "entity"
 LEXICAL_CHANNEL = "lexical"
 VISUAL_CHANNEL = "visual_ann"
+TEXT_CHANNEL = "text_ann"
 
 # 每条通道按调用方上限过取一层再融合。1.0 把理由写在了注释里
 # （``evidence_retrieval.py:171-176``）："Ask each enabled channel for the complete
@@ -137,6 +143,25 @@ def _visual_candidates(result: VisualSearchResult) -> tuple[CandidateHit, ...]:
     )
 
 
+def _text_candidates(result: TextSearchResult) -> tuple[CandidateHit, ...]:
+    """还原成 1.0 ``TextAnnRetriever.retrieve`` 交给 Kernel 的那张命中表。
+
+    与 ``_visual_candidates`` 同形：``RetrieveTextAnn`` 内部已经 ``fuse`` 过一次，
+    但融合只消费 ``rank``，而名次记在 ``channels["text_ann"]``、原始分数记在
+    ``raw_scores`` 里，所以这里是无损还原——分数由编排层按名次重算。
+    """
+    return tuple(
+        CandidateHit(
+            asset_id=hit.asset_id,
+            channel=TEXT_CHANNEL,
+            rank=hit.channels[TEXT_CHANNEL],
+            raw_score=hit.raw_scores.get(TEXT_CHANNEL, 0.0),
+        )
+        for hit in result.hits
+        if TEXT_CHANNEL in hit.channels
+    )
+
+
 class RetrieveEvidence:
     """四条 primary 通道（metadata / entity / lexical / visual_ann）→ 一次加权 RRF。"""
 
@@ -147,11 +172,13 @@ class RetrieveEvidence:
         lexical: RetrieveLexical,
         metadata: RetrieveMetadata,
         entity: RetrieveEntity,
+        text: RetrieveTextAnn,
     ) -> None:
         self._visual = visual
         self._lexical = lexical
         self._metadata = metadata
         self._entity = entity
+        self._text = text
 
     def execute(self, request: EvidenceRequest) -> EvidenceResult:
         text = request.text.strip()
@@ -162,6 +189,9 @@ class RetrieveEvidence:
 
         visual = self._visual.execute(
             VisualSearchRequest(text=text, scope_id=request.scope_id, limit=recall_limit)
+        )
+        text_result = self._text.execute(
+            TextSearchRequest(text=text, scope_id=request.scope_id, limit=recall_limit)
         )
         # 这个 dict 的插入顺序必须与 1.0 的构建顺序一致：metadata 最先，锚点加成才会
         # 落在同时被 metadata 与语义通道命中的候选上。
@@ -184,6 +214,10 @@ class RetrieveEvidence:
                 whole_query=text, scope_id=request.scope_id, limit=recall_limit
             ),
             VISUAL_CHANNEL: _visual_candidates(visual),
+            # text_ann 排在最后——1.0 ``build_default_retrievers`` 的构建顺序是
+            # metadata → entity → lexical → visual_ann → text_ann。anchor 加成按
+            # **候选第一次出现时**的通道给，顺序换了拿到的加成就不一样。
+            TEXT_CHANNEL: _text_candidates(text_result),
         }
         fused = fuse(channel_hits, channel_weights=DEFAULT_CHANNEL_WEIGHTS)
 
