@@ -228,9 +228,9 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 | Task | 内容 | 依赖 |
 |---|---|---|
 | **121** | **`query_memory_facts`——依赖核查后重估为一条子系统，不是一个工具**（2026-09-29 实测）。体量：`structured_memory.py` 311 行（`StructuredMemoryExecutor` + 16 个方法）+ 工具侧 `_query_memory_facts` 与四个 helper（`_draft_from_filters` / `_spec_for` / `_resolve_entity` / `_fact_samples`）约 120 行 + **`QuerySpec` / `Constraint` / draft 这套查询契约**（1.0 `query_contracts.py` 406 行，2.0 只移植了其中的 `parse_time_expression`）。三套枚举：`operation` {count, exists, first, last, group} × `subject` {asset, person_appearance, processing} × `filters` {time, media, place, person}。**建议拆成 121a 查询契约 / 121b executor / 121c 工具与注册**。前置 113/114（facts 读路径）仍然成立 |
-| **122** | `query_photo_people` | S5b 的 `retrieve_entity` |
-| **123** | `inspect_photo`（VLM，1.0 调用 10,721 次） | 8100 上的视觉端点（当前 qwen3.5-4B + mmproj，已实测可用） |
-| **124** | `read_photo_text`（OCR，1.0 调用 2,867 次） | **动工前核查**：1.0 的 `ocr_tool.py`（638 行）用的是哪个 OCR 后端，2.0 有没有 |
+| **122** | `query_photo_people`——**已核查，重估为「补两条读路径 + 接线」**（见 §4 Task 122）。`ResultSet.resolve(handle)` 与 scope 校验两段可直接照 1.0；缺的是「按 asset 取已绑定人脸」这一向，以及 `people_json` 里 `entity_id` 那一位（读取侧被丢掉了） | S5b 的 `retrieve_entity` + 新增两条读路径 |
+| **123** | `inspect_photo`（VLM，1.0 调用 10,721 次）——**与 124 共用一层「拿问题问图」的 inspector 端口，那个端口 2.0 没有**（见 §4 Task 123/124）。**先落端口，再落本任务** | 8100 上的视觉端点（当前 qwen3.5-4B + mmproj，已实测可用） |
+| **124** | `read_photo_text`——**已核查，且后端已裁决：只用 8100 的 VLM，零新依赖，工具描述如实收窄**（见 §4 Task 124）。2.0 一个 OCR 后端都没有，1.0 的 PaddleOCR 从来没加过。**与 123 共用 inspector 端口** | 同 123，先落 inspector 端口 |
 
 > **T121b 是「重写」不是「移植」**（2026-09-29 二核）。`structured_memory.py` 里 5 个方法
 > **直接拼 SQL**（`_base_query` / `_place_clause` / `_count` / `_group_by` / `_list`），
@@ -582,3 +582,57 @@ T124 的后端已裁决走第 2 条路（**只用 8100 的 VLM，零新依赖，
 
 **仍然没有归属的**（本切片不排，也不需要现在决定）：鉴权、observations 原始列表、
 OCR settings / telemetry / query-gaps、`/api/dashboard`、回合取消、会话历史回放。
+
+
+---
+
+## 8. 当前进度与下一步（2026-09-29 交接）
+
+**这一节是给下一个会话的入口。** 前面七节是计划，这一节是「计划跑到哪了」。
+
+### 8.1 已完成
+
+| 任务 | 状态 | 提交 |
+|---|---|---|
+| T121a 查询契约 | 完成 | `6028ca6` |
+| T121b 筛选条件派生 + SQL | 完成 | `63b897a` `bd6dcee` `3f2dd51`（修正） |
+| T121c 工具与注册 | 完成 | `c17daa5` `7b84f7f` `d001d01`（补覆盖） |
+| T122 / T123 / T124 | **已核查，均重估** | `4c2abdc` `7d9a602` `c994cd0` |
+
+`query_memory_facts` 已在生产链路上：`AssistantToolbox` → `QueryMemoryFacts` →
+`StructuredQueryRepository`，容器已装配，真库（53 张）跑通。
+
+**门禁基线**：`make ci` 的 lint / format / mypy / 5 个 import 契约 / reachability /
+method-reachability / module-map / capability-map / openapi **全绿**；覆盖率 97.50%（门禁 85%）。
+唯一红的是 e2e `test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`——
+**已裁决为模型问题，不是代码问题，不要修**。
+
+### 8.2 下一步：先落 inspector 端口，再按顺序做三个工具
+
+**第一件事（T123/T124 共用，必须先做）**：一个「拿一个问题去问这张图」的端口。
+2.0 现有的两个视觉入口都不是它——`VlmObserver.observe` 的 schema 是固定的七个字段
+（导入期观察器，不接问题），`OpenAIPersonVision` 是画像/瞬间/外观三个专用入口。
+定义见 §4 的 Task 123/124 条目。
+
+之后：**T122 的两条读路径 → T122 工具 → T123 → T124**。
+
+### 8.3 还差一个裁决
+
+**T122 的 `Observation.people`**：1.0 靠 `people_json` 里有没有 `entity_id` 数出
+「未确认同行者」，2.0 的读取侧只留名字。两条路——改 `Observation.people` 的类型
+（影响词法投影/事件锚点/参与者投影），或另开一条只读路径（只给这个工具用）。
+§4 的 Task 122 条目倾向后者，**但没定**。
+
+### 8.4 几条会浪费时间的门禁事实
+
+- **每个任务的默认形状是「先核查」。** §3 的「依赖」栏写着「接线」的四个任务
+  （T121/T122/T124/T123+124），核查后**没有一个是接线**。动工前先核依赖，
+  核出缺口再写任务定义——这是 S5c T86g 立下的体例。
+- **`check_reachability` 是模块粒度的**，判据是「有没有被 import 过」。端口里引用一个
+  类型，整个模块就算「接上了」，而模块内的规则函数可能一个调用者都没有。
+  它还会**按反向规则要求删掉自己的登记**——登记里的模块真被调用后，它会报红让你删。
+- **coverage 只测 `sentrix.domain` 与 `sentrix.application`**（`pyproject.toml` 的
+  `[tool.coverage.run] source`）。**infrastructure 一行都不算**——SQL 仓储只有集成用例
+  覆盖它，门禁数不到。读覆盖率报表时要知道这件事。
+- **`make ci` 的 coverage 段会被那条已知的 e2e 失败打断**，于是 `web-check` 不跑。
+  报告「门禁全绿」时说清楚哪一段没跑到。
