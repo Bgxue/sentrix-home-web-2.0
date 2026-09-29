@@ -26,6 +26,7 @@ from sentrix.application.retrieval.retrieve_entity import CHANNEL, RetrieveEntit
 from sentrix.application.retrieval.retrieve_evidence import EvidenceRequest, RetrieveEvidence
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
+from sentrix.application.retrieval.retrieve_text_ann import RetrieveTextAnn
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES
@@ -245,6 +246,23 @@ def test_a_limit_of_zero_returns_nothing(library):
 # ---- 进融合：entity 是 anchor 通道 --------------------------------------------------
 
 
+class ScriptedTextEmbedder:
+    """文本通道的假嵌入器。
+
+    这个夹具里不写任何文本向量，所以它返回什么都不会命中——它的作用只是让
+    ``RetrieveTextAnn`` 能构造起来并且**不报降级**（返回空表会被判成
+    ``embedder_unavailable``，那会让 ``degraded`` 字段在被测的链路上失真）。
+    维度与视觉那个不同（3 vs 4）是有意的：共用同一个假件、维度又写成一样的话，
+    「查错空间」这件事测不出来。
+    """
+
+    model_id = scheme.TEXT_MODEL
+    dimension = 3
+
+    def embed_query(self, text: str) -> Sequence[float]:
+        return [1.0, 0.0, 0.0]
+
+
 def build_evidence(library) -> RetrieveEvidence:
     return RetrieveEvidence(
         visual=RetrieveVisual(embedder=ScriptedEmbedder(), vectors=library["vectors"], index=None),
@@ -256,6 +274,7 @@ def build_evidence(library) -> RetrieveEvidence:
             aliases=EMPTY_ALIASES,
             recognize_place=lambda _asset_id: False,
         ),
+        text=RetrieveTextAnn(embedder=ScriptedTextEmbedder(), vectors=library["vectors"]),
     )
 
 

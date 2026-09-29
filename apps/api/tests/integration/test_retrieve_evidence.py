@@ -23,6 +23,7 @@ from sentrix.application.retrieval.retrieve_evidence import (
 )
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
+from sentrix.application.retrieval.retrieve_text_ann import RetrieveTextAnn
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual, VisualSearchRequest
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES
@@ -156,6 +157,23 @@ def library(migrations_ready_db: Database, tmp_path: Path):
     }
 
 
+class ScriptedTextEmbedder:
+    """文本通道的假嵌入器。
+
+    这个夹具里不写任何文本向量，所以它返回什么都不会命中——它的作用只是让
+    ``RetrieveTextAnn`` 能构造起来并且**不报降级**（返回空表会被判成
+    ``embedder_unavailable``，那会让 ``degraded`` 字段在被测的链路上失真）。
+    维度与视觉那个不同（3 vs 4）是有意的：共用同一个假件、维度又写成一样的话，
+    「查错空间」这件事测不出来。
+    """
+
+    model_id = scheme.TEXT_MODEL
+    dimension = 3
+
+    def embed_query(self, text: str) -> Sequence[float]:
+        return [1.0, 0.0, 0.0]
+
+
 def build(library) -> RetrieveEvidence:
     def recognize_place(asset_id: str) -> bool:
         """「这张图本来就该有地点」= asset 上有 GPS（与 ``routes/search.py`` 同一判据）。"""
@@ -172,6 +190,7 @@ def build(library) -> RetrieveEvidence:
             aliases=EMPTY_ALIASES,
             recognize_place=recognize_place,
         ),
+        text=RetrieveTextAnn(embedder=ScriptedTextEmbedder(), vectors=library["vectors"]),
     )
 
 
@@ -277,17 +296,22 @@ def test_metadata_stays_silent_without_a_positive_condition(library):
 # ---- 缺通道的形态 ----------------------------------------------------------------
 
 
-def test_only_the_channels_that_exist_in_s4_are_ever_reported(library):
-    """entity / text_ann 在 2.0 还没有类，所以它们既不出现也不报空。
+def test_every_reported_channel_is_one_of_the_five_wired_ones(library):
+    """五条通道在 S6 之后都接上了（entity 是 S5b、text_ann 是 S6 T115）。
 
-    1.0 的缺通道就是「不在 ``retrievers`` 列表里」（``retrieval/__init__.py:79-84``），
-    ``channel_hits`` 里没有那个键——不是「调了返回空」。
+    这条原先钉的是「报出来的只能是三条」——S4 时 entity / text_ann 还没有类，
+    那条断言是对的。**但它的前提被后续切片推翻了，而它自己不会知道**：
+    这次是加必填参数时顺手炸出来的；换成可选参数的话它会静默地继续通过，
+    而那时它钉的已经是错的东西。
+
+    所以改成钉**不变量**：报出来的通道名必须是这五条里的。
+    「没命中的通道不出现」由
+    ``test_metadata_stays_silent_without_a_positive_condition`` 单独钉住，这里不重复。
     """
     result = build(library).execute(EvidenceRequest(text="海边", scope_id=SCOPE, limit=3, place="萧山区"))
 
     reported = {channel for hit in result.hits for channel in hit.channels}
-    assert reported <= {"metadata", "lexical", "visual_ann"}
-    assert reported == {"metadata", "lexical", "visual_ann"}
+    assert reported <= {"metadata", "entity", "lexical", "visual_ann", "text_ann"}
 
 
 def test_the_requested_limit_bounds_only_the_delivered_list(library):

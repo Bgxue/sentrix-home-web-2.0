@@ -226,23 +226,29 @@ def test_the_lexical_channel_is_fused_into_the_endpoint(channel_client: TestClie
     items = channel_client.get("/api/v1/search", params={"q": "海边", "scope_id": "album1"}).json()["items"]
 
     assert items[0]["asset"]["file_name"] == "海边.jpg"
-    assert items[0]["channels"] == {"visual_ann": 2, "lexical": 1}
-    assert items[0]["score"] == pytest.approx(1.0 / 61 + 2.5 / 62)
+    # S6 T115 之后 text_ann 也在这条链上了——导入时写文本向量（T115b），
+    # 而这个夹具正是**通过 HTTP 导入**的，所以第三条通道是端到端长出来的，
+    # 不是桩出来的。它的权重 0.5 也进了分数。
+    assert items[0]["channels"] == {"visual_ann": 2, "lexical": 1, "text_ann": 1}
+    assert items[0]["score"] == pytest.approx(1.0 / 61 + 2.5 / 62 + 0.5 / 61)
 
 
-def test_the_endpoint_reports_only_the_channels_that_exist(channel_client: TestClient):
-    """entity / text_ann 在 2.0 还没有类：它们不出现在 ``channels`` 里，也不报空。
+def test_the_endpoint_reports_only_the_channels_that_have_hits(channel_client: TestClient):
+    """报出来的通道必须是**真命中了的**那几条，不出现恒空的占位通道。
 
-    1.0 的缺通道就是「不在 retriever 列表里」（``retrieval/__init__.py:79-84``）。
-    metadata 是第三条，但它只在有正向结构化条件时才给召回信号，而 S4 的端点没有
-    这类参数（硬条件属于 S6）——所以这里也不该出现。
+    **这条原先钉的是「只有两条，因为 entity / text_ann 还没有类」。** S5b 补了
+    entity、S6 T115 补了 text_ann，那个前提就过期了——而断言自己不会知道：
+    它只会在有人顺手加参数时炸一下（这次就是），或者更糟，一直静默地钉着错的东西。
+
+    改成钉不变量：没召回信号的通道不出现（没有人物条件的 entity、没有正向结构化
+    条件的 metadata），命中了的必须在。
     """
     items = channel_client.get("/api/v1/search", params={"q": "海边", "scope_id": "album1"}).json()["items"]
 
-    assert {channel for item in items for channel in item["channels"]} == {
-        "visual_ann",
-        "lexical",
-    }
+    reported = {channel for item in items for channel in item["channels"]}
+    assert reported == {"visual_ann", "lexical", "text_ann"}
+    assert "entity" not in reported, "没有人物条件时 entity 通道不该有召回信号"
+    assert "metadata" not in reported, "没有正向结构化条件时 metadata 通道不该有召回信号"
 
 
 def test_search_without_a_scope_covers_every_album(scripted_client: TestClient) -> None:

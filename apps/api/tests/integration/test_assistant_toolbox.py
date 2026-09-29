@@ -19,6 +19,7 @@ from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_evidence import RetrieveEvidence
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
+from sentrix.application.retrieval.retrieve_text_ann import RetrieveTextAnn
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import PersonProfile
@@ -52,6 +53,19 @@ class ScriptedEmbedder:
     def embed_image(self, path: Path) -> Sequence[float]:
         digest = hashlib.sha256(Path(path).read_bytes()).digest()
         return [digest[0] / 255, digest[1] / 255, 0.0, 0.0]
+
+
+class ScriptedTextEmbedder:
+    """文本通道的假嵌入器。**维度与 ScriptedEmbedder 故意不同**（3 vs 4）——
+    两个通道共用一个假件时，把维度写成一样会让「查错空间」这件事测不出来。
+    """
+
+    model_id = scheme.TEXT_MODEL
+    dimension = 3
+
+    def embed_query(self, text: str) -> Sequence[float]:
+        digest = hashlib.sha256(text.encode()).digest()
+        return [digest[0] / 255, digest[1] / 255, digest[2] / 255]
 
 
 class StubPeople:
@@ -115,6 +129,7 @@ def toolbox(migrations_ready_db, tmp_path):
                 index=SqliteLexicalIndex(migrations_ready_db, observations, assets=assets, places=places)
             ),
             metadata=RetrieveMetadata(assets=assets, places=places, aliases=EMPTY_ALIASES),
+            text=RetrieveTextAnn(embedder=ScriptedTextEmbedder(), vectors=vectors),
         ),
         assets=assets,
         result_sets=result_sets,

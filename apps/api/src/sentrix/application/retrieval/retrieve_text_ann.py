@@ -36,6 +36,10 @@ from sentrix.domain.retrieval.fusion import fuse
 from sentrix.domain.retrieval.models import CandidateHit
 from sentrix.domain.retrieval.ports import TextEmbedder, VectorHit, VectorRepository
 
+# 与写入侧 ``IndexObservationText`` 同一个字面量。两处各写一遍是有代价的，
+# 但它比「从写入用例 import 一个常量」好：召回侧不该依赖写入侧的模块。
+OBSERVATION_SOURCE = "observation"
+
 log = logging.getLogger("sentrix.retrieval.text_ann")
 
 CHANNEL = "text_ann"
@@ -153,6 +157,11 @@ class RetrieveTextAnn:
                 scope_id=scope_id,
                 model_name=self._embedder.model_id,
             ):
+                # **事件行不是异常。** 写入侧给 ``episodic/event`` 那行的 metadata 按 1.0
+                # 只有 ``observation_id``，它本来就不指向 Asset。每次查询都拿它报一条
+                # warning，会把真正的数据缺口淹掉。
+                if hit.source_type != OBSERVATION_SOURCE:
+                    continue
                 asset_id = self._asset_of(hit)
                 if asset_id is None:
                     unmapped += 1
@@ -160,9 +169,9 @@ class RetrieveTextAnn:
                 if asset_id not in best or hit.score > best[asset_id]:
                     best[asset_id] = hit.score
         if unmapped:
-            # 不静默：映不回 Asset 的命中等于是「检索到了但交付不出来」，
-            # 它在结果条数上表现为「少几张图」——那正是最容易没人发现的那种错。
-            log.warning("文本召回有 %d 条命中缺少 asset_id，已丢弃", unmapped)
+            # **观察行**缺 asset_id 才是异常：命中了却交付不出来，在结果条数上表现为
+            # 「少几张图」——最容易没人发现的那种错。
+            log.warning("文本召回有 %d 条观察命中缺少 asset_id，已丢弃", unmapped)
         return sorted(best.items(), key=lambda item: item[1], reverse=True)
 
     @staticmethod
