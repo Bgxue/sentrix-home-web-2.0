@@ -232,6 +232,24 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 | **123** | `inspect_photo`（VLM，1.0 调用 10,721 次） | 8100 上的视觉端点（当前 qwen3.5-4B + mmproj，已实测可用） |
 | **124** | `read_photo_text`（OCR，1.0 调用 2,867 次） | **动工前核查**：1.0 的 `ocr_tool.py`（638 行）用的是哪个 OCR 后端，2.0 有没有 |
 
+> **T121b 是「重写」不是「移植」**（2026-09-29 二核）。`structured_memory.py` 里 5 个方法
+> **直接拼 SQL**（`_base_query` / `_place_clause` / `_count` / `_group_by` / `_list`），
+> 而那份 SQL 写死在 1.0 的 schema 上：
+>
+> | 1.0 | 2.0 |
+> |---|---|
+> | `json_extract(a.metadata_json, '$.reverse_geocode.{label,name,province,city,district}')` | **没有 `reverse_geocode`**——地点权威来源是 `asset_places` 表里的 `Place` |
+> | `a.captured_location` 当文本 `LIKE` | `GpsPoint` 对象（`as_text()`） |
+> | `a.derived_kind` | 待核 |
+> | `store.connection` / `store.list_assets` | `Database.connect()` + 仓储 |
+> | `geocoding.place_alias_names` | `PlaceAliases` |
+>
+> 而且按 2.0 的分层，**这些 SQL 该落进 infrastructure 的仓储**，不是 application 用例。
+> 所以 T121b 的实际定义是：把 5 处 SQL 逐条翻译到 2.0 的 schema 并搬进仓储层，
+> 其余 11 个方法（纯编排）才谈得上移植。**翻译 SQL 是静默出错的高发区**
+> （`LIKE` 该不该是 `instr`、少了 `derived_kind` 过滤、alias 展开漏一支），
+> 每条都要有「同一份数据、两条路径给出同一个数」的对照用例。
+
 > **一条方法论，由两个正好相反的案例得出**（2026-09-29）：
 >
 > | 工具 | 注释说 | 代码说 | 真相 |
