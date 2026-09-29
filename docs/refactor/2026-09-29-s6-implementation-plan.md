@@ -478,6 +478,45 @@ count/first/last 这类问题，`filters.place` 就是问题本身。
 倾向 3，但这个选择不该由实施者替用户定：它改的是「这个工具能不能被信任来读数字」，
 而 1.0 的工具描述说明那正是它的用途。**在裁决之前 T124 不动工。**
 
+### Task 123 / 124 · 共用的那块：2.0 有「看图」，没有「问图」
+
+T124 的后端已裁决走第 2 条路（**只用 8100 的 VLM，零新依赖，工具描述如实收窄**）。
+定完之后顺手核了 T123/T124 共用的那一层，核出它们要的是同一个 2.0 没有的东西。
+
+2.0 现有的两个视觉入口都不是「拿一个问题去问这张图」：
+
+- `VlmObserver.observe(path) -> ObservationSemantics | None`
+  （`domain/media/ports.py:92`）——**schema 是固定的七个字段**
+  （caption / activity / place / event_type / ocr_text / objects / clothing / facts），
+  对应 1.0 `model_clients.py:1130-1198` 的 `analyze_image`。它是**导入期**的观察器，
+  每次最多 3 次调用（首轮 / 补全 / 中文化），不接问题；
+- `OpenAIPersonVision`（`infrastructure/media/person_vision_model.py`）——人物画像 /
+  瞬间 / 外观三个**专用**入口，各自有各自的输出形状。
+
+而 1.0 这两个工具要的都是**问题驱动**的一次调用：
+
+- `inspect_photo`：`_INSPECT_PROMPT` 有 `{question}` 与 `{target_instruction}` 两个槽，
+  返回 `{"observation":…, "certainty":"supported|uncertain", "target_face_id":…}`，
+  并且提示词里带着**人脸清单**，让模型在「问题指向某个人但没给名字」时回一个 face_id；
+- `read_photo_text`：OCR 导向的提示（1.0 的主路径是 PaddleOCR，VLM 是回退）。
+  按 T124 的裁决，2.0 只剩这一路。
+
+**所以 T123 与 T124 共用一个上游件**：一个「photo inspector」端口，
+`inspect(path, question, faces) -> 结构化回答`。两条工具各自只决定提示词槽位与
+输出解析。
+
+不先落这一件的话，两个工具会各自写一遍 HTTP 调用——而那一遍里最容易写错的两处
+（图片编码、超时与「模型不可用」的降级）就会有两份实现，各自测各自的。
+
+**动工顺序应当是：先 inspector 端口 + 适配器 + 它的对照用例，再 T123、再 T124。**
+这也是把 T123/T124 从「接线」改判为「补一层 + 两个工具」的原因——本切片第四个
+「计划说接线、实际不是」的任务（前三个：T121、T122、T124 的后端）。
+
+继承 1.0 的一条口径：`inspect_photo` 的 `certainty` 只有
+`supported` / `uncertain` 两档，**没有「确定没有」**。模型答不上来时报 `uncertain`，
+不是 `contradicted`——这与 `conditions.py` 里 UNKNOWN 与 CONTRADICTED 分开是同一个道理，
+不要在移植时顺手加一档。
+
 ### Task 127 · 恢复作答的阶梯
 
 **动工前必须先核查**（照 S5c 的 T86g 体例：先核依赖，核出缺口再写任务定义）。
