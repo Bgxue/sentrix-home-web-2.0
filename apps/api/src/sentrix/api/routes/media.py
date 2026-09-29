@@ -16,6 +16,7 @@ from sentrix.application.media.index_place import IndexAssetPlace
 from sentrix.application.media.observe_asset import ObserveAsset
 from sentrix.application.memories.assign_events import AssignEvents, EventVisualSimilarity
 from sentrix.application.memories.maintain_facts import MaintainFacts
+from sentrix.application.retrieval.index_observation_text import IndexObservationText
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
 from sentrix.domain.media.models import Asset, Observation
@@ -124,6 +125,7 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
         event_assigner=lambda observation: _event_id(assigner, observation),
         face_enroller=_face_enroller(container),
         fact_maintainer=_fact_maintainer(container),
+        text_indexer=_text_indexer(container),
         lexical_index=container.lexical_index,
         # 记忆空间行（裁决一）。**只在这里接**：簇列表内连 ``memory_spaces``，
         # 少接这一处，全新部署导入一整册之后审阅页一个簇都不显示（第 97 / 103 条）。
@@ -153,6 +155,20 @@ def _face_enroller(container: Container) -> Callable[[Asset, Observation], int]:
         for face in faces:
             enroll.enroll(asset.id, observation.id, face)
         return len(faces)
+
+    return run
+
+
+def _text_indexer(container: Container) -> Callable[[Observation, str | None], int]:
+    """文本向量写入的接线。
+
+    **排在事件归并之后**（``ImportAssets.execute`` 的顺序），所以入参带 ``event_id``——
+    1.0 那条 ``episodic/event`` 行要的就是它。
+    """
+    index = IndexObservationText(embedder=container.text_embedder, vectors=container.vector_repository)
+
+    def run(observation: Observation, event_id: str | None) -> int:
+        return index.index(observation, event_id).rows
 
     return run
 

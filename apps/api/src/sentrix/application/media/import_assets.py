@@ -97,6 +97,10 @@ class ImportResult:
     # 1.0 把这份 id 表写进 ``assets.metadata_json["fact_ids"]``。2.0 不往 asset 上挂
     # JSON blob，但要留下同一个可观测面：调用方与测试都靠它区分「门禁关了」与「没接线」。
     fact_ids: tuple[str, ...] = ()
+    # 本次写进去的文本向量行数（0 或 3）。与 ``faces`` 同一个理由：
+    # 「这台机器没有文本能力」与「这段文本拼出来是空的」要能分开，
+    # 而它们都表现为「没有文本向量」。
+    text_rows: int = 0
 
 
 def _new_id(prefix: str) -> str:
@@ -119,6 +123,7 @@ class ImportAssets:
         event_assigner: Callable[[Observation], str] | None = None,
         face_enroller: Callable[[Asset, Observation], int] | None = None,
         fact_maintainer: Callable[[Observation], tuple[str, ...]] | None = None,
+        text_indexer: Callable[[Observation, str | None], int] | None = None,
         lexical_index: LexicalIndex | None = None,
         spaces: SpaceRepository | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -133,6 +138,7 @@ class ImportAssets:
         self._event_assigner = event_assigner
         self._face_enroller = face_enroller
         self._fact_maintainer = fact_maintainer
+        self._text_indexer = text_indexer
         self._lexical_index = lexical_index
         self._spaces = spaces
         self._clock = clock
@@ -200,6 +206,11 @@ class ImportAssets:
         observation = self._observe(asset, observation) or observation
         faces = self._enroll_faces(asset, observation)
         event_id = self._assign_event(observation)
+        # 文本向量**必须在事件归并之后**：1.0 ``pipeline.py:324`` 的注释
+        # 「Update the same vector with its final event link after selection」。
+        # 写在前面则 event_id 恒为空，而那条 metadata 只在召回时用得到——
+        # 错了不报错，只是事件维度的扩展永远失效。
+        text_rows = self._index_text(observation, event_id)
         fact_ids = self._maintain_facts(observation)
         lexical_terms = self._project_lexical(observation)
 
@@ -215,6 +226,7 @@ class ImportAssets:
             lexical_terms=lexical_terms,
             fact_ids=fact_ids,
             faces=faces,
+            text_rows=text_rows,
         )
 
     # ---- 可选协作者 ------------------------------------------------------------
@@ -233,6 +245,19 @@ class ImportAssets:
         if self._visual_indexer is None:
             return False
         return self._visual_indexer.index(asset).indexed
+
+    def _index_text(self, observation: Observation, event_id: str | None) -> int:
+        """写文本向量，返回写了几行。与 ``_index_visual`` / ``_index_place`` 同形：
+        协作者缺失就静默跳过，成败在用例内部判定。
+
+        失败原因（空文本 / 模型不可用 / 维度不符）**不在这里分流**——
+        与上面两个索引器同一个缺口：``ImportResult`` 只有 ``indexed`` / ``placed``
+        两个布尔，分不出「没有文本能力」与「这段文本拼出来是空的」。
+        那是要在 ``ImportResult`` 上开字段的事，本任务不动它。
+        """
+        if self._text_indexer is None:
+            return 0
+        return self._text_indexer(observation, event_id)
 
     def _index_place(self, asset: Asset) -> bool:
         if self._place_indexer is None:
