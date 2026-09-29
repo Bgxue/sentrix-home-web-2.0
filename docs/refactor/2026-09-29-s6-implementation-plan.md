@@ -195,24 +195,53 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 
 ### 第三组 · 硬条件
 
+**2026-09-29 核查后重写。** 原计划写成「时间 / 人物 / 地点三个独立任务」，那把机制看小了。
+核 1.0 之后：**它们是同一件事——条件判定（condition pass）**，而 2.0 整个缺这一步。
+
+1.0 有**两套**机制，别混：
+
+| 机制 | 作用 | 谁在用 | 2.0 现状 |
+|---|---|---|---|
+| `HardFilterContext` → 各通道的**召回前筛** | 影响「召回什么」，不保证结果满足条件 | 只有 `metadata` 通道真用（`metadata.py:33` 的早退）；`visual_ann` / `lexical` / `entity` / `text_ann` 只从它取 scope | ✅ 已有（`EvidenceRequest` 的 time_bounds / place / person / media_types） |
+| `spec.constraints` 里 `strictness == HARD` → **融合后过滤** | 保证「结果真的满足条件」 | `_evaluate`（`evidence_retrieval.py:414-425`），`_condition` 对 time / media / place / person 四维返回 matched/contradicted | ❌ **完全没有** |
+
+`retrieve_evidence.py` 的模块 docstring 自己写着「S4 只搬前两步（召回 + 融合）。
+后两步要种子分级与 `EvidencePacket`，属于 S6」——第三条就是**条件证据判定**。
+
 | Task | 内容 |
 |---|---|
-| **118** | 时间硬条件（`time_range`） |
-| **119** | 人物硬条件（`person_id`，接 S5b 的 `retrieve_entity`） |
-| **120** | 地点硬条件（`place`，接 S4 的 `asset_places`） |
+| **118** | **条件判定的纯规则**：`_condition` 的四维（time / media / place / person）→ 领域层纯函数，各自返回 matched / contradicted / unknown |
+| **119** | **融合后的排除**：HARD 约束不满足即排除（negated 反过来），并把 `excluded_count` 传出来——1.0 的 `packet.excluded_count` 就是这个 |
+| **120** | **HTTP 面**：`/search` 接受 `time_range` / `person` / `place` / `media_type`，接进 `EvidenceRequest` |
 
-> 三个硬条件各自独立成任务，因为 1.0 的失败模式是「硬条件被当成软加权」——
-> 查询「拍过**某个人**的照片」时，如果人物只是加权而不是硬过滤，返回的结果里会混进
-> 没有那个人的照片，而**这个错误在界面上看起来完全正常**。每个都要有「过滤前有、过滤后没有」的用例。
+**为什么原先拆成三个是错的**：三个条件走的是同一个判定与同一个排除动作，
+拆开会让「排除逻辑」写三遍——而 1.0 那份是**一张表**（`_condition` 按 dimension 分派）。
+按条件拆任务，等于把一张表切成三张。
+
+**判据**：每个维度都要有「过滤前有、过滤后没有」的用例——那是这一条唯一的可见效果。
+`person` 那一维特别注意：1.0 在人物不匹配时返回 **`unknown` 而不是 `contradicted`**
+（`evidence_retrieval.py:479`），而 HARD 的判据是 `status != "matched"`——
+所以 unknown 一样被排除。这个区别只在 `SEMANTIC` 档上才有意义（那里只排除 contradicted）。
 
 ### 第四组 · 四个工具
 
 | Task | 内容 | 依赖 |
 |---|---|---|
-| **121** | `query_memory_facts` | 113 / 114 |
+| **121** | **`query_memory_facts`——依赖核查后重估为一条子系统，不是一个工具**（2026-09-29 实测）。体量：`structured_memory.py` 311 行（`StructuredMemoryExecutor` + 16 个方法）+ 工具侧 `_query_memory_facts` 与四个 helper（`_draft_from_filters` / `_spec_for` / `_resolve_entity` / `_fact_samples`）约 120 行 + **`QuerySpec` / `Constraint` / draft 这套查询契约**（1.0 `query_contracts.py` 406 行，2.0 只移植了其中的 `parse_time_expression`）。三套枚举：`operation` {count, exists, first, last, group} × `subject` {asset, person_appearance, processing} × `filters` {time, media, place, person}。**建议拆成 121a 查询契约 / 121b executor / 121c 工具与注册**。前置 113/114（facts 读路径）仍然成立 |
 | **122** | `query_photo_people` | S5b 的 `retrieve_entity` |
 | **123** | `inspect_photo`（VLM，1.0 调用 10,721 次） | 8100 上的视觉端点（当前 qwen3.5-4B + mmproj，已实测可用） |
 | **124** | `read_photo_text`（OCR，1.0 调用 2,867 次） | **动工前核查**：1.0 的 `ocr_tool.py`（638 行）用的是哪个 OCR 后端，2.0 有没有 |
+
+> **一条方法论，由两个正好相反的案例得出**（2026-09-29）：
+>
+> | 工具 | 注释说 | 代码说 | 真相 |
+> |---|---|---|---|
+> | `adjacency` | 配置里 `"adjacency": false` | 类存在、工厂会跳过它、`.expand(` 无生产调用者 | **是死的**——注释对 |
+> | `query_memory_facts` | `tools.py` 模块 docstring：「**全量聚合工具已删除**」 | `tools.py:2690` **就注册着**；`runtime.py:604/654` 还在特判它；轨迹里 1,603 次调用 | **是活的**——注释过期 |
+>
+> **两次都不能只信一边。** 只信「1.0 有哪些 .py 文件」会把 adjacency 当缺口（第一版计划就这么错了）；
+> 只信注释会把 query_memory_facts 当成已删。**判一个能力在不在，要看它有没有注册、有没有生产调用者**——
+> 那正好就是 `check_reachability` / `check_method_reachability` 这两条门禁在 2.0 里问的问题。
 
 ### 第五组 · 收口
 
