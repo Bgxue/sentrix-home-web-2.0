@@ -379,3 +379,54 @@ def test_memory_facts_groups_by_month(toolbox):
     assert outcome.model_visible["unit"] == "original_asset_breakdown"
     # 分组结果本身已经把内容摊开了，不再附样本——1.0 也是只在非分组时附。
     assert outcome.model_visible["samples"] == []
+
+
+def test_memory_facts_exists_and_last(toolbox):
+    """夹具里两张照片是 2019-08-01 与 2019-08-02。"""
+    exists = run(toolbox, "query_memory_facts", operation="exists", subject="asset")
+    assert exists.ok
+    assert exists.model_visible["value"] is True
+
+    last = run(toolbox, "query_memory_facts", operation="last", subject="asset")
+    assert last.ok
+    assert last.model_visible["value"] == "2019-08-02T00:00:00+00:00"
+    assert last.model_visible["unit"] == "captured_at"
+
+
+def test_memory_facts_unit_follows_the_media_filter(toolbox):
+    """``unit`` 是按媒体过滤定的，不是按结果定的——问「多少张视频」得到 0，
+    但单位仍然是 ``original_video``。写成「结果为空就用默认单位」会让
+    「0 个视频」和「0 张照片」看起来是同一句话。"""
+    image = run(toolbox, "query_memory_facts", operation="count", subject="asset", filters={"media": "image"})
+    assert (image.model_visible["unit"], image.model_visible["value"]) == ("original_image", 2)
+
+    video = run(toolbox, "query_memory_facts", operation="count", subject="asset", filters={"media": "video"})
+    assert (video.model_visible["unit"], video.model_visible["value"]) == ("original_video", 0)
+
+
+def test_memory_facts_without_a_scope_is_unavailable(toolbox):
+    """相册范围由系统注入。走到这里说明**装配错了，不是模型错了**——
+    所以是 ``unavailable`` 而不是某个 ``unsupported_*``：那两类要模型改参数，
+    这一类改参数没用。"""
+    build, _result_sets = toolbox
+
+    outcome = build.execute(
+        "query_memory_facts", {"operation": "count", "subject": "asset"}, scope_id="", now=NOW
+    )
+
+    assert outcome.failure_reason == "missing_runtime_scope"
+
+
+def test_memory_facts_rejects_a_person_that_was_never_confirmed(toolbox):
+    """**与「这个人不存在」不同，所以不是一个 0 条的统计结果。** 返回 0 会让模型
+    理直气壮地说「没有他/她的照片」，而事实是这个名字在本相册里根本没被确认过。"""
+    outcome = run(
+        toolbox,
+        "query_memory_facts",
+        operation="count",
+        subject="person_appearance",
+        filters={"person": "查无此人"},
+    )
+
+    assert outcome.failure_reason == "person_not_named_in_current_album"
+    assert outcome.model_visible["status"] == "unresolved_person"
