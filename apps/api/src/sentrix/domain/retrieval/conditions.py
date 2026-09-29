@@ -248,18 +248,32 @@ def _place(
 
 
 def _person(condition: Condition, observation: Observation, context: EvidenceContext) -> Evidence:
+    """**两条路，任一成立即命中**（1.0 ``:470-481`` 是 ``or``，照抄）。
+
+    1. ``name in observation.people`` —— 这条观察的**已确认人物快照**里有这个名字。
+       这是逐观察的事实，比「这个 scope 里有这个人」精确得多（后者会让那个人出现的
+       任何一张图都通过）；
+    2. ``context.confirmed_person(name)`` —— **这个 scope 里**这个名字是已确认人物。
+       1.0 在这一支上每次重查 ``entity_mentions`` + ``status == 'confirmed'``，
+       在 2.0 由 ``EntityRepository.confirmed_person_names`` 承担。
+
+    **一处记下来的观察，没有改行为。** 2.0 的 ``observations.people`` 是**追加式快照**
+    （``link_confirmed_mention`` 在写提及的同一个调用里调 ``_append_person_snapshot``），
+    实体后来被取消确认时它不会回退。所以第 1 支可能命中一个**已经不是**已确认人物的名字。
+    1.0 同样如此（它第 1 支也不查新鲜度）——**这是照抄的行为，不是这里引入的**。
+    改它会让「按人搜照片」的结果与 1.0 不同，那是另一个决定。
+
+    查不到时返回 ``UNKNOWN`` 而不是 ``CONTRADICTED``（1.0 ``:479``）：图里没有这个名字
+    有两种可能——这个人没被拍到，或者那条提及还没建。HARD 档下两者都排除，
+    但 SEMANTIC 档下只有后者该排除，所以这个区别必须留着。
+    """
     name = condition.value.strip()
     if not name:
         return Evidence(ConditionStatus.UNKNOWN)
     if name in observation.people:
         return Evidence(ConditionStatus.MATCHED, "confirmed_bridge", observation.id, 1.0)
     if context.confirmed_person is not None and context.confirmed_person(name):
-        # 1.0 ``:479-481``：观察的 people 字段里没有，就去查 ``entity_mentions``——
-        # 那条桥只对**已确认**人物成立，所以来源是 ``confirmed_bridge``。
         return Evidence(ConditionStatus.MATCHED, "confirmed_bridge", observation.id, 1.0)
-    # **UNKNOWN，不是 CONTRADICTED**（1.0 ``:479``）。图片里没有这个名字有两种可能：
-    # 这个人没被拍到，或者那条提及还没建。HARD 档下两者都会被排除，
-    # 但 SEMANTIC 档下只有后者该被排除——所以这个区别必须留着。
     return Evidence(ConditionStatus.UNKNOWN)
 
 

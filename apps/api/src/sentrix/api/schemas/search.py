@@ -23,4 +23,8 @@ class SearchResponse(BaseModel):
     degraded_reason: str
     # 权威存储里的向量条数。用来区分「还没导入过」和「搜不到」。
     authoritative_vectors: int
+    # 被结构化条件排除掉的候选数。**必须给出来**：没有它，「条件把所有候选都排除了」
+    # 与「本来就没有候选」在响应上长得一模一样，而这两件事该做的处置相反
+    # （前者是用户的条件太窄，后者是库里没有）。
+    excluded_count: int = 0
     items: list[SearchHit]

@@ -187,6 +187,47 @@ paths:
           minimum: 1
           default: 20
           title: Limit
+      - name: time_range
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 60
+          description: 时间条件，例如 2023年10月 / 2025年-2026年
+          default: ''
+          title: Time Range
+        description: 时间条件，例如 2023年10月 / 2025年-2026年
+      - name: person
+        in: query
+        required: false
+        schema:
+          type: array
+          items:
+            type: string
+          description: 人物条件，可重复：scope 内已确认人物的本名
+          default: []
+          title: Person
+        description: 人物条件，可重复：scope 内已确认人物的本名
+      - name: place
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 60
+          description: 地点条件，服务端按解析出的行政区/地名匹配
+          default: ''
+          title: Place
+        description: 地点条件，服务端按解析出的行政区/地名匹配
+      - name: media_type
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 20
+          description: 媒体类型：image / video / audio / text
+          default: ''
+          title: Media Type
+        description: 媒体类型：image / video / audio / text
       responses:
         '200':
           description: Successful Response
@@ -2313,6 +2354,10 @@ components:
         authoritative_vectors:
           type: integer
           title: Authoritative Vectors
+        excluded_count:
+          type: integer
+          title: Excluded Count
+          default: 0
         items:
           items:
             $ref: '#/components/schemas/SearchHit'

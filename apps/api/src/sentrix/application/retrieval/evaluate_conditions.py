@@ -76,13 +76,16 @@ class EvaluateConditions:
         observations: ObservationRepository,
         places: AssetPlaceRepository | None = None,
         aliases: PlaceAliases | None = None,
-        confirmed_person: Callable[[str], bool] | None = None,
+        confirmed_people: Callable[[str | None], frozenset[str]] | None = None,
     ) -> None:
         self._assets = assets
         self._observations = observations
         self._places = places
         self._aliases = aliases
-        self._confirmed_person = confirmed_person
+        # 传的是「按 scope 取已确认人物本名」的查询口，而不是一个 `name -> bool`：
+        # 人物条件必须**按当前 scope** 判，而 scope 到 filter 才有。传一个定好 scope
+        # 的闭包会把 scope 钉死在构造时——那是调用方的事，不是这里的。
+        self._confirmed_people = confirmed_people
 
     def filter(
         self,
@@ -120,7 +123,7 @@ class EvaluateConditions:
         # 地点按资产查一次，四条观察共用。**必须是这个资产的解析结果**——
         # 传 ``None`` 会让地点条件一律 UNKNOWN，而 UNKNOWN 在 HARD 档下同样排除候选，
         # 于是「地点条件」会表现为「把所有照片都删了」。
-        context = self._context(asset_id)
+        context = self._context(asset_id, scope_id)
         best: ConditionVerdict | None = None
         for observation in self._observations_for(asset_id):
             candidate = self._judge_one(asset, observation, conditions, context)
@@ -152,14 +155,25 @@ class EvaluateConditions:
     def _observations_for(self, asset_id: str) -> Sequence[Observation]:
         return self._observations.list_by_asset(asset_id)
 
-    def _context(self, asset_id: str) -> EvidenceContext:
+    def _confirmed_predicate(self, scope_id: str | None) -> Callable[[str], bool] | None:
+        """把「按 scope 取名字集合」包成 ``name -> bool``。
+
+        ``confirmed_people`` 没接时返回 ``None``——那时人物条件只看观察的 ``people``
+        快照（**降级，不是等价实现**：快照是追加式的，实体被取消确认后它不会回退）。
+        """
+        if self._confirmed_people is None:
+            return None
+        names = self._confirmed_people(scope_id)
+        return lambda name: name in names
+
+    def _context(self, asset_id: str, scope_id: str | None) -> EvidenceContext:
         """判一条约束需要的外部事实。``places`` 没接时 ``place`` 恒为 ``None``——
         那让地点条件走 UNKNOWN 分支（不是 CONTRADICTED），与「这张图没解析出地点」
         是同一条路。**这是有意的降级，不是等价实现**：接上之后地点条件才真的会排除人。"""
         return EvidenceContext(
             place=self._places.get(asset_id) if self._places is not None else None,
             place_aliases=self._aliases if self._aliases is not None else EvidenceContext().place_aliases,
-            confirmed_person=self._confirmed_person,
+            confirmed_person=self._confirmed_predicate(scope_id),
         )
 
 
