@@ -76,7 +76,7 @@ PENDING_METHODS: dict[str, str] = {
     "EventRepository.dissolve": "S7（重分段；s5-deviations 第 15/35 条记「随 S7」）",
     "PortraitRepository.list_for_person": "S6 · 依赖核查（画像版本列表，归属未定）",
     "PortraitRepository.set_lock": "S6 · 依赖核查（画像手改/锁定，归属未定）",
-    "ObservationRepository.list_by_asset": "S6 · 依赖核查（观察读路径，归属未定）",
+    # ObservationRepository.list_by_asset 在 T119（条件排除）接线，按反向规则删掉。
     "MediaStorage.path_for": "S6 · 依赖核查（媒体路径解析，归属未定）",
     "LexicalIndex.rebuild_scope": "S6 · 依赖核查（词法索引重建，归属未定）",
     "AssetRepository.update_status": "S6 · 依赖核查（资产状态流转，归属未定）",

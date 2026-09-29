@@ -62,15 +62,26 @@ class ConditionStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-# 1.0 ``defaults.json`` 的 ``matched_source_types``：**只有这些来源的 matched 算数**，
-# 其余会被降级成 possible（`_evaluate` 的 419-420 行）。这条表是「双层防伪」的第一层——
-# 它决定「模型说它看见了」与「结构化字段说它是」不是同一件事。
+# **只有这些来源的 matched 算数**，其余降级成 possible（1.0 ``_evaluate`` 的 419-420 行）。
+# 它决定「模型说它看见了」与「结构化字段说它是」不是同一件事——双层防伪的第一层。
+#
+# **抄的是代码，不是配置。** 1.0 有**两份**来历不同的清单：
+#
+#   - ``evidence_retrieval.py:409-412`` 的类常量——**真正生效的那份**，五个来源，
+#     ``confirmed_bridge`` 与 ``entity_bridge_confirmed`` **两个都在**；
+#   - ``configs/retrieval/defaults.json`` 的 ``matched_source_types``——只有四个，
+#     漏了 ``confirmed_bridge``（而 ``_condition`` 的人物分支产出的正是这个），
+#     而且 ``RetrievalConfig.matched_source_types``（``config.py:78``）**全仓没有调用者**。
+#
+# 第一版照抄了配置那份，于是**人物硬条件永远不可能满足**：命中判成 matched、
+# 随即被降级成 possible，而 HARD 档只认 matched。表现是「按人搜照片一张都搜不出来」。
+# **一份没人读的配置看起来与生效的那份一样权威**——这次是靠一个用例炸出来的。
 TRUSTED_SOURCE_TYPES = frozenset(
     {
         "asset_metadata",
         "observation_field_exact",
+        "confirmed_bridge",
         "entity_bridge_confirmed",
-        "ocr_exact",
         "subject_binding",
     }
 )

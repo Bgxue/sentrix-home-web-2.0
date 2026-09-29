@@ -37,6 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from sentrix.application.retrieval.evaluate_conditions import EvaluateConditions
 from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_lexical import RetrieveLexical
 from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
@@ -51,6 +52,7 @@ from sentrix.application.retrieval.retrieve_visual import (
     VisualSearchResult,
 )
 from sentrix.domain.media.models import MediaType
+from sentrix.domain.retrieval.conditions import Condition
 from sentrix.domain.retrieval.fusion import DEFAULT_CHANNEL_WEIGHTS, fuse
 from sentrix.domain.retrieval.models import CandidateHit
 
@@ -96,6 +98,10 @@ class EvidenceRequest:
     # 人物条件属于 S6 的查询解析），但 **entity 通道只在有人物条件时才给召回信号**——
     # 这个字段不存在的话，那条通道在类型上就没法被喂过，它会永远返回空，而不是「被接上了」。
     person: tuple[str, ...] = ()
+    # 结构化条件（时间 / 媒体 / 地点 / 人物）。**与上面几个字段不是一回事**：
+    # 那几个是传给通道的**召回前筛**，它们影响「召回什么」，不保证结果满足条件；
+    # 这一条走的是**融合后的排除**，那才是「硬条件」的全部含义。
+    conditions: tuple[Condition, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +128,10 @@ class EvidenceResult:
     degraded: bool = False
     degraded_reason: str = ""
     authoritative_vectors: int = 0
+    # 被条件排除掉的候选数。1.0 ``EvidencePacket.excluded_count``（``:42``）。
+    # **必须传出来**：没有它，「条件把所有候选都排除了」与「本来就没有候选」
+    # 在响应上长得一模一样，而这两件事该做的处置相反。
+    excluded_count: int = 0
 
 
 def _visual_candidates(result: VisualSearchResult) -> tuple[CandidateHit, ...]:
@@ -173,12 +183,14 @@ class RetrieveEvidence:
         metadata: RetrieveMetadata,
         entity: RetrieveEntity,
         text: RetrieveTextAnn,
+        conditions: EvaluateConditions | None = None,
     ) -> None:
         self._visual = visual
         self._lexical = lexical
         self._metadata = metadata
         self._entity = entity
         self._text = text
+        self._conditions = conditions
 
     def execute(self, request: EvidenceRequest) -> EvidenceResult:
         text = request.text.strip()
@@ -221,6 +233,21 @@ class RetrieveEvidence:
         }
         fused = fuse(channel_hits, channel_weights=DEFAULT_CHANNEL_WEIGHTS)
 
+        # **条件判定排在融合之后、交付之前。** 1.0 ``evidence_retrieval.py:325``
+        # 的 ``_evaluate_fused`` 就是这个位置。放在前面（比如放在通道里）会变成
+        # 「每条通道各自过滤」，而条件判定要的是「对整个候选集一次」，
+        # 否则被 A 通道排除的候选还会从 B 通道进来。
+        excluded_count = 0
+        if self._conditions is not None and request.conditions:
+            outcome = self._conditions.filter(
+                [candidate.asset_id for candidate in fused],
+                request.conditions,
+                scope_id=request.scope_id,
+            )
+            kept = set(outcome.kept)
+            fused = [candidate for candidate in fused if candidate.asset_id in kept]
+            excluded_count = outcome.excluded_count
+
         return EvidenceResult(
             hits=tuple(
                 EvidenceHit(
@@ -235,4 +262,5 @@ class RetrieveEvidence:
             degraded=visual.degraded,
             degraded_reason=visual.degraded_reason,
             authoritative_vectors=visual.authoritative_vectors,
+            excluded_count=excluded_count,
         )
