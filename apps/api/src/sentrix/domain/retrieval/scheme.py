@@ -17,3 +17,16 @@ IMAGE_MODEL = "chinese-clip-ViT-L-14"
 VISUAL_DIMENSION = 768
 # memory_vectors.space 与 Qdrant 的命名向量名都用这个值。
 VISUAL_SPACE = "visual"
+
+# ---- TEXT 一侧（S6 T115a 补）--------------------------------------------------
+# 上面那句「留给 S4」是当时的判断，而 S4 没做——文本嵌入整条侧一直不存在，
+# 直到 S6 补六路召回时才接上（T115）。常量放在这里而不是适配器里：
+# 写入、查询、重建索引三处都只认这一个来源，是这个文件存在的全部理由。
+TEXT_EMBEDDER = "bge_m3"
+TEXT_MODEL = "BAAI/bge-m3"
+TEXT_DIMENSION = 1024
+# 1.0 ``pipeline.py:342-344`` 用同一条 text_embedding 写三行：
+#   episodic/observation、episodic/event、semantic/observation
+# 两个空间名照抄，因为 text_ann 的召回读的就是它们。
+SEMANTIC_SPACE = "semantic"
+EPISODIC_SPACE = "episodic"

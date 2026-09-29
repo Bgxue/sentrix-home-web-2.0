@@ -54,6 +54,7 @@ from sentrix.domain.places.ports import AssetPlaceRepository, PlaceResolver
 from sentrix.domain.retrieval.ports import (
     LexicalIndex,
     LexicalSearch,
+    TextEmbedder,
     VectorIndex,
     VectorRepository,
     VisualEmbedder,
@@ -71,6 +72,7 @@ from sentrix.infrastructure.media.person_vision import (
 from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
+from sentrix.infrastructure.models.bge_text import BgeM3TextEmbedder
 from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
 from sentrix.infrastructure.persistence.database import Database
@@ -129,6 +131,7 @@ class Container:
     vector_repository: VectorRepository
     vector_index: VectorIndex
     visual_embedder: VisualEmbedder
+    text_embedder: TextEmbedder
 
     # 时间线（S4）。地点是纯离线的：区县走 PyGeoCN 的面，乡镇/村庄走 GeoNames 的
     # 最近邻点，运行时零网络依赖。
@@ -207,6 +210,9 @@ class Container:
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
             visual_embedder=ChineseClipVisualEmbedder(),
+            # 文本嵌入走 HTTP，模型在 .venv-text 里（设计 §2.1：2.0 不管理模型
+            # 进程生命周期）。地址来自 Settings，与 8100 的 vlm_base_url 同一口径。
+            text_embedder=BgeM3TextEmbedder(settings.text_embedder_url),
             place_resolver=OfflinePlaceResolver(
                 admin=PyGeoCNAdminResolver(),
                 nearest=GeoNamesNearestResolver(settings.geo_dir),

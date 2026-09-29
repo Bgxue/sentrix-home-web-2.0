@@ -222,3 +222,25 @@ class VisualEmbedder(Protocol):
     def embed_image(self, path: Path) -> Sequence[float]: ...
 
     def embed_query(self, text: str) -> Sequence[float]: ...
+
+
+class TextEmbedder(Protocol):
+    """文本嵌入：一段语义文本 → 向量。
+
+    **与 ``VisualEmbedder`` 分开，不合并。** 两者的失败模式不同：视觉嵌入是本进程内
+    推理，权重缺席时不可用；文本嵌入是一次 HTTP 往返（bge-m3 sidecar，8101），
+    sidecar 可能没起、可能起了但模型没加载、也可能只是这一趟超时。合成一个端口，
+    调用方就分不出「这台机器没有文本能力」与「刚才那一次网络抖了」——
+    而前者要降级、后者应该重试。
+
+    成员声明成只读 property，理由同 ``VisualEmbedder``：适配器的实现是 property，
+    mypy 的 ``arg-type`` 不允许只读 property 去满足可写变量的协议约定。
+    """
+
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def dimension(self) -> int: ...
+
+    def embed_query(self, text: str) -> Sequence[float]: ...

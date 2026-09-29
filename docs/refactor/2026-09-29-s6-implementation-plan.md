@@ -145,7 +145,8 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 
 | S6 要求 | 2.0 现状 | 证据 |
 |---|---|---|
-| **六路召回补齐** | **4/6**。缺 `text_ann` 与 `adjacency` | 1.0 有 `retrieval/{visual_ann,text_ann,lexical,metadata,entity,adjacency}.py` 六个；2.0 的召回器只有 `Retrieve{Visual,Lexical,Metadata,Entity}`。`fusion.py:31-38` 的 `DEFAULT_CHANNEL_WEIGHTS` **已经列了六路**（含 `text_ann: 0.5` / `adjacency: 0.5`），`fusion.py:29` 也已声明 `EXPANDER_CHANNELS = ("adjacency",)`——**权重和通道分类都在，召回器不在** |
+| **六路召回补齐** | **5/6 才是真缺口**（2026-09-29 核查后修正）。缺 `text_ann`；**`adjacency` 不是缺口**——见下 | 1.0 有 `retrieval/{visual_ann,text_ann,lexical,metadata,entity,adjacency}.py` 六个，但 `configs/retrieval/defaults.json:10` 写着 `"adjacency": false`，而 `build_default_retrievers`（`retrieval/__init__.py:80`）对关掉的通道**直接 `continue`，连实例都不建**。`AdjacencyRetriever` 只被自己的模块、工厂和 `test_adjacency_retriever.py` 引用，`.expand(` 唯一的生产调用点在 Kernel 里——而 Kernel 只有在它被构建时才跑。**它在 1.0 是死代码**，与 `agent_contracts.py`（392 行、静态不可达 → 不搬）同一类。2.0 的 `retrieve_evidence.py:22` 早就把这件事写进了注释，而我在写第一版计划时没核到 |
+| **`text_ann` 的真实体量** | **不是「加一路召回器」** | 1.0 的 `text_ann` 要：查询文本 → `TextQueryEmbedder` → semantic/episodic ANN → 把 observation 命中映回 Asset。而 2.0 **整条文本嵌入侧都不存在**：`scheme.py` 自己写着「TEXT 一侧（BAAI/bge-m3，1024 维，HTTP sidecar）留给 S4」而 S4 没做；`config.py:27` 的 `text_embedder_url` 全仓只有它自己那一行；线上库 `memory_vectors` **只有 `visual` 空间**（53 asset + 117 face_instance），一条文本向量都没有。所以这是一条**多段任务**：端口 + adapter + 写入 + 召回 + 存量回填 |
 | **硬条件（时间/人物/地点）** | **0** | `grep -iE 'hard_filter\|time_range\|person_filter\|place_filter'` 在 `application/retrieval/` 与 `domain/retrieval/` **零命中** |
 | **四个工具** | **4 个全缺** | 2.0 注册的是 `search_memories` / `get_result_page` / `get_original_photos` / `get_person_profile`（`domain/assistant/tools.py:54,81,98,121`）；`inspect_photo` / `read_photo_text` / `query_memory_facts` / `query_photo_people` 全仓零命中 |
 | **证据包 + trace 能展开** | **部分** | `domain/assistant/evidence_ledger.py` 在，`application/retrieval/retrieve_evidence.py` 在（融合 + 缺口传递到 HTTP 响应）；**trace 的展开面未核** |
@@ -185,9 +186,12 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 
 | Task | 内容 |
 |---|---|
-| **115** | `text_ann` 召回器（1.0 `retrieval/text_ann.py`；写侧 `memory_vectors` 的 `text_ann` route） |
-| **116** | `adjacency` 召回器（1.0 `retrieval/adjacency.py`；扩展通道，`fusion.py:29` 的 `EXPANDER_CHANNELS` 已留位） |
-| **117** | 通道补齐的**对照验收**：同一 query 在补齐前后各跑一次，断言 `channels` 里出现了新键且名次合理 |
+| **115a** | **文本嵌入侧**：`TextEmbedder` 端口 + bge-m3 HTTP adapter（8101 sidecar 已在跑、已实测 `{"status":"ok","model":"BAAI/bge-m3","dimension":1024}`）+ `scheme.py` 的 TEXT 常量（`scheme.py` 自己注明这一侧「留给 S4」而 S4 没做） |
+| **115b** | **写入侧**：导入时把 observation 的语义文本写进 `semantic` 空间（1.0 `pipeline.upsert_vector` 的 `source_type=observation`） |
+| **115c** | **召回器**：`RetrieveTextAnn`（1.0 `retrieval/text_ann.py`），把命中映回 Asset |
+| **115d** | **存量回填**：线上 53 张 asset 已有 text 语义但没有文本向量。回填脚本（体例照 T85 那次人脸回填） |
+| ~~116~~ | **不实现 `adjacency`**（2026-09-29 核查：1.0 默认关着，是死代码）。按 `agent_contracts.py` 的先例处置，理由记入 `frozen.md` |
+| **117** | 通道补齐的**对照验收**：同一 query 在 `text_ann` 接上前后各跑一次，断言 `channels` 里出现了 `text_ann` 键且**名次不是垫底**（垫底意味着它其实没贡献） |
 
 ### 第三组 · 硬条件
 
@@ -249,7 +253,7 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
    而「让红色消失」本身是这条门禁最好的一次验证。
 2. **113/114 必须在 121 之前**。`query_memory_facts` 没有 facts 读路径就没有数据源，
    而直接写工具会得到一个「永远返回空」的工具，读起来像「这个人没有事实」。
-3. **115/116 在 117 之前**——117 是对照验收，没有前两个无从对照。
+3. **115a–115b 在 115c/117 之前**——没有写入侧就没有向量，召回器接上去只会永远返回空，而「空」与「没接」在读数上分不开。117 是对照验收，没有前面几个无从对照。
 
 ---
 
@@ -288,6 +292,7 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 
 | 项 | 归属 / 理由 |
 |---|---|
+| **`adjacency` 召回器** | **1.0 默认关着**（`configs/retrieval/defaults.json:10` 的 `"adjacency": false`，`build_default_retrievers` 连实例都不建），只被自己的测试跑过。实现它等于**加一个 1.0 从没跑过的东西**。按 `agent_contracts.py`（392 行、静态不可达 → 不搬）的先例：不实现，理由记入 `frozen.md`。**注意 `fusion.py` 的权重表与 `EXPANDER_CHANNELS` 里还留着它的位置——那是照抄 1.0 的权重表，留着无妨，但不要因为「表里有」就去建召回器** |
 | 视频（4 条路由 + 抽取链） | **S8**；按裁决**单独排**，本切片不做 |
 | family-graph 7 条、relationships CRUD、角色假设 | **S7**（设计 §8）；`s5-deviations.md` 第 15/35 条已标「随 S7」 |
 | `hardware` / `model-profiles` / `runtime-providers` 9 条 | **S11**；设计 §2.1「2.0 不管理模型进程生命周期」 |
