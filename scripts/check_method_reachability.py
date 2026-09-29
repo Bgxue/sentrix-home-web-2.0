@@ -47,6 +47,7 @@ import argparse
 import ast
 import sys
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -64,9 +65,9 @@ DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
 #     把它们硬塞进一个编号会更像有归属，实际只是把问题推后。
 PENDING_METHODS: dict[str, str] = {
     # —— 审计查出（2026-09-29）——
-    "FactRepository.list_facts": "Task 113（facts 读路径）",
-    "FactRepository.set_status": "Task 114（facts 状态机闭合）",
-    "FactRepository.supersede_others": "Task 114（facts 状态机闭合）",
+    # facts 的三条（list_facts / set_status / supersede_others）已在 T113/T114 接线，
+    # 按反向规则从这张表里删掉。**这三条是被自己删掉的，不是被人想起来的**——
+    # 接线完成的那一刻这条门禁就报红要求删，那正是它存在的形式。
     "RelationshipRepository.retract": "Task 116（关系 CRUD）",
     # —— 本门禁首跑查出 ——
     "EntityRepository.list_properties": "Task 128（S6 语义实体：实体属性读）",
@@ -82,7 +83,7 @@ PENDING_METHODS: dict[str, str] = {
 }
 
 
-def iter_protocols(src: Path):
+def iter_protocols(src: Path) -> Iterator[tuple[Path, str, list[str]]]:
     """产出 (文件, 协议类名, [方法名])。只看 ``domain/**/ports.py``。"""
     for path in sorted(src.rglob("domain/**/ports.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))

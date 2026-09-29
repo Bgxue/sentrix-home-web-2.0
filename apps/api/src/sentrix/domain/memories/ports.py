@@ -150,7 +150,12 @@ class FactRepository(Protocol):
 
     def set_status(self, fact_id: str, status: str) -> Fact: ...
 
-    def list_facts(self, scope_id: str, *, limit: int) -> Sequence[Fact]: ...
+    def get(self, fact_id: str) -> Fact | None: ...
+
+    # ``scope_id`` 为 ``None`` 表示**全部相册**。1.0 的 ``list_facts(1000)``
+    # 根本没有 scope 参数；2.0 一度写成必填，是在端口层面收窄了 1.0 的行为。
+    # 接线时改回可选，与 ``AssetRepository.list_by_scope`` 同一口径。
+    def list_facts(self, scope_id: str | None, *, limit: int) -> Sequence[Fact]: ...
 
     def purge_unanchored(self, scope_id: str) -> int:
         """删掉 subject 不再是本 scope 已确认人物本名的事实，返回删了几条。

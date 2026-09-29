@@ -8,6 +8,7 @@ from sentrix import __version__
 from sentrix.api.errors import domain_error_handler
 from sentrix.api.routes import (
     assistant,
+    facts,
     health,
     identity,
     insights,
@@ -43,6 +44,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(maintenance.router)
     v1.include_router(spaces.router)
     v1.include_router(insights.router)
+    v1.include_router(facts.router)
     app.include_router(v1)
     return app
 

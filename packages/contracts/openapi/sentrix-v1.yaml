@@ -1153,6 +1153,104 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/facts:
+    get:
+      tags:
+      - facts
+      summary: List Facts
+      operationId: list_facts_api_v1_facts_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Scope Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 20
+          description: 按状态过滤：active / pending / superseded / retracted
+          default: ''
+          title: Status
+        description: 按状态过滤：active / pending / superseded / retracted
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 1000
+          minimum: 1
+          default: 200
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/facts/{fact_id}/confirm:
+    post:
+      tags:
+      - facts
+      summary: Confirm Fact
+      operationId: confirm_fact_api_v1_facts__fact_id__confirm_post
+      parameters:
+      - name: fact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Fact Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactPayload'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/facts/{fact_id}/reject:
+    post:
+      tags:
+      - facts
+      summary: Reject Fact
+      operationId: reject_fact_api_v1_facts__fact_id__reject_post
+      parameters:
+      - name: fact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Fact Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactPayload'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -1660,6 +1758,65 @@ components:
       - crop_url
       title: FaceCropRef
       description: 簇里的一张样本脸。``crop_url`` 直接可打开，前端不再拼路径。
+    FactListResponse:
+      properties:
+        facts:
+          items:
+            $ref: '#/components/schemas/FactPayload'
+          type: array
+          title: Facts
+      type: object
+      required:
+      - facts
+      title: FactListResponse
+    FactPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        subject:
+          type: string
+          title: Subject
+        predicate:
+          type: string
+          title: Predicate
+        object:
+          type: string
+          title: Object
+        status:
+          type: string
+          title: Status
+        confidence:
+          type: number
+          title: Confidence
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        revision:
+          type: integer
+          title: Revision
+        supersedes_fact_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Supersedes Fact Id
+      type: object
+      required:
+      - id
+      - scope_id
+      - subject
+      - predicate
+      - object
+      - status
+      - confidence
+      - evidence_ids
+      - revision
+      title: FactPayload
     HTTPValidationError:
       properties:
         detail:

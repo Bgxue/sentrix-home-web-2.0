@@ -142,10 +142,18 @@ class SqliteFactRepository:
             )
             return int(cursor.rowcount)
 
-    def list_facts(self, scope_id: str, *, limit: int) -> Sequence[Fact]:
+    def list_facts(self, scope_id: str | None, *, limit: int) -> Sequence[Fact]:
+        """按 scope 取事实；``scope_id`` 为 ``None`` 时取全部相册（1.0 的行为）。
+
+        1.0 的 ``list_facts(limit)`` 没有 scope 参数，一次返回全库；2.0 加了 scope
+        过滤，但**必须保留「不传 = 全部」这条路**——否则「看全部相册的事实」这件事
+        在 2.0 做不出来，而 1.0 一直在做。
+        """
+        where = "" if scope_id is None else " WHERE scope_id = ?"
+        params: tuple[object, ...] = (limit,) if scope_id is None else (scope_id, limit)
         with self._database.connect() as connection:
             rows = connection.execute(
-                f"SELECT {_COLUMNS} FROM facts WHERE scope_id = ? ORDER BY updated_at DESC LIMIT ?",
-                (scope_id, limit),
+                f"SELECT {_COLUMNS} FROM facts{where} ORDER BY updated_at DESC LIMIT ?",
+                params,
             ).fetchall()
         return [_row_to_fact(row) for row in rows]
