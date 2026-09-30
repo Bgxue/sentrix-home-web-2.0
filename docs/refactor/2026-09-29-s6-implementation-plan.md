@@ -325,6 +325,96 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 而候选列表里不会因此多出任何东西。两半都要断言——只断言前一半的话，
 一个「永远写六条、不管跑没跑」的实现也能过。
 
+### Task 127 · 动工前核查（2026-09-30）：「非人物实体」到底是哪几个，以及一个必须定的口径
+
+计划给 T127 的注记是「1.0 那两张表的**实际列与被引用处**——它们 2.0 一张都没建，
+抄错列名要等到写入时才炸」。核完了，并且核出两件计划里没写的。
+
+#### ① 两张表的列集（`CREATE TABLE` 即权威）
+
+`_ensure_columns` 那一段（`db.py:1073-1084`）给这两张表补的列
+（`scope_id` / `event_memory_json` / `patterns_json` / `confidence_source` /
+`normalized_value_text` / `normalization_version` / `support_count`）
+**已经在 `CREATE TABLE` 里了**——1.0 那是给老库打补丁用的。所以 2.0 的迁移
+**可以一次建对**，那正是 2.0 迁移的既定风格（`0006_identity.sql:12` 写着同一句话）。
+
+`semantic_profiles`（`db.py:811-826`）：
+`id` / `scope_id` / **`person_id` UNIQUE REFERENCES entities(id)** / `summary_zh` /
+`activity_summary_zh` / `place_summary_zh` / `appearance_summary_zh` /
+`preference_summary_zh` / `event_memory_json` / `patterns_json` / `evidence_ids_json` /
+`revision` / `created_at` / `updated_at`
+
+`semantic_claims`（`db.py:827-849`）：
+`id` / `scope_id` / **`person_id` REFERENCES entities(id)** / `dimension` / `predicate` /
+`value_text` / `normalized_value_text` / `normalization_version` / `support_count` /
+`value_entity_id REFERENCES entities(id)` / `valid_from` / `valid_to` /
+`supporting_event_ids_json` / `evidence_ids_json` / `status` / `confidence` /
+`confidence_source` / `supersedes_claim_id REFERENCES semantic_claims(id)` / `revision` /
+`created_at` / `updated_at`；索引 `idx_semantic_claims_person ON semantic_claims(person_id)`
+
+#### ② `person_id` 这个名字在两列上都撒谎——**第四次**同一形状
+
+两列的约束都是 `NOT NULL REFERENCES entities(id)`，而 1.0 的抽取**是给非人物实体写
+claim 与 profile 的**（下面 ③）。也就是说这一列装的是「这条 claim 关于哪个实体」，
+与「人」无关。这与 `_confirmed_photo_identities`（名字说 confirmed，SQL 不查状态）
+是同一类：**照搬列名（忠实），但把这件事写进 docstring**；改名是偏离，要单独有理由。
+
+#### ③ 「非人物实体抽取」的具体形态：`_find_or_create_entities_batch`
+
+`db.py:3708-3730`，四个 `entity_type`（`:3798-3803` 的 `values` 列表）：
+
+| entity_type | 名字来自 | 摘要文案 |
+|---|---|---|
+| `place` | 观察的地点，或采集地点 | 由图片观察或采集地点维护 |
+| `object` | 观察到的物体（`objects`） | 由图片观察到的物体 |
+| `atmosphere` | 画面氛围（受控词表归一后） | 由图片观察到的画面氛围 |
+| `time` | 原始拍摄日期 | 由原始拍摄时间维护 |
+
+建完实体再逐条 `maintain_entity_property` 写属性：`geo` / `scene_type` /
+`semantic_primary` / `semantic_details` / `visual_place_descriptions` /
+`raw_atmosphere_labels` 等（`:3838-3934`）。
+
+**这是一条生产路径。** 判据同 §3 那个方法论框：`create_entity(..., "place")` 这种写法
+**只在 `test_entities.py` 里出现**（非测试调用点全是 `"person"`），真正建非人物实体的是
+这个 batch API——所以「1.0 有没有非人物实体」不能靠 grep `create_entity` 判。
+
+#### ④ 顺带确认了 T128 那条注记
+
+`maintain_entity_property_values`（多值合并）**全仓非测试调用者只有 `db.py` 的观察抽取段**
+（`:3854` / `:3859` / `:3907` / `:3922` / `:3923` / `:3934` / `:4031`）。
+`s5-deviations.md` 第 46 条记的「本切片没有调用者」——**那个调用者就是它**，
+T128 接上之后那个零调用登记可以删。
+
+#### ⑤ 两件「不用改」，记下来免得动工时顺手加
+
+- **泄漏守卫已经包含 `semantic_claims`。** 2.0 的 `final_guard.py:46` 的 `_TABLE_NAME`
+  逐字抄了 1.0 的正则（`assets|observations|entity_mentions|semantic_claims|agent_result_sets`）。
+- **`memory_feedback.target_claim_id` 那条外键不建。** 它引用 `semantic_claims`
+  （`db.py:906`），但 `memory_feedback` 在 2.0 的冻结清单里（§范围决策「反馈」）。
+
+#### ⑥ **一个必须先定的口径**：地点在 2.0 是 `asset_places`，在 1.0 是 entity
+
+这是这一组真正的分岔，也是它体量的来源：
+
+| | 1.0 | 2.0 现状 |
+|---|---|---|
+| 地点怎么存 | **entity**（`entity_type='place'`）+ 属性 + `semantic_claims` + 进 entity 召回通道 | **`asset_places` 表 + `Place` 值对象**（S4 的选择），**不是实体** |
+| 物体 / 氛围 / 时间 | 同样是 entity | **没有**（只在 `Observation.objects` / `clothing` 里是文本） |
+
+所以 T127–T131 有两种可能的口径，**体量差一个量级**：
+
+- **甲：把四类都补成实体**（照 1.0）。那要与 2.0 既有的 `asset_places` 处理关系——
+  并存（同一份地点两处存，靠什么保证一致？）还是替换（S4 的地点到 S6 全换掉，
+  影响 `retrieve_metadata` / 时间线展示 / `Place` 的解析链）。
+- **乙：只补 `object` / `atmosphere` / `time` 三类**，地点继续走 `asset_places`
+  （2.0 的既有选择），entity 通道对地点不生效。
+
+**这一条决定 T127 到 T131 的整个形状，动工前要定。** 我倾向先核一件事再定：
+2.0 的 `retrieve_metadata` 与时间线已经让 `asset_places` 承担了多少 1.0 里
+「place 实体」承担的职责——如果完全覆盖，乙就是对的；如果 1.0 的 place 实体还承担了
+`asset_places` 没有的东西（比如 `semantic_details` 那种受控词表属性、以及
+「同一个地点跨照片聚合」），那甲才站得住。
+
 ### 收口
 
 | Task | 内容 |
