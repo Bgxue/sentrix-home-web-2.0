@@ -708,6 +708,66 @@ supersede 旧行 → 插新行（`source='user'`、`confidence=1`、`status='act
   `detail.relationships.concat(detail.facts.map(...))`），所以 2.0 少了 `relationships`
   之后，那个弹窗的「关联事件与关系」一栏只剩事实。**如实反映，不补占位。**
 
+#### T129 / T130 动工前核查（2026-09-30）：分组键是现算的四级策略
+
+##### T129 · `entity-groups`
+
+1.0 有两条路由（`app.py:1871-1882`），且**都是现算的投影，不落表**：
+`list_semantic_entity_groups`（`db.py:4194`）与 `get_semantic_entity_group`（`db.py:4249`）。
+
+**分组键 = `(scope_id 或 "home-default", entity_type, label)`**，`label` 由
+`_semantic_entity_key`（`db.py:4144-4165`）现算，**四级策略按顺序短路**：
+
+| 顺序 | strategy | 依据 |
+|---|---|---|
+| 1 | `semantic_primary` | 实体属性 `semantic_primary` 有值，且类型 ∈ {place, object, atmosphere} |
+| 2 | `controlled_equivalence` | `SEMANTIC_ENTITY_EQUIVALENTS[类型]`，先精确匹配 label 再子串匹配 |
+| 3 | `semantic_concept` | place 查 `SEMANTIC_PLACE_CONCEPTS`（9 条）、object 查 `SEMANTIC_OBJECT_CONCEPTS`（10 条），子串命中即取归一化词 |
+| 4 | `exact_label` | 兜底，label = 去空白后的 `canonical_name` |
+
+**要搬四张词表**（`db.py:206-247`）：`SEMANTIC_ENTITY_EQUIVALENTS`、`MOOD_NORMALIZATION`
+（`emotion` 那一支引用的就是它）、`SEMANTIC_PLACE_CONCEPTS`、`SEMANTIC_OBJECT_CONCEPTS`。
+都是逐字常量，属 T127 `extraction.py` 那类「纯规则放 domain」。
+
+**两处过滤要注意，一处容易漏**：
+
+- 源是 `list_entities(scope_id, public=False)`——**`public=False`**，所以私密地点的投影
+  **不在这一层**做；但组内成员是逐条走 `public_entity` 的（`db.py:4226`）。
+- 循环里**跳过 `person`**、以及 `status ∈ {rejected, superseded}`（SQL 层已经排过一遍，
+  这里是第二道）。
+- `emotion` → `atmosphere` 的归一只发生在**组的 key** 上（`:4199`）；传给
+  `_semantic_entity_key` 的仍是原始 `"emotion"`，所以 `SEMANTIC_ENTITY_EQUIVALENTS["emotion"]`
+  会被用上——两处别弄反。
+
+**返回的组有 16 个键**，没有 LIMIT、没有分页、**没有成员数阈值**（单成员组也返回，
+`is_semantic_cluster` 只是 `len(members) > 1` 的标记）。排序三处各不相同：
+组按 `(entity_type, -evidence_count, canonical_name)`、成员按 `(-evidence_count, canonical_name)`、
+`member_entity_ids` 按字符串。
+
+**`GET /entity-groups/{id}` 里有一块是 S7 的**：它把每个成员的 `get_entity_detail` 结果
+放进 `members`，再把所有成员的 `observations` / `events` / **`relationships`** 按 id 去重后
+扁平合并。`relationships` 与前两次同样的处理——**不进响应**。找组是**线性扫描内存里的
+列表**（O(n)），不是按 id 查表。
+
+##### T130 · `GET /knowledge`
+
+`app.py:1921-1932`，返回三块：
+
+| 块 | 来源 | 过滤 | 排序 | LIMIT |
+|---|---|---|---|---|
+| `profiles` | `semantic_profiles` | 给了 `person_id` 就按它；否则对 scope 内**每个实体轮流查一次**（N+1），`None` 丢弃 | 无 | 无（主键等值） |
+| `claims` | `semantic_claims` | `status IN ('active','pending')`；`person_id` 有值时按它；`scope_id` **在 Python 里过滤** | `updated_at DESC` | **1000** |
+| `spaces` | `memory_spaces` | `status = 'active'` | `created_at` | 无 |
+
+**1.0 前端只读 `claims`**（`src/app.js:872` 的 `semanticKnowledgeView`，按
+`claim.status !== "superseded"` 再过滤一次）。`profiles` 与 `spaces` 在 `src/` 与 `App.vue`
+里**零读取**——侧栏的空间列表走的是另一条路由 `/api/memory-spaces`
+（`src/app.js:1161`），不是 knowledge 的 `spaces` 键。**如实记下，不据此砍掉**（它们是
+1.0 的 API 契约，而且 `profiles` 正是 T128b 里留给 T130 的那一块）。
+
+`semantic_profiles` / `semantic_claims` 在 2.0 **零读路径**（只在迁移里建表），所以
+T130 要新建一个语义读的端口。
+
 ### 收口
 
 | Task | 内容 |
