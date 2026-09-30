@@ -479,6 +479,60 @@ if time_entity and entity["id"] != time_entity["id"]:
 正是 1.0 的形状。乙（只做 object/atmosphere/time）会让「家中餐厅出现在哪些照片里」
 这类问题在 2.0 永远答不了，而 1.0 答得了。
 
+### Task 128–131 · 动工前核查（2026-09-30）：三条实体路由的实际体量
+
+T127 落了实体之后，这一组才有东西可服务。**核查的一条主结论：三个路由里两个是薄映射，
+第三个不是**——`GET /entities/{id}` 落到 1.0 的 `get_entity_detail`，那是一个
+**九个子查询的复合读**（`db.py:4570-4640`）。
+
+#### 1.0 那三条路由（`app.py`）
+
+| 路由 | 1.0 做了什么 |
+|---|---|
+| `GET /api/entities`（`:1858`） | `list_entities(status, scope_id)`；**默认滤掉 `entity_type == 'person'`**（`includePeople` 打开才给）；pending 的人物把名字换成「待命名成员」 |
+| `GET /api/entities/{id}`（`:1948`） | `get_entity_detail`；没有就 404；pending 的人物换名字 |
+| `PUT /api/entities/{id}/properties/{key}`（`:1959`） | `set_entity_property(id, key, value, evidence_ids)`；**`KeyError`→404、`ValueError`→400** |
+
+#### `get_entity_detail` 的九个部分（`db.py:4570-4640`）
+
+```
+entity（本体）
+├── avatar_face_instance_id   ← 该实体非 rejected 的簇里检测置信度最高的一张脸
+├── clusters[]                ← 名下全部簇，每个再带 samples[]（最近 12 张脸的 id/bbox/文件名）
+├── relationships[]           ← 关系（S7 的表）
+├── facts[]                   ← subject 或 object 等于本名的那些事实
+├── event_ids[]               ← 出现过的事件
+├── observations[]            ← entity_observations ⋈ observations，最近 100
+├── evidence_observations[]   ← 上一项再加工出的证据形态
+└── …（还有两三个派生块）
+```
+
+**这是这一组唯一「重」的地方**，而且它跨了四个域：人脸（簇/实例）、事件、事实、
+关系。按 2.0 的分层，这个复合读要么落成一个 application 用例（把四个仓储编排起来），
+要么在路由层拼——**2.0 的既有先例是前者**（`read_timeline.py` 就是这么干的）。
+
+**一处必须先定的口径**：`relationships[]` 那一段是 **S7 的表**。与 T127 那条裁决同形，
+`GET /entities/{id}` 要么先不回关系（并在响应里如实不留那个键——2.0 的规矩是
+「不留恒空的占位键」，见 `routes/insights.py` 的 module-map 条目），要么等 S7。
+
+#### 2.0 已有的东西（核过，直接接）
+
+| 需要 | 2.0 现状 |
+|---|---|
+| 按 status/scope 列实体（含非人物） | `EntityRepository.list_people` **硬编码 person**；要放开成 `list_entities` |
+| 属性读 | `EntityRepository.list_properties` **在**（零调用，PENDING 登记的就是 T128） |
+| 属性写（用户值） | `EntityRepository.set_property` **在**（零调用） |
+| 实体本体 | `EntityRepository.get` **在** |
+| 人物详情页 | `GET /people/{person_id}` **已在 `routes/identity.py:306`** ——先读它，`GET /entities/{id}` 能复用的部分不要重写 |
+
+#### 建议的拆法
+
+| 任务 | 内容 | 体量 |
+|---|---|---|
+| **128a** | `GET /entities` + `PUT /entities/{id}/properties/{key}`（放开 `list_people` 成 `list_entities`、接 `list_properties`/`set_property`） | 薄映射，与 T122 同形 |
+| **128b** | `GET /entities/{id}`：先读 `GET /people/{person_id}` 与 `read_timeline` 的编排先例，再定**哪几块搬、哪几块留 S7** | 一个 application 用例 |
+| **129/130** | `entity-groups` / `knowledge`：1.0 是 `db.py:4194` 现算的投影（不落表）。**动工前要核那个投影的分组键**，以及 `knowledge` 三块（profiles + claims + spaces）各来自哪 | 未核 |
+
 ### 收口
 
 | Task | 内容 |
