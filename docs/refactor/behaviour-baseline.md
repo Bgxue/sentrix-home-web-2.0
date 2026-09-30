@@ -267,3 +267,12 @@
 > **另外：那条 SQL 有三重互相覆盖的过滤**（簇 INNER、实体 INNER、`entity_type='person'`），
 > 单独把任一 INNER 换成 LEFT JOIN 都观察不到行为差别——`NULL = 'person'` 不为真，
 > WHERE 那一句自己就把未绑定的行挡掉了。2026-09-30 用定点变异实测确认过。
+
+
+> **2026-09-30 补：`read_photo_text` 的 VLM 回退是死代码。** 上面那张表里
+> 「后端顺序」与「密集文字的两条处理」两行描述的是 **PaddleOCR 那一路**，而模块注释
+> 承诺的「读不到回退 VLM」**在 1.0 里没有实现**：`_OCR_PROMPT` / `_OCR_PROMPT_FULL`
+> 全仓从未被引用，`ocr_tool.py` 整条链上一次模型调用都没有。
+> 1.0 生产 venv 里装着 `paddleocr`，所以 2,867 次调用跑的都是小模型。
+> **2.0 的 `read_photo_text` 因此只有一条路：读导入期已落库的 `observations.ocr_text`**
+> （那是 1.0 的第一条路，见上表最后一行）。裁决与理由记在 S6 计划 §8.8。

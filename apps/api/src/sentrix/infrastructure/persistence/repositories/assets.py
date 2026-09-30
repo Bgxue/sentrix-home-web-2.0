@@ -284,6 +284,15 @@ class SqliteObservationRepository:
             ).fetchall()
         return [row_to_observation(row) for row in rows]
 
+    def latest_ocr_text(self, asset_id: str) -> str:
+        """1.0 ``ocr_tool.py:544-548`` 的原样，只取一列、只取最新那条。"""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT ocr_text FROM observations WHERE asset_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (asset_id,),
+            ).fetchone()
+        return str(row["ocr_text"] or "").strip() if row else ""
+
     def latest_people_snapshot(self, asset_id: str) -> Sequence[PeopleSnapshotEntry]:
         """1.0 ``tools.py:2578-2581`` 的原样。**只取最新那条，且只取一列。**
 

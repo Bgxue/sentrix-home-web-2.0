@@ -52,9 +52,10 @@ def declaration(*evidence_types: str, goal: str = "找海边的照片", scope: s
 def test_the_prompt_lists_exactly_the_evidence_registry():
     """注册表是 ``EvidenceType`` 的全部取值，提示词逐条列出来。
 
-    S6 加了三类——``structured_fact``（``query_memory_facts``，T121）、
-    ``photo_identity``（``query_photo_people`` / ``inspect_photo``，T122/T123）与
-    ``visual_observation``（``inspect_photo``，T123）。三类和另外三类一样是
+    S6 加了四类——``structured_fact``（``query_memory_facts``，T121）、
+    ``photo_identity``（``query_photo_people`` / ``inspect_photo``，T122/T123）、
+    ``visual_observation``（``inspect_photo``，T123）与 ``visible_text``
+    （``read_photo_text``，T124）。四类和另外三类一样是
     「模型可以向规划器声明的需求」，所以照旧**由枚举唯一决定**，不另开一张表
     ——这也是这条用例断言的是 ``planner_evidence_types()`` 而不是字面量的原因。
     """
@@ -68,6 +69,7 @@ def test_the_prompt_lists_exactly_the_evidence_registry():
         "photo_identity",
         "photo_set",
         "structured_fact",
+        "visible_text",
         "visual_observation",
     )
 

@@ -64,6 +64,27 @@ class ObservationRepository(Protocol):
 
     def enrich(self, observation_id: str, *, semantics: ObservationSemantics) -> Observation: ...
 
+    def latest_ocr_text(self, asset_id: str) -> str:
+        """这张照片**最近一次**观察里已经存下来的图内文字。没有就是空串。
+
+        1.0 ``agent_runtime/ocr_tool.py:544-548``：
+
+            SELECT ocr_text FROM observations WHERE asset_id = ?
+            ORDER BY updated_at DESC LIMIT 1
+
+        **这是 ``read_photo_text`` 的第一条路，而在 1.0 它也是第一条路**
+        （在任何 OCR 引擎之前，命中就返回、零推理）——2.0 的导入期
+        ``OpenAIVlmObserver`` 本来就往这一列写「图中文字，1000 字内」，
+        所以这一路在 2.0 一直有数据。
+
+        与 ``latest_people_snapshot`` 是两条单列读取，看着像重复，**但不是**：
+        ``ocr_text`` 经 ``row_to_observation`` 解析后**原样保留**，所以它本来就能从
+        ``Observation.ocr_text`` 拿到；``people_json`` 里那位 ``entity_id``
+        **恰好被解析丢掉了**，才需要一条旁路。这一条留在这里是为了让「取最新那条」
+        这个口径只有一处（1.0 也是 ``updated_at DESC LIMIT 1``）。
+        """
+        ...
+
     def latest_people_snapshot(self, asset_id: str) -> Sequence[PeopleSnapshotEntry]:
         """这张照片**最近一次**观察里的人物快照，带绑定状态（T122 用）。
 

@@ -766,7 +766,7 @@ OCR settings / telemetry / query-gaps、`/api/dashboard`、回合取消、会话
 | **T123/T124 共用的 inspector 端口** | **完成**（§8.2 的「第一件事」） | 见本节末「这次落了什么」 |
 | **T122 四条读路径 + `query_photo_people` 工具** | **完成** | 见 §8.6 |
 | **T123 精读预算 + 人脸清单 + `inspect_photo`** | **完成** | 见 §8.7 |
-| T124 | **已核查、已裁决后端**，未动工 | `7d9a602` `c994cd0` |
+| **T124 `read_photo_text`** | **完成**（后端裁决见 §8.8） | 见 §8.8 |
 
 `query_memory_facts` 已在生产链路上：`AssistantToolbox` → `QueryMemoryFacts` →
 `StructuredQueryRepository`，容器已装配，真库（53 张）跑通。
@@ -780,7 +780,10 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 
 ~~**第一件事（T123/T124 共用，必须先做）**~~ → **已完成**，见 §8.5。
 
-剩下的是：**T124**（T122 见 §8.6、T123 见 §8.7）。
+**S6 的四个工具全部落地**（T122 §8.6 / T123 §8.7 / T124 §8.8）。
+剩下的是**第五、六组与收口**：T125（证据包 + trace 可展开）、T126（语义评审第二层）、
+T127–T131（语义实体）、T132（收口）。另外 T116（不实现 `adjacency`）的理由
+**还没记进 `frozen.md`**——那是 §3 定的落点，收口前要补。
 
 **T122 已按 §4 的「二核」清单落地**：四条读路径 + 接线 + 17 条新用例。
 它比原计划的两条多出来的那两条，是**证据类型词表**（`photo_identity` 这个公共类型
@@ -972,3 +975,53 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 1.0 的人脸清单**不过滤 `entity_type`**，而 T122 那条过滤。1.0 里非人物实体不存在所以
 无差别；T127 落非人物实体后，一个绑到「乌篷船」的簇会让清单给出这个名字。
 **今天不修**——改了就是偏离 1.0，那需要一个裁决。
+
+
+### 8.8 T124 落了什么：read_photo_text，以及一条推翻了前提的实测
+
+**结论先说：1.0 的 VLM OCR 回退是死代码，那段注释在撒谎。**
+
+`ocr_tool.py:3` 的模块注释写「PaddleOCR 小模型优先，**读不到回退 VLM**」。实测：
+
+- 两个 VLM OCR 提示词 `_OCR_PROMPT` / `_OCR_PROMPT_FULL`（`:28-29`）在全仓
+  **除了定义处一次都没被引用过**；
+- `ocr_tool.py` 整条链上没有任何一次模型调用（grep `gamma` 只命中一句注释）；
+  `_read_photo_text_impl` 在 `_ocr_single_asset` 返回 `None` 时直接回
+  「这次没能可靠读出照片里的文字。」；
+- 而 `paddleocr` **确实装在 1.0 的生产 venv 里**（`.venv` 导入成功）——
+  所以那 2,867 次调用跑的都是小模型，VLM 那一路**从来没跑过**。
+
+这是 §3 那个方法论框里的第三个：`adjacency` 是注释对、代码死的；
+`query_memory_facts` 是注释过期、代码活的；**这个是注释承诺了、代码里根本没有**。
+而 §4 Task 124 的前提（「1.0 是两级」）正是抄了那条注释——**于是基于它做出的裁决
+（「只用 8100 的 VLM」）不是「把 1.0 的现有能力收窄」，是新增一条 1.0 从没跑过的路**。
+
+**裁决（2026-09-30，推翻上一版）：只做第一路**——读导入期已落库的 `observations.ocr_text`。
+理由：1.0 的 `_ocr_single_asset` **本来也是先读它**（`ocr_tool.py:544-559`，
+命中就返回、零推理），而 2.0 的导入期 `OpenAIVlmObserver` 本来就往这一列写
+「图中文字，1000 字内」——所以这一路两边都有、不需要任何新东西。
+
+**落的三个件**：
+
+| 落点 | 是什么 |
+|---|---|
+| `domain/assistant/evidence_ledger.py` + `intent.py` | `EvidenceType.VISIBLE_TEXT` 与 `text` / `ocr` / `price` 三个轴词别名（1.0 `goal_planner.py:70-72`）。**在那之前这三个词是认不出来的别名**，于是「招牌上写了什么」这类问题会让规划器报 `invalid_planner_action` 并重规划 |
+| `domain/media/ports.py` + `repositories/assets.py` | `ObservationRepository.latest_ocr_text(asset_id)`——1.0 那条单列 SQL 逐字（`ORDER BY updated_at DESC LIMIT 1`） |
+| `domain/assistant/tools.py` + `application/assistant/tools.py` | `ToolSpec` 与 `_read_photo_text` |
+
+**两处与 1.0 的偏离，都是「这条路径变了」的直接后果**：
+
+1. **不收 `question`。** 1.0 的 `required_inputs` 里有它，而它唯一的用途是决定要不要对
+   小模型的结果做一次补偿重识别（`_HARD_VALUE_QUESTION_RE`，`ocr_tool.py:584-593`）。
+   2.0 不重识别，收一个用不上的参数只会让模型多花几个 token 去填它。
+2. **`cost_class` 是 `CHEAP`，不是 1.0 的 `expensive`。** 1.0 标昂贵是因为它真跑一次
+   OCR 引擎（CPU 推理、占那个共用的 `inspections` 计数器）。照抄的后果不是「保守一点」，
+   是**一次免费的读库会把 `inspect_photo` 那唯一一次精读预算吃掉**。
+
+**工具描述按裁决如实收窄**：删掉「内部会把照片切块放大后 OCR」，换成「文字是导入时由
+视觉模型抽取并落库的，本工具不再重新识别：没存下就如实说读不到，**不要据此断言照片里
+没有字**」。最后那句是必要的：模型拿到空的 `full_text` 会倾向回答「照片里没有文字」，
+而**「我们没读到」与「图上没有」是两件事**。
+
+**用例与变异**：16 条新用例，**9 条定点变异全部变红**（含一条钉住 `cost_class=CHEAP`
+与一条钉住「不收 question」——**偏离也要有门禁**，否则下一个人会顺手改回「照抄 1.0」）。

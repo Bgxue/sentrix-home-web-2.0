@@ -653,6 +653,8 @@ def _tool_status_text(name: str, outcome: ToolOutcome) -> str:
         return f"已把 {outcome.observation.get('delivered', 0)} 张照片交给用户。"
     if name == "get_person_profile":
         return "已读取人物档案。" if outcome.observation.get("found") else "没有这位人物的档案。"
+    if name == "read_photo_text":
+        return str(outcome.model_visible.get("note") or "已读取照片里的文字。")
     if name == "inspect_photo":
         return str(outcome.model_visible.get("observation") or "已复核这张照片。")
     if name == "query_photo_people":

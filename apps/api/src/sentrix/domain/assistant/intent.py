@@ -16,10 +16,14 @@
 那些窗口是模型端点不可用（PhotoBench 每跑一轮就 ``lifecycle.stop()`` → ``start()`` →
 ``bind-runtime`` 换一次模型），不是规划器设计有问题。所以规划还是一次模型调用，照 1.0。
 
-**证据类型表收窄到 S3 的四个工具能产出的三类**（``photo_set`` / ``delivered_photo`` /
-``person_profile``）。1.0 的注册表有九类，因为 1.0 有十来个工具；S3 只有四个，声明一个
-没有工具能满足的类型会让那一轮必然以缺口收场——那不是 1.0 的行为。收窄的是词表，
-机制（模型声明 → 校验 → 带错误回灌重试）原样。
+**证据类型表是「有工具能满足的类型」那个集合。** S3 收窄到它那四个工具能产出的三类
+（``photo_set`` / ``delivered_photo`` / ``person_profile``），理由写在下面那段历史里；
+S6 随着工具补齐又加回四类（``structured_fact`` / ``photo_identity`` /
+``visual_observation`` / ``visible_text``），现在七类。**收窄与放宽的都是词表**，
+机制（模型声明 → 校验 → 带错误回灌重试）从 S3 起没动过。
+
+1.0 的注册表有九类，因为 1.0 有十来个工具；**声明一个没有工具能满足的类型会让那一轮
+必然以缺口收场**——所以这个表跟着工具走，不跟着 1.0 的公共表走。
 """
 
 from __future__ import annotations
@@ -96,6 +100,14 @@ _TYPE_ALIASES: Mapping[str, str] = {
     "visual": EvidenceType.VISUAL_OBSERVATION.value,
     "detail": EvidenceType.VISUAL_OBSERVATION.value,
     "visual_observation": EvidenceType.VISUAL_OBSERVATION.value,
+    # S6（T124）补的三个轴词。1.0 ``goal_planner.py:70-72``。**在这之前它们是
+    # 认不出来的别名**，于是「招牌上写了什么」这类问题会让规划器报
+    # ``invalid_planner_action`` 并重规划——`_TYPE_ALIASES` 的注释写着「认不出来的别名
+    # 保持原样，交给校验去报」，这三条正是那种情况。
+    "text": EvidenceType.VISIBLE_TEXT.value,
+    "ocr": EvidenceType.VISIBLE_TEXT.value,
+    "price": EvidenceType.VISIBLE_TEXT.value,
+    "visible_text": EvidenceType.VISIBLE_TEXT.value,
 }
 
 _HEX_DIGITS = re.compile(r"^[0-9a-f]+$")

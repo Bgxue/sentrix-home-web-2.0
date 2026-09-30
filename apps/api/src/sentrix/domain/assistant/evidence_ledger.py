@@ -65,6 +65,13 @@ class EvidenceType(StrEnum):
     # 前者由 ``inspect_photo`` 满足，后者由 ``query_photo_people`` / ``inspect_photo``
     # 一起满足，这个区别在 T123 的 ``satisfies`` 上是两个条目。
     VISUAL_OBSERVATION = "visual_observation"
+    # ``read_photo_text`` 的产物（1.0 ``tools.py:2768``）。1.0 的公共表里有它
+    # （``evidence_contract.py:16``），轴词表里 ``text`` / ``ocr`` / ``price`` 三个词
+    # 都指向它（``goal_planner.py:70-72``）。
+    #
+    # **S6 补的第三类，也是最后一类。** 三类加起来是「看细节 / 这是谁 / 写着什么」，
+    # 正好对应 1.0 那三个视觉工具的分工。
+    VISIBLE_TEXT = "visible_text"
 
 
 class RequirementStatus(StrEnum):

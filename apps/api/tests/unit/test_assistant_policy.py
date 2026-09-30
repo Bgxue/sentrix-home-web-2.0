@@ -35,6 +35,7 @@ def test_the_tool_list_is_exactly_what_ships():
         "query_memory_facts",
         "query_photo_people",
         "inspect_photo",
+        "read_photo_text",
         "get_result_page",
         "get_original_photos",
         "get_person_profile",

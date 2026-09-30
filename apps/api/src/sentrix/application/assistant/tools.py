@@ -127,6 +127,8 @@ class AssistantToolbox:
             return self._photo_people(arguments, scope_id=scope_id)
         if name == "inspect_photo":
             return self._inspect_photo(arguments, scope_id=scope_id, question=question)
+        if name == "read_photo_text":
+            return self._read_photo_text(arguments, scope_id=scope_id)
         if name == "get_original_photos":
             return self._deliver(arguments, scope_id=scope_id)
         if name == "get_person_profile":
@@ -533,6 +535,71 @@ class AssistantToolbox:
                 "photo_identities": photo_identities,
                 "face_candidates": face_candidates,
                 "unconfirmed_people_count": unconfirmed,
+            },
+        )
+
+    # ---- read_photo_text ----------------------------------------------------
+
+    def _read_photo_text(self, arguments: Mapping[str, Any], *, scope_id: str) -> ToolOutcome:
+        """读这张照片**已经存下来的**图内文字。1.0 ``ocr_tool.py:544-559``。
+
+        **这条路是 1.0 的第一条路，也是它唯一跑过的那条之外剩下的那条。**
+        1.0 的 ``_ocr_single_asset`` 在任何 OCR 引擎之前先查 ``observations.ocr_text``，
+        命中就返回、零推理；2.0 的导入期 ``OpenAIVlmObserver`` 本来就往这一列写
+        「图中文字，1000 字内」，所以这一路在 2.0 一直有数据。
+
+        **没有第二条路。** 1.0 的模块注释承诺「读不到回退 VLM」，而那两个 VLM OCR 提示词
+        （``_OCR_PROMPT`` / ``_OCR_PROMPT_FULL``）在全仓**从未被引用过**，``ocr_tool.py``
+        整条链上一次模型调用都没有——那段回退是死代码（2026-09-30 实测，记在
+        ``behaviour-baseline.md``）。1.0 真正跑的是 PaddleOCR，而 2.0 没有它。
+        所以这里**只有**「读已落库的那份」，读不到就如实说读不到。
+
+        **读不到不是「图上没有字」。** 这条区分很重要：模型拿到一个空的 ``full_text``
+        会倾向于回答「照片里没有文字」。返回的措辞专门挡住了它。
+        """
+        result_set_id = str(arguments.get("result_set_id") or "").strip()
+        result_set = self._result_sets.get(result_set_id)
+        if result_set is None:
+            return _failure("unknown_result_set", "结果集不存在。请先调用 search_memories。")
+        if result_set.scope_id != scope_id:
+            return _failure("scope_mismatch", "这个结果集不属于当前相册。")
+
+        handle = str(arguments.get("asset_handle") or "").strip() or "photo_1"
+        asset_id = result_set.resolve(handle)
+        if asset_id is None:
+            return _failure(
+                "bad_handle",
+                "这个 handle 不在当前结果集里。请只用 search_memories / get_result_page 返回的 handle。",
+            )
+
+        text = self._observations.latest_ocr_text(asset_id)
+        if not text:
+            return _failure(
+                "no_text_detected",
+                "这张照片里没有存下文字。可能是画面里本来就没有字，也可能是导入时没读出来"
+                "——不要据此断言照片里没有字。",
+            )
+        return ToolOutcome(
+            observation={
+                "result_set_id": result_set.id,
+                "asset_handle": handle,
+                "asset_id": asset_id,
+                "source": "ingestion_ocr",
+                "full_text": text,
+            },
+            model_visible={
+                "asset_handle": handle,
+                # 1.0 ``ocr_tool.py:551`` 的 ``offline_text[:1600]``——上限照抄。
+                "full_text": text[:1600],
+                # 1.0 ``:552-553``：最多 8 行、每行 150 字。1.0 的 ``text_regions``
+                # 是给界面画框用的，2.0 没有那个界面，但**保留这一格**：它是「哪些行是
+                # 真的读出来的」的证据，模型据此判断文本完整性比看一坨全文准。
+                "text_regions": [
+                    {"text": line[:150], "source": "ingestion_ocr"} for line in text.splitlines()[:8]
+                ],
+                "certainty": CERTAINTY_SUPPORTED,
+                "source": "ingestion_ocr",
+                "note": "这些字是导入时从画面里读出来并保存的。",
             },
         )
 

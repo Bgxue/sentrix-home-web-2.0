@@ -297,11 +297,53 @@ INSPECT_PHOTO = ToolSpec(
 )
 
 
+READ_PHOTO_TEXT = ToolSpec(
+    name="read_photo_text",
+    description=(
+        "读取这张照片**已经存下来的**文字内容（菜单/价格/招牌/店名/电话/年份/小字）。"
+        "适用于「多少钱/价格/售价/店名/招牌/电话/写了什么/什么字/哪一年」等需要看照片文字的题。"
+        # **这一句是 T124 裁决的落点。** 1.0 的描述写着「内部会把照片切块放大后 OCR」，
+        # 而那条路在 2.0 不存在（1.0 靠 PaddleOCR，见 behaviour-baseline 的
+        # 「照片人物取证」一节）。描述里不如实说明，模型就会把「没读到」当成「图上没有」。
+        "文字是导入时由视觉模型抽取并落库的，本工具**不再重新识别**："
+        "没存下就如实说读不到，不要据此断言照片里没有字。"
+        "asset_handle 用 search_memories preview 里的 handle，可省略（默认预览第一张）。"
+    ),
+    parameters=_object_schema(
+        {
+            "result_set_id": {
+                "type": "string",
+                "description": "search_memories 或 get_result_page 返回的结果集 id。",
+            },
+            "asset_handle": {
+                "type": "string",
+                "description": "要读的那张照片的 handle（photo_1…）。省略则用结果集第一张。",
+            },
+        },
+        ["result_set_id"],
+    ),
+    # 1.0 ``tools.py:2768`` 的 ``produces_evidence=("visible_text",)``。
+    satisfies=(EvidenceType.VISIBLE_TEXT,),
+    # **两处与 1.0 不同，都是「这条路径变了」的直接后果，不是偏好：**
+    #
+    # 1. **不收 ``question``。** 1.0 的 ``required_inputs`` 里有它，而它在 1.0 唯一的
+    #    用途是决定要不要对小模型的结果做一次补偿重识别（``_HARD_VALUE_QUESTION_RE``，
+    #    ``ocr_tool.py:584-593``）。2.0 这条路不重识别，那个参数没有任何用处——
+    #    收一个用不上的参数只会让模型多花几个 token 去填它。
+    # 2. **``cost_class`` 是 CHEAP，不是 1.0 的 ``expensive``。** 1.0 标昂贵是因为它
+    #    真的跑一次 OCR 引擎（CPU 推理）；2.0 读的是一列已落库的文本，代价与翻一页
+    #    差不多。照抄 ``expensive`` 会让它**吃掉 ``inspect_photo`` 那唯一一次精读预算**
+    #    ——一次免费的读库把一次真模型调用挤掉，那是纯损失。
+    required=("result_set_id",),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     SEARCH_MEMORIES,
     QUERY_MEMORY_FACTS,
     QUERY_PHOTO_PEOPLE,
     INSPECT_PHOTO,
+    READ_PHOTO_TEXT,
     GET_RESULT_PAGE,
     GET_ORIGINAL_PHOTOS,
     GET_PERSON_PROFILE,
