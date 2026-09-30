@@ -401,3 +401,59 @@ class EntityDetailResponse(BaseModel):
     observations: list[EntityDetailObservation]
     appearance_evidence: list[EntityDetailAppearance]
     evidence_files: list[EntityEvidenceFile]
+
+
+class EntityGroupRationale(BaseModel):
+    """这一组是**怎么**被并到一起的。``strategy`` 是四级策略之一，``normalized_key``
+    是归一后的标签。1.0 的键名如此（``db.py:4215``），照搬——前端拿它解释分组原因。"""
+
+    strategy: str
+    normalized_key: str
+
+
+class EntityGroupPayload(BaseModel):
+    """一个语义实体组。**现算的投影，不落表**：``id`` 是
+    ``semantic_group:{scope}:{type}:{label}`` 拼出来的，所以同一个 scope 下同一个概念永远是
+    同一个 id——没有「创建组」这种动作。
+
+    ``members`` 是**投影过的**实体摘要（与 ``GET /entities`` 的行同形）——私密地点在
+    成员这一层就被换成别名或「私密地点」。
+
+    **没有 ``relationship_count``**：``relationships`` 的读路径是 S7，而 1.0 的这个键是
+    成员级计数的累加。恒 0 会让「S7 还没做」读起来像「这组实体确实没有关系」。
+    """
+
+    id: str
+    scope_id: str
+    entity_type: str
+    canonical_name: str
+    members: list[EntitySummaryPayload]
+    member_entity_ids: list[str]
+    source_labels: list[str]
+    semantic_details: list[str]
+    evidence_count: int
+    confidence: float
+    preview_asset_id: str | None
+    preview_file_name: str | None
+    preview_media_type: str | None
+    rationale: EntityGroupRationale
+    is_semantic_cluster: bool
+
+
+class EntityGroupListResponse(BaseModel):
+    """1.0 的外层键是 ``groups``（``app.py:1873``）。"""
+
+    groups: list[EntityGroupPayload]
+
+
+class EntityGroupDetailResponse(BaseModel):
+    """一个组 + 各成员的实体详情 + 扁平合并后的观察与事件。
+
+    **``relationships`` 不在**——1.0 ``db.py:4260`` 把各成员的关系也合并进来，而那是
+    S7 的表。与 ``GET /entities/{id}`` 同一条规矩。
+    """
+
+    group: EntityGroupPayload
+    members: list[EntityDetailResponse]
+    observations: list[EntityDetailObservation]
+    events: list[EntityDetailEvent]

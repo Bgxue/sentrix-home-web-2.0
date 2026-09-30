@@ -31,10 +31,14 @@ from datetime import datetime
 # 空结果——所以收在这里一份。
 
 ENTITY_TYPE_PERSON = "person"
-# 语义实体里的地点。1.0 的 ``entity_type`` 有五个取值（person / place / object / time /
-# atmosphere），2.0 目前只有 person 与非人物两类的**判据**用到具体类型名：``public_entity``
-# 的私密投影只对 place 生效（``db.py:4676``）。别的类型名等真有判据依赖它们时再收进来。
+# 语义实体那四类。1.0 的 ``entity_type`` 有五个取值（person / place / object / time /
+# atmosphere）**外加一个 ``emotion``**——它只在语义分组里出现，而且被当成 atmosphere。
+# 收在这里一份的理由与其他取值常量相同：它们同时是「落库的列」与「判据的字面量」，
+# 散开写一次就是一条静默的空结果。
 ENTITY_TYPE_PLACE = "place"
+ENTITY_TYPE_OBJECT = "object"
+ENTITY_TYPE_ATMOSPHERE = "atmosphere"
+ENTITY_TYPE_EMOTION = "emotion"
 
 # 没指定记忆空间时的落点。1.0 把这个字面量写了十几处（``db.py:4816`` 等），
 # 2.0 收成一份：它出现在 SQL 的 ``DEFAULT``、仓储的兜底与用例的入参默认值里，
@@ -44,6 +48,9 @@ DEFAULT_SCOPE_ID = "home-default"
 ENTITY_STATUS_PENDING = "pending"
 ENTITY_STATUS_CONFIRMED = "confirmed"
 ENTITY_STATUS_REJECTED = "rejected"
+# 改口留下的旧值。1.0 db.py:4047 的列表过滤里与 rejected 并列——两者都不该
+# 出现在「当前实体」里。T129 的分组循环里也要跳过它（那是第二道，SQL 层已排过）。
+ENTITY_STATUS_SUPERSEDED = "superseded"
 
 CLUSTER_STATUS_PENDING = "pending"
 CLUSTER_STATUS_CONFIRMED = "confirmed"

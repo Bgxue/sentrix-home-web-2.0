@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from datetime import UTC, datetime
+from typing import Protocol, TypeVar
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
@@ -38,6 +40,10 @@ from sentrix.api.schemas.identity import (
     EntityDetailObservation,
     EntityDetailResponse,
     EntityEvidenceFile,
+    EntityGroupDetailResponse,
+    EntityGroupListResponse,
+    EntityGroupPayload,
+    EntityGroupRationale,
     EntityListResponse,
     EntityPropertyPayload,
     EntityPropertyRequest,
@@ -58,6 +64,11 @@ from sentrix.api.schemas.identity import (
 from sentrix.application.identity.name_person import NamePerson
 from sentrix.application.identity.observe_appearance import ObserveAppearance
 from sentrix.application.identity.read_entity_detail import EntityDetail, ReadEntityDetail
+from sentrix.application.identity.read_entity_groups import (
+    EntityGroup,
+    EntityGroupDetail,
+    ReadEntityGroups,
+)
 from sentrix.application.identity.review_cluster import ReviewCluster
 from sentrix.application.identity.seed_identity import (
     NoSeedFacesError,
@@ -87,6 +98,17 @@ from sentrix.domain.identity.models import (
 from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
 
 router = APIRouter(tags=["identity"])
+
+
+_T = TypeVar("_T", bound="_HasId")
+
+
+class _HasId(Protocol):
+    """去重要用的那一个字段。"""
+
+    @property
+    def id(self) -> str: ...
+
 
 # 1.0 ``app.py:2530-2532`` 的三个字面量。裁剪尺寸与质量是**交付契约**：换一个数字，
 # 前端缓存里的缩略图与新的就再也对不上。
@@ -316,7 +338,11 @@ def split_face_cluster(
 
 
 def _entity_summary(
-    container: Container, entity: EntityRecord, decoration: EntityDecoration
+    container: Container,
+    entity: EntityRecord,
+    decoration: EntityDecoration,
+    *,
+    projected: tuple[str, bool | None] | None = None,
 ) -> EntitySummaryPayload:
     """一条实体记录 + 它的派生字段 → 实体目录里的一行。
 
@@ -342,10 +368,16 @@ def _entity_summary(
     if entity.entity_type == ENTITY_TYPE_PERSON:
         single_sample = is_single_sample(status=entity.status, clusters=decoration.clusters)
     if entity.entity_type == ENTITY_TYPE_PLACE:
-        properties = {
-            item.property_key: item.value for item in container.entity_repository.list_properties(entity.id)
-        }
-        canonical_name, private = private_place(canonical_name, properties)
+        if projected is not None:
+            # 调用方已经算过这一次投影（实体分组的用例要拿投影后的名字给成员排序），
+            # 再查一遍属性表只是把同一次计算做第二遍。
+            canonical_name, private = projected
+        else:
+            properties = {
+                item.property_key: item.value
+                for item in container.entity_repository.list_properties(entity.id)
+            }
+            canonical_name, private = private_place(canonical_name, properties)
     return EntitySummaryPayload(
         id=entity.id,
         scope_id=entity.scope_id,
@@ -601,6 +633,106 @@ def set_entity_property(
     except ValueError as error:
         raise InvalidRequestError(str(error)) from error
     return _property_payload(written)
+
+
+def _read_entity_groups(container: Container) -> ReadEntityGroups:
+    """实体分组用例的装配。它复用实体详情那个用例来取成员详情——
+
+    1.0 ``db.py:4254`` 的 ``get_entity_detail`` 就是逐个成员调的，2.0 保持同一条路，
+    不在这里把详情再拼一遍。
+    """
+    return ReadEntityGroups(
+        entities=container.entity_repository,
+        details=_read_entity_detail(container),
+    )
+
+
+def _group_payload(container: Container, group: EntityGroup) -> EntityGroupPayload:
+    return EntityGroupPayload(
+        id=group.id,
+        scope_id=group.scope_id,
+        entity_type=group.entity_type,
+        canonical_name=group.canonical_name,
+        # 投影**已经在用例里算过**（成员排序用的就是投影后的名字），所以把结果传进去，
+        # 不让它再查一遍属性表。
+        members=[
+            _entity_summary(
+                container,
+                member.entity,
+                member.decoration,
+                projected=(member.canonical_name, member.private),
+            )
+            for member in group.members
+        ],
+        member_entity_ids=list(group.member_entity_ids),
+        source_labels=list(group.source_labels),
+        semantic_details=list(group.semantic_details),
+        evidence_count=group.evidence_count,
+        confidence=group.confidence,
+        preview_asset_id=group.preview_asset_id,
+        preview_file_name=group.preview_file_name,
+        preview_media_type=group.preview_media_type,
+        rationale=EntityGroupRationale(
+            strategy=group.rationale_strategy, normalized_key=group.canonical_name
+        ),
+        is_semantic_cluster=group.is_semantic_cluster,
+    )
+
+
+def _group_detail_payload(container: Container, detail: EntityGroupDetail) -> EntityGroupDetailResponse:
+    """组详情：成员详情 + 把各成员的观察 / 事件按 id 去重后扁平合并。
+
+    **去重放在这里而不是用例里**：它在 1.0 ``db.py:4256-4263`` 是用三个 ``set`` 做的，
+    而那一段的**产物就是响应里的这两个数组**——搬进用例只会让同一份去重逻辑在两处各写
+    一遍（路由侧还得把 payload 再拼一次）。顺序是**成员顺序**，1.0 也是。
+    """
+    members = [_entity_detail_payload(item, container) for item in detail.members]
+    return EntityGroupDetailResponse(
+        group=_group_payload(container, detail.group),
+        members=members,
+        observations=_dedupe_payloads(item for payload in members for item in payload.observations),
+        events=_dedupe_payloads(item for payload in members for item in payload.events),
+    )
+
+
+def _dedupe_payloads(items: Iterable[_T]) -> list[_T]:
+    """按 ``.id`` 去重、保序。1.0 用三个 ``set`` 各存各的 id，顺序即遍历顺序。"""
+    seen: set[str] = set()
+    ordered: list[_T] = []
+    for item in items:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        ordered.append(item)
+    return ordered
+
+
+@router.get("/entity-groups")
+def list_entity_groups(
+    scope_id: str | None = None,
+    container: Container = Depends(get_container),
+) -> EntityGroupListResponse:
+    """语义实体组。1.0 ``app.py:1871-1873`` 加 ``db.py:4194-4236``。
+
+    **现算的投影，不落表**——组没有表，``id`` 是拼出来的。所以没有「创建组」这种动作，
+    也没有 LIMIT 与分页：一组只是一个概念加它的成员，**单成员组也返回**
+    （``is_semantic_cluster`` 只是 ``len(members) > 1`` 的标记，不是过滤条件）。
+    """
+    groups = _read_entity_groups(container).execute(scope_id=scope_id)
+    return EntityGroupListResponse(groups=[_group_payload(container, item) for item in groups])
+
+
+@router.get("/entity-groups/{group_id}")
+def get_entity_group(
+    group_id: str,
+    scope_id: str | None = None,
+    container: Container = Depends(get_container),
+) -> EntityGroupDetailResponse:
+    """一个组。找不到是 404 ``semantic entity group not found``（1.0 ``app.py:1879``）。"""
+    detail = _read_entity_groups(container).get(group_id, scope_id=scope_id)
+    if detail is None:
+        raise NotFoundError("semantic entity group not found")
+    return _group_detail_payload(container, detail)
 
 
 # ---- 人物 --------------------------------------------------------------------

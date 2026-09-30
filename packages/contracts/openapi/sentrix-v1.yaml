@@ -967,6 +967,77 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/entity-groups:
+    get:
+      tags:
+      - identity
+      summary: List Entity Groups
+      description: '语义实体组。1.0 ``app.py:1871-1873`` 加 ``db.py:4194-4236``。
+
+
+        **现算的投影，不落表**——组没有表，``id`` 是拼出来的。所以没有「创建组」这种动作，
+
+        也没有 LIMIT 与分页：一组只是一个概念加它的成员，**单成员组也返回**
+
+        （``is_semantic_cluster`` 只是 ``len(members) > 1`` 的标记，不是过滤条件）。'
+      operationId: list_entity_groups_api_v1_entity_groups_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntityGroupListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/entity-groups/{group_id}:
+    get:
+      tags:
+      - identity
+      summary: Get Entity Group
+      description: 一个组。找不到是 404 ``semantic entity group not found``（1.0 ``app.py:1879``）。
+      operationId: get_entity_group_api_v1_entity_groups__group_id__get
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Group Id
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntityGroupDetailResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/people:
     get:
       tags:
@@ -2317,6 +2388,159 @@ components:
         ``kind`` 取 ``observation`` / ``appearance``——它是交付契约的一部分，
 
         前端按它区分证据来源。``file_name`` 取不到时回落成 ``asset_id``。'
+    EntityGroupDetailResponse:
+      properties:
+        group:
+          $ref: '#/components/schemas/EntityGroupPayload'
+        members:
+          items:
+            $ref: '#/components/schemas/EntityDetailResponse'
+          type: array
+          title: Members
+        observations:
+          items:
+            $ref: '#/components/schemas/EntityDetailObservation'
+          type: array
+          title: Observations
+        events:
+          items:
+            $ref: '#/components/schemas/EntityDetailEvent'
+          type: array
+          title: Events
+      type: object
+      required:
+      - group
+      - members
+      - observations
+      - events
+      title: EntityGroupDetailResponse
+      description: '一个组 + 各成员的实体详情 + 扁平合并后的观察与事件。
+
+
+        **``relationships`` 不在**——1.0 ``db.py:4260`` 把各成员的关系也合并进来，而那是
+
+        S7 的表。与 ``GET /entities/{id}`` 同一条规矩。'
+    EntityGroupListResponse:
+      properties:
+        groups:
+          items:
+            $ref: '#/components/schemas/EntityGroupPayload'
+          type: array
+          title: Groups
+      type: object
+      required:
+      - groups
+      title: EntityGroupListResponse
+      description: 1.0 的外层键是 ``groups``（``app.py:1873``）。
+    EntityGroupPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        entity_type:
+          type: string
+          title: Entity Type
+        canonical_name:
+          type: string
+          title: Canonical Name
+        members:
+          items:
+            $ref: '#/components/schemas/EntitySummaryPayload'
+          type: array
+          title: Members
+        member_entity_ids:
+          items:
+            type: string
+          type: array
+          title: Member Entity Ids
+        source_labels:
+          items:
+            type: string
+          type: array
+          title: Source Labels
+        semantic_details:
+          items:
+            type: string
+          type: array
+          title: Semantic Details
+        evidence_count:
+          type: integer
+          title: Evidence Count
+        confidence:
+          type: number
+          title: Confidence
+        preview_asset_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preview Asset Id
+        preview_file_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preview File Name
+        preview_media_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preview Media Type
+        rationale:
+          $ref: '#/components/schemas/EntityGroupRationale'
+        is_semantic_cluster:
+          type: boolean
+          title: Is Semantic Cluster
+      type: object
+      required:
+      - id
+      - scope_id
+      - entity_type
+      - canonical_name
+      - members
+      - member_entity_ids
+      - source_labels
+      - semantic_details
+      - evidence_count
+      - confidence
+      - preview_asset_id
+      - preview_file_name
+      - preview_media_type
+      - rationale
+      - is_semantic_cluster
+      title: EntityGroupPayload
+      description: '一个语义实体组。**现算的投影，不落表**：``id`` 是
+
+        ``semantic_group:{scope}:{type}:{label}`` 拼出来的，所以同一个 scope 下同一个概念永远是
+
+        同一个 id——没有「创建组」这种动作。
+
+
+        ``members`` 是**投影过的**实体摘要（与 ``GET /entities`` 的行同形）——私密地点在
+
+        成员这一层就被换成别名或「私密地点」。
+
+
+        **没有 ``relationship_count``**：``relationships`` 的读路径是 S7，而 1.0 的这个键是
+
+        成员级计数的累加。恒 0 会让「S7 还没做」读起来像「这组实体确实没有关系」。'
+    EntityGroupRationale:
+      properties:
+        strategy:
+          type: string
+          title: Strategy
+        normalized_key:
+          type: string
+          title: Normalized Key
+      type: object
+      required:
+      - strategy
+      - normalized_key
+      title: EntityGroupRationale
+      description: '这一组是**怎么**被并到一起的。``strategy`` 是四级策略之一，``normalized_key``
+
+        是归一后的标签。1.0 的键名如此（``db.py:4215``），照搬——前端拿它解释分组原因。'
     EntityListResponse:
       properties:
         entities:
