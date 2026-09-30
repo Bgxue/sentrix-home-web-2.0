@@ -35,6 +35,7 @@ from sentrix.domain.identity.ports import (
     PersonVision,
     PortraitRepository,
     RelationshipRepository,
+    SemanticRepository,
 )
 from sentrix.domain.media.ports import (
     AssetRepository,
@@ -104,6 +105,9 @@ from sentrix.infrastructure.persistence.repositories.relationships import (
 )
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
+from sentrix.infrastructure.persistence.repositories.semantic import (
+    SqliteSemanticRepository,
+)
 from sentrix.infrastructure.persistence.repositories.spaces import SqliteSpaceRepository
 from sentrix.infrastructure.persistence.repositories.structured import (
     SqliteStructuredQueryRepository,
@@ -164,6 +168,10 @@ class Container:
     # 人脸侧的写入者是在线匹配与簇审阅，实体侧的写入者是命名与属性维护。
     face_repository: FaceRepository
     entity_repository: EntityRepository
+    # 语义画像与声明（S6 T130）。这两张表从 T127 建起来后一直没有读者，是 T130
+    # 给它们的第一个——**只读**：写入侧的人像流水线在 2.0 走的是
+    # ``person_portrait_revisions``，与这两张表不是一套（S6 之前就有的分叉）。
+    semantic_repository: SemanticRepository
     # 人脸检测与向量（S5b）。**构造它不建 session**：权重在第一次 detect 时才加载，
     # 所以容器构造期没有模型开销，缺权重的机器上它会自己退化成空表（``available``）。
     face_detector: FaceDetector
@@ -241,6 +249,7 @@ class Container:
             structured_query_repository=SqliteStructuredQueryRepository(database, place_aliases),
             face_repository=SqliteFaceRepository(database),
             entity_repository=entities,
+            semantic_repository=SqliteSemanticRepository(database),
             face_detector=FaceAdapter(),
             appearance_repository=SqliteAppearanceRepository(database),
             person_vision=OpenAIPersonVision(

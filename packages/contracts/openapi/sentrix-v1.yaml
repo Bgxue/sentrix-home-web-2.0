@@ -1437,6 +1437,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/knowledge:
+    get:
+      tags:
+      - knowledge
+      summary: Get Knowledge
+      description: '语义知识的三块。1.0 ``app.py:1921-1932``。
+
+
+        **``profiles`` 那一支是 N+1**：不给 ``person_id`` 时对 scope 内每个实体轮流查一次
+
+        （1.0 就是一个生成器加 ``if item`` 过滤）。照搬——它的顺序因此等于实体的
+
+        ``updated_at DESC``。'
+      operationId: get_knowledge_api_v1_knowledge_get
+      parameters:
+      - name: person_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Person Id
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -2885,6 +2929,56 @@ components:
         调用方而不是只落日志：这一趟会走几十次模型调用、让本来就长的导入请求再长一截，
 
         **"到底跑了没有、跑了多少"必须能从响应里看见**——否则它就是一个没人能观测的副作用。'
+    KnowledgeResponse:
+      properties:
+        profiles:
+          items:
+            $ref: '#/components/schemas/SemanticProfilePayload'
+          type: array
+          title: Profiles
+        claims:
+          items:
+            $ref: '#/components/schemas/SemanticClaimPayload'
+          type: array
+          title: Claims
+        spaces:
+          items:
+            $ref: '#/components/schemas/KnowledgeSpacePayload'
+          type: array
+          title: Spaces
+      type: object
+      required:
+      - profiles
+      - claims
+      - spaces
+      title: KnowledgeResponse
+    KnowledgeSpacePayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          type: string
+          title: Name
+        kind:
+          type: string
+          title: Kind
+        status:
+          type: string
+          title: Status
+      type: object
+      required:
+      - id
+      - name
+      - kind
+      - status
+      title: KnowledgeSpacePayload
+      description: '记忆空间。**只有四个字段**，而 1.0 返回的是 ``memory_spaces`` 整行（八个）。
+
+
+        少掉的四个里 ``include_in_people`` 是有语义的，但 2.0 的 ``MemorySpace``
+
+        模型就没带它——那是 S1 定下的形状，不在本次范围内。'
     MergeClustersRequest:
       properties:
         target_cluster_id:
@@ -3279,6 +3373,192 @@ components:
       - photos_without_faces
       title: SeedIdentityResponse
       description: 预置身份的结论。``photos_without_faces`` 单列，是为了让「静默跳过」可见。
+    SemanticClaimPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        person_id:
+          type: string
+          title: Person Id
+        dimension:
+          type: string
+          title: Dimension
+        predicate:
+          type: string
+          title: Predicate
+        value_text:
+          type: string
+          title: Value Text
+        normalized_value_text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Normalized Value Text
+        normalization_version:
+          type: string
+          title: Normalization Version
+        support_count:
+          type: integer
+          title: Support Count
+        value_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Value Entity Id
+        valid_from:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Valid From
+        valid_to:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Valid To
+        supporting_event_ids:
+          items:
+            type: string
+          type: array
+          title: Supporting Event Ids
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        status:
+          type: string
+          title: Status
+        confidence:
+          type: number
+          title: Confidence
+        confidence_source:
+          type: string
+          title: Confidence Source
+        supersedes_claim_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Supersedes Claim Id
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - scope_id
+      - person_id
+      - dimension
+      - predicate
+      - value_text
+      - normalized_value_text
+      - normalization_version
+      - support_count
+      - value_entity_id
+      - valid_from
+      - valid_to
+      - supporting_event_ids
+      - evidence_ids
+      - status
+      - confidence
+      - confidence_source
+      - supersedes_claim_id
+      - revision
+      - created_at
+      - updated_at
+      title: SemanticClaimPayload
+      description: '``semantic_claims`` 一行。``person_id`` **指实体 id 而不是「人」**——1.0 的
+
+        列名如此，且它拿非人物实体的 id 查过这张表（``db.py:4622``）。'
+    SemanticProfilePayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        person_id:
+          type: string
+          title: Person Id
+        summary_zh:
+          type: string
+          title: Summary Zh
+        activity_summary_zh:
+          type: string
+          title: Activity Summary Zh
+        place_summary_zh:
+          type: string
+          title: Place Summary Zh
+        appearance_summary_zh:
+          type: string
+          title: Appearance Summary Zh
+        preference_summary_zh:
+          type: string
+          title: Preference Summary Zh
+        event_memory:
+          items: {}
+          type: array
+          title: Event Memory
+        patterns:
+          items: {}
+          type: array
+          title: Patterns
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - scope_id
+      - person_id
+      - summary_zh
+      - activity_summary_zh
+      - place_summary_zh
+      - appearance_summary_zh
+      - preference_summary_zh
+      - event_memory
+      - patterns
+      - evidence_ids
+      - revision
+      - created_at
+      - updated_at
+      title: SemanticProfilePayload
+      description: '``semantic_profiles`` 一行。三个 JSON 列的键名**去掉了 ``_json`` 后缀**——
+
+        仓储已经把值解成列表，还留着后缀会让人以为拿到的是串。1.0 的 ``_decode`` 是就地
+
+        换值、保留键名的（``event_memory_json`` 仍是这个名字），**这是一处偏离**：
+
+        2.0 的模型层把「解过了」这件事表达在类型与名字上。'
     SplitClusterRequest:
       properties:
         face_instance_id:

@@ -12,6 +12,7 @@ from sentrix.api.routes import (
     health,
     identity,
     insights,
+    knowledge,
     maintenance,
     media,
     search,
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(spaces.router)
     v1.include_router(insights.router)
     v1.include_router(facts.router)
+    v1.include_router(knowledge.router)
     app.include_router(v1)
     return app
 

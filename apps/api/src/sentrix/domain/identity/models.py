@@ -574,3 +574,59 @@ class EntitySpec:
     entity_type: str
     name: str
     summary: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticProfileRecord:
+    """``semantic_profiles`` 一行（1.0 ``db.py:811`` 的表，列逐字照搬）。
+
+    ``event_memory`` / ``patterns`` / ``evidence_ids`` 三个是 DB 里的 ``*_json`` 列，
+    在仓储层解成序列——1.0 的 ``_decode`` 也是在这个位置解的。
+    """
+
+    id: str
+    scope_id: str
+    person_id: str
+    summary_zh: str
+    activity_summary_zh: str
+    place_summary_zh: str
+    appearance_summary_zh: str
+    preference_summary_zh: str
+    event_memory: tuple[object, ...]
+    patterns: tuple[object, ...]
+    evidence_ids: tuple[str, ...]
+    revision: int
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticClaimRecord:
+    """``semantic_claims`` 一行（1.0 ``db.py:829`` 的表，列逐字照搬）。
+
+    ``person_id`` 在这个域里**指实体 id 而不是「人」**——1.0 的表就这么写的，
+    而 ``get_entity_detail`` 与 ``/api/knowledge`` 都拿非人物实体的 id 去查过它
+    （``db.py:4622`` 的调用点不判类型）。**照搬这个名字**，改名会让两边的行对不上。
+    """
+
+    id: str
+    scope_id: str
+    person_id: str
+    dimension: str
+    predicate: str
+    value_text: str
+    normalized_value_text: str | None
+    normalization_version: str
+    support_count: int
+    value_entity_id: str | None
+    valid_from: str | None
+    valid_to: str | None
+    supporting_event_ids: tuple[str, ...]
+    evidence_ids: tuple[str, ...]
+    status: str
+    confidence: float
+    confidence_source: str
+    supersedes_claim_id: str | None
+    revision: int
+    created_at: datetime | None
+    updated_at: datetime | None

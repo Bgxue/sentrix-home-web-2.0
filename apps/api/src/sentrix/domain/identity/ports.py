@@ -38,6 +38,8 @@ from sentrix.domain.identity.models import (
     PhotoIdentityRecord,
     PortraitRevisionRecord,
     RelationshipRecord,
+    SemanticClaimRecord,
+    SemanticProfileRecord,
 )
 
 
@@ -917,5 +919,33 @@ class AppearanceRepository(Protocol):
 
         ``include_empty=False`` 会滤掉 ``clothing`` 为空表的那些——**空表不是
         「没穿衣服」，是「模型没能可靠归属给目标人物」**。
+        """
+        ...
+
+
+class SemanticRepository(Protocol):
+    """语义画像与声明的**只读**面（S6 · T130）。
+
+    两张表在 2.0 从 T127 建起来之后一直**没有任何读写路径**，这个端口是它们的第一个
+    读者。写入侧不在本切片：1.0 的写入者是人像流水线（``run_person_insights`` 那一路），
+    2.0 的画像写的是 ``person_portrait_revisions``，与这两张表不是一套——**这是 S6 之前
+    就存在的分叉，不在本次范围内**。
+    """
+
+    def get_profile(self, person_id: str) -> SemanticProfileRecord | None:
+        """1.0 ``db.py:2614-2616``：``SELECT * FROM semantic_profiles WHERE person_id = ?``。
+
+        参数名与列名都叫 ``person_id``，但**传进来的可以是任意实体的 id**——1.0 的
+        ``get_entity_detail`` 与 ``/api/knowledge`` 都这么用（前者不判类型）。
+        """
+        ...
+
+    def list_claims(self, person_id: str | None = None, *, limit: int = 500) -> Sequence[SemanticClaimRecord]:
+        """1.0 ``db.py:2710-2716`` 的 ``list_semantic_claims``。
+
+        **恒带 ``status IN ('active', 'pending')`` 过滤**——那是 1.0 的默认参数
+        （``include_history=False``），也是唯一被用到的取值。1.0 还有 ``include_history``
+        分支，2.0 没有调用者需要它，所以不搬那个参数（不是漏）。
+        ``person_id`` 为空表示全表，仍受 ``limit`` 约束。
         """
         ...
