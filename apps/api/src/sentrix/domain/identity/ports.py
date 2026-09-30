@@ -339,14 +339,22 @@ class EntityRepository(Protocol):
 
     def get(self, entity_id: str) -> EntityRecord | None: ...
 
-    def list_people(
+    def list_entities(
         self, *, status: str | None = None, scope_id: str | None = None
     ) -> Sequence[EntityRecord]:
-        """人物列表。1.0 ``db.py:4041`` ``list_entities`` 的 person 一支。
+        """实体列表，不分类型。1.0 ``db.py:4041`` 的 ``list_entities`` 的前两段。
 
         空间规则与 ``FaceRepository.list_clusters`` 是同一条：``include_in_people = 0``
-        的空间里的实体一律不出现——评测空间聚出来的人不该出现在家庭成员列表里。
+        的空间里的实体一律不出现——评测空间聚出来的实体不该出现在家庭实体目录里。
         ``status`` 为空时排除 ``rejected`` / ``superseded``（1.0 的字面量）。
+
+        **按类型过滤不在这里。** 1.0 的 ``list_entities`` 不带类型参数，person 与非 person
+        由两个路由各自在 Python 里分（``app.py:1514`` 的 ``/api/people``、``:1862`` 的
+        ``/api/entities``）——「全部实体」与「家庭成员」是两个不同的产品问题，
+        把它们合成一个参数会让「谁在过滤」变得说不清。
+
+        方法名从 ``list_people`` 改回 ``list_entities`` 是**恢复 1.0 的形状**，不是新设计：
+        2.0 早先把 ``entity_type = ?`` 绑死进 SQL，那是只服务人物列表时的收窄。
         """
         ...
 

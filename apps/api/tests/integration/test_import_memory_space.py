@@ -3,7 +3,7 @@
 **这条缺口是 dev §2k 第 97 条。** ``FaceRepository.list_clusters`` **内连**
 ``memory_spaces``（``include_in_people``），而 2.0 在本次裁决之前**全仓零写入者**：
 簇与脸都在库里，`/face-clusters` 一个都读不出来——不是「少一条数据」，是审阅页的
-「待命名成员」那半边在默认路径上不可见。（第 97 条说 ``list_people`` 也内连，
+「待命名成员」那半边在默认路径上不可见。（第 97 条说 ``list_entities`` 也内连，
 **那半句不成立**，第 103 条纠正：它用的是子查询，不受影响。）
 
 1.0 建空间的地方是 ``db.py:1462`` 的 ``create_asset``（单张 ``/api/ingest`` 与批量
@@ -153,7 +153,7 @@ def test_a_cluster_can_exist_in_the_database_and_still_be_invisible_on_the_peopl
     ——所以这里**不**再补一条「钉住内连接」的用例：想钉的是那句话，不是 ``INNER JOIN``
     这个写法。
 
-    **顺带纠正第 97 条的一处措辞。** 那条说 ``list_people`` 也内连 ``memory_spaces``
+    **顺带纠正第 97 条的一处措辞。** 那条说 ``list_entities`` 也内连 ``memory_spaces``
     ——不是：它用的是 ``scope_id NOT IN (SELECT id FROM memory_spaces WHERE
     include_in_people = 0)`` 这个子查询（1.0 ``db.py:4043`` 的 ``list_entities`` 原样），
     没登记过的 scope 反而**照常列出来**。所以缺空间行真正打掉的是**簇**这一面
@@ -168,7 +168,7 @@ def test_a_cluster_can_exist_in_the_database_and_still_be_invisible_on_the_peopl
     assert result.faces == 1
     assert cluster_rows(migrations_ready_db, SCOPE) == 1
     assert repos["faces"].list_clusters() == []
-    assert [item.scope_id for item in repos["entities"].list_people(scope_id=SCOPE)] == [SCOPE]
+    assert [item.scope_id for item in repos["entities"].list_entities(scope_id=SCOPE)] == [SCOPE]
     assert repos["spaces"].get(SCOPE) is None
 
 
@@ -185,7 +185,7 @@ def test_the_import_path_ensures_the_space_so_the_cluster_is_visible(
     clusters = repos["faces"].list_clusters()
     assert [item.scope_id for item in clusters] == [SCOPE]
     assert [item.member_count for item in clusters] == [1]
-    people = repos["entities"].list_people(scope_id=SCOPE)
+    people = repos["entities"].list_entities(scope_id=SCOPE)
     assert [item.id for item in people] == [clusters[0].entity_id]
 
 

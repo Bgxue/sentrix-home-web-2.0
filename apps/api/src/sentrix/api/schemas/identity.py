@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -165,3 +167,41 @@ class SeedIdentityResponse(BaseModel):
     aliases: list[str]
     face_count: int
     photos_without_faces: int
+
+
+class EntityPropertyRequest(BaseModel):
+    """``PUT /entities/{id}/properties/{key}`` 的请求体。
+
+    **两个字段都可省，都不是笔误。** 1.0 的路由是裸 ``dict`` 收的（``app.py:1960``），
+    取值用 ``payload.get("value")`` 与 ``payload.get("evidence_ids") or []``：
+    ``{}`` 会**写入成功**（值落成 ``null``），``"evidence_ids": null`` 等同于没给。
+    把它们写成必填字段，这两种请求就变成 422——同一个产品行为换了一个码。
+    与 ``ConfirmClusterRequest`` / ``BatchConfirmItem`` 是同一条理由。
+    """
+
+    value: Any = None
+    evidence_ids: list[str] | None = None
+
+
+class EntityPropertyPayload(BaseModel):
+    """``entity_properties`` 一行。
+
+    这 12 个键就是 1.0 ``db.py:4652-4666`` 的 ``_property_row``：它把 ``value_json`` /
+    ``evidence_ids_json`` 解出来换成 ``value`` / ``evidence_ids``，其余列原样。
+    响应体**没有外层包裹**（1.0 ``app.py:1962`` 直接返回那个 dict），所以这里也不包。
+    """
+
+    id: str
+    entity_id: str
+    property_key: str
+    value: Any
+    # ``source`` 是行为的一部分，不是日志：``maintain_property`` 的「同值抬置信度」与
+    # 「用户值优先」两条判据都按它分派。用户写下的那一条恒为 ``user``。
+    source: str
+    confidence: float
+    status: str
+    evidence_ids: list[str]
+    supersedes_property_id: str | None
+    revision: int
+    created_at: str | None
+    updated_at: str | None

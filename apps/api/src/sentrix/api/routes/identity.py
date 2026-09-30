@@ -1,4 +1,4 @@
-"""身份端点：簇审阅、人物、人脸裁剪。
+"""身份端点：簇审阅、人物、实体属性、人脸裁剪。
 
 **只做 HTTP 映射与服务端字段拼装。** 审阅的四条规则（同名并入、已确认不可拒绝、两个已
 确认的人不能自动合并、实例必须属于该簇）全在 ``application/identity`` 里；路由把它们
@@ -30,6 +30,8 @@ from sentrix.api.schemas.identity import (
     BatchConfirmResponse,
     ConfirmClusterRequest,
     ConfirmClusterResponse,
+    EntityPropertyPayload,
+    EntityPropertyRequest,
     FaceClusterListResponse,
     FaceClusterSummary,
     FaceCropRef,
@@ -61,6 +63,7 @@ from sentrix.domain.identity.models import (
     ENTITY_STATUS_PENDING,
     ENTITY_TYPE_PERSON,
     PENDING_CLUSTER_NAME,
+    EntityPropertyRecord,
     EntityRecord,
     FaceClusterRecord,
     FaceInstanceRecord,
@@ -290,6 +293,55 @@ def split_face_cluster(
     return _cluster_payload(container, created)
 
 
+# ---- 实体属性 ------------------------------------------------------------------
+
+
+def _property_payload(record: EntityPropertyRecord) -> EntityPropertyPayload:
+    return EntityPropertyPayload(
+        id=record.id,
+        entity_id=record.entity_id,
+        property_key=record.property_key,
+        value=record.value,
+        source=record.source,
+        confidence=record.confidence,
+        status=record.status,
+        evidence_ids=list(record.evidence_ids),
+        supersedes_property_id=record.supersedes_property_id,
+        revision=record.revision,
+        created_at=_optional_isoformat(record.created_at),
+        updated_at=_optional_isoformat(record.updated_at),
+    )
+
+
+@router.put("/entities/{entity_id}/properties/{property_key}")
+def set_entity_property(
+    entity_id: str,
+    property_key: str,
+    payload: EntityPropertyRequest,
+    container: Container = Depends(get_container),
+) -> EntityPropertyPayload:
+    """用户写下一个实体属性的当前值。1.0 ``app.py:1959-1966``。
+
+    **这里只做异常的翻译，不重做判断。** 两条边界都在仓储里，而且与 1.0 逐字一致：
+    ``_require_entity`` 抛 ``KeyError``（实体不存在）、``_clean_key`` 抛
+    ``ValueError("property_key is required")``（键 trim 后为空）。1.0 把它们映成
+    404 ``entity not found`` 与 400 ``str(error)``——400 的消息就是异常自己的话，
+    所以这里也不改写它。
+
+    写成属性的这条路**会顶掉派生值**（这是它存在的意义），所以它归 ``set_property``
+    而不归 ``maintain_property``；两条路的差别在 ``EntityRepository`` 的 docstring 里。
+    """
+    try:
+        written = container.entity_repository.set_property(
+            entity_id, property_key, payload.value, evidence_ids=payload.evidence_ids or []
+        )
+    except KeyError as error:
+        raise NotFoundError("entity not found") from error
+    except ValueError as error:
+        raise InvalidRequestError(str(error)) from error
+    return _property_payload(written)
+
+
 # ---- 人物 --------------------------------------------------------------------
 
 
@@ -299,7 +351,10 @@ def list_people(
     scope_id: str | None = None,
     container: Container = Depends(get_container),
 ) -> PersonListResponse:
-    people = container.entity_repository.list_people(status=status, scope_id=scope_id)
+    # 类型过滤在路由层，不在仓储里——1.0 ``app.py:1514`` 就是这么写的。仓储给的是
+    # 「全部实体」，要哪一类是各页自己的事（``/entities`` 那个路由另有一份过滤）。
+    values = container.entity_repository.list_entities(status=status, scope_id=scope_id)
+    people = [item for item in values if item.entity_type == ENTITY_TYPE_PERSON]
     return PersonListResponse(people=[_person_payload(container, item) for item in people])
 
 

@@ -822,6 +822,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/entities/{entity_id}/properties/{property_key}:
+    put:
+      tags:
+      - identity
+      summary: Set Entity Property
+      description: '用户写下一个实体属性的当前值。1.0 ``app.py:1959-1966``。
+
+
+        **这里只做异常的翻译，不重做判断。** 两条边界都在仓储里，而且与 1.0 逐字一致：
+
+        ``_require_entity`` 抛 ``KeyError``（实体不存在）、``_clean_key`` 抛
+
+        ``ValueError("property_key is required")``（键 trim 后为空）。1.0 把它们映成
+
+        404 ``entity not found`` 与 400 ``str(error)``——400 的消息就是异常自己的话，
+
+        所以这里也不改写它。
+
+
+        写成属性的这条路**会顶掉派生值**（这是它存在的意义），所以它归 ``set_property``
+
+        而不归 ``maintain_property``；两条路的差别在 ``EntityRepository`` 的 docstring 里。'
+      operationId: set_entity_property_api_v1_entities__entity_id__properties__property_key__put
+      parameters:
+      - name: entity_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Entity Id
+      - name: property_key
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Property Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EntityPropertyRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntityPropertyPayload'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/people:
     get:
       tags:
@@ -1703,6 +1758,99 @@ components:
           default: ''
       type: object
       title: CreateConversationRequest
+    EntityPropertyPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        entity_id:
+          type: string
+          title: Entity Id
+        property_key:
+          type: string
+          title: Property Key
+        value:
+          title: Value
+        source:
+          type: string
+          title: Source
+        confidence:
+          type: number
+          title: Confidence
+        status:
+          type: string
+          title: Status
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        supersedes_property_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Supersedes Property Id
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - entity_id
+      - property_key
+      - value
+      - source
+      - confidence
+      - status
+      - evidence_ids
+      - supersedes_property_id
+      - revision
+      - created_at
+      - updated_at
+      title: EntityPropertyPayload
+      description: '``entity_properties`` 一行。
+
+
+        这 12 个键就是 1.0 ``db.py:4652-4666`` 的 ``_property_row``：它把 ``value_json`` /
+
+        ``evidence_ids_json`` 解出来换成 ``value`` / ``evidence_ids``，其余列原样。
+
+        响应体**没有外层包裹**（1.0 ``app.py:1962`` 直接返回那个 dict），所以这里也不包。'
+    EntityPropertyRequest:
+      properties:
+        value:
+          title: Value
+        evidence_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Evidence Ids
+      type: object
+      title: EntityPropertyRequest
+      description: '``PUT /entities/{id}/properties/{key}`` 的请求体。
+
+
+        **两个字段都可省，都不是笔误。** 1.0 的路由是裸 ``dict`` 收的（``app.py:1960``），
+
+        取值用 ``payload.get("value")`` 与 ``payload.get("evidence_ids") or []``：
+
+        ``{}`` 会**写入成功**（值落成 ``null``），``"evidence_ids": null`` 等同于没给。
+
+        把它们写成必填字段，这两种请求就变成 422——同一个产品行为换了一个码。
+
+        与 ``ConfirmClusterRequest`` / ``BatchConfirmItem`` 是同一条理由。'
     FaceClusterListResponse:
       properties:
         clusters:

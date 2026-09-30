@@ -14,7 +14,7 @@ S5 追加一条：**导入即建记忆空间**。落点照 1.0 ``db.py:1462`` �
 （``ImportAlbum`` 也走它，两条入口一次覆盖）。没有这一步，全新部署导入一整册之后
 **审阅页的「待命名成员」列表恒空**：``FaceRepository.list_clusters`` **内连**
 ``memory_spaces``，而全仓没有第二个写入者（``s5-deviations`` 第 97 条；措辞由第 103 条
-纠正——``EntityRepository.list_people`` 用的是 ``scope_id NOT IN (SELECT ...)`` 子查询，
+纠正——``EntityRepository.list_entities`` 用的是 ``scope_id NOT IN (SELECT ...)`` 子查询，
 不受影响）。名字与类型取 1.0 的 ``create_memory_space(scope_id, scope_id)``：``name``
 与 ``id`` 同值，``kind`` 走签名默认 ``household``——批量端点里那个 ``benchmark`` 是
 1.0 的评测旁路，按第 6/30 条不移植进生产代码。

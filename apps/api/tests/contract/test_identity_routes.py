@@ -68,14 +68,15 @@ def add_entity(
     scope_id: str = HOME,
     family_role: str | None = None,
     summary: str = "",
+    entity_type: str = "person",
 ) -> None:
     with _db(client).connect() as connection, connection:
         connection.execute(
             "INSERT INTO entities"
             " (id, scope_id, entity_type, canonical_name, status, family_role, summary,"
             "  confidence, created_at, updated_at)"
-            " VALUES (?, ?, 'person', ?, ?, ?, ?, 0.0, ?, ?)",
-            (entity_id, scope_id, name, status, family_role, summary, NOW, NOW),
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)",
+            (entity_id, scope_id, entity_type, name, status, family_role, summary, NOW, NOW),
         )
 
 
@@ -820,3 +821,120 @@ def test_a_cluster_in_a_scope_without_a_space_row_is_invisible_on_the_review_pag
 
     body = client.get("/api/v1/face-clusters", params={"scope_id": FRESH}).json()
     assert [item["id"] for item in body["clusters"]] == ["cluster_orphan"]
+
+
+# ---- 实体属性 --------------------------------------------------------------------
+
+
+def test_the_people_route_only_shows_people(identity_client: TestClient):
+    """``/people`` 的类型过滤在**路由层**，不在仓储里——1.0 ``app.py:1514`` 也是这么分的。
+
+    仓储给的现在是「全部实体」（``list_entities`` 没有 ``entity_type`` 参数）。这条钉的是
+    路由把它收窄回人物。
+
+    定点变异：删掉 ``routes/identity.py`` 里那行
+    ``people = [item for item in values if item.entity_type == ENTITY_TYPE_PERSON]``，
+    这条立刻变红——而 ``/people`` 的**其余用例全都不会**，因为它们的 fixture 里一个非人物
+    实体都没有。这就是这条用例非存在不可的理由：过滤被搬了个位置，原有用例看不见。
+    """
+    add_entity(identity_client, "ent_person", name="妈妈", status="confirmed")
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    people = identity_client.get("/api/v1/people").json()["people"]
+
+    assert [item["id"] for item in people] == ["ent_person"]
+
+
+def test_setting_a_property_returns_the_written_row(identity_client: TestClient):
+    """用户写属性：新行 ``source='user'`` / ``confidence=1`` / ``status='active'`` / ``revision=1``。
+
+    1.0 ``db.py:4762-4768`` 把这三个值**写死在 SQL 字面量里**，所以它们是契约不是默认值。
+    响应体**没有外层包裹**（1.0 ``app.py:1962`` 直接返回 ``_property_row`` 那个 dict）。
+    """
+    add_entity(identity_client, "ent_1", name="妈妈", status="confirmed")
+
+    response = identity_client.put(
+        "/api/v1/entities/ent_1/properties/private_flag",
+        json={"value": True, "evidence_ids": ["obs_1", "obs_1"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["entity_id"] == "ent_1"
+    assert body["property_key"] == "private_flag"
+    assert body["value"] is True
+    assert body["source"] == "user"
+    assert body["confidence"] == 1
+    assert body["status"] == "active"
+    assert body["revision"] == 1
+    assert body["supersedes_property_id"] is None
+    # 1.0 ``db.py:4753`` 的 ``list(dict.fromkeys(evidence_ids or []))``：去重且保序。
+    assert body["evidence_ids"] == ["obs_1"]
+
+
+def test_setting_a_property_twice_supersedes_the_older_one(identity_client: TestClient):
+    """第二次写**不覆盖**第一行，而是把旧的转 ``superseded`` 再插一行 ``revision+1``。
+
+    定点变异：去掉 ``set_property`` 里那条
+    ``UPDATE entity_properties SET status = 'superseded' ...``，
+    ``revision`` 与 ``supersedes_property_id`` 两条断言**仍然会过**（它们只看新行，
+    而新行的 revision 是照着旧行算的、与旧行状态无关）——只有「旧行变成 superseded」
+    那一条会红。所以那条断言才是这条用例的主体，前面两条只是铺路。
+    """
+    add_entity(identity_client, "ent_1", name="妈妈", status="confirmed")
+    first = identity_client.put("/api/v1/entities/ent_1/properties/title", json={"value": "甲"}).json()
+
+    second = identity_client.put("/api/v1/entities/ent_1/properties/title", json={"value": "乙"}).json()
+
+    assert second["revision"] == 2
+    assert second["supersedes_property_id"] == first["id"]
+    assert second["value"] == "乙"
+    with _db(identity_client).connect() as connection:
+        old = connection.execute(
+            "SELECT status FROM entity_properties WHERE id = ?", (first["id"],)
+        ).fetchone()
+    assert old["status"] == "superseded"
+
+
+def test_setting_a_property_on_an_unknown_entity_is_404(identity_client: TestClient):
+    """``KeyError`` → 404 是**路由翻译**的，仓储只管抛。
+
+    定点变异：删掉路由里的 ``except KeyError``，这条会变成 500。
+    """
+    response = identity_client.put("/api/v1/entities/ent_nope/properties/title", json={"value": 1})
+
+    assert response.status_code == 404
+    assert _error(response) == ("not_found", "entity not found")
+
+
+def test_an_empty_property_key_is_400(identity_client: TestClient):
+    """键 trim 后为空是 **400 不是 422**：判据在仓储（``_clean_key``），不在路径声明。
+
+    消息逐字是异常自己的话（1.0 ``app.py:1966`` 的 ``detail=str(error)``），
+    所以路由不能改写它。
+
+    定点变异：删掉路由里的 ``except ValueError``，这条会变成 500。
+    """
+    add_entity(identity_client, "ent_1", name="妈妈", status="confirmed")
+
+    response = identity_client.put("/api/v1/entities/ent_1/properties/%20", json={"value": 1})
+
+    assert response.status_code == 400
+    assert _error(response) == ("invalid_request", "property_key is required")
+
+
+def test_a_body_without_a_value_is_accepted_and_writes_null(identity_client: TestClient):
+    """``{}`` 是**合法请求**，写进去一个 ``null``。
+
+    1.0 的路由收的是裸 ``dict``（``app.py:1960``），``payload.get("value")`` 对缺键返回
+    ``None``，于是它写入**成功**。把 ``value`` 写成必填字段会让这个请求变成 422——
+    同一个产品行为换了一个码。``evidence_ids: null`` 同理（1.0 是 ``... or []``，
+    所以它等同于没给，而不是报错）。
+    """
+    add_entity(identity_client, "ent_1", name="妈妈", status="confirmed")
+
+    response = identity_client.put("/api/v1/entities/ent_1/properties/note", json={"evidence_ids": None})
+
+    assert response.status_code == 200
+    assert response.json()["value"] is None
+    assert response.json()["evidence_ids"] == []

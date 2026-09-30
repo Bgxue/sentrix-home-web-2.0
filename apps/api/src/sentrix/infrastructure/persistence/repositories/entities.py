@@ -166,9 +166,23 @@ class SqliteEntityRepository:
             ).fetchone()
         return _row_to_entity(row) if row else None
 
-    def list_people(
+    def list_entities(
         self, *, status: str | None = None, scope_id: str | None = None
     ) -> Sequence[EntityRecord]:
+        """1.0 ``db.py:4041-4054`` 的 ``list_entities``，三段逐条对齐。
+
+        1. **``status`` 给了就精确匹配，没给就排除 ``rejected`` / ``superseded``**
+           （1.0 的 ``WHERE status = ?`` 与 ``WHERE status NOT IN (...)`` 两支）；
+        2. **``scope_id`` 排除 ``include_in_people = 0`` 的空间**——恒有，不受参数影响；
+        3. ``scope_id`` 传了再加一条 ``scope_id = ?``。
+
+        没有 ``entity_type`` 过滤，也没有 LIMIT（1.0 同样是全量 + ``ORDER BY updated_at DESC``）。
+
+        1.0 这个方法在返回前还有两段（``db.py:4054-4055``）：``_decorate_entities`` 补派生
+        字段、``public_entity`` 做私密地点投影。2.0 把它们拆到别处——派生字段走
+        ``decorate_entities``，投影是 domain 的纯函数——**读侧拼装在路由层完成**，
+        与 ``routes/identity.py`` 既有的簇列表是同一条路。
+        """
         excluded = "(SELECT id FROM memory_spaces WHERE include_in_people = 0)"
         clause = "status = ?" if status else "status NOT IN ('rejected', 'superseded')"
         params: list[object] = [status] if status else []
@@ -178,9 +192,9 @@ class SqliteEntityRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 f"SELECT {_ENTITY_COLUMNS} FROM entities"
-                f" WHERE entity_type = ? AND {clause} AND scope_id NOT IN {excluded}"
+                f" WHERE {clause} AND scope_id NOT IN {excluded}"
                 " ORDER BY updated_at DESC",
-                [ENTITY_TYPE_PERSON, *params],
+                params,
             ).fetchall()
         return [_row_to_entity(row) for row in rows]
 

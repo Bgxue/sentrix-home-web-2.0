@@ -521,7 +521,7 @@ entity（本体）
 |---|---|
 | 按 status/scope 列实体（含非人物） | `EntityRepository.list_people` **硬编码 person**；要放开成 `list_entities` |
 | 属性读 | `EntityRepository.list_properties` **在**（零调用，PENDING 登记的就是 T128） |
-| 属性写（用户值） | `EntityRepository.set_property` **在**（零调用） |
+| 属性写（用户值） | `EntityRepository.set_property` **在**，而且**不是零调用**——`set_person_aliases`（`entities.py:747`）已经在用它。原表写的「零调用」是错的（2026-09-30 核查更正）；方法级可达性门禁当时也没报它，因为判据是「名字被属性访问过」，而那个访问就在同一个文件里 |
 | 实体本体 | `EntityRepository.get` **在** |
 | 人物详情页 | `GET /people/{person_id}` **已在 `routes/identity.py:306`** ——先读它，`GET /entities/{id}` 能复用的部分不要重写 |
 
