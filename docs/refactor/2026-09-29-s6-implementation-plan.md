@@ -822,6 +822,37 @@ T130 要新建一个语义读的端口。
 （``domain/retrieval/ports.py:80-83``）——与 T131 是同一类「1.0 有这个函数但没人调」，
 但那次判对了，这次的任务表没有。
 
+#### T132 收口（2026-09-30）：§1.1 三条缺口的处置
+
+| §1.1 的缺口 | 处置 |
+|---|---|
+| ① 可达性门禁的判定单位是模块、不是符号 | **补了**（S6 · T133）——`scripts/check_method_reachability.py`，带 `PENDING_METHODS` 例外表与反向规则。本切片接线时它**自己删掉了三条登记**（facts 的三条、`maintain_property`、`list_properties`） |
+| ② **没有任何门禁盯 schema** | **记入不做**，见下 |
+| ③ `check_capability_map.py` 是单向校验 | **补了**——加了反向规则（标着 `pending` 的，`target_path` 不能已经存在），并把卡住的两条改正 |
+
+##### ③ 的具体处理
+
+`person_moments` 与 `person_portrait_revisions` 两条在 S5c 就交付了却一直标着 `pending`,
+本次改成 `verified` 并补上真实的 `target_path` / `verification`
+（`repositories/moments.py` + `test_moment_repository.py`、
+`repositories/portraits.py` + `test_portrait_repository.py`）。
+
+新规则**做过反向验证**：把其中一条改回 `pending`，门禁立刻报红并指出 `target_path` 已存在。
+与 `check_reachability.py` 的 `PENDING_WIRING`、`check_method_reachability.py` 的
+`PENDING_METHODS` 是同一条纪律——**登记一旦被现实追上，门禁自己要求删**。
+
+##### ② 为什么记入不做
+
+缺口是真的，2026-09-30 复核仍然成立：`ingest_batches` 表建在
+`migrations/0002_media.sql:48`、`assets.batch_id` 列建在 `:9`，而全 `apps/api/src/` 里
+唯一提到它们的是 `application/media/import_album.py:18` 的一句**注释**；
+线上库该表 **0 行**、该列**全 NULL**（实测）。
+
+不做，是因为**它是另一个形状的问题**：schema 的「有没有人读写」不像模块与方法那样有
+一个明确的调用点可查——列可以从 `SELECT *` 里被顺带读出来，表可以被原样透传。
+要判得准就得做数据流分析，那比这一条门禁的收益大得多。**但缺口要留痕**：
+这三张表/列的事实写在这里，S6 之后谁动 `ingest_batches` 都该先回来看一眼。
+
 ### 收口
 
 | Task | 内容 |
