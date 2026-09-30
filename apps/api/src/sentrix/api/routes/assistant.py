@@ -113,6 +113,10 @@ def _run_turn(container: Container) -> RunTurn:
                 structured=container.structured_query_repository,
                 entities=container.entity_repository,
             ),
+            # `query_photo_people` 的两条读路径（T122）：按 asset 的已绑定人脸，
+            # 与 people_json 里带 entity_id 的那一份快照。
+            faces=container.face_repository,
+            observations=container.observation_repository,
         ),
     )
 

@@ -109,6 +109,35 @@ class FaceClusterRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PhotoIdentityRecord:
+    """一张照片里一张**已绑到人物实体**的脸。T122 与 T123 共用（见 ``FaceRepository``
+    的 ``list_photo_identities``）。
+
+    与 ``FaceInstanceRecord`` 是两件事，不要合并：那个是「一个实例的全部字段 + 它所属
+    asset 的四个字段」，这个是「这条 JOIN 命中的那一行」——它多带实体侧的
+    ``entity_id`` / ``person_name`` / ``family_role``，少带嵌入与姿态那一堆
+    （那张照片要对模型说话，不需要向量）。
+
+    ``identity_status`` 是 1.0 写死的字面量 ``"bound"``（``tools.py:2297``），**不是**
+    从某个状态列读来的：能出现在这条记录里，就已经意味着「绑了」。
+    """
+
+    face_instance_id: str
+    asset_id: str
+    cluster_id: str
+    entity_id: str
+    person_name: str
+    family_role: str
+    bbox: tuple[float, ...]
+    detection_confidence: float
+    quality: float
+    # ``entity_mentions`` 上那条同 (实例, 实体) 的置信度。1.0 的 LEFT JOIN 带出来的
+    # （``tools.py:2287-2289``），**没有命中就是 None**——不补 0.0：0.0 是「算过一次、
+    # 结果是零」，None 是「没有这条提及」，两者的下游含义不同。
+    mention_confidence: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class FaceInstanceRecord:
     """``face_instances`` 一行 + 它所属 asset 的四个字段。
 

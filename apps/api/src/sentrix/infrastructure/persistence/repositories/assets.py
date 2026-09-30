@@ -16,7 +16,7 @@ from sentrix.domain.media.models import (
     Observation,
     ObservationFact,
 )
-from sentrix.domain.media.ports import ObservationSemantics
+from sentrix.domain.media.ports import ObservationSemantics, PeopleSnapshotEntry
 from sentrix.infrastructure.persistence.database import Database
 
 _ASSET_COLUMNS = (
@@ -166,6 +166,39 @@ def _json_people(value: str | None) -> tuple[str, ...]:
     return tuple(names)
 
 
+def people_snapshot(value: str | None) -> tuple[PeopleSnapshotEntry, ...]:
+    """``people_json`` → 带绑定状态的条目。**只解析，不校验**（与 ``_json_people`` 同）。
+
+    写入侧存的是 ``{"entity_id":…, "name":…, "status":…}``；模型自报的那一批可能只是
+    字符串（``_json_people`` 两种都吃）。两种都收成同一个形状：
+
+    - dict → ``name`` 取 ``name``，``entity_id`` 取 ``entity_id``；
+    - 裸字符串 → ``name`` 是它，``entity_id`` 是空串。
+
+    **不去重。** ``_json_people`` 去重是因为它产出的是给人看的名字表；这里产出的是
+    「这张照片里有几个说不上名字的人」，去重会把这个计数改小——而 1.0 的
+    ``sum(1 for p in people_values if not ...)`` 是在**原始列表**上数的。
+    """
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    entries: list[PeopleSnapshotEntry] = []
+    for item in parsed:
+        if isinstance(item, dict):
+            entries.append(
+                PeopleSnapshotEntry(
+                    name=str(item.get("name") or "").strip(),
+                    entity_id=str(item.get("entity_id") or ""),
+                )
+            )
+        else:
+            entries.append(PeopleSnapshotEntry(name=str(item).strip()))
+    return tuple(entries)
+
+
 def _json_list(value: str | None) -> tuple[str, ...]:
     try:
         parsed = json.loads(value or "[]")
@@ -250,6 +283,21 @@ class SqliteObservationRepository:
                 (asset_id,),
             ).fetchall()
         return [row_to_observation(row) for row in rows]
+
+    def latest_people_snapshot(self, asset_id: str) -> Sequence[PeopleSnapshotEntry]:
+        """1.0 ``tools.py:2578-2581`` 的原样。**只取最新那条，且只取一列。**
+
+        不复用 ``list_by_asset`` 再挑第一条：那个按 ``created_at DESC`` 排（1.0 这里是
+        ``updated_at DESC``），而且它会把整行观察读出来解析一遍——这里要的是**原始 JSON
+        里的 entity_id 那一位**，而 ``row_to_observation`` 走的 ``_json_people``
+        恰好把它丢了。读整行再解析等于把丢掉的东西再从原始列里捞一次，绕。
+        """
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT people_json FROM observations WHERE asset_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (asset_id,),
+            ).fetchone()
+        return people_snapshot(row["people_json"]) if row else ()
 
     def list_scope(self, scope_id: str, *, limit: int) -> Sequence[Observation]:
         with self._database.connect() as connection:

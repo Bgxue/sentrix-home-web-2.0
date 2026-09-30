@@ -433,6 +433,71 @@ count/first/last 这类问题，`filters.place` 就是问题本身。
 结论：**T122 从「接线」升级为「补两个读路径 + 接线」**，与 T121 的升级同一形状。
 `asset_handle` 的解析与 scope 校验这两段可以直接照 1.0，没有缺口。
 
+#### T122 二核（2026-09-30）：读两次 1.0 之后，任务定义定下来了
+
+上面那一版是对的，但有两处写得太轻，另有一处**整条漏了**。
+
+**① `_confirmed_photo_identities` 的名字撒谎，SQL 不撒谎——照 SQL 搬。**
+它的 docstring 与函数名都说 "confirmed"，而那条 JOIN 里**一个状态过滤都没有**：
+
+```sql
+FROM face_instances fi
+JOIN face_clusters fc ON fc.id = fi.cluster_id
+JOIN entities e     ON e.id = fc.entity_id          -- INNER：没绑簇的、簇没绑实体的都不出现
+LEFT JOIN entity_mentions em ON em.face_instance_id = fi.id AND em.entity_id = fc.entity_id
+WHERE fi.asset_id = ? AND e.entity_type = 'person'  -- 就这一条过滤
+ORDER BY fi.quality DESC, fi.detection_confidence DESC
+```
+
+它判的是「**绑没绑**」，不是「确认没确认」（`tools.py:2277-2316`）。2.0 里簇可以带
+pending 实体（`enroll_face` 就是「建簇带 pending 实体」），所以两者不是一回事。
+**按 SQL 搬，并把这条不一致写进端口方法的 docstring**——顺手补一个
+`status = 'confirmed'` 是在改产品行为，不是修 bug。
+
+**② `_confirmed_photo_identities` 是 T122 与 T123 共用的件，不是 T122 私有的。**
+1.0 里两个工具都调它：`_query_photo_people`（`:2577`）取 `person_name` / `membership`，
+`_inspect_photo`（`:2158`）取 **`bbox`** 去裁目标人物的定位图。
+所以这个读路径的返回必须带上 `bbox` / `face_instance_id` / `cluster_id`，
+**即使 T122 自己一个都不用**——否则 T123 动工时会再开一条几乎一样的。
+（T123 还另有第三个近似读：`_photo_face_manifest`（`:2320`）——那张表含**未绑定**的脸、
+`face_id` 是局部编号 `face_1`、且带 `identity_status`。两者别合并，见 §4 Task 123。）
+
+**③ `membership` 的口径定了：回 `family_role`，不装作有家庭图谱。**
+1.0 逐个人调 `get_effective_family_membership(scope_id, entity_id)`（家庭图谱，S7），
+2.0 只有实体上的 `family_role`。**输出里保留 `membership` 这个键**（工具契约的形状照 1.0），
+值取 `family_role`，并在**工具描述里写明「尚无关系图谱」**。留空标 `unknown` 是更差的选择：
+`membership` 会是每一行都相同的常量，读起来像「这些人都没有家庭归属」。
+**注意 `family_role` 在端口/仓储那一层叫 `family_role`，映射成 `membership` 是工具层的事。**
+
+**④ 漏掉的那条：证据类型的词表。** 1.0 的 `query_photo_people` 声明
+`produces_evidence=("photo_identity", "confirmed_identity")`（`tools.py:2727`），
+两个**都是**公共证据类型（`evidence_contract.py:13-14`），也都进
+`planner_evidence_types()` 发给规划器。
+
+2.0 的 `EvidenceType` 现在只有四个，两个都不在：
+
+| 1.0 | 2.0 | 依据 |
+|---|---|---|
+| `confirmed_identity` | **已有，就是 `PERSON_PROFILE`** | `intent.py:89-92` 把 `person` / `identity` / `profile` 三个轴词都映射到它；1.0 的 `_TYPE_MAP`（`goal_planner.py:66-67`）把 `person` / `identity` 映射到 `confirmed_identity`——**同一个轴**，2.0 是改名加收窄 |
+| `photo_identity` | **没有，要加** | 它在 1.0 是独立的一类：`evidence_contract.py:14` 的公共表里有它，规划器提示词专门交代「身份问题只有在需要确认**照片中的人名**时才声明 photo_identity」（`goal_planner.py:49`），`runtime.py:1011` 还为它单独做工具准入 |
+
+所以 `satisfies` 是 **`(PHOTO_IDENTITY, PERSON_PROFILE)` 两条**：
+`PHOTO_IDENTITY` 是这个工具自己的产物，`PERSON_PROFILE` 是 1.0 那条
+`confirmed_identity` 的兼容面——**照 1.0 声明，否则「问照片里的人是谁」这类需求
+在本工具被调用之后依然开着，门禁会逼模型再去找一个查不到的东西**（与
+`_person` 那条 `blocks=PERSON_PROFILE` 是同一个坑的两面）。
+
+**动工清单（四条读路径 + 接线）：**
+
+| # | 落点 | 形状 |
+|---|---|---|
+| 1 | `domain/identity/ports.py` + `repositories/faces.py` | `FaceRepository.list_photo_identities(asset_id) -> Sequence[PhotoIdentityRecord]`；记录带 `face_instance_id` / `asset_id` / `cluster_id` / `entity_id` / `person_name` / `family_role` / `bbox` / `detection_confidence` / `quality` |
+| 2 | `domain/media/ports.py` + `repositories/assets.py` | `ObservationRepository.latest_people_snapshot(asset_id) -> Sequence[PeopleSnapshotEntry]`（`name` + `entity_id`，按 `updated_at DESC LIMIT 1`）；**只给这个工具用**（§8.3 的裁决） |
+| 3 | `domain/assistant/evidence_ledger.py` | 新增 `EvidenceType.PHOTO_IDENTITY`，描述表（`intent.py:305`）补一行 |
+| 4 | `domain/assistant/tools.py` + `application/assistant/tools.py` + `api/routes/assistant.py` | `ToolSpec` + `AssistantToolbox._photo_people` + 注入两个仓储 |
+
+工具描述照 1.0 原文（`tools.py:2723-2724`），另加一句「尚无关系图谱」。
+
 ### Task 124 · read_photo_text 的动工前核查（2026-09-29）
 
 计划里点名要核的第一件事就是「1.0 的 `ocr_tool.py` 用的是哪个 OCR 后端」。核完了：
@@ -517,6 +582,107 @@ T124 的后端已裁决走第 2 条路（**只用 8100 的 VLM，零新依赖，
 不是 `contradicted`——这与 `conditions.py` 里 UNKNOWN 与 CONTRADICTED 分开是同一个道理，
 不要在移植时顺手加一档。
 
+### Task 123 · inspect_photo 的动工前核查（2026-09-30）
+
+端口已落（§8.5），T122 也把共用的那条绑定读路径（带 `bbox`）落了。核完之后，
+**T123 比「写一个工具」多三件前置**，其中两件在**策略层**，不在工具层。
+
+**① 1.0 的「昂贵，每轮最多 1 次」是一条真预算，2.0 没有。**
+
+1.0 的 `ToolSpec` 有一个 `cost_class` 字段，`inspect_photo` 与 `read_photo_text`
+都是 `"expensive"`（`tools.py:2755`、`:2769`）。`ToolPolicy.authorize` 拿它去问预算：
+
+```python
+if self.budget is not None and not self.budget.can_tool_call(
+        inspection=spec.cost_class == "expensive"):     # tool_policy.py:37-38
+    return ToolDecision(False, "budget exhausted")
+...
+self.budget.record_tool_call(inspection=spec.cost_class == "expensive")   # :62
+```
+
+而 `BudgetState.max_inspections = 1`（`budget_manager.py:17`）。**这条预算同时管两个工具**
+——它们是同一个计数器 `inspections` 的两个使用者，所以「每轮总共只能精读一张图一次」，
+不是「每个工具各一次」。这正是 1.0 工具描述里那句「同一张图最多复核一次，
+不要反复检查同一张」的**执行机构**；不实现它，那句话就只是一句劝告。
+
+**2.0 现状**：`TurnProfile`（`domain/assistant/profile.py`）只有
+`max_steps=8 / max_tool_calls=6 / max_search_calls=1 / wall_time_s=180 / final_reserve_s=10`，
+**没有 `max_inspections`**；`ToolSpec` **没有 `cost_class` 字段**；
+`tool_policy.py` 只有 `search_memories` 那一条计数。所以这一件要新增，且它落在
+`domain/assistant/profile.py` + `token`/`task_state` + `tool_policy.py` 三处。
+
+**② `preconditions` 这一件，核完之后结论翻过来了：2.0 里它没有家，不该补。**
+
+1.0 的 `inspect_photo` 有前置条件 `asset_handle_in_current_preview`（`tools.py:2757`），
+由 `ToolPolicy.execute` 校验（`tool_policy.py:44-55`）。看上去 2.0 缺一层，**实际不是**：
+
+1.0 能这么写，是因为它的 `task_state` 是**一个可变字典**，`result_preview` 就存在里面
+（`tool_policy.py:47-49` 直接读 `task_state.get("result_preview")`）。
+2.0 的 `TaskState`（`domain/assistant/task_state.py`）**没有 preview、也没有 result_set
+任何一个字段**——实测 grep 零命中；而 `ToolPolicy` 的类注释写死了它**无状态**
+（「所有计数都在 `TaskState` 上」）。要在这条路上做前置条件，就得把仓储塞进策略层，
+那会破坏 2.0 「策略只做决定、执行器才碰数据」这条分界。
+
+**所以 faithful 的做法是把这条判据留在执行器里**——T122 的 `query_photo_people` 已经是
+这个形状（`result_set.resolve(handle)` 失败 → `bad_handle`），而且它比 1.0 更严格：
+1.0 的前置条件比的是「handle 在 preview 文本里」，T122 比的是「handle 真的解析得到一个
+asset」。**T123 照这个形状做，不新增 `preconditions` 字段。**
+
+（`required` 挡的是「模型漏填 handle」，这一层 2.0 有、工作正常，不涉及。）
+
+**③ 第三个证据类型：`visual_observation`。**
+
+`inspect_photo` 声明 `produces_evidence=("visual_observation", "photo_identity")`
+（`tools.py:2756`）。`photo_identity` 已由 T122 补上；`visual_observation` 还没有。
+
+**S6 四个工具要补的公共证据类型一共三类**，进度：
+
+| 类型 | 谁产出 | 状态 |
+|---|---|---|
+| `photo_identity` | `query_photo_people`（T122）/ `inspect_photo`（T123） | **已补**（T122） |
+| `visual_observation` | `inspect_photo`（T123） | 待 T123 |
+| `visible_text` | `read_photo_text`（T124） | 待 T124 |
+
+（2.0 的 `EvidenceType` 还缺 1.0 公共表里的 `location_metadata` / `temporal_metadata` /
+`user_statement` 三类，那三类不属于 S6 的四个工具——登记在 §6 收口时一起判。）
+
+**④ 人脸清单是第三条读路径，且与 T122 那条**不同**。**
+
+1.0 的 `_photo_face_manifest`（`tools.py:2320-2358`）与 T122 用的
+`_confirmed_photo_identities` 是两条查询，**不要合并**：
+
+| | `list_photo_identities`（T122/T123 共用） | `_photo_face_manifest`（T123 独用） |
+|---|---|---|
+| 含未绑定的人脸 | **不含**（两个 INNER JOIN） | **含**（`LEFT JOIN face_clusters` / `LEFT JOIN entities`） |
+| 人脸编号 | 无 | `face_1` / `face_2`… **局部编号**，按 `quality DESC, detection_confidence DESC, id` |
+| 名字 | `person_name`（实体本名） | 只在 cluster 与 entity **双确认**时才填 `person_name`，否则留空 |
+| 给谁 | T122 的 `people` 列表 / T123 的裁剪目标 | 提示词里的「人脸清单」，让模型在没给名字时回一个 `face_id` |
+
+**「未确认者不得猜姓名」这条纪律的落点就在第三行那个双确认判据上**
+（`cluster_status == 'confirmed' and entity_status == 'confirmed' and canonical_name`）。
+注意它与 T122 那条 SQL 「一个状态过滤都没有」是**相反的**口径——两条查询在同一个文件里，
+一个查状态一个不查，各自都有出处，**不要用一条的直觉去改另一条**。
+
+**⑤ 裁剪件这一侧 2.0 已经齐了。** `expanded_person_crop`
+（`domain/identity/appearance.py`）与 `render_person_crop`（`render_person_crop` 的
+PIL 边界在 `infrastructure/media/person_vision.py`，端口是 `PersonCropRenderer`）
+都在 S5c 落过，`observe_appearance` 正在用。T123 直接接上，并把它喂给
+`PhotoInspector.inspect(..., crop=...)`——那个形参就是为这一条留的。
+
+**动工清单（五件，第一件是 T123/T124 共用的前置）：**
+
+| # | 落点 | 是什么 |
+|---|---|---|
+| 1 | `domain/assistant/tools.py`（`ToolSpec.cost_class`）+ `profile.py`（`max_inspections`）+ `task_state.py`（计数与 `can_inspect`）+ `tool_policy.py`（那条判定） | `cost_class` 与 `max_inspections`（**T123/T124 共用**，两边都靠它）。落点已探明：`TaskState` 加一个按 `cost_class == "expensive"` 数记录的属性，`ToolPolicy.decide` 里照 `search_memories` 那条判定的形状加一条 |
+| ~~2~~ | ~~`preconditions`~~ | **不做**，见上面 ② |
+| 3 | `domain/assistant/evidence_ledger.py` | `EvidenceType.VISUAL_OBSERVATION` |
+| 4 | `domain/identity/ports.py` + `repositories/faces.py` | `list_face_manifest(asset_id)`（第三条读路径，含未绑定） |
+| 5 | `domain/assistant/tools.py` + `application/assistant/tools.py` | `ToolSpec` 与执行器（含 `target_person` 解析、裁剪、`target_face_id` 回收） |
+| 6 | `api/routes/assistant.py` | 注入 `photo_inspector` 与 `person_crop_renderer` |
+
+**顺序约束**：第 1 件必须在工具之前——它是 T123 与 T124 **共用**的前置，
+给一条工具单独写一遍等于把同一件写两遍（与 §4 Task 123/124 拒绝写两遍 HTTP 是同一条理由）。
+
 ### Task 127 · 恢复作答的阶梯
 
 **动工前必须先核查**（照 S5c 的 T86g 体例：先核依赖，核出缺口再写任务定义）。
@@ -597,7 +763,9 @@ OCR settings / telemetry / query-gaps、`/api/dashboard`、回合取消、会话
 | T121a 查询契约 | 完成 | `6028ca6` |
 | T121b 筛选条件派生 + SQL | 完成 | `63b897a` `bd6dcee` `3f2dd51`（修正） |
 | T121c 工具与注册 | 完成 | `c17daa5` `7b84f7f` `d001d01`（补覆盖） |
-| T122 / T123 / T124 | **已核查，均重估** | `4c2abdc` `7d9a602` `c994cd0` |
+| **T123/T124 共用的 inspector 端口** | **完成**（§8.2 的「第一件事」） | 见本节末「这次落了什么」 |
+| **T122 四条读路径 + `query_photo_people` 工具** | **完成** | 见 §8.6 |
+| T123 / T124 | **已核查，均重估**，未动工 | `7d9a602` `c994cd0` |
 
 `query_memory_facts` 已在生产链路上：`AssistantToolbox` → `QueryMemoryFacts` →
 `StructuredQueryRepository`，容器已装配，真库（53 张）跑通。
@@ -607,21 +775,33 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 唯一红的是 e2e `test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`——
 **已裁决为模型问题，不是代码问题，不要修**。
 
-### 8.2 下一步：先落 inspector 端口，再按顺序做三个工具
+### 8.2 下一步：inspector 端口已落，接着按顺序做三个工具
 
-**第一件事（T123/T124 共用，必须先做）**：一个「拿一个问题去问这张图」的端口。
-2.0 现有的两个视觉入口都不是它——`VlmObserver.observe` 的 schema 是固定的七个字段
-（导入期观察器，不接问题），`OpenAIPersonVision` 是画像/瞬间/外观三个专用入口。
-定义见 §4 的 Task 123/124 条目。
+~~**第一件事（T123/T124 共用，必须先做）**~~ → **已完成**，见 §8.5。
 
-之后：**T122 的两条读路径 → T122 工具 → T123 → T124**。
+剩下的是：**T123 → T124**（T122 已完成，见 §8.6）。
 
-### 8.3 还差一个裁决
+**T122 已按 §4 的「二核」清单落地**：四条读路径 + 接线 + 17 条新用例。
+它比原计划的两条多出来的那两条，是**证据类型词表**（`photo_identity` 这个公共类型
+2.0 没有）与 **T122/T123 共用的绑定读路径**（带 `bbox`，T122 自己不用）。
+
+### 8.3 ~~还差一个裁决~~ → 已裁决（2026-09-30）
 
 **T122 的 `Observation.people`**：1.0 靠 `people_json` 里有没有 `entity_id` 数出
-「未确认同行者」，2.0 的读取侧只留名字。两条路——改 `Observation.people` 的类型
-（影响词法投影/事件锚点/参与者投影），或另开一条只读路径（只给这个工具用）。
-§4 的 Task 122 条目倾向后者，**但没定**。
+「未确认同行者」，2.0 的读取侧只留名字（`assets.py:148` 的 `_json_people`），
+而 `Observation.people` 是 `tuple[str, ...]`——绑定与否这一位在 domain 里被丢掉了。
+这个数字是要回给模型的一句话，也是「不要给未绑定的人安名字」这条纪律的落点。
+
+**裁决（2026-09-30）：先只读路径，S7 再评估改类型。**
+
+- 本切片**只开一条只读路径**，专供这个工具按 `people_json` 原样取回来；
+  **不动** `Observation.people` 的形状——那是 S4 定下的模型，
+  影响面是词法投影 / 事件锚点 / 参与者投影三个读者，
+  为一个工具去改它等于让 S4 的模型背 S6 的需求。
+- **代价照单收下**：绑定状态只在这一个入口可见，另一个读者要它时得再开一条。
+- **留给 S7 的问题**（不是「以后再说」，是一个有判据的待办）：S7 的家庭图谱落地之后，
+  看**参与者投影**是否真的需要「绑定与否」这一位。需要，就该把类型改对；
+  不需要，这条只读路径就是终点。
 
 ### 8.4 几条会浪费时间的门禁事实
 
@@ -636,3 +816,96 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
   覆盖它，门禁数不到。读覆盖率报表时要知道这件事。
 - **`make ci` 的 coverage 段会被那条已知的 e2e 失败打断**，于是 `web-check` 不跑。
   报告「门禁全绿」时说清楚哪一段没跑到。
+- **（本次新增）同名测试文件会让整轮 collection 直接失败。** 测试目录没有
+  `__init__.py`，所以 `unit/test_photo_inspector.py` 与 `e2e/test_photo_inspector.py`
+  会撞在同一个模块名上，pytest 报 `import file mismatch` 并**中断整轮**——
+  `make coverage` 连一条用例都没跑就退出 2。**只有跑全量才会撞上**：单目录跑、按文件跑
+  都是绿的。命名的现成规矩是 e2e 按**场景**命名（`test_visual_search` /
+  `test_assistant_turn`），单元测试按**模块**命名——所以这次是
+  `unit/test_photo_inspector.py` + `e2e/test_photo_inspection.py`。
+- **（本次新增）`check_method_reachability` 对「先落地、后接线」的端口正是设计好的。**
+  新增的 `PhotoInspector.inspect` 落地那一刻必然没有生产调用者，于是这条门禁报红要求
+  登记；登记进 `PENDING_METHODS` 并写明 T123/T124，等两条工具接上时它会**按反向规则
+  自己报红要求删掉那一条**。与 facts 那三条走的是同一条路。
+
+### 8.5 本次落了什么：T123/T124 共用的 inspector 端口
+
+按 §4 Task 123/124 的「先落端口 + 适配器 + 它的对照用例」，落了六个文件：
+
+| 文件 | 是什么 |
+|---|---|
+| `domain/media/inspection.py`（新） | 1.0 `_INSPECT_PROMPT` / `TARGET_INSTRUCTION` / 人脸清单前缀的**逐字节原文**与 `build_inspect_prompt`；只装提示词不装解析 |
+| `domain/media/ports.py` | 新增 `PhotoInspector` 端口 |
+| `infrastructure/media/photo_inspector.py`（新） | `OpenAIPhotoInspector`：图片编码与一次往返**复用** `vlm_observer` 的 `_encode_image` / `chat_json` |
+| `infrastructure/media/vlm_observer.py` | `chat_json` 的 `image` 形参从 `str` 放宽成 `str \| Sequence[str]`（1.0 指名目标人物时发两张图） |
+| `bootstrap/container.py` | 装配 `photo_inspector`（按端口声明） |
+| `tests/unit/test_photo_inspector.py` + `tests/e2e/test_photo_inspection.py` | 对照用例（见下） |
+
+**动工前核出的三处，都不是「接线」**（本切片第五个「计划说接线、实际不是」）：
+
+1. **端口签名要比 §4 写的多两位。** §4 写的是 `inspect(path, question, faces)`，而 1.0
+   的 `_inspect_photo` 在指名目标人物时**发两张图**（裁剪件在前、原图在后，
+   `tools.py:2192`），并且 `target_instruction` 那句只在**指名了人**时才填——与裁剪图做没
+   做出来无关（裁剪失败落到 `not_located` 也照样填，因为那句话说「（如有）」，
+   `tools.py:2186-2200`）。所以端口是
+   `inspect(path, question, *, faces=(), target_person="", crop=None)`。
+2. **`chat_json` 原本只收一个 `image`，多图是第一个真需求。** 没有另写一份请求组装——
+   那一份要重复的正是「图片编码、超时、模型不可用的降级」，而它们正是这个端口存在的理由。
+3. **对照用例的第一版是假绿，两处，都记在 e2e 的模块 docstring 里**，免得改回去：
+   断言「两个问题得到两句不同的话」在**把问题写死**之后照样绿（采样噪声）；
+   改成判内容之后仍然绿——**8100 的 4B 模型会答出问题范围之外的东西**（问形状，它把颜色
+   一起说了）。所以「问题有没有进提示词」这条判据放在单元层（那里能逐字节断言发出去的
+   提示词，定点变异是红的），e2e 只判结构（两种入口各自的答复形状、图真的发到了、
+   `certainty` 不溢出两档）。**9 条定点变异全部变红**。
+
+**两条给 T124 的实测证据**（`read_photo_text` 动工时直接用）：
+
+1. **1.0 的 `_ocr_single_asset` 在任何 OCR 后端之前，先读导入期已经落库的
+   `observations.ocr_text`**（`ocr_tool.py:544-559`），命中就返回
+   `source: "ingestion_ocr"` / `certainty: "supported"` / `persisted: True`。而 2.0 的
+   `OpenAIVlmObserver` 在导入时**本来就写了 `ocr_text`**（「图中文字，1000 字内」）。
+   所以 T124 的第一条路不是「调 VLM」，是「先看这条观察里有没有现成的字」——
+   1.0 也是这么排的，而且这一路**零推理开销**。
+2. **这个 4B 模型答得比问的多。** 实测：问「这张图里画的是什么形状？只回答形状名称。」，
+   它回「这张照片里画的是一个红色圆和一个蓝色正方形」。这正是 §4 Task 124 那张对照表里
+   「会不会读出图上没有的字」那一格——**T124 的工具描述必须按裁决如实收窄**，
+   不能声称逐字精确。
+
+
+### 8.6 T122 落了什么：query_photo_people（四条读路径 + 接线）
+
+| # | 落点 | 是什么 |
+|---|---|---|
+| 1 | `domain/identity/models.py` + `ports.py` + `repositories/faces.py` | `PhotoIdentityRecord` 与 `FaceRepository.list_photo_identities(asset_id)`——1.0 `_confirmed_photo_identities` 那条 SQL 逐字 |
+| 2 | `domain/media/ports.py` + `repositories/assets.py` | `PeopleSnapshotEntry` 与 `ObservationRepository.latest_people_snapshot(asset_id)`——**只给这个工具用**（§8.3 的裁决） |
+| 3 | `domain/assistant/evidence_ledger.py` | `EvidenceType.PHOTO_IDENTITY`（1.0 公共证据表里有而 2.0 缺的那一类） |
+| 4 | `domain/assistant/tools.py` + `application/assistant/tools.py` + `api/routes/assistant.py` | `ToolSpec`（描述照 1.0 原文 + 一句「尚无关系图谱」）、`AssistantToolbox._photo_people`、注入两个仓储 |
+
+用例：`apps/api/tests/integration/test_query_photo_people.py`（17 条，真 SQLite）。
+**14 条定点变异，12 条变红，2 条是等价变异**（见下）。
+
+**动工中核出来的四件事，都写进代码注释与 `behaviour-baseline.md` 了：**
+
+1. **`people` 是按人脸实例逐行的，同一个人两张脸就出现两次**（摘要念「爸爸、爸爸」）。
+   我第一版用例断言的是去重后的 `"爸爸"`，被自己写的实现推翻——回头读 1.0
+   `tools.py:2589-2593`，**1.0 也是逐行生成**，它同样重复。去重会同时改掉 `people`
+   的长度，而那个长度是证据。用例改成钉住 1.0 的行为。
+2. **那条 SQL 有三重互相覆盖的过滤。** 把任一个 INNER JOIN 换成 LEFT JOIN 都观察不到
+   差别——`NULL = 'person'` 不为真，`entity_type` 那句自己就把未绑定的行挡掉了。
+   实测确认（去掉 WHERE 之后未绑定的脸立刻出现、用例立刻红），所以那两条是**等价变异**，
+   不是用例漏了。**这一点写进了用例的模块 docstring**，免得下次有人看到「绿」就以为漏了。
+3. **`ObservationRepository.add` 会把 `people_json` 重新序列化成
+   `{"name":…, "status":"confirmed"}`——没有 `entity_id`。** 带 `entity_id` 的那一份由
+   命名流程的 `_append_person_snapshot` 追加。所以「未确认同行者」这个数与
+   「导入期快照 + 之后被认出来的人」两个写入者的时序有关，
+   `latest_people_snapshot` 读的是**原始列**，不是 `Observation.people`。
+4. **`intent.requirements_of` 是零调用者的死函数，而且它的描述表对
+   `STRUCTURED_FACT` / `PHOTO_IDENTITY` 会 `KeyError`。** 活的路径
+   （`parse_declaration`）用模型自己给的 description，根本不查那张表。
+   **没有动它**——那是 §1.1 那类自检缺口，归 T132 收口时处理。
+
+**两处要留意的后续**：
+
+- `capability-map.jsonl` 没有为本次新增能力登记（§3 的 T132 是收口任务，按计划归它）；
+- `check_method_reachability` **不需要**为这两个新端口方法登记——它们落地就有生产调用者
+  （工具就是调用者），这正是它与 `PhotoInspector.inspect` 那次不同的地方。

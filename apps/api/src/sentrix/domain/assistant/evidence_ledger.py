@@ -42,6 +42,22 @@ class EvidenceType(StrEnum):
     # 而这个工具产出的数字本身就是回答。所以它不需要被某个需求码映射——
     # 账本记下「这一轮拿到过一条精确统计」，门禁不会因为它去逼模型再检索一次。
     STRUCTURED_FACT = "structured_fact"
+    # ``query_photo_people`` 的产物（1.0 ``tools.py:2727`` 的 ``produces_evidence``）。
+    #
+    # **1.0 在这一格上有两类，2.0 只补一类，这是有意的。** 1.0 声明的是
+    # ``("photo_identity", "confirmed_identity")``，两个都在
+    # ``evidence_contract.py`` 的公共表里、也都发给规划器。对到 2.0：
+    #
+    # - ``confirmed_identity`` **已经有了，就是下面的 ``PERSON_PROFILE``**——
+    #   ``intent.py`` 把 ``person`` / ``identity`` / ``profile`` 三个轴词都映射到它，
+    #   而 1.0 ``goal_planner.py:66-67`` 把前两个映射到 ``confirmed_identity``：
+    #   同一个轴，2.0 是改名加收窄；
+    # - ``photo_identity`` **是另一类**，2.0 没有，所以在这里补上。
+    #
+    # 1.0 的规划器为它单独写过一句纪律（``goal_planner.py:49``：「身份问题只有在需要
+    # 确认**照片中的人名**时才声明 photo_identity」），``runtime.py:1011`` 还为它单独
+    # 做工具准入——它不是 ``confirmed_identity`` 的同义词。
+    PHOTO_IDENTITY = "photo_identity"
 
 
 class RequirementStatus(StrEnum):

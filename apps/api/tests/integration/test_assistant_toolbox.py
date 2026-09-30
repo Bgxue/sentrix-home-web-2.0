@@ -34,6 +34,7 @@ from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteObservationRepository,
 )
 from sentrix.infrastructure.persistence.repositories.entities import SqliteEntityRepository
+from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
 from sentrix.infrastructure.persistence.repositories.result_sets import SqliteResultSetRepository
 from sentrix.infrastructure.persistence.repositories.search_terms import SqliteLexicalIndex
 from sentrix.infrastructure.persistence.repositories.structured import (
@@ -148,6 +149,11 @@ def toolbox(migrations_ready_db, tmp_path):
             ),
             entities=SqliteEntityRepository(migrations_ready_db),
         ),
+        # `query_photo_people` 的两条读路径（T122）。这个夹具不落脸也不落观察，
+        # 所以它们恒空——被测的是别的工具的信息边界。它们自己的行为在
+        # test_query_photo_people.py。
+        faces=SqliteFaceRepository(migrations_ready_db),
+        observations=observations,
     )
     return build, result_sets
 

@@ -646,4 +646,8 @@ def _tool_status_text(name: str, outcome: ToolOutcome) -> str:
         return f"已把 {outcome.observation.get('delivered', 0)} 张照片交给用户。"
     if name == "get_person_profile":
         return "已读取人物档案。" if outcome.observation.get("found") else "没有这位人物的档案。"
+    if name == "query_photo_people":
+        # 那句话本来就是为模型写的一句人话（1.0 ``tools.py:2602``），
+        # 直接拿来当进度条文本——另编一句会让两处对同一件事各说各的。
+        return str(outcome.model_visible.get("summary") or "已读取照片里的人物。")
     return "工具执行完成。"

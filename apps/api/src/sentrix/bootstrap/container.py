@@ -41,6 +41,7 @@ from sentrix.domain.media.ports import (
     MediaStorage,
     MetadataReader,
     ObservationRepository,
+    PhotoInspector,
     PreviewEncoder,
     VlmObserver,
 )
@@ -71,6 +72,7 @@ from sentrix.infrastructure.media.person_vision import (
     PillowPersonPreviewRenderer,
 )
 from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
+from sentrix.infrastructure.media.photo_inspector import OpenAIPhotoInspector
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.bge_text import BgeM3TextEmbedder
@@ -185,6 +187,9 @@ class Container:
 
     chat_model: ChatModel
     vlm_observer: VlmObserver
+    # 拿一个问题去问一张图（S6 的 T123/T124 共用的上游件）。与上面那个是**同一个端点的
+    # 两种问法**，不是同一件事：``vlm_observer`` 的 schema 固定七个字段、不接问题。
+    photo_inspector: PhotoInspector
     conversation_repository: ConversationRepository
     turn_repository: TurnRepository
     result_set_repository: ResultSetRepository
@@ -254,6 +259,11 @@ class Container:
                 timeout_s=settings.chat_timeout_s,
             ),
             vlm_observer=OpenAIVlmObserver(
+                settings.vlm_base_url,
+                served_model,
+                timeout_s=settings.vlm_timeout_s,
+            ),
+            photo_inspector=OpenAIPhotoInspector(
                 settings.vlm_base_url,
                 served_model,
                 timeout_s=settings.vlm_timeout_s,

@@ -77,6 +77,12 @@ PENDING_METHODS: dict[str, str] = {
     "PortraitRepository.list_for_person": "S6 · 依赖核查（画像版本列表，归属未定）",
     "PortraitRepository.set_lock": "S6 · 依赖核查（画像手改/锁定，归属未定）",
     # ObservationRepository.list_by_asset 在 T119（条件排除）接线，按反向规则删掉。
+    #
+    # PhotoInspector.inspect 与上面那些**来历不同**：它不是被审计或本门禁查出来的疏漏，
+    # 而是计划**要求**先落地、后接线的一件（§4 Task 123/124：先落 inspector 端口 + 适配器
+    # + 它的对照用例，再 T123、再 T124），所以它落地的那一刻必然没有生产调用者。
+    # 登记在此，等两条工具接上时**由反向规则自己删掉**——与 facts 那三条走的是同一条路。
+    "PhotoInspector.inspect": "Task 123/124（inspect_photo / read_photo_text 两个工具）",
     "MediaStorage.path_for": "S6 · 依赖核查（媒体路径解析，归属未定）",
     "LexicalIndex.rebuild_scope": "S6 · 依赖核查（词法索引重建，归属未定）",
     "AssetRepository.update_status": "S6 · 依赖核查（资产状态流转，归属未定）",

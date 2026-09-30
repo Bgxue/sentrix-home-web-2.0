@@ -6,7 +6,7 @@ domain；具体怎么解码由 infrastructure 实现。
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +64,44 @@ class ObservationRepository(Protocol):
 
     def enrich(self, observation_id: str, *, semantics: ObservationSemantics) -> Observation: ...
 
+    def latest_people_snapshot(self, asset_id: str) -> Sequence[PeopleSnapshotEntry]:
+        """这张照片**最近一次**观察里的人物快照，带绑定状态（T122 用）。
+
+        1.0 ``tools.py:2578-2581``：``SELECT people_json FROM observations
+        WHERE asset_id = ? ORDER BY updated_at DESC LIMIT 1``。取最近一次是 1.0 的
+        口径——一张照片可以有多条观察（换过模型、补全过），人名快照以最新那条为准。
+
+        没有观察行时返回**空元组**，与「有一条观察但里面没有人」是同一个结果——
+        1.0 也是这么收的（``observation`` 为 ``None`` 时 ``people_values = []``）。
+        调用方要区分这两件事的话得自己再查，但那条链路上没有任何地方需要区分。
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class PeopleSnapshotEntry:
+    """``observations.people_json`` 里的一条，**原样**。
+
+    写入侧（``entities.py`` 的 ``_append_person_snapshot``）存的是
+    ``{"entity_id":…, "name":…, "status":…}``，而读取侧一直只取 ``name``
+    （``_json_people``）——「**绑没绑**」这一位在 ``Observation.people``
+    （``tuple[str, ...]``）里被丢掉了。
+
+    这个 DTO 存在的唯一理由是把它捡回来：1.0 数「未确认同行者」靠的正是
+    ``people_json`` 里**没有** ``entity_id`` 的条目（``tools.py:2582-2588``），
+    而那个数字是要回给模型的一句话，也是「不要给未绑定的人安名字」这条纪律的落点。
+
+    **它是只读的旁路，不是 ``Observation.people`` 的替代品**（2026-09-30 裁决）：
+    ``Observation.people`` 是 S4 定下的形状，词法投影 / 事件锚点 / 参与者投影三处都读它，
+    为一个工具去改它等于让 S4 的模型背 S6 的需求。绑定状态只在这一个入口可见。
+    """
+
+    name: str
+    # ``""`` 表示这一条**没有**绑定实体。1.0 的判据是 ``person.get("entity_id")``
+    # 的真假，所以空串与缺失是同一件事——这里用一个值表达，不留 ``None``：
+    # 调用方不该去区分「键不在」与「键是空串」，1.0 也没区分过。
+    entity_id: str = ""
+
 
 @dataclass(frozen=True, slots=True)
 class ObservationSemantics:
@@ -104,6 +142,47 @@ class VlmObserver(Protocol):
     def model_id(self) -> str: ...
 
     def observe(self, path: Path) -> ObservationSemantics | None: ...
+
+
+class PhotoInspector(Protocol):
+    """拿一个问题去问一张图。实现在 ``infrastructure/media/photo_inspector.py``。
+
+    **为什么另起一个端口，而不是给 ``VlmObserver`` 加一个 ``question`` 形参。**
+    ``VlmObserver.observe`` 是**导入期**的观察器：schema 固定七个字段、跑一次就落库、
+    每次导入最多占三次推理。它问的是「这张图里有什么」，与用户当场问的那句话无关——
+    而 ``ObservationSemantics`` 那七个字段是**产品要落库的形状**，不是模型能回答的形状；
+    拿它去装「这张合影里谁戴了帽子」，只会得到一个恒空的字段。
+
+    ``OpenAIPersonVision`` 也不是它：那是画像 / 瞬间 / 外观三个**专用**入口，各自有各自的
+    输出形状与各自的词表。这个端口问的是**用户想知道的那件事**——1.0 的 ``inspect_photo``
+    （T123）与 ``read_photo_text``（T124）各自只决定往槽位里填什么、以及怎么解析回来的
+    那包 JSON（见 ``domain/media/inspection.py``）。
+
+    与 ``PersonVision`` 同一条口径：模型不可用、读不了图、返回的不是 JSON——一律返回
+    ``None``，一次都不抛。工具靠 ``None`` 决定降级，而不是靠 catch。
+
+    **``crop`` 的存在是 1.0 的形状，不是预留。** 指名了目标人物时，1.0 发的是**两张**图：
+    裁剪件在前、原图在后（``tools.py:2192`` 的 ``inspect_images.insert(0, crop)``），
+    提示词里那句「第一张图（如有）是该人物的定位裁剪图」才成立。``crop`` 读不了就
+    **退回只发原图**，不让整次检查失败——1.0 的裁剪块自带 ``except (OSError, ValueError,
+    TypeError)`` 并落到 ``target_status = "not_located"``（``tools.py:2186-2200``）。
+
+    ``faces`` 是**原样送进提示词**的人脸清单，本端口一个字段都不改写——见
+    ``inspection.render_face_manifest`` 的 docstring。
+    """
+
+    @property
+    def model_id(self) -> str: ...
+
+    def inspect(
+        self,
+        path: str | Path,
+        question: str,
+        *,
+        faces: Sequence[Mapping[str, object]] = (),
+        target_person: str = "",
+        crop: str | Path | None = None,
+    ) -> dict[str, object] | None: ...
 
 
 class AssetObserver(Protocol):

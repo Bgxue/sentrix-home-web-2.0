@@ -207,3 +207,63 @@
 | 文本嵌入 | BAAI/bge-m3，1024 维，HTTP sidecar `127.0.0.1:8101`（CPU） | `backend/embeddings/bge_text.py` |
 | 方案冻结 | `embeddings/scheme.py` 已钉死，不读 env | `backend/embeddings/scheme.py` |
 | VLM 端点 | `http://127.0.0.1:8100/v1`（llama.cpp，OpenAI 兼容） | `backend/model_clients.py:537` |
+
+## 照片复核 / 读字（S6）
+
+`inspect_photo` 与 `read_photo_text` 的提示词与取值口径。1.0 的调用量分别是
+10,721 次与 2,867 次，是助手的主要取证手段（设计文档 §1.3）。
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| `inspect_photo` 提示词 | 两个槽 `{target_instruction}` / `{question}`，固定要 `observation` / `certainty` / `target_face_id` 三个字段 | `backend/agent_runtime/tools.py:2616-2622` |
+| `certainty` 的取值 | **只有 `supported` / `uncertain` 两档**；模型没给时默认 `supported`。**没有「确定没有」那一档** | `:2619`、`:2255` |
+| 目标人物那句 | 只在**指名了目标人物**时才填；与裁剪图做没做出来无关（裁剪失败照样填，因为那句话说「（如有）」） | `:2196-2198`、`:2186-2200` |
+| 人脸清单 | 拼在提示词**之后**（不是槽）；未确认的人**不填 `person_name`**，模型据此不许猜姓名 | `:2204-2208`、`:2343-2355` |
+| 发几张图 | 指名目标人物且定位到裁剪件时发**两张**：裁剪件在前、原图在后 | `:2192` |
+| 问题缺席时的默认问法 | `请描述这张照片` | `:2125` |
+| **`read_photo_text` 的第一条路** | **任何 OCR 后端之前**先读导入期已落库的 `observations.ocr_text`，命中即返回 `source: ingestion_ocr` / `certainty: supported` / `persisted: true`（零推理开销） | `backend/agent_runtime/ocr_tool.py:544-559` |
+| `read_photo_text` 的后端顺序 | PaddleOCR 小模型优先（CPU、零显存、进程内），读不到回退 VLM；`paddleocr` 装不上时自己退化成 VLM-only | `ocr_tool.py:3`、`:134-142` |
+| 密集文字的两条处理 | 3×3 切块放大（`rows=3, cols=3, scale=2.0`）、按 y 聚行（`y_tol=26`） | `ocr_tool.py` 的 `_tile_images` / `_small_row_cluster` |
+
+> **`paddleocr` 从来没进过 2.0。** 它不是「移植时丢了」，是那个可选后端一开始就没加：
+> 2.0 的唯一 OCR 来源是 `OpenAIVlmObserver` 写入的 `ocr_text`。**所以 2.0 现在所处的状态，
+> 正是 1.0 在 `paddleocr` 装不上的环境里自己退化到的那个状态。**
+>
+> **2026-09-29 实测（153 的 8100，qwen3.5-4B）**：这个模型**答得比问的多**——问
+> 「这张图里画的是什么形状？只回答形状名称。」，它回「这张照片里画的是一个红色圆和一个
+> 蓝色正方形」。这正是 1.0 在 `read_photo_text` 的工具描述里专门警告模型不要拿它去统计
+> 「OCR 金额、桌数」的那件事的两面：**这个工具的用途是「读出真的写着什么」，而 VLM
+> 会读出图上没有的字、且不会自报**。T124 的工具描述必须按裁决如实收窄。
+
+## 照片人物取证（S6 · T122）
+
+`query_photo_people`——1.0 调用 887 次。它只回答「**这张照片里有谁**」，
+不做跨照片的人名搬运。
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| 工具描述原文 | 「读取一张已检索照片自己的已确认人物和未确认同行者。asset_handle 必须来自当前 search_memories preview；不会把其他候选照片的人名移植过来。」 | `backend/agent_runtime/tools.py:2723-2724` |
+| 声明的证据类型 | `photo_identity` + `confirmed_identity`（**两个都是**公共类型） | `tools.py:2727`、`evidence_contract.py:13-14` |
+| 已绑定人脸的判据 | `face_instances ⋈ face_clusters ⋈ entities`，唯一那条过滤是 `e.entity_type = 'person'`。**没有任何状态过滤** | `tools.py:2281-2300` |
+| 该查询的排序 | `quality DESC, detection_confidence DESC`（只有两个键，同分时取到哪行由 SQLite 定） | 同上 |
+| 未确认同行者 | `people_json` 里**没有 `entity_id`** 的条目数 **减去**已绑定的脸数，下界 0 | `tools.py:2582-2588` |
+| 人名快照取哪一条 | `observations` 里 `ORDER BY updated_at DESC LIMIT 1` | `tools.py:2578-2580` |
+| 空结果那句话 | `"没有已确认姓名"`（不是空串——空串会让模型以为字段坏了） | `tools.py:2602` |
+| 两个失败码 | `bad_handle`（handle 不在结果集）与 `scope_mismatch`（结果集不属于当前相册）分开 | `tools.py:2566-2576` |
+
+> **三处「名字/直觉与代码不一致」，都是 1.0 的，照搬不修。**
+>
+> 1. **`_confirmed_photo_identities` 判的是「绑没绑」，不是「确认没确认」。** 函数名与
+>    docstring 都写 *confirmed*，而 SQL 两个 JOIN 都是 INNER、一个状态过滤都没有。
+>    2.0 里簇可以带 pending 实体（`enroll_face` 就是「建簇带 pending 实体」）。
+>    **顺手补一个 `status = 'confirmed'` 是在改产品行为。**
+> 2. **`people` 是照着人脸实例逐行生成的，同一个人有两张脸就出现两次。**
+>    摘要会念成「爸爸、爸爸」（`tools.py:2589-2593`）。**去重会同时改掉 `people` 的长度**，
+>    而那个长度是证据。
+> 3. **`membership` 在 1.0 来自家庭图谱**（`get_effective_family_membership`，
+>    `tools.py:2295`），**不是实体上的字段**。2.0 只有 `entities.family_role`，
+>    所以工具描述里如实写明「尚无关系图谱」——不要据此推断两个人之间的亲属关系。
+>
+> **另外：那条 SQL 有三重互相覆盖的过滤**（簇 INNER、实体 INNER、`entity_type='person'`），
+> 单独把任一 INNER 换成 LEFT JOIN 都观察不到行为差别——`NULL = 'person'` 不为真，
+> WHERE 那一句自己就把未绑定的行挡掉了。2026-09-30 用定点变异实测确认过。

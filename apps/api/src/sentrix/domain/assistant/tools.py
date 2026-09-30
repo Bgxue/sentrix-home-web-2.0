@@ -197,9 +197,44 @@ QUERY_MEMORY_FACTS = ToolSpec(
 )
 
 
+QUERY_PHOTO_PEOPLE = ToolSpec(
+    name="query_photo_people",
+    description=(
+        "读取一张已检索照片自己的已确认人物和未确认同行者。"
+        "asset_handle 必须来自当前 search_memories preview；不会把其他候选照片的人名移植过来。"
+        "未确认的人**没有名字**，只报个数，不要给他们安名字。"
+        # 1.0 这里逐个人回的是 `get_effective_family_membership`（家庭图谱，S7）。
+        # 2.0 没有图谱，只有实体上的 family_role——描述里如实说清楚，
+        # 而不是让模型把 family_role 当成「这一家的人」去用。
+        "membership 一栏来自人物实体上的家庭角色，**尚无关系图谱**，"
+        "不要据此推断两个人之间的亲属关系。"
+    ),
+    parameters=_object_schema(
+        {
+            "result_set_id": {
+                "type": "string",
+                "description": "search_memories 或 get_result_page 返回的结果集 id。",
+            },
+            "asset_handle": {
+                "type": "string",
+                "description": "要查的那张照片的 handle（photo_1…），必须来自当前结果集的 preview。",
+            },
+        },
+        ["result_set_id", "asset_handle"],
+    ),
+    # 两条都声明，理由见 ``evidence_ledger.EvidenceType.PHOTO_IDENTITY`` 的注释：
+    # ``PHOTO_IDENTITY`` 是本工具自己的产物，``PERSON_PROFILE`` 是 1.0 那条
+    # ``confirmed_identity`` 在 2.0 的名字——只声明前者的话，「问照片里的人是谁」
+    # 这类需求在本工具被调用之后依然开着，门禁会逼模型再去找一个查不到的东西。
+    satisfies=(EvidenceType.PHOTO_IDENTITY, EvidenceType.PERSON_PROFILE),
+    required=("result_set_id", "asset_handle"),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     SEARCH_MEMORIES,
     QUERY_MEMORY_FACTS,
+    QUERY_PHOTO_PEOPLE,
     GET_RESULT_PAGE,
     GET_ORIGINAL_PHOTOS,
     GET_PERSON_PROFILE,

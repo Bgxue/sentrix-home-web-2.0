@@ -24,6 +24,7 @@ from sentrix.domain.identity.models import (
     FaceClusterRecord,
     FaceInstanceRecord,
     FacePrototypeRecord,
+    PhotoIdentityRecord,
 )
 from sentrix.infrastructure.persistence.database import Database
 
@@ -333,6 +334,53 @@ class SqliteFaceRepository:
 
     def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]:
         return self._instances_where("fi.cluster_id = ?", (cluster_id,))
+
+    def list_photo_identities(self, asset_id: str) -> Sequence[PhotoIdentityRecord]:
+        """1.0 ``tools.py:2281-2300`` 那条 SQL，逐字。
+
+        **两个 INNER JOIN 是判据本身**，不是写法：没有簇的脸、簇没绑实体的脸都不出现。
+        ``LEFT JOIN entity_mentions`` 则相反——没有那条提及也要出这一行，只是
+        ``mention_confidence`` 是 ``None``。
+
+        **一个状态过滤都没有**（``e.entity_type = 'person'`` 是唯一那条）。
+        端口方法的 docstring 写了这件事为什么照搬不修。
+
+        ``ORDER BY`` 只有两个键，也是 1.0 的：同质量同置信度时取到哪一行由 SQLite 定。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT fi.id AS face_instance_id, fi.asset_id, fi.cluster_id, fi.bbox_json,
+                       fi.detection_confidence, fi.quality,
+                       fc.entity_id, e.canonical_name, e.family_role,
+                       em.confidence AS mention_confidence
+                FROM face_instances fi
+                JOIN face_clusters fc ON fc.id = fi.cluster_id
+                JOIN entities e ON e.id = fc.entity_id
+                LEFT JOIN entity_mentions em
+                  ON em.face_instance_id = fi.id
+                 AND em.entity_id = fc.entity_id
+                WHERE fi.asset_id = ?
+                  AND e.entity_type = 'person'
+                ORDER BY fi.quality DESC, fi.detection_confidence DESC
+                """,
+                (asset_id,),
+            ).fetchall()
+        return [
+            PhotoIdentityRecord(
+                face_instance_id=str(row["face_instance_id"]),
+                asset_id=str(row["asset_id"]),
+                cluster_id=str(row["cluster_id"] or ""),
+                entity_id=str(row["entity_id"] or ""),
+                person_name=str(row["canonical_name"] or ""),
+                family_role=str(row["family_role"] or ""),
+                bbox=_vector(row["bbox_json"]),
+                detection_confidence=row["detection_confidence"],
+                quality=row["quality"],
+                mention_confidence=row["mention_confidence"],
+            )
+            for row in rows
+        ]
 
     def find_instance(self, cluster_id: str, instance_id: str) -> FaceInstanceRecord | None:
         rows = self._instances_where("fi.cluster_id = ? AND fi.id = ?", (cluster_id, instance_id))

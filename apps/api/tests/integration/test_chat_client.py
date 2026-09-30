@@ -149,9 +149,13 @@ def test_the_tools_field_carries_standard_json_schema(server: str):
 
     sent = _Handler.received[0]["body"]
     assert sent["tool_choice"] == "auto"
+    # 顺序与 ``TOOL_SPECS`` 一致（``query_photo_people`` 是 S6 T122 加的第五个）。
+    # 与 ``test_assistant_policy.test_the_tool_list_is_exactly_what_ships`` 是两处
+    # 故意的重复：那条钉**注册表**，这条钉**真的上了线的那份**（发出去的就是它们）。
     assert [tool["function"]["name"] for tool in sent["tools"]] == [
         "search_memories",
         "query_memory_facts",
+        "query_photo_people",
         "get_result_page",
         "get_original_photos",
         "get_person_profile",

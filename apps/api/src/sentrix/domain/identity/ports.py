@@ -32,6 +32,7 @@ from sentrix.domain.identity.models import (
     FacePrototypeRecord,
     PersonMomentRecord,
     PersonNameMatch,
+    PhotoIdentityRecord,
     PortraitRevisionRecord,
     RelationshipRecord,
 )
@@ -99,6 +100,30 @@ class FaceRepository(Protocol):
         ...
 
     def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]: ...
+
+    def list_photo_identities(self, asset_id: str) -> Sequence[PhotoIdentityRecord]:
+        """一张照片里**已经绑到人物实体**的那些脸（T122/T123 共用）。
+
+        1.0 ``agent_runtime/tools.py:2277-2316`` 的 ``_confirmed_photo_identities``，
+        那条 JOIN 原样：``face_instances ⋈ face_clusters ⋈ entities``，
+        只留 ``entity_type = 'person'``。
+
+        **名字与判据不一致，这是 1.0 的，照搬不修。** 那个函数叫
+        ``_confirmed_photo_identities``、docstring 也写着 *confirmed*，而 SQL 里
+        **一个状态过滤都没有**——两个 JOIN 都是 INNER，所以它判的是「**绑没绑**」：
+        有的脸没有簇、有的簇没有实体，那些不出现；至于簇或实体是不是 ``confirmed``，
+        它一次都没看过。2.0 里簇可以带 pending 实体（``enroll_face`` 就是「建簇带
+        pending 实体」），所以这两个问题不是一回事。**顺手补一个
+        ``status = 'confirmed'`` 是在改产品行为，不是修 bug。**
+
+        排序也是 1.0 的：``quality DESC, detection_confidence DESC``（**没有第三键**，
+        所以完全同分的两张脸取到哪一行由 SQLite 决定——照抄）。
+
+        ``bbox`` 这一格是给 T123 的：``_inspect_photo`` 拿它去裁目标人物的定位图
+        （``tools.py:2181-2192``）。T122 自己一个都不用，但两条工具共用这一条读路径，
+        少带一格就会让 T123 再开一条几乎一样的查询。
+        """
+        ...
 
     def person_candidate_features(self, scope_id: str) -> Sequence[dict[str, Any]]:
         """核心人物排序的输入：这个空间里每个**未退休**的簇一行特征。

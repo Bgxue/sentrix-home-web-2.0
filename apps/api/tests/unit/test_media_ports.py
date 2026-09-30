@@ -2,7 +2,16 @@ from sentrix.domain.media import ports
 
 
 def test_ports_are_protocols_not_concrete_classes():
-    for name in ("AssetRepository", "MediaStorage", "MetadataReader", "PreviewEncoder"):
+    # ``VlmObserver`` 与 ``ObservationSemantics`` 比这份名单先落地，一直没被列进来；
+    # 本切片新加的 ``PhotoInspector``（T123/T124 共用的上游件）随手补上——
+    # 这条不变量问的是「端口有没有写成 Protocol」，新端口就该当场被它盖住。
+    for name in (
+        "AssetRepository",
+        "MediaStorage",
+        "MetadataReader",
+        "PreviewEncoder",
+        "PhotoInspector",
+    ):
         port = getattr(ports, name)
         assert getattr(port, "_is_protocol", False), f"{name} 必须是 Protocol"
 

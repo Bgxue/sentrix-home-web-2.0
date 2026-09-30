@@ -38,6 +38,7 @@ import base64
 import json
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -179,17 +180,28 @@ def semantics_from_payload(payload: dict[str, Any]) -> ObservationSemantics:
 
 
 def chat_json(
-    endpoint: str, model: ServedModel, prompt: str, image: str | None, timeout_s: float
+    endpoint: str,
+    model: ServedModel,
+    prompt: str,
+    image: str | Sequence[str] | None,
+    timeout_s: float,
 ) -> dict[str, Any] | None:
-    """一次「提示词（+ 图）→ JSON 对象」的往返。任何失败都返回 ``None``。
+    """一次「提示词（+ 一张或多张图）→ JSON 对象」的往返。任何失败都返回 ``None``。
 
-    ``OpenAIVlmObserver`` 与 ``person_vision_model.OpenAIPersonVision`` 共用这一段：
-    请求体的形状（``content`` 是块数组、图走 ``image_url`` 的 data URL）与失败口径只在
-    这一处，改一次两边都动——两条链路都不许把「模型没答」升级成「导入失败」。
+    ``OpenAIVlmObserver`` / ``person_vision_model.OpenAIPersonVision`` /
+    ``photo_inspector.OpenAIPhotoInspector`` 共用这一段：请求体的形状（``content`` 是块
+    数组、图走 ``image_url`` 的 data URL）与失败口径只在这一处，改一次三边都动——三条
+    链路都不许把「模型没答」升级成「导入失败」。
+
+    **为什么会收一串图。** 1.0 的 ``inspect_photo`` 在指名了目标人物时发**两张**：
+    裁剪件在前、原图在后（``tools.py:2192``）。多图在这里只是多几个 ``image_url`` 块，
+    **顺序即语义**（提示词说「第一张图（如有）是该人物的定位裁剪图」），所以照传进来的
+    次序发，不排序、不去重。单张仍然照旧传字符串——``OpenAIVlmObserver`` 与
+    ``OpenAIPersonVision`` 的调用点一个字都不用改。
     """
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    if image is not None:
-        content.append({"type": "image_url", "image_url": {"url": image}})
+    for url in [image] if isinstance(image, str) else list(image or ()):
+        content.append({"type": "image_url", "image_url": {"url": url}})
     try:
         body = {
             "model": model.current(),

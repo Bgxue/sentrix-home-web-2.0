@@ -1,7 +1,8 @@
-"""四个工具的执行器：把工具调用接到真正的检索、资产与人物目录上。
+"""五个工具的执行器：把工具调用接到真正的检索、资产、人物目录与人脸绑定上。
 
-对应 1.0 ``agent_runtime/tools.py`` 的四个 handler（``_search_memories`` 1513 行起、
-``_get_result_page`` 2044、``_get_original_photos`` 1966、``_get_person_profile`` 2651）。
+对应 1.0 ``agent_runtime/tools.py`` 的五个 handler（``_search_memories`` 1513 行起、
+``_get_result_page`` 2044、``_get_original_photos`` 1966、``_get_person_profile`` 2651、
+``_query_photo_people`` 2555）。
 
 **每个工具产出两份投影，这是本模块最重要的设计。** 1.0 在 handler 与模型之间夹了两层
 过滤（``ToolPolicy._sanitize`` 的键白名单 + ``runtime.py:131-180`` 的
@@ -32,7 +33,8 @@ from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
 from sentrix.domain.assistant.result_set import ResultSet
-from sentrix.domain.media.ports import AssetRepository
+from sentrix.domain.identity.ports import FaceRepository
+from sentrix.domain.media.ports import AssetRepository, ObservationRepository
 from sentrix.domain.retrieval.fact_query import FactRejection
 
 log = logging.getLogger("sentrix.assistant.tools")
@@ -83,12 +85,18 @@ class AssistantToolbox:
         result_sets: ResultSetRepository,
         people: PersonDirectory,
         memory_facts: QueryMemoryFacts,
+        faces: FaceRepository,
+        observations: ObservationRepository,
     ) -> None:
         self._retrieval = retrieval
         self._assets = assets
         self._result_sets = result_sets
         self._people = people
         self._memory_facts = memory_facts
+        # ``query_photo_people`` 的两条读路径（T122）。两者都是**只读**，
+        # 且都只被这一个工具用——不是通用能力。
+        self._faces = faces
+        self._observations = observations
 
     def execute(
         self, name: str, arguments: Mapping[str, Any], *, scope_id: str, now: datetime
@@ -97,6 +105,8 @@ class AssistantToolbox:
             return self._search(arguments, scope_id=scope_id, now=now)
         if name == "get_result_page":
             return self._page(arguments, scope_id=scope_id)
+        if name == "query_photo_people":
+            return self._photo_people(arguments, scope_id=scope_id)
         if name == "get_original_photos":
             return self._deliver(arguments, scope_id=scope_id)
         if name == "get_person_profile":
@@ -262,6 +272,85 @@ class AssistantToolbox:
                 "note": "这些照片已经展示给用户了。",
             },
             attachments=tuple(attachments),
+        )
+
+    # ---- query_photo_people -------------------------------------------------
+
+    def _photo_people(self, arguments: Mapping[str, Any], *, scope_id: str) -> ToolOutcome:
+        """一张照片自己的已确认人物 + 未确认同行者。1.0 ``tools.py:2555-2608``。
+
+        **这个工具只回答「这张照片里有谁」，不做跨照片的人名搬运**——1.0 的工具描述
+        把这条写死了（``:2724``），因为模型很容易从候选集里另一张照片借一个名字过来。
+
+        三处判据逐条照 1.0：
+
+        1. ``resolve`` 失败与「结果集不属于本 scope」都**各自**回一句——1.0 是
+           ``bad_handle`` 与 ``scope_mismatch`` 两个码，合起来会让「handle 打错了」
+           与「结果集过期了」在轨迹里长得一样；
+        2. 未确认同行者 = ``people_json`` 里**没有 entity_id** 的条目数
+           ``- 已绑定的脸数``，下限 0。减这一下是必须的：命名流程会把已确认的人
+           **追加**进同一份快照，不减就会把已经认出来的人再数一遍
+           （1.0 ``:2582-2588`` 的注释写的就是这件事）；
+        3. ``summary`` 那一句是给模型看的，未确认时明说「没有已确认姓名」，
+           而不是留空——空串会让模型以为这个字段坏了。
+        """
+        result_set_id = str(arguments.get("result_set_id") or "").strip()
+        handle = str(arguments.get("asset_handle") or "").strip()
+        result_set = self._result_sets.get(result_set_id)
+        if result_set is None:
+            return _failure("unknown_result_set", "结果集不存在。请先调用 search_memories。")
+        if result_set.scope_id != scope_id:
+            return _failure("scope_mismatch", "这个结果集不属于当前相册。")
+
+        asset_id = result_set.resolve(handle)
+        if asset_id is None:
+            return _failure(
+                "bad_handle",
+                "这个 handle 不在当前结果集里。请只用 search_memories / get_result_page 返回的 handle。",
+            )
+
+        identities = self._faces.list_photo_identities(asset_id)
+        snapshot = self._observations.latest_people_snapshot(asset_id)
+        described = sum(1 for entry in snapshot if not entry.entity_id)
+        unconfirmed = max(0, described - len(identities))
+
+        named = [
+            {
+                "person_name": row.person_name,
+                # 端口那层叫 ``family_role``，工具契约那一格叫 ``membership``（1.0 的名字）。
+                # 映射写在这里，不写进仓储——仓储不该知道助手工具的字段名。
+                "membership": row.family_role or "unknown",
+                "identity_status": "bound",
+                "asset_id": row.asset_id,
+            }
+            for row in identities
+            if row.person_name
+        ]
+        summary = "、".join(row["person_name"] for row in named) or "没有已确认姓名"
+        if unconfirmed:
+            summary += f"；另有 {unconfirmed} 名未确认身份同行者"
+
+        return ToolOutcome(
+            observation={
+                "result_set_id": result_set.id,
+                "asset_id": asset_id,
+                "people": named,
+                "unconfirmed_people_count": unconfirmed,
+                "described_people_count": described,
+            },
+            model_visible={
+                "result_set_id": result_set.id,
+                "people": [
+                    {
+                        "person_name": row["person_name"],
+                        "membership": row["membership"],
+                        "identity_status": row["identity_status"],
+                    }
+                    for row in named
+                ],
+                "unconfirmed_people_count": unconfirmed,
+                "summary": summary,
+            },
         )
 
     # ---- get_person_profile -------------------------------------------------
