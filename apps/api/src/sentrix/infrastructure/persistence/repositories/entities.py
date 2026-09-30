@@ -200,6 +200,24 @@ class SqliteEntityRepository:
             ).fetchall()
         return [_row_to_entity(row) for row in rows]
 
+    def recent_observation_ids(self, entity_id: str, *, limit: int = 100) -> Sequence[str]:
+        """1.0 ``db.py:4590-4594`` 的 ``entity_observations ⋈ observations``，只取 id。
+
+        **不选 ``o.*``。** 1.0 那条 SQL 选的是整行，但拿到之后**只用了 ``row["id"]``**，
+        紧接着对每一行再 ``get_observation`` 一次——那个投影是多余的，2.0 不复刻它。
+        下面那两层 N+1（逐条取观察、逐条取 asset）倒是照搬，因为它们的**结果**要进响应。
+
+        ``captured_at`` 相同时没有第二排序键，与 1.0 一致；不确定性写在端口 docstring 里。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT o.id FROM entity_observations eob"
+                " JOIN observations o ON o.id = eob.observation_id"
+                " WHERE eob.entity_id = ? ORDER BY o.captured_at DESC LIMIT ?",
+                (entity_id, limit),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def decorate_entities(self, entity_ids: Sequence[str]) -> Mapping[str, EntityDecoration]:
         """1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``，六条批量聚合逐条对齐。
 

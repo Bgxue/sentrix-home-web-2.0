@@ -1109,3 +1109,140 @@ def test_a_non_person_is_reviewable_by_evidence_count(identity_client: TestClien
 
     after = identity_client.get("/api/v1/entities").json()["entities"][0]
     assert after["reviewable"] is True
+
+
+# ---- 实体详情 --------------------------------------------------------------------
+
+
+def test_the_entity_detail_carries_the_nine_blocks(identity_client: TestClient):
+    """十二个键搬九个，这里钉「九个都在、且都是数组 / 对象而不是 null」。"""
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    body = identity_client.get("/api/v1/entities/ent_place").json()
+
+    assert body["entity"]["canonical_name"] == "西湖"
+    assert body["entity"]["entity_type"] == "place"
+    assert body["properties"] == []
+    assert body["property_history"] == []
+    assert body["clusters"] == []
+    assert body["facts"] == []
+    assert body["events"] == []
+    assert body["observations"] == []
+    assert body["appearance_evidence"] == []
+    assert body["evidence_files"] == []
+
+
+def test_an_unknown_entity_detail_is_404(identity_client: TestClient):
+    """1.0 ``app.py:1951-1952``：``if not value`` → 404 ``entity not found``。"""
+    response = identity_client.get("/api/v1/entities/ent_nope")
+
+    assert response.status_code == 404
+    assert _error(response) == ("not_found", "entity not found")
+
+
+def test_a_pending_person_in_the_detail_only_has_its_name_replaced(identity_client: TestClient):
+    """1.0 这个端点**只换名字**——它**没有**同时改 ``family_role`` 与 ``summary``，
+    而同仓库的 ``/api/people/{id}/profile`` 与 ``/evidence`` 两处都改了。
+
+    **三处不一致是 1.0 的原样**（``app.py:1954-1955`` 对 ``:1545-1549``）。顺手「统一」
+    会让这个端点的 ``summary`` 从落库原文变成展示文案。
+
+    定点变异：在 ``_entity_detail_payload`` 里补上 ``family_role`` / ``summary`` 的改写，
+    这条变红。
+    """
+    add_entity(
+        identity_client,
+        "ent_1",
+        name="待确认人物簇 · cluster_1",
+        family_role="母亲",
+        summary="由 buffalo_l 生成",
+    )
+
+    entity = identity_client.get("/api/v1/entities/ent_1").json()["entity"]
+
+    assert entity["canonical_name"] == PENDING_CLUSTER_NAME
+    assert entity["family_role"] == "母亲"  # **照搬 1.0：这里不改**
+    assert entity["summary"] == "由 buffalo_l 生成"  # **也不改**
+
+
+def test_a_pending_person_in_the_people_list_does_change_its_role_and_summary(
+    identity_client: TestClient,
+):
+    """对照：``/people`` 那一侧**三件都改**。两条用例一起才说明「不一致是照搬的」，
+    而不是「有一边忘了改」。
+    """
+    add_entity(
+        identity_client,
+        "ent_1",
+        name="待确认人物簇 · cluster_1",
+        family_role="母亲",
+        summary="由 buffalo_l 生成",
+    )
+
+    person = identity_client.get("/api/v1/people").json()["people"][0]
+
+    assert person["canonical_name"] == PENDING_CLUSTER_NAME
+    assert person["family_role"] is None
+    assert person["summary"] == "由人脸聚类生成，等待用户确认"
+
+
+def test_the_detail_has_no_relationships_key(identity_client: TestClient):
+    """``relationships`` 留 S7，**键不进响应**（按「不留恒空的占位键」）。
+
+    定点变异：在 ``EntityDetailResponse`` 上加一个 ``relationships: list[...] = []``，
+    这条变红——那正是它要挡的：恒空的键读起来像「这个实体确实没有关系」。
+    """
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    body = identity_client.get("/api/v1/entities/ent_place").json()
+
+    assert "relationships" not in body
+
+
+def test_the_detail_has_no_profile_or_claims_keys(identity_client: TestClient):
+    """``profile`` / ``claims`` 归 T130（``GET /knowledge`` 就是这两张表 + spaces），
+    本次不搬。同样不留占位键。
+    """
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    body = identity_client.get("/api/v1/entities/ent_place").json()
+
+    assert "profile" not in body
+    assert "claims" not in body
+
+
+def test_the_detail_observations_carry_their_asset(identity_client: TestClient):
+    """观察块带 asset（1.0 是把 ``assets`` 整行挂上去）。**没有 ``transcript``**——
+    那一列属于 S8，2.0 的 ``observations`` 表里根本没有。"""
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+    with _db(identity_client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entity_observations (entity_id, observation_id, confidence, source,"
+            " created_at) VALUES ('ent_place', 'obs_1', 0.5, 'observation_extraction', ?)",
+            (NOW,),
+        )
+
+    observation = identity_client.get("/api/v1/entities/ent_place").json()["observations"][0]
+
+    assert observation["id"] == "obs_1"
+    assert observation["asset"]["file_name"] == "asset_1.jpg"
+    assert observation["asset"]["media_type"] == "image"
+    assert "transcript" not in observation
+
+
+def test_the_detail_properties_split_current_from_history(identity_client: TestClient):
+    """``properties`` 排掉 superseded，``property_history`` 全要。"""
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+    with _db(identity_client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entity_properties (id, entity_id, property_key, value_json, source,"
+            " confidence, status, evidence_ids_json, revision, created_at, updated_at)"
+            " VALUES ('prop_old', 'ent_place', 'scene_type', '\"旧\"', 'observation_extraction',"
+            " 0.5, 'superseded', '[]', 1, ?, ?)",
+            (NOW, NOW),
+        )
+
+    body = identity_client.get("/api/v1/entities/ent_place").json()
+
+    assert body["properties"] == []
+    assert [item["id"] for item in body["property_history"]] == ["prop_old"]

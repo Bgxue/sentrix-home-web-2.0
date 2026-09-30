@@ -49,6 +49,12 @@ CLUSTER_STATUS_PENDING = "pending"
 CLUSTER_STATUS_CONFIRMED = "confirmed"
 CLUSTER_STATUS_REJECTED = "rejected"
 
+# 一个簇在详情里带几张样本脸。1.0 ``db.py:5149`` 的 ``LIMIT 12``——「簇审阅页一屏放得下
+# 的样本数」。**两个读者**：簇列表（``GET /face-clusters``）与实体详情（``GET /entities/{id}``
+# 的 ``clusters[].samples``）。原先只在 ``api/routes/identity.py`` 里定义，T128b 的用例层
+# 也要用同一个数——两处各写一个 12，改了一处就是一屏放不下或样本被截。
+CLUSTER_SAMPLES_LIMIT = 12
+
 # 人脸检测的复核结论。四个取值散在检测适配器、在线匹配的资格闸门、重聚类的认领条件
 # 三处，收成一份：它们同时是「落库的列」与「判据的字面量」，漂开一次就是一条静默的空集。
 FACE_VALIDITY_VERIFIED = "verified"
@@ -549,6 +555,11 @@ class AppearanceEvidenceRecord:
     status: str
     created_at: datetime | None
     updated_at: datetime | None
+    # 1.0 ``db.py:4535-4546`` 的查询**内连 ``assets``** 并选出这两列。2.0 早先只搬了主表，
+    # 是同一段的不完整移植；T128b 的 ``evidence_files`` 要用文件名，才把它补齐。
+    # 有默认值是为了不动已有的构造点——它们是**联表带出来的**，不是这张表自己的列。
+    file_name: str = ""
+    media_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -31,10 +31,16 @@ from datetime import UTC, datetime
 from sentrix.domain.identity.models import AppearanceEvidenceRecord
 from sentrix.infrastructure.persistence.database import Database
 
+# 1.0 ``db.py:4535-4546`` 的 ``list_person_appearance_evidence`` **内连 ``assets``** 并选出
+# ``a.file_name`` / ``a.media_type``。2.0 早先只搬了主表那几列，是同一段的不完整移植——
+# T128b 的 ``evidence_files`` 要用文件名（1.0 的兜底是「取不到就用 asset_id」，
+# 少了这两列就永远走兜底，读起来像文件名本来就是 asset_id）。
 _COLUMNS = (
-    "id, person_id, face_instance_id, observation_id, asset_id, crop_bbox_json,"
-    " clothing_json, confidence, model_name, status, created_at, updated_at"
+    "pae.id, pae.person_id, pae.face_instance_id, pae.observation_id, pae.asset_id,"
+    " pae.crop_bbox_json, pae.clothing_json, pae.confidence, pae.model_name, pae.status,"
+    " pae.created_at, pae.updated_at, a.file_name, a.media_type"
 )
+_ASSET_JOIN = " JOIN assets a ON a.id = pae.asset_id"
 
 CONFIRMED = "confirmed"
 CONFIRMED_PERSON_STATUS = "confirmed"
@@ -169,7 +175,8 @@ class SqliteAppearanceRepository:
     def get(self, evidence_id: str) -> AppearanceEvidenceRecord | None:
         with self._database.connect() as connection:
             row = connection.execute(
-                f"SELECT {_COLUMNS} FROM person_appearance_evidence WHERE id = ?", (evidence_id,)
+                f"SELECT {_COLUMNS} FROM person_appearance_evidence pae{_ASSET_JOIN} WHERE pae.id = ?",
+                (evidence_id,),
             ).fetchone()
         return _record(row)
 
@@ -183,13 +190,14 @@ class SqliteAppearanceRepository:
         的提示词）。默认把它们排除，是因为它们没有信息量；要统计「模型判不出来的比例」
         时才传 ``include_empty=True``。
         """
-        where = "person_id = ? AND status = ?"
+        where = "pae.person_id = ? AND pae.status = ?"
         if not include_empty:
-            where += " AND clothing_json != '[]'"
+            where += " AND pae.clothing_json != '[]'"
         with self._database.connect() as connection:
             rows = connection.execute(
-                f"SELECT {_COLUMNS} FROM person_appearance_evidence WHERE {where}"
-                " ORDER BY confidence DESC, updated_at DESC LIMIT ?",
+                f"SELECT {_COLUMNS} FROM person_appearance_evidence pae{_ASSET_JOIN}"
+                f" WHERE {where}"
+                " ORDER BY pae.confidence DESC, pae.updated_at DESC LIMIT ?",
                 (person_id, CONFIRMED, limit),
             ).fetchall()
         return [record for row in rows if (record := _record(row)) is not None]
@@ -211,4 +219,6 @@ def _record(row: sqlite3.Row | None) -> AppearanceEvidenceRecord | None:
         status=row["status"],
         created_at=_timestamp(row["created_at"]),
         updated_at=_timestamp(row["updated_at"]),
+        file_name=row["file_name"],
+        media_type=row["media_type"],
     )

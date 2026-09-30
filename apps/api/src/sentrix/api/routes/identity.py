@@ -30,6 +30,14 @@ from sentrix.api.schemas.identity import (
     BatchConfirmResponse,
     ConfirmClusterRequest,
     ConfirmClusterResponse,
+    EntityDetailAppearance,
+    EntityDetailAsset,
+    EntityDetailEntity,
+    EntityDetailEvent,
+    EntityDetailFact,
+    EntityDetailObservation,
+    EntityDetailResponse,
+    EntityEvidenceFile,
     EntityListResponse,
     EntityPropertyPayload,
     EntityPropertyRequest,
@@ -49,6 +57,7 @@ from sentrix.api.schemas.identity import (
 )
 from sentrix.application.identity.name_person import NamePerson
 from sentrix.application.identity.observe_appearance import ObserveAppearance
+from sentrix.application.identity.read_entity_detail import EntityDetail, ReadEntityDetail
 from sentrix.application.identity.review_cluster import ReviewCluster
 from sentrix.application.identity.seed_identity import (
     NoSeedFacesError,
@@ -60,6 +69,7 @@ from sentrix.application.memories.assign_events import ConfirmedPersonEvents, Ev
 from sentrix.bootstrap.container import Container
 from sentrix.domain.identity.decoration import is_reviewable, is_single_sample, private_place
 from sentrix.domain.identity.models import (
+    CLUSTER_SAMPLES_LIMIT,
     CLUSTER_STATUS_PENDING,
     CLUSTER_STATUS_REJECTED,
     ENTITY_STATUS_CONFIRMED,
@@ -78,8 +88,6 @@ from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observati
 
 router = APIRouter(tags=["identity"])
 
-# 1.0 ``db.py:5149`` 的 LIMIT 12：簇审阅页一屏放得下的样本数。
-CLUSTER_SAMPLES_LIMIT = 12
 # 1.0 ``app.py:2530-2532`` 的三个字面量。裁剪尺寸与质量是**交付契约**：换一个数字，
 # 前端缓存里的缩略图与新的就再也对不上。
 FACE_CROP_MAX_DIMENSION = 256
@@ -395,6 +403,158 @@ def list_entities(
     return EntityListResponse(
         entities=[_entity_summary(container, item, decorations[item.id]) for item in records]
     )
+
+
+def _read_entity_detail(container: Container) -> ReadEntityDetail:
+    """实体详情用例的装配。**七个协作者，只有这里知道它们是谁。**"""
+    return ReadEntityDetail(
+        entities=container.entity_repository,
+        faces=container.face_repository,
+        facts=container.fact_repository,
+        events=container.event_repository,
+        observations=container.observation_repository,
+        assets=container.asset_repository,
+        appearances=container.appearance_repository,
+    )
+
+
+def _detail_asset(asset: Asset | None) -> EntityDetailAsset | None:
+    if asset is None:
+        return None
+    return EntityDetailAsset(
+        id=asset.id,
+        file_name=asset.file_name,
+        media_type=str(asset.media_type),
+        path=asset.path,
+    )
+
+
+def _entity_detail_payload(detail: EntityDetail, container: Container) -> EntityDetailResponse:
+    """把用例的结果搬进响应模型。**只有一处改写**，指 1.0 ``app.py:1954-1955``。"""
+    entity = detail.entity
+    canonical_name = entity.canonical_name
+    if entity.entity_type == ENTITY_TYPE_PERSON and entity.status == ENTITY_STATUS_PENDING:
+        # **只换名字。** 1.0 这个端点没有同时改 ``family_role`` 与 ``summary``，
+        # 而同仓库的 ``/api/people/{id}/profile``（``app.py:1545-1549``）与
+        # ``/evidence``（``:1561-1565``）两处都改了。**三处不一致是 1.0 的原样**，
+        # 照搬——顺手「统一」会让这个端点的 ``summary`` 从落库原文变成展示文案。
+        canonical_name = PENDING_CLUSTER_NAME
+    return EntityDetailResponse(
+        entity=EntityDetailEntity(
+            id=entity.id,
+            scope_id=entity.scope_id,
+            entity_type=entity.entity_type,
+            canonical_name=canonical_name,
+            status=entity.status,
+            family_role=entity.family_role,
+            summary=entity.summary,
+            confidence=entity.confidence,
+            identity_state=entity.identity_state,
+            role_state=entity.role_state,
+            name_state=entity.name_state,
+            created_at=_optional_isoformat(entity.created_at),
+            updated_at=_optional_isoformat(entity.updated_at),
+            avatar_face_instance_id=detail.avatar_face_instance_id,
+            evidence_count=detail.evidence_count,
+        ),
+        properties=[_property_payload(item) for item in detail.properties],
+        property_history=[_property_payload(item) for item in detail.property_history],
+        # 簇那一块直接复用 ``FaceClusterSummary``：它的形状就是 1.0 的「簇行 + samples」，
+        # 再定义一个同样的模型只会让两处漂开。
+        clusters=[
+            _cluster_payload(container, item.cluster).model_copy(
+                update={"samples": [_crop_ref(face) for face in item.samples]}
+            )
+            for item in detail.clusters
+        ],
+        facts=[
+            EntityDetailFact(
+                id=fact.id,
+                scope_id=fact.scope_id,
+                subject=fact.subject,
+                predicate=fact.predicate,
+                object=fact.object,
+                status=str(fact.status),
+                confidence=fact.confidence,
+                evidence_ids=list(fact.evidence_ids),
+                revision=fact.revision,
+            )
+            for fact in detail.facts
+        ],
+        events=[
+            EntityDetailEvent(
+                id=event.id,
+                scope_id=event.scope_id,
+                title=event.title,
+                event_type=event.event_type,
+                time_start=_optional_isoformat(event.time_start),
+                time_end=_optional_isoformat(event.time_end),
+                place=event.place,
+                admin_district=event.admin_district,
+                activity=event.activity,
+                summary=event.summary,
+                confidence=event.confidence,
+                aggregation_score=event.aggregation_score,
+                status=event.status,
+                revision=event.revision,
+            )
+            for event in detail.events
+        ],
+        observations=[
+            EntityDetailObservation(
+                id=item.observation.id,
+                asset_id=item.observation.asset_id,
+                source_type=item.observation.source_type,
+                captured_at=_optional_isoformat(item.observation.captured_at),
+                caption=item.observation.caption,
+                asset=_detail_asset(item.asset),
+            )
+            for item in detail.observations
+        ],
+        appearance_evidence=[
+            EntityDetailAppearance(
+                id=item.id,
+                person_id=item.person_id,
+                face_instance_id=item.face_instance_id,
+                observation_id=item.observation_id,
+                asset_id=item.asset_id,
+                crop_bbox=list(item.crop_bbox),
+                clothing=list(item.clothing),
+                confidence=item.confidence,
+                model_name=item.model_name,
+                status=item.status,
+                file_name=item.file_name,
+                media_type=item.media_type,
+            )
+            for item in detail.appearance_evidence
+        ],
+        evidence_files=[
+            EntityEvidenceFile(
+                evidence_id=item.evidence_id,
+                asset_id=item.asset_id,
+                file_name=item.file_name,
+                kind=item.kind,
+            )
+            for item in detail.evidence_files
+        ],
+    )
+
+
+@router.get("/entities/{entity_id}")
+def get_entity_detail(
+    entity_id: str,
+    container: Container = Depends(get_container),
+) -> EntityDetailResponse:
+    """实体详情。1.0 ``app.py:1948-1956`` 加 ``db.py:4570-4627``。
+
+    两条边界：用例对不存在的实体返回 ``None`` → 404 ``entity not found``
+    （1.0 是 ``if not value:`` 判的，同一个条件）；pending 的人物**只换名字**，
+    理由写在 ``_entity_detail_payload`` 里。
+    """
+    detail = _read_entity_detail(container).execute(entity_id)
+    if detail is None:
+        raise NotFoundError("entity not found")
+    return _entity_detail_payload(detail, container)
 
 
 def _property_payload(record: EntityPropertyRecord) -> EntityPropertyPayload:

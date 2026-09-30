@@ -359,6 +359,22 @@ class EntityRepository(Protocol):
         """
         ...
 
+    def recent_observation_ids(self, entity_id: str, *, limit: int = 100) -> Sequence[str]:
+        """这个实体关联的观察 id，按 ``captured_at`` 降序，取前 ``limit`` 条。
+
+        1.0 ``db.py:4590-4594`` 的 ``entity_observations ⋈ observations``，
+        ``ORDER BY o.captured_at DESC LIMIT 100``。
+
+        **只回 id，不回观察本体。** 1.0 那条 SQL 选的是 ``o.*``，但拿到行之后**只用了
+        ``row["id"]``**——它紧接着对每一行再 ``get_observation`` 一次。2.0 不重复那个多余
+        的投影，只取 id，由用例去取本体与 asset（1.0 那两层 N+1 的形状保留）。
+
+        **一处照搬的 1.0 不确定性**：``captured_at`` 相同时 1.0 没有第二排序键，
+        取到哪几条由 SQLite 的扫描顺序决定——同一个实体问两次，返回的**集合**都可能在
+        边界上不同。照搬不修（改它要引入 1.0 没有的次序），但记在这里。
+        """
+        ...
+
     def decorate_entities(self, entity_ids: Sequence[str]) -> Mapping[str, EntityDecoration]:
         """批量取实体列表要用的派生字段。1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``。
 

@@ -257,3 +257,147 @@ class EntityPropertyPayload(BaseModel):
     revision: int
     created_at: str | None
     updated_at: str | None
+
+
+class EntityDetailEntity(BaseModel):
+    """实体详情里的 ``entity`` 那一块。
+
+    **与 ``EntitySummaryPayload`` 不是同一个东西**：1.0 的详情只在这个实体行上就地加了
+    ``avatar_face_instance_id`` 与 ``evidence_count`` 两个键（``db.py:4579`` / ``:4601``），
+    而列表那一边加的是七条聚合的十一个字段。两个响应模型不共用，是因为它们**描述的是
+    1.0 的两个不同投影**，合成一个会让两边都出现恒空的键。
+
+    ``evidence_count`` 在这里是**取回来的观察条数**（上限 100），而列表那边是
+    ``entity_observations`` 的原始行数——**1.0 就是两个数**，别统一。
+    """
+
+    id: str
+    scope_id: str
+    entity_type: str
+    canonical_name: str
+    status: str
+    family_role: str | None
+    summary: str
+    confidence: float
+    identity_state: str
+    role_state: str
+    name_state: str
+    created_at: str | None
+    updated_at: str | None
+    avatar_face_instance_id: str | None
+    evidence_count: int
+
+
+class EntityDetailAsset(BaseModel):
+    """观察指向的资产。1.0 是把 ``assets`` 整行挂上去，前端只读这几个字段。"""
+
+    id: str
+    file_name: str
+    media_type: str
+    path: str
+
+
+class EntityDetailObservation(BaseModel):
+    """一条原始证据。``asset`` 读不回来时为 ``None``——1.0 会把那种观察整个跳过，
+    所以正常情况下它非空；留可空是为了不在模型层假装它一定在。
+
+    **没有 ``transcript``。** 1.0 的 ``observations`` 表有这一列（``db.py:457``），
+    2.0 没有——视频/音频的转写属于 **S8**，``application/retrieval/index_observation_text.py``
+    的 docstring 里已经写明「不是遗漏，是那一侧还没做」。1.0 前端拿它当 caption 的兜底
+    （``src/app.js:1036`` 的 ``caption || transcript || "原始观察证据"``），所以这里少一个键
+    的后果是那句话直接落到常量，不会渲染出错。
+    """
+
+    id: str
+    asset_id: str
+    source_type: str
+    captured_at: str | None
+    caption: str
+    asset: EntityDetailAsset | None
+
+
+class EntityDetailFact(BaseModel):
+    """一条事实。``subject`` / ``object`` 存的是**名字不是 id**（1.0 的 ``facts`` 表如此），
+    所以按实体找事实是按名字匹配 ``canonical_name``。"""
+
+    id: str
+    scope_id: str
+    subject: str
+    predicate: str
+    object: str
+    status: str
+    confidence: float
+    evidence_ids: list[str]
+    revision: int
+
+
+class EntityDetailEvent(BaseModel):
+    """事件本体。1.0 那块是 ``get_event`` 的整行（还带若干派生键）；
+    2.0 的 ``EventRecord`` 是 S4 裁过的形状，这里就照它给。"""
+
+    id: str
+    scope_id: str
+    title: str
+    event_type: str
+    time_start: str | None
+    time_end: str | None
+    place: str
+    admin_district: str
+    activity: str
+    summary: str
+    confidence: float
+    aggregation_score: float
+    status: str
+    revision: int
+
+
+class EntityDetailAppearance(BaseModel):
+    """一条外观取样。``file_name`` / ``media_type`` 是**联表带出来的**，
+    不是 ``person_appearance_evidence`` 自己的列。"""
+
+    id: str
+    person_id: str
+    face_instance_id: str
+    observation_id: str
+    asset_id: str
+    crop_bbox: list[float]
+    clothing: list[str]
+    confidence: float
+    model_name: str
+    status: str
+    file_name: str
+    media_type: str
+
+
+class EntityEvidenceFile(BaseModel):
+    """``evidence_files`` 的一项。**四个键**，1.0 ``db.py:4604-4612`` 逐字。
+
+    ``kind`` 取 ``observation`` / ``appearance``——它是交付契约的一部分，
+    前端按它区分证据来源。``file_name`` 取不到时回落成 ``asset_id``。
+    """
+
+    evidence_id: str
+    asset_id: str
+    file_name: str
+    kind: str
+
+
+class EntityDetailResponse(BaseModel):
+    """``GET /entities/{id}`` 的响应。
+
+    1.0 返回十二个键，这里**九个**——三个不在，各有理由（写在
+    ``application/identity/read_entity_detail.py`` 的模块 docstring 里）：
+    ``relationships`` 是 S7 的表；``profile`` / ``claims`` 的读路径归 T130。
+    **不补恒空的占位键**：留一个恒 ``[]`` 的 ``relationships``，读起来像
+    「这个实体确实没有关系」。
+    """
+
+    entity: EntityDetailEntity
+    properties: list[EntityPropertyPayload]
+    property_history: list[EntityPropertyPayload]
+    clusters: list[FaceClusterSummary]
+    facts: list[EntityDetailFact]
+    events: list[EntityDetailEvent]
+    observations: list[EntityDetailObservation]
+    appearance_evidence: list[EntityDetailAppearance]
+    evidence_files: list[EntityEvidenceFile]

@@ -335,3 +335,43 @@
 > 本次只把两边的 **summary** 对齐了（那是同一个改写块里漏掉的一条），序号这件事需要
 > 单独裁决：序号是**列表位置**的函数，放进 `_person_payload` 意味着那个函数要知道
 > 自己在列表里的下标。
+
+## 实体详情（S6 · T128b，2026-09-30）
+
+`GET /api/entities/{id}`（1.0 `app.py:1948-1956` + `db.py:4570-4627`）。**是十二个键，
+不是计划里写的「九个子查询」**；2.0 搬九个，三个不进响应（各有理由，见
+`application/identity/read_entity_detail.py` 的模块 docstring）。
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| 实体不存在 | 返回 `None` → 404 `entity not found` | `backend/db.py:4571-4573`、`app.py:1951-1952` |
+| pending 人物的改写 | **只换 `canonical_name` 成 `待命名成员`**——`family_role` 与 `summary` **不改** | `backend/app.py:1954-1955` |
+| 对照：`/api/people/{id}/profile` | 同一件事**三件都改**（名字 + `family_role=None` + `summary`） | `backend/app.py:1545-1549` |
+| 对照：`/api/people/{id}/evidence` | 同上，三件都改 | `backend/app.py:1561-1565` |
+| `facts` 的匹配方式 | 按 **`canonical_name` 字符串**匹配 `subject` 或 `object`，**不按 id** | `backend/db.py:4588` |
+| `facts` 的取数顺序 | **先取 1000 条（全库、无 scope 过滤）再过滤**——两步的顺序是行为的一部分 | `backend/db.py:4588` |
+| `facts` / `relationships` 的状态过滤 | **都没有**（`retracted` 的关系也会返回）；而 `properties` **有** | `backend/db.py:4588` / `:5590` 对 `:4667` |
+| `clusters` 的状态过滤 | **没有**——被拒的簇也在详情里 | `backend/db.py:4580` |
+| `avatar_face_instance_id` 的状态过滤 | **有**——`fc.status != 'rejected'` | `backend/db.py:4576` |
+| 每簇样本数 | `LIMIT 12` | `backend/db.py:4583` |
+| `observations` 的取数 | `captured_at DESC LIMIT 100`，**没有第二排序键** | `backend/db.py:4590-4594` |
+| `evidence_count`（详情） | **取回来的观察条数**（上限 100） | `backend/db.py:4601` |
+| `evidence_count`（列表） | **`entity_observations` 的原始行数** | `backend/db.py:4083` |
+| `evidence_files` 的合并 | 观察先、外观后，**按 id 去重且后写覆盖先写**（所以撞车时外观那条赢） | `backend/db.py:4602-4613` |
+| `evidence_files` 的 kind | `observation` / `appearance` | `backend/db.py:4607` / `:4612` |
+| `file_name` 的兜底 | 取不到就用 `asset_id` | `backend/db.py:4606` / `:4611` |
+
+> **两处「同名不同义」不要统一。** ① `evidence_count` 在**列表**里是
+> `entity_observations` 的原始行数、在**详情**里是取回来的观察条数（上限 100）——
+> 1.0 就是两个数（`db.py:4083` 对 `:4601`）。② 同一个响应里 `properties` 排
+> `superseded`、`clusters` 不排 `rejected`，两种相反的规矩并存。
+>
+> **`clusters` 的样本排序在 2.0 与 1.0 不同**（已存在的差异，不在 T128b 范围内）：
+> 1.0 是 `ORDER BY fi.created_at DESC`（`db.py:4584`），2.0 的
+> `FaceRepository.list_instances` 是 `quality DESC, created_at ASC`。
+> 两处都会给出「最多 12 张」，但**取到哪 12 张可能不同**。
+>
+> **`transcript` 不在响应里**：1.0 的 `observations` 表有这一列，2.0 没有——
+> 视频/音频的转写属于 **S8**（`application/retrieval/index_observation_text.py` 的
+> docstring 已写明「不是遗漏，是那一侧还没做」）。1.0 前端拿它当 caption 的兜底，
+> 所以少一个键的后果是那句话落到常量，不会渲染出错。
