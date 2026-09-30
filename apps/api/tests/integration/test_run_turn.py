@@ -869,6 +869,17 @@ def test_an_unfaithful_answer_is_pushed_back_once_then_released(env):
     assert result.answer == "相册里有 2 张海边的照片。"
     assert any("工具确认 2 张" in message.content for message in model.calls[-1])
 
+    # **1.0 ``runtime.py:2961-2968``：放行时打 ``l2_soft_release`` 标。**
+    # 没有它，「评审放行的答案」与「评审通过的答案」在轨迹上完全一样，
+    # 而评测与排查要区分的正是这两者。
+    released = [
+        event for event in _turns.events_after(turn_id, 0) if event.payload.get("code") == "l2_soft_release"
+    ]
+    assert len(released) == 1
+    assert released[0].kind == "judge"
+    assert released[0].payload["possibly_fabricated"] is True
+    assert "工具确认 2 张" in released[0].payload["reason"]
+
 
 def test_a_failing_judge_lets_the_answer_through(env):
     """L2 挂了就放行——1.0 ``judge.py:195-198`` 的 fail-open。
@@ -920,3 +931,47 @@ def test_only_missing_disclosure_does_not_block_the_answer(env):
     result = run_turn.run(turn_id)
 
     assert result.answer == "这是你要的海边照片。"
+
+
+def test_a_faithful_answer_carries_no_soft_release_label(env):
+    """评审通过的答案**不许**带标——这一半才是「打标」这个动作有意义的依据。
+
+    只断言「判不实时会打标」的话，一个**永远打标**的实现也能过，而那种标什么都说明不了。
+    """
+    _conversations, turns, conversation, _db = env
+    model = ScriptedModel(
+        [tool_call("search_memories", "c1", query="海边"), final("相册里有 2 张海边的照片。")],
+        judge=judge_reply(),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    assert len(model.judge_calls) == 1, "评审该被调用一次"
+    assert not [
+        event for event in turns.events_after(turn_id, 0) if event.payload.get("code") == "l2_soft_release"
+    ]
+
+
+def test_a_style_only_problem_does_not_earn_the_label(env):
+    """``missing_disclosure`` 只是披露建议，**不拦事实正确的回答**，也不打标
+    （1.0 ``judge.py:174-176`` 的 severity 分层：只有 ``_TRUTH_TYPES`` 才走软引导那一支）。
+
+    打标的口径必须与软引导的口径一致：标的意思是「带着一次未复评的不实判决出门了」，
+    而风格问题根本没被判成不实——给它打标会把那个词的含义稀释掉。
+    """
+    _conversations, turns, conversation, _db = env
+    model = ScriptedModel(
+        [tool_call("search_memories", "c1", query="海边"), final("相册里有 2 张海边的照片。")],
+        judge=judge_reply(("missing_disclosure", "没有说明只是候选")),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "相册里有 2 张海边的照片。", "风格问题不该让回答被退回重写"
+    assert not [
+        event for event in turns.events_after(turn_id, 0) if event.payload.get("code") == "l2_soft_release"
+    ]

@@ -169,6 +169,11 @@ class _Session:
     search_returned_nothing: bool = False
     # 1.0 ``runtime.py:2759`` 的 ``l2_faithfulness_checked``：每问只评审一次。
     judged: bool = False
+    # 1.0 ``runtime.py:2786-2788`` 的 ``turn.l2_unverified`` / ``l2_unverified_reason``：
+    # 这一次 final 曾被 L2 判过不实。**它是「放行时打标」那一半的依据**——见
+    # ``_judge_answer`` 里发 ``l2_soft_release`` 的那一处。
+    l2_unverified: bool = False
+    l2_unverified_reason: str = ""
     # 门禁拦下时写给模型的提醒，由主循环作为一条 user 消息加回去。
     pending_reminder: str = ""
 
@@ -430,6 +435,28 @@ class RunTurn:
             if self._review_with_l2(session, messages, answer):
                 # 与门禁拦下同一条路：调用方把 pending_reminder 加回对话后继续循环。
                 return None
+            if session.l2_unverified:
+                # 1.0 ``runtime.py:2961-2968``：某次 final 曾被语义评审判不实、经软引导后
+                # 放行 → **打标供分析**。1.0 把它记成一条 ``type="judge"`` / ``status=
+                # "soft_release"`` / ``possibly_fabricated: True`` 的 step；
+                # 2.0 落在进度事件上（那是同类信息的同一出口）。
+                #
+                # **这一格不是日志，是判据**：没有它，「评审放行的答案」与「评审通过的答案」
+                # 在轨迹上完全一样，而评测与排查要区分的正是这两者。
+                self._publish(
+                    session,
+                    state.emit(
+                        ProgressStage.FINALIZING,
+                        ProgressStatus.OK,
+                        "已基于复核后的回答收尾。",
+                        kind="judge",
+                        payload={
+                            "code": "l2_soft_release",
+                            "possibly_fabricated": True,
+                            "reason": session.l2_unverified_reason,
+                        },
+                    ),
+                )
             state.finish(
                 TerminationReason.ANSWERED_WITH_GAP
                 if answered_with_gap(session.ledger)
@@ -480,6 +507,11 @@ class RunTurn:
         verdict = self._judge.review(query=state.question, answer=answer, transcript=messages)
         if verdict.faithful or not verdict.truth_problems:
             return False
+        # 1.0 ``runtime.py:2786-2788``：判过不实就先把标记落下来。**标记在「判不实」那一刻
+        # 落、在「放行」那一刻发**——中间隔着一次软引导，而软引导之后**不再复评**
+        # （``judged`` 那道闩）。所以这条等于「这条答案带着一次未复评的不实判决出门了」。
+        session.l2_unverified = True
+        session.l2_unverified_reason = "; ".join(str(item) for item in verdict.truth_problems)
         state.phase = FINALIZING
         self._publish(
             session,

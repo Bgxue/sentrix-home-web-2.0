@@ -266,7 +266,7 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 | Task | 内容 |
 |---|---|
 | ~~**125**~~ | ✅ **完成**（§8.9）——证据包 + trace 的可展开面，**§8 给 S6 的验收条件** |
-| **126** | 语义评审层的第二层（「双层防伪」——**动工前核查 1.0 的第二层是什么**） |
+| ~~**126**~~ | ✅ **完成**（§8.10）——语义评审层的第二层（「双层防伪」） |
 
 ### 第六组 · 语义实体（2026-09-29 裁决并入 S6）
 
@@ -824,7 +824,7 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 ~~**第一件事（T123/T124 共用，必须先做）**~~ → **已完成**，见 §8.5。
 
 **S6 的四个工具全部落地**（T122 §8.6 / T123 §8.7 / T124 §8.8）。
-剩下的是**第五、六组与收口**：T126（语义评审第二层）、T127–T131（语义实体）、T132（收口）。
+剩下的是**第六组与收口**：T127–T131（语义实体）、T132（收口）。
 **T125 已完成**（§8.9）——S6 的验收条件「证据包和 trace 能展开」现在有了可判定的落点。另外 T116（不实现 `adjacency`）的理由
 **还没记进 `frozen.md`**——那是 §3 定的落点，收口前要补。
 
@@ -1110,3 +1110,62 @@ was invoked (or give an explicit unavailable reason)*。
 **之外**被调用（健康度要跑完才知道，早先写成当参数先算），于是它们抛异常时**整次检索
 直接挂掉**——而「一个通道挂了不该让整次检索挂掉」正是 1.0 那个 `except` 的全部意义。
 用例先红、才改的实现。这一条写进了 `record` 的 docstring。
+
+
+### 8.10 T126 落了什么：L2 的第二层，以及一处「不补」
+
+**核查先定名。** 1.0 的「双层防伪」是**两层**，名字与分工都写在
+`judge.py:3-12` 与 `final_guard.py:1-18` 上：
+
+| 层 | 是什么 | 做什么 |
+|---|---|---|
+| **L1** `final_guard.py` | 确定性规则 | 只做结构性兜底：安全 / 占位符 / 交付完整性 / 流程结构。**明说不做语义等价**（「三个人」与「3」是等价的） |
+| **L2** `judge.py` | **一次模型调用**（12B Observation Faithfulness Judge） | 语义级合格性：编造 / 矛盾 / 漏报 / 过度声称 / 缺口披露 |
+
+**2.0 的两层都在**（`domain/assistant/final_guard.py` 与 `domain/assistant/judge.py` +
+`application/assistant/judge.py`，`run_turn.py:480` 接线）。逐条对 1.0 的口径，
+2.0 已经忠实的有：每问只评审一次（`session.judged`）、有工具结果才评、
+评审计一个模型步、看完整轨迹、**severity 分层**（只有 `_TRUTH_TYPES`
+= fabrication / contradiction / omission / certainty_upgrade 才退回重写，
+`missing_disclosure` 只是披露建议）。
+
+**一处真缺口：放行时的 `l2_soft_release` 打标。**
+
+1.0 在**判不实那一刻**落标记（`runtime.py:2786-2788` 的 `turn.l2_unverified` /
+`l2_unverified_reason`），在**放行那一刻**发标（`:2961-2968`：一条 `type="judge"` /
+`status="soft_release"` / `possibly_fabricated: True` 的 step）。中间隔着一次软引导，
+而软引导之后**不再复评**——所以这条标的意思是「**这条答案带着一次未复评的不实判决出门了**」。
+
+**2.0 只有那句注释**：`domain/assistant/judge.py:13` 在 docstring 里引用了
+1.0 轨迹里 `agent2_trace.quality.l2_soft_release = true` 的出现率（6.6%），
+**而全仓没有任何代码产生它**（`grep possibly_fabricated|soft_release|l2_unverified`
+在 src 里只有那一行 docstring）。
+
+没有它，「评审放行的答案」与「评审通过的答案」在轨迹上完全一样，
+而评测与排查要区分的正是这两者。两半都落了：`_Session` 加
+`l2_unverified` / `l2_unverified_reason`，`_review_with_l2` 判不实时落标记，
+`_judge_answer` 放行时发 `l2_soft_release` 事件。
+
+**一处核完判定「不补」：`trusted_facts`。** 这是同一个方法论框里的**第四次**，
+而这次方向又不同（前三次：`adjacency` 注释对代码死；`query_memory_facts` 注释过期代码活；
+T124 注释承诺了代码里根本没有）：
+
+1.0 的调用点算了两组「可信事实」（`_confirmed_facts(task) + _trusted_facts(task)`，
+`runtime.py:1237-1260` 与 `:1205-1235`）塞进评审。看上去 2.0 缺这一整块。**实测不是**：
+
+- 那两组事实只喂给一个 `facts_block`（`judge.py:127`），而 `facts_block`
+  **只在 `else:` 分支里被引用**（`:154`，与 `obs_lines` 一起）——那个分支的前提是
+  **没有 `messages`**；
+- 唯一的生产调用点（`runtime.py:2769`）**总是传 `messages`** → `if messages:`
+  恒真 → 那个分支**在生产上从不执行**；
+- 而 1.0 自己在那段代码上方写了理由：*「完整轨迹优先：评审能看到工具返回里被压缩投影
+  丢弃的字段（captured_at/地点/preview 等），**不会被『可信事实白名单』误导**」*。
+
+**2.0 的 `build_user_prompt` 实现的正是真正跑的那一支**（轨迹优先、最近 8 条、每条 900 字），
+连理由都逐字搬了。所以这里 2.0 已经忠实，补 `trusted_facts` 等于把一条 1.0 在生产上
+没走过的路建起来——那正是 T124 那条裁决否掉的做法。
+
+**用例与变异**：`test_run_turn.py` 三条（既有那条加了打标断言 + 两条新用例：
+评审通过不打标、风格问题不打标），**定点变异 6 条全部变红**。
+后两条用例是必需的——只断言「判不实时会打标」的话，一个**永远打标**的实现也能过，
+而那种标什么都说明不了。
