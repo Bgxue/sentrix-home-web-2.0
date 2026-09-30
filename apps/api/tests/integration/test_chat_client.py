@@ -156,6 +156,7 @@ def test_the_tools_field_carries_standard_json_schema(server: str):
         "search_memories",
         "query_memory_facts",
         "query_photo_people",
+        "inspect_photo",
         "get_result_page",
         "get_original_photos",
         "get_person_profile",

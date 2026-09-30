@@ -1,4 +1,7 @@
-"""S3 上线的四个工具的契约：名字、描述、参数 schema、能满足哪类证据。
+"""工具契约：名字、描述、参数 schema、能满足哪类证据、贵不贵（``cost_class``）。
+
+S3 上线四个，S6 加了 ``query_memory_facts``（T121）、``query_photo_people``（T122）
+与 ``inspect_photo``（T123），现在六个。
 
 对应 1.0 ``agent_runtime/tool_registry.py`` + ``tools.py`` 的注册段（``tools.py:2681``）。
 两处与 1.0 的**结构性差异**：
@@ -253,10 +256,52 @@ QUERY_PHOTO_PEOPLE = ToolSpec(
 )
 
 
+INSPECT_PHOTO = ToolSpec(
+    name="inspect_photo",
+    description=(
+        "复核已检索照片的视觉细节（物体/衣着/颜色/场景）。"
+        "asset_handle 使用 search_memories preview 里的 handle（photo_1…），可省略（默认用预览第一张）。"
+        "当前 handle 不含目标时换下一张（photo_2、photo_3…）复核，同一张图最多复核一次，不要反复检查同一张。"
+        "昂贵，默认每轮最多 1 次。"
+    ),
+    parameters=_object_schema(
+        {
+            "result_set_id": {
+                "type": "string",
+                "description": "search_memories 或 get_result_page 返回的结果集 id。",
+            },
+            "question": {
+                "type": "string",
+                "description": "要用这张图回答的问题，用用户问题里的实词，不要改写成别的意思。",
+            },
+            "asset_handle": {
+                "type": "string",
+                "description": "要复核的那张照片的 handle（photo_1…）。省略则用结果集第一张。",
+            },
+            "target_person": {
+                "type": "string",
+                "description": "问题只针对某一位已确认人物时填他的名字；不针对某个人就省略。",
+            },
+        },
+        ["result_set_id", "question"],
+    ),
+    # 1.0 ``tools.py:2756`` 的两条。``visual_observation`` 是「看细节」，
+    # ``photo_identity`` 是「这是谁」——两个不同的需求都可能被这一次调用满足。
+    satisfies=(EvidenceType.VISUAL_OBSERVATION, EvidenceType.PHOTO_IDENTITY),
+    # 1.0 的 ``required_inputs=("asset_handle", "question")`` 与它自己的描述
+    # （「asset_handle …可省略」）**互相矛盾**。2.0 保留描述里那条行为（省略就用第一张），
+    # 所以这里只把 ``question`` 与 ``result_set_id`` 列为必填——照 required_inputs 抄会
+    # 让「可省略」当场失效（策略层会以 ``missing_argument`` 拒掉）。
+    required=("result_set_id", "question"),
+    cost_class=CostClass.EXPENSIVE,
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     SEARCH_MEMORIES,
     QUERY_MEMORY_FACTS,
     QUERY_PHOTO_PEOPLE,
+    INSPECT_PHOTO,
     GET_RESULT_PAGE,
     GET_ORIGINAL_PHOTOS,
     GET_PERSON_PROFILE,

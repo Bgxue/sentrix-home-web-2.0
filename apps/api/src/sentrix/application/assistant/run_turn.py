@@ -531,7 +531,14 @@ class RunTurn:
 
         self._tool_event(session, call, ProgressStatus.RUNNING, f"正在执行 {call.name}…", "model_action")
         outcome = self._toolbox.execute(
-            call.name, decision.arguments, scope_id=state.scope_id, now=datetime.now(UTC)
+            call.name,
+            decision.arguments,
+            scope_id=state.scope_id,
+            now=datetime.now(UTC),
+            # 1.0 的 ``inspect_photo`` 用它找「问题里提到的那个已确认人物」当裁剪目标
+            # （``tools.py:2162-2165``）。1.0 从可变的 ``task_state`` 里取，2.0 的
+            # ``TaskState`` 没有那一格——**这不是加状态，是把已经在手上的那个字符串传下去**。
+            question=state.question,
         )
         state.record(
             ToolCallRecord(
@@ -646,6 +653,8 @@ def _tool_status_text(name: str, outcome: ToolOutcome) -> str:
         return f"已把 {outcome.observation.get('delivered', 0)} 张照片交给用户。"
     if name == "get_person_profile":
         return "已读取人物档案。" if outcome.observation.get("found") else "没有这位人物的档案。"
+    if name == "inspect_photo":
+        return str(outcome.model_visible.get("observation") or "已复核这张照片。")
     if name == "query_photo_people":
         # 那句话本来就是为模型写的一句人话（1.0 ``tools.py:2602``），
         # 直接拿来当进度条文本——另编一句会让两处对同一件事各说各的。

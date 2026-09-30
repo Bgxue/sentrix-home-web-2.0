@@ -765,7 +765,8 @@ OCR settings / telemetry / query-gaps、`/api/dashboard`、回合取消、会话
 | T121c 工具与注册 | 完成 | `c17daa5` `7b84f7f` `d001d01`（补覆盖） |
 | **T123/T124 共用的 inspector 端口** | **完成**（§8.2 的「第一件事」） | 见本节末「这次落了什么」 |
 | **T122 四条读路径 + `query_photo_people` 工具** | **完成** | 见 §8.6 |
-| T123 / T124 | **已核查，均重估**，未动工 | `7d9a602` `c994cd0` |
+| **T123 精读预算 + 人脸清单 + `inspect_photo`** | **完成** | 见 §8.7 |
+| T124 | **已核查、已裁决后端**，未动工 | `7d9a602` `c994cd0` |
 
 `query_memory_facts` 已在生产链路上：`AssistantToolbox` → `QueryMemoryFacts` →
 `StructuredQueryRepository`，容器已装配，真库（53 张）跑通。
@@ -779,7 +780,7 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 
 ~~**第一件事（T123/T124 共用，必须先做）**~~ → **已完成**，见 §8.5。
 
-剩下的是：**T123 → T124**（T122 已完成，见 §8.6）。
+剩下的是：**T124**（T122 见 §8.6、T123 见 §8.7）。
 
 **T122 已按 §4 的「二核」清单落地**：四条读路径 + 接线 + 17 条新用例。
 它比原计划的两条多出来的那两条，是**证据类型词表**（`photo_identity` 这个公共类型
@@ -909,3 +910,65 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 - `capability-map.jsonl` 没有为本次新增能力登记（§3 的 T132 是收口任务，按计划归它）；
 - `check_method_reachability` **不需要**为这两个新端口方法登记——它们落地就有生产调用者
   （工具就是调用者），这正是它与 `PhotoInspector.inspect` 那次不同的地方。
+
+
+### 8.7 T123 落了什么：inspect_photo（10,721 次的那一个）
+
+三个提交，按依赖顺序：
+
+| 提交 | 内容 |
+|---|---|
+| `334c571` | **精读预算**（T123/T124 共用）：`ToolSpec.cost_class` + `TurnProfile.max_inspections=1` + `TaskState.inspection_calls`/`can_inspect` + `ToolPolicy` 里那条独立判定 |
+| `a085070` | **人脸清单读路径** `FaceRepository.list_face_manifest`（含未绑定、`face_1` 局部编号）+ `EvidenceType.VISUAL_OBSERVATION` |
+| 本提交 | `ToolSpec` + `AssistantToolbox._inspect_photo` + 装配（`photo_inspector` / `person_crop_renderer`）+ 接线（`run_turn` 传 `question`） |
+
+**动工前核出的两处「计划说 A、实际是 B」：**
+
+1. **`preconditions` 不该补**（§4 Task 123 的 ②）：1.0 靠可变 `task_state` 字典里的
+   `result_preview`，2.0 的 `TaskState` 没有这个字段、`ToolPolicy` 又写死了无状态。
+   faithful 的做法是留在执行器里——就是 T122 的 `bad_handle` 形状。
+2. **`cost_class`/`max_inspections` 是真缺**，而且 **T123/T124 共用同一个计数器**
+   （1.0 的 `inspections`），所以是「一轮总共只能精读一张图一次」。
+
+**动工中定下的三处口径：**
+
+1. **裁剪件的坐标不做归一化。** 1.0 有一段 `max(bbox) <= 1.0` 就按图宽高换算的防御
+   （`tools.py:2178-2183`），而它要 PIL 拿图宽高——2.0 的 domain-purity 不许 application
+   碰 PIL。**2.0 的框本来就是像素**（`observe_appearance` 把 `instance.bbox` 直接交给
+   `render_person_crop`，没有换算），所以那一段在 2.0 没有对应的输入；真来了归一化的框，
+   `render_person_crop` 抛 `ValueError`，落进那个 `not_located` 分支——行为仍然安全。
+2. **`target_person` 的来源少一路。** 1.0 还看 `task_state.active_person`（`:2127`），
+   2.0 的 `TaskState` 没有这一格——**不补**（那是 1.0 主循环的可变状态，与「策略无状态」
+   的分界冲突）。留下的两路是显式参数与「问题里提到的已确认人名」（`:2162-2165`）。
+   为了后一路，`AssistantToolbox.execute` 加了一个 `question` 形参——
+   **那不是加状态，是把已经在手上的那个字符串传下去**。
+3. **`bad_handle` 不封口，`file_unavailable`/`model_unavailable` 封。**
+   1.0 只回一个 `blocked` 列表、不做别的；2.0 的账本认封口。换一张图还有机会的那条
+   **不封**，否则会把「换个 handle 再试」也一起堵死。
+
+**用例与变异**：`test_inspect_photo.py` 26 条 + `test_face_manifest.py` 12 条；
+**定点变异 19 条全部变红**（精读预算 6、人脸清单 9、工具 10，其中 `bad_handle`
+那条第一次写成了占位、补跑才红）。
+
+**变异先于用例抓到的四处**（都写进了对应用例的 docstring）：
+
+- 精读预算「跨两个工具共用」最初只测了一个方向，把计数写成「按工具名数 inspect_photo」
+  也照样绿——那次记录正好就是 inspect_photo，两边算出同一个 1。**两个方向都断言**才红。
+- 人脸清单的「排序第三键」最初比的是「两次调用结果相同」，在同一次实现里恒真；
+  改成**插入顺序故意与 id 顺序相反**才可分辨。
+- 「按 asset 过滤」最初没造任何脸，把 WHERE 删掉照样返回空表。
+- 人脸清单「有名字」那条腿的判据从 `person_name` 改成 `identity_status`
+  ——空名字时两条路都算得出空串。
+
+**顺带修的两处**（都是这次改动让它们当场红的，属于门禁按设计工作）：
+
+- `module-map` 的 `tools.py` 状态是 `cost_class`、`application/assistant/tools.py`
+  依赖 `domain/media/inspection.py`；
+- `test_assistant_toolbox.py::test_an_unknown_tool_is_reported_not_raised` 原来借
+  `inspect_photo` 当「不存在的工具」的例子——**它现在存在了**，同一次调用变成
+  `unknown_result_set`。已换成 `no_such_tool`。
+
+**留给 T127 的口径缺口**（`test_face_manifest.py` 里有一条用例钉住它）：
+1.0 的人脸清单**不过滤 `entity_type`**，而 T122 那条过滤。1.0 里非人物实体不存在所以
+无差别；T127 落非人物实体后，一个绑到「乌篷船」的簇会让清单给出这个名字。
+**今天不修**——改了就是偏离 1.0，那需要一个裁决。

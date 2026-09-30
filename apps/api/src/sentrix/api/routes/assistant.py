@@ -117,6 +117,9 @@ def _run_turn(container: Container) -> RunTurn:
             # 与 people_json 里带 entity_id 的那一份快照。
             faces=container.face_repository,
             observations=container.observation_repository,
+            # `inspect_photo` 的两件（T123）：把问题问给图的那一层，与目标人物的裁剪件。
+            photo_inspector=container.photo_inspector,
+            person_crops=container.person_crop_renderer,
         ),
     )
 

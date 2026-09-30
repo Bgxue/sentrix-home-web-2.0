@@ -96,8 +96,18 @@ class StubToolbox:
         self.calls: list[tuple[str, Mapping[str, object]]] = []
 
     def execute(
-        self, name: str, arguments: Mapping[str, object], *, scope_id: str, now: datetime
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        *,
+        scope_id: str,
+        now: datetime,
+        question: str = "",
     ) -> ToolOutcome:
+        # ``question`` 是 `inspect_photo` 要的（1.0 ``tools.py:2162-2165`` 拿它找裁剪目标）,
+        # 与 ``__init__`` 那三件一样：**凡是 ``RunTurn`` 会传给真实 toolbox 的形参，
+        # 假件都得收**——少一个就在运行时 TypeError，而它会被吞成 ``model_error``，
+        # 看起来像模型的问题。
         self.calls.append((name, dict(arguments)))
         outcome = self._outcomes.get(name)
         if outcome is None:

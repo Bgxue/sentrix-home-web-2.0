@@ -23,16 +23,18 @@ def call(name: str, **arguments: object) -> ToolCall:
 
 
 def test_the_tool_list_is_exactly_what_ships():
-    """S3 四个 + S6 的 ``query_memory_facts``（T121）与 ``query_photo_people``（T122）。
+    """S3 四个 + S6 的 ``query_memory_facts``（T121）、``query_photo_people``（T122）
+    与 ``inspect_photo``（T123）。
 
-    **这是一个逐字断言的清单，不是 ``>= 4``。** 工具多一个少一个都会改变模型看到的
-    契约，而「多了一个没人注意的工具」正是那种不会报错、只会让模型偶尔调错东西的改动。
-    清单变了就必须在这里显式改一次。
+        **这是一个逐字断言的清单，不是 ``>= 4``。** 工具多一个少一个都会改变模型看到的
+        契约，而「多了一个没人注意的工具」正是那种不会报错、只会让模型偶尔调错东西的改动。
+        清单变了就必须在这里显式改一次。
     """
     assert [spec.name for spec in TOOL_SPECS] == [
         "search_memories",
         "query_memory_facts",
         "query_photo_people",
+        "inspect_photo",
         "get_result_page",
         "get_original_photos",
         "get_person_profile",

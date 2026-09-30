@@ -74,6 +74,20 @@ class ScriptedTextEmbedder:
         return [digest[0] / 255, digest[1] / 255, digest[2] / 255]
 
 
+class StubInspector:
+    """`inspect_photo` 的模型入口。这个夹具不调它，所以只要求它叫得应。"""
+
+    def inspect(self, *args: object, **kwargs: object) -> None:  # pragma: no cover
+        raise AssertionError("这个夹具不该调 inspect_photo")
+
+
+class StubCrops:
+    """目标人物的裁剪件。同上。"""
+
+    def render(self, *args: object, **kwargs: object) -> None:  # pragma: no cover
+        raise AssertionError("这个夹具不该裁图")
+
+
 class StubPeople:
     def __init__(self, profiles: dict[str, PersonProfile] | None = None) -> None:
         self._profiles = profiles or {}
@@ -154,6 +168,9 @@ def toolbox(migrations_ready_db, tmp_path):
         # test_query_photo_people.py。
         faces=SqliteFaceRepository(migrations_ready_db),
         observations=observations,
+        # `inspect_photo` 的两件（T123）。这个夹具不调它——被测的是别的工具的信息边界。
+        photo_inspector=StubInspector(),
+        person_crops=StubCrops(),
     )
     return build, result_sets
 
@@ -329,7 +346,11 @@ def test_a_blank_person_name_fails(toolbox):
 
 
 def test_an_unknown_tool_is_reported_not_raised(toolbox):
-    outcome = run(toolbox, "inspect_photo", asset_handle="photo_1")
+    """**名字要挑一个永远不会存在的。** 这条用例原来借的是 ``inspect_photo``——
+    那时它确实不存在（S6 的 T123 才做）。它落地之后，同一次调用变成了
+    ``unknown_result_set``（参数齐了、只是结果集对不上），用例当场红。
+    """
+    outcome = run(toolbox, "no_such_tool", asset_handle="photo_1")
 
     assert not outcome.ok
     assert outcome.failure_reason == "unknown_tool"

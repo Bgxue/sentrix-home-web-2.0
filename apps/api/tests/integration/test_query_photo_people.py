@@ -360,6 +360,8 @@ def build_toolbox(bundle) -> AssistantToolbox:
         memory_facts=None,
         faces=bundle["faces"],
         observations=bundle["observations"],
+        photo_inspector=None,
+        person_crops=None,
     )
 
 

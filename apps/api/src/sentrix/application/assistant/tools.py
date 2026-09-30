@@ -20,11 +20,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sentrix.application.assistant.query_memory_facts import QueryMemoryFacts
@@ -33,11 +35,15 @@ from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
 from sentrix.domain.assistant.result_set import ResultSet
-from sentrix.domain.identity.ports import FaceRepository
-from sentrix.domain.media.ports import AssetRepository, ObservationRepository
+from sentrix.domain.identity.ports import FaceRepository, PersonCropRenderer
+from sentrix.domain.media.inspection import CERTAINTY_SUPPORTED
+from sentrix.domain.media.ports import AssetRepository, ObservationRepository, PhotoInspector
 from sentrix.domain.retrieval.fact_query import FactRejection
 
 log = logging.getLogger("sentrix.assistant.tools")
+
+# 1.0 ``tools.py:2125`` 的 ``arguments.get("question") or "请描述这张照片"``。
+DEFAULT_INSPECT_QUESTION = "请描述这张照片"
 
 DEFAULT_SEARCH_LIMIT = 12
 MAX_SEARCH_LIMIT = 12
@@ -87,6 +93,8 @@ class AssistantToolbox:
         memory_facts: QueryMemoryFacts,
         faces: FaceRepository,
         observations: ObservationRepository,
+        photo_inspector: PhotoInspector,
+        person_crops: PersonCropRenderer,
     ) -> None:
         self._retrieval = retrieval
         self._assets = assets
@@ -97,9 +105,19 @@ class AssistantToolbox:
         # 且都只被这一个工具用——不是通用能力。
         self._faces = faces
         self._observations = observations
+        # ``inspect_photo`` 的两件（T123）：把问题问给图的那一层，与目标人物的
+        # 头肩裁剪件。裁剪走端口而不是在这里 import PIL——domain-purity 把 PIL 点名禁了。
+        self._photo_inspector = photo_inspector
+        self._crops = person_crops
 
     def execute(
-        self, name: str, arguments: Mapping[str, Any], *, scope_id: str, now: datetime
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        scope_id: str,
+        now: datetime,
+        question: str = "",
     ) -> ToolOutcome:
         if name == "search_memories":
             return self._search(arguments, scope_id=scope_id, now=now)
@@ -107,6 +125,8 @@ class AssistantToolbox:
             return self._page(arguments, scope_id=scope_id)
         if name == "query_photo_people":
             return self._photo_people(arguments, scope_id=scope_id)
+        if name == "inspect_photo":
+            return self._inspect_photo(arguments, scope_id=scope_id, question=question)
         if name == "get_original_photos":
             return self._deliver(arguments, scope_id=scope_id)
         if name == "get_person_profile":
@@ -350,6 +370,169 @@ class AssistantToolbox:
                 ],
                 "unconfirmed_people_count": unconfirmed,
                 "summary": summary,
+            },
+        )
+
+    # ---- inspect_photo ------------------------------------------------------
+
+    def _inspect_photo(self, arguments: Mapping[str, Any], *, scope_id: str, question: str) -> ToolOutcome:
+        """拿一个问题去复核一张照片。1.0 ``tools.py:2123-2267``。
+
+        **这个工具的产出是「一次观察」，不是一条记忆**：1.0 的返回里写死
+        ``"persisted": False``（``:2266``）——它看一眼就完了，不落库、不产生新事实。
+        2.0 的 ``ToolOutcome`` 没有 ``persisted`` 这一格：**不落库是默认行为**，
+        没有第二个工具会顺手落，所以那个字段在这里是多余的。
+
+        三处与 1.0 的差别，都是 2.0 的结构决定的：
+
+        1. **裁剪件的坐标不做归一化。** 1.0 有一段 ``max(bbox) <= 1.0`` 就按图宽高换算的
+           防御（``:2178-2183``），而它要 PIL 才能拿到图宽高——2.0 的 domain-purity
+           不许 application 碰 PIL。**2.0 的框本来就是像素**（``observe_appearance``
+           把 ``instance.bbox`` 直接交给 ``render_person_crop``，没有换算），
+           所以那一段在 2.0 没有对应的输入；真来了归一化的框，
+           ``render_person_crop`` 会抛 ``ValueError``，落进下面那个 ``not_located``。
+        2. **``target_person`` 的来源少一路。** 1.0 还看 ``task_state.active_person``
+           （``:2127``），2.0 的 ``TaskState`` 没有这一格——**不补**，那是 1.0 主循环的
+           可变状态，与「策略无状态」的分界冲突。留下的两路是显式参数与「问题里提到的
+           已确认人名」（``:2162-2165``），后者才是常用的那一路。
+        3. **模型不可用与文件不可用会封口 ``VISUAL_OBSERVATION``。** 1.0 只回一个
+           ``blocked`` 列表，不做别的；2.0 的账本认这个封口，好让门禁不再逼模型重试
+           一件这一轮拿不到的东西。``bad_handle`` **不封**——换一张图还有机会。
+        """
+        result_set_id = str(arguments.get("result_set_id") or "").strip()
+        result_set = self._result_sets.get(result_set_id)
+        if result_set is None:
+            return _failure("unknown_result_set", "结果集不存在。请先调用 search_memories。")
+        if result_set.scope_id != scope_id:
+            return _failure("scope_mismatch", "这个结果集不属于当前相册。")
+
+        # 1.0 ``:2128-2131``：不给 handle 就用预览第一张。``photo_1`` 就是预览第一张
+        # （``ResultSet.resolve`` 的序号口径），所以这里不必先去翻一页。
+        handle = str(arguments.get("asset_handle") or "").strip() or "photo_1"
+        asset_id = result_set.resolve(handle)
+        if asset_id is None:
+            return _failure(
+                "bad_handle",
+                "这个 handle 不在当前结果集里。请只用 search_memories / get_result_page 返回的 handle。",
+            )
+
+        asset = self._assets.get(asset_id)
+        if asset is None or not Path(asset.path).is_file():
+            return ToolOutcome(
+                observation={"failure_reason": "file_unavailable", "asset_id": asset_id},
+                model_visible={"error": "file_unavailable", "message": "照片文件不可用。"},
+                failure_reason="file_unavailable",
+                blocks=EvidenceType.VISUAL_OBSERVATION,
+            )
+
+        asked = str(arguments.get("question") or "").strip() or DEFAULT_INSPECT_QUESTION
+        identities = self._faces.list_photo_identities(asset_id)
+        manifest = self._faces.list_face_manifest(asset_id)
+        described = sum(
+            1 for entry in self._observations.latest_people_snapshot(asset_id) if not entry.entity_id
+        )
+
+        target_person = str(arguments.get("target_person") or "").strip()
+        if not target_person:
+            # 1.0 ``:2162-2165``：问题（或用户目标）里提到的、且这张照片里已确认的人。
+            mentioned = question + asked
+            target_person = next(
+                (row.person_name for row in identities if row.person_name and row.person_name in mentioned),
+                "",
+            )
+
+        target_identity = next(
+            (row for row in identities if target_person and row.person_name == target_person), None
+        )
+        target_face = next(
+            (row for row in manifest if target_person and row.person_name == target_person), None
+        )
+
+        crop_path: str | None = None
+        target_status = "not_requested"
+        target_bbox: list[float] | None = None
+        if target_person:
+            target_status = "not_located"
+            if target_identity is not None and target_identity.bbox:
+                try:
+                    crop_path, crop_bbox = self._crops.render(asset.path, target_identity.bbox)
+                    target_status = "located"
+                    target_bbox = list(crop_bbox)
+                except (OSError, ValueError, TypeError):
+                    # 1.0 ``:2186-2200``：裁不出来**不让整次检查失败**——原图照样发出去，
+                    # 提示词里那句「第一张图（如有）」就是为这一路写的。
+                    crop_path = None
+                    target_bbox = None
+
+        try:
+            parsed = self._photo_inspector.inspect(
+                asset.path,
+                asked,
+                faces=[dataclasses.asdict(row) for row in manifest],
+                target_person=target_person,
+                crop=crop_path,
+            )
+        finally:
+            # 临时件由调用方删（``render_person_crop`` 的契约）。
+            if crop_path:
+                Path(crop_path).unlink(missing_ok=True)
+
+        if parsed is None:
+            return ToolOutcome(
+                observation={"failure_reason": "model_unavailable", "asset_id": asset_id},
+                model_visible={"error": "model_unavailable", "message": "模型不可用，这次没能复核这张照片。"},
+                failure_reason="model_unavailable",
+                blocks=EvidenceType.VISUAL_OBSERVATION,
+            )
+
+        # 1.0 ``:2242-2248``：没人脸时退回「快照里说不上名字的条目数」。
+        # 有清单就以清单为准——清单是**这次真的检出来的脸**，比模型当时写的描述更可信。
+        unconfirmed = (
+            max(0, len(manifest) - len(identities)) if manifest else max(0, described - len(identities))
+        )
+        photo_identities = [
+            {
+                "person_name": row.person_name,
+                "membership": row.family_role or "unknown",
+                "identity_status": "bound",
+            }
+            for row in identities
+            if row.person_name
+        ]
+        face_candidates = [
+            {
+                "face_id": row.face_id,
+                "identity_status": row.identity_status,
+                "person_name": row.person_name,
+            }
+            for row in manifest
+        ]
+        certainty = str(parsed.get("certainty") or CERTAINTY_SUPPORTED)
+        return ToolOutcome(
+            observation={
+                "result_set_id": result_set.id,
+                "asset_handle": handle,
+                "asset_id": asset_id,
+                "question": asked,
+                "certainty": certainty,
+                "selected_face_id": str(parsed.get("target_face_id") or ""),
+                "target_person": target_person,
+                "target_face_id": target_face.face_id if target_face else "",
+                "target_face_status": target_status,
+                "target_bbox": target_bbox,
+                "confirms_visual_only": not identities,
+                "unconfirmed_people_count": unconfirmed,
+            },
+            model_visible={
+                "asset_handle": handle,
+                "question": asked,
+                "observation": str(parsed.get("observation") or parsed.get("scene") or ""),
+                "certainty": certainty,
+                "target_person": target_person,
+                "target_face_status": target_status,
+                "photo_identities": photo_identities,
+                "face_candidates": face_candidates,
+                "unconfirmed_people_count": unconfirmed,
             },
         )
 
