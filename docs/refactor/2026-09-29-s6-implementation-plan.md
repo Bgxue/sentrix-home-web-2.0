@@ -642,6 +642,72 @@ supersede 旧行 → 插新行（`source='user'`、`confidence=1`、`status='act
 `alias` 两个属性，接上的那一刻反向规则就报红要求删——与 facts 那三条、`maintain_property`
 走的是同一条路。**又一条被门禁自己删掉的登记。**
 
+#### 128b 动工前核查（2026-09-30）：不是九个子查询，是十二个键
+
+上面写「`get_entity_detail` 是一个**九个子查询**的复合读」。**这个数不对**，实测：
+
+- **返回 dict 有 12 个键**：`entity` / `properties` / `property_history` / `clusters` /
+  `relationships` / `facts` / `profile` / `claims` / `appearance_evidence` / `events` /
+  `observations` / `evidence_files`（`db.py:4614-4627`）。
+- 函数体内**直接写出的 SQL 只有 4 条**（avatar `:4575`、clusters `:4580`、
+  每簇 samples `:4583`、observations `:4591`），其余全走 helper。按「逻辑上的一次取数」
+  数是 **13 项**。
+- **不存在实体时返回 `None`**（`:4571-4573`），不是空 dict。
+
+路由 `GET /api/entities/{entity_id}`（`app.py:1948-1956`）只做两件事：`None` → 404
+`entity not found`；pending 的 person **只换 `canonical_name`**——注意它**没有**同时改
+`family_role` 与 `summary`，而同仓库的 `/api/people/{id}/profile`（`:1545-1549`）与
+`/evidence`（`:1561-1565`）两处都改了。**三处不一致是 1.0 的原样。**
+
+##### 十二个键 × 2.0 现状 × 本次搬不搬
+
+| 键 | 2.0 现状 | 决定 |
+|---|---|---|
+| `entity` | `EntityRepository.get` + `decorate_entities`（T128a 刚落的） | **搬**，含 `avatar_face_instance_id` 与 `evidence_count` 两个就地加的键 |
+| `properties` | `list_properties(entity_id)` | **搬** |
+| `property_history` | `list_properties(..., include_history=True)` | **搬**（1.0 是同一次查询的两种参数） |
+| `clusters[]` + `samples[]` | `list_clusters_for_entity` + 逐簇 `list_instances` | **搬**。`samples` 是 N+1（1.0 `:4582-4586` 同样是 N+1，每簇 `LIMIT 12`） |
+| `relationships[]` | **S7 的表** | **不搬**，键不进响应（与 T127 那两条关系同形） |
+| `facts[]` | `FactRepository.list_facts` 只有 scope 级 | **搬**，新增按名字读（见下） |
+| `events[]` | `event_ids` **在**，事件本体要逐个 `get` | **搬**，N+1 与 1.0 `:4624` 同形 |
+| `observations[]` | **缺「按实体查观察」的读路径** | **搬**，新增（见下） |
+| `evidence_files[]` | 派生（observations + appearances 的 id → {asset_id, file_name, kind}） | **搬** |
+| `appearance_evidence[]` | `AppearanceRepository.list_for(person_id, *, include_empty, limit=500)` **在**，默认值 / 排序 / WHERE 与 1.0 `db.py:4535-4546` 逐一对应 | **搬** |
+| `profile` | `semantic_profiles` **零读路径**（全仓无 Python 引用） | **不搬** → **T130**（`GET /knowledge` 就是 profiles + claims + spaces） |
+| `claims` | `semantic_claims` 同上 | **不搬** → **T130** |
+
+##### 两条要新增的读路径
+
+1. **`facts[]`**：1.0 是拉 `list_facts(1000)`（**全库、无 scope 过滤**）再在 Python 里按
+   **`canonical_name` 字符串**匹配 `subject` 或 `object`（`:4588`）。2.0 的 `facts` 表
+   `subject`/`object` 存的也是**名字不是 id**（`entities.py` 删实体时同样按名字删），
+   所以这条按名字查是**照搬**，不是将就。
+2. **`observations[]`**：1.0 是 `entity_observations ⋈ observations`，
+   `ORDER BY o.captured_at DESC LIMIT 100`（`:4590-4594`），然后逐条 `get_observation` +
+   `get_asset`（`:4595-4600`，又一层 N+1，把 asset 整行挂在 `observation["asset"]` 上）。
+   2.0 的 `ObservationRepository` 没有 by-entity，`entity_observations` 只有计数与
+   「取最新一张预览」两处读。**落点选 `EntityRepository`**——那张表的写入者本来就是它
+   （`link_observation`），而与 observations / assets 的 JOIN 在 2.0 已有先例
+   （`decorate_entities` 的预览查询就是这三个表的 JOIN）。
+
+##### 落点：一个 application 用例，照 `read_timeline.py` 的先例
+
+四个域的仓储在用例层拼成一个结果，返回模块内的 frozen dataclass，HTTP 映射留在路由
+（`application/memories/read_timeline.py` 就是这么组织的：关键字注入 4 个仓储、
+返回 `TimelineResult`，路由只做 pydantic 转换）。**不在路由里拼**——这次跨了四个域，
+与簇列表那种「把记录字段搬进响应模型」不是一回事。
+
+##### 两处对不齐、如实记下的 1.0 行为
+
+- **`relationships` 与 `facts` 都没有状态过滤。** `list_relationships`（`db.py:5590-5597`）
+  连 `retracted` 都返回，`facts` 那块也没有 status 条件。2.0 的
+  `RelationshipRepository.list_for_entity` 同样没有过滤——**这是巧合地对齐**，
+  不是 2.0 修过。而 `properties` 是**有**过滤的（`status IN ('active','pending')`）。
+  三处不一致，都是 1.0 的原样。
+- **1.0 前端把二者拼在一起渲染**（`src/app.js:1031`：
+  `detail.relationships.concat(detail.facts.map(...))`），所以 2.0 少了 `relationships`
+  之后，那个弹窗的「关联事件与关系」一栏只剩事实。**如实反映，不补占位。**
+
 ### 收口
 
 | Task | 内容 |
