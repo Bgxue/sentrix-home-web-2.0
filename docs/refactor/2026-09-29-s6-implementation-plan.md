@@ -392,6 +392,54 @@ T128 接上之后那个零调用登记可以删。
 - **`memory_feedback.target_claim_id` 那条外键不建。** 它引用 `semantic_claims`
   （`db.py:906`），但 `memory_feedback` 在 2.0 的冻结清单里（§范围决策「反馈」）。
 
+#### ⑦ 迁移已落地；抽取那一段的体量与一处**跨切片**的牵连
+
+**迁移 `0008_semantic_entities.sql` 已落**（两张表 + `idx_semantic_claims_person`，
+列集照 ①、不搬 `_ensure_columns` 补丁、不建 `memory_feedback.target_claim_id`、
+`person_id` 那个名字的实情写进注释）。
+
+**抽取那一段（1.0 `db.py:3755-3954`，约 200 行）比计划那一行大得多，而且有三件计划里没写：**
+
+**A. 它依赖语义受控词表，但三条腿有回退到 2.0 已有字段的路。** `maintain_observation_entities`
+的输入是 `normalize_semantic_analysis(...)` 的 `semantic`（`place.primary` /
+`objects[].label` / `atmosphere.labels`）——那是 **S4 明确没搬的 `detail` 族**
+（`vlm_observer.py` 的模块注释：「1.0 的 semantic 受控词表……那是 S6 的精读」）。
+但 1.0 自己的 `or` 链把三条腿接在了 2.0 有的字段上：
+
+| entity_type | 1.0 首选来源 | **回退** | 2.0 有没有 |
+|---|---|---|---|
+| `place` | `semantic_place.primary` | `observation.place`（自由文本），再不行 `"其他或不确定"` | ✅ `Observation.place` |
+| `object` | `semantic_objects[].label` | `observation.objects` | ✅ `Observation.objects` |
+| `time` | — | `captured_at` 派生（date/year/month/season/part_of_day） | ✅ |
+| `atmosphere` | `semantic_atmosphere.labels` | `extracted["emotions"]` 经 `normalize_mood` | ❌ **`emotions` 在 2.0 的 Observation 上不存在** |
+
+所以**四类里三类现在就能做**，`atmosphere` 要先定「要不要把 `emotions` 也搬进来」——
+而它是受控词表那一族的一部分。
+
+**B. 它做七件事，不只是「建实体」。** 逐条列在实现清单里：批量 find-or-create 四类实体、
+place 的五个属性（含 `geo` / `scene_type` / `semantic_primary` / `semantic_details` /
+`visual_place_descriptions`）、**旧 place 投影的清理**（DELETE `entity_observations` 与
+`event_entities` 上的旧行）、object 的 label/category、atmosphere 的 label/details、
+time 的四个派生属性、`event_entities` 关联（每类一个中文关系名）。
+
+**C. 它调 `create_relationship`——那是 S7 的表。** 最后一组循环给每个实体建两条关系：
+
+```python
+if place_entity and entity["id"] != place_entity["id"]:
+    self.create_relationship(entity["id"], "出现在", place_entity["id"], ...)
+if time_entity and entity["id"] != time_entity["id"]:
+    self.create_relationship(entity["id"], "记录于", time_entity["id"], ...)
+```
+
+而 2.0 的 `relationships` 表与 `RelationshipRepository.create` 的归属是 **S7**
+（设计 §8 的 S7 = family graph + relationships；`check_method_reachability` 里
+`RelationshipRepository.list_person_relationships` 与 `retract` 现在登记的正是 S7）。
+**所以 T127 照 1.0 全搬会牵进 S7 的地界**——这是动工前要定的第二件事：
+要么 T127 先不做那两条关系（记成显式的后续），要么把关系表那一半提前。
+
+**结论**：T127 拆成三段更妥当——`0008`（已落）、**四类实体与属性**（A/B，可做）、
+**关系那两条**（C，与 S7 一起）。⑥ 那条口径核完判为「甲」。
+
 #### ⑥ **一个必须先定的口径**：地点在 2.0 是 `asset_places`，在 1.0 是 entity
 
 这是这一组真正的分岔，也是它体量的来源：
