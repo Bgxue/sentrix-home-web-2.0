@@ -502,3 +502,17 @@ class AppearanceEvidenceRecord:
     status: str
     created_at: datetime | None
     updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class EntitySpec:
+    """「要找一个什么样的实体」——``find_or_create_entities`` 的输入一行。
+
+    1.0 用的是裸三元组 ``(entity_type, name, summary)``（``db.py:3798-3805`` 的
+    ``values`` → ``specs``）。2.0 收成一个具名记录：三个都是 ``str`` 的元组，
+    拼参数顺序错了不会有任何东西报错，而**错的顺序会把摘要写进名字字段**。
+    """
+
+    entity_type: str
+    name: str
+    summary: str = ""

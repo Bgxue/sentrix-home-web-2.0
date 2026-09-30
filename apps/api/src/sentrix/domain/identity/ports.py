@@ -26,6 +26,7 @@ from sentrix.domain.identity.models import (
     EntityPropertyRecord,
     EntityRecord,
     EntityRevisionRecord,
+    EntitySpec,
     FaceClusterRecord,
     FaceDetection,
     FaceInstanceRecord,
@@ -349,6 +350,53 @@ class EntityRepository(Protocol):
         """
         ...
 
+    def find_or_create_entities(
+        self,
+        specs: Sequence[EntitySpec],
+        *,
+        scope_id: str = DEFAULT_SCOPE_ID,
+        confidence: float = 0.0,
+    ) -> Mapping[tuple[str, str], EntityRecord]:
+        """按 ``(entity_type, name)`` 批量找或建，返回 ``(类型, 名字) → 实体`` 的表。
+
+        1.0 ``db.py:3708-3749`` 的 ``_find_or_create_entities_batch``，逐条对齐：
+
+        1. **先按 ``(类型, 名字)`` 去重、丢掉空名字**——同一张照片里同一个物体写两遍
+           不该建两个实体；
+        2. **按类型分组去查**（``canonical_name IN (...)``），一次一类而不是一行一查；
+        3. 命中的按 ``active → confirmed → 其余`` 的偏好排序取第一个（1.0 的
+           ``ORDER BY CASE status ...``）——同名有多个时优先那个已经在用的；
+        4. **命中的抬置信度**（``MAX(confidence, ?)``），**没命中的按 ``pending`` 新建**。
+
+        ``status != 'rejected'`` 是查询条件的一部分：被否掉的实体不该被复用。
+        查不到是**按类型批量查的**，不是逐个 ``get``——一张照片有几十个物体时，
+        逐个查就是几十次往返。
+
+        **这是 2.0 唯一一处给非人物实体建行的地方。** 在此之前只有 ``create_person``
+        （它的 docstring 写着「2.0 只收 person 这一种，因为本切片没有别的调用者」）——
+        S6 的 T127 就是那个调用者。
+        """
+        ...
+
+    def link_observation(
+        self,
+        entity_id: str,
+        observation_id: str,
+        *,
+        confidence: float = 0.0,
+        source: str = "observation_extraction",
+    ) -> None:
+        """把「这条观察提到了这个实体」记进 ``entity_observations``。
+
+        1.0 ``db.py:3831-3837``：``INSERT ... ON CONFLICT(entity_id, observation_id)
+        DO UPDATE SET confidence = MAX(confidence, excluded.confidence)``——**同一条观察
+        重跑时抬置信度、不重复插入**，那是「重跑导入不产生重复行」的一半。
+
+        **在 S6 之前这张表一个写入者都没有**（2.0 只有一处读：``entities.py:734``
+        取某个实体的事件 id）。T127 是它的第一个写入者。
+        """
+        ...
+
     def create_person(
         self,
         name: str,
@@ -432,6 +480,33 @@ class EntityRepository(Protocol):
         当前值是用户值 → 原样返回它、不写任何行；与当前派生值相同 → 只抬置信度并合并
         证据；不同 → 新起一行 ``status='pending'``，把被取代的那行记进
         ``supersedes_property_id``。
+        """
+        ...
+
+    def maintain_property_values(
+        self,
+        entity_id: str,
+        property_key: str,
+        values: Sequence[object],
+        *,
+        confidence: float = 0.0,
+        evidence_ids: Sequence[str] = (),
+        source: str = PROPERTY_SOURCE_DERIVED,
+    ) -> EntityPropertyRecord:
+        """多值属性的**合并**写入。1.0 ``db.py:4728-4744``。
+
+        与 ``maintain_property`` 的差别是**合并而不是改口**，三处口径都照 1.0：
+
+        1. **用户值优先**：当前值是 ``source='user'`` 就原样返回、一个字节都不写；
+        2. **并集去重、丢掉空项**：``dict.fromkeys(existing + values)``——1.0 用字典**保序**
+           去重，不是 ``set``（集合会打乱顺序，而这份列表要进提示词）；
+        3. **已有值时就地 UPDATE，不新起 ``pending`` 行**。这一条与 ``maintain_property``
+           相反，也是它必须单独存在的原因：多值属性（``semantic_details`` /
+           ``raw_atmosphere_labels``）是**累积的证据**，每张照片多一条就起一条待确认的
+           「改口」行，界面会堆满永远没人确认的修订。
+
+        为什么 2.0 现在才加：``s5-deviations.md`` 第 46 条记过它在 1.0「本切片没有
+        调用者」——**唯一那个调用者是语义实体抽取（T127）**。
         """
         ...
 

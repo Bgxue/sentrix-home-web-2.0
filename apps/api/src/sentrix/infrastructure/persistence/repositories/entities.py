@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 from sentrix.domain.identity.models import (
@@ -35,6 +35,7 @@ from sentrix.domain.identity.models import (
     EntityPropertyRecord,
     EntityRecord,
     EntityRevisionRecord,
+    EntitySpec,
     PersonNameMatch,
 )
 from sentrix.infrastructure.persistence.database import Database
@@ -182,6 +183,111 @@ class SqliteEntityRepository:
                 [ENTITY_TYPE_PERSON, *params],
             ).fetchall()
         return [_row_to_entity(row) for row in rows]
+
+    def find_or_create_entities(
+        self,
+        specs: Sequence[EntitySpec],
+        *,
+        scope_id: str = DEFAULT_SCOPE_ID,
+        confidence: float = 0.0,
+    ) -> Mapping[tuple[str, str], EntityRecord]:
+        """1.0 ``db.py:3708-3749`` 的 ``_find_or_create_entities_batch``，四步逐条对齐。
+
+        **按类型分组查而不是逐个查**：一张照片常有几十个物体，逐个 ``get`` 就是几十次
+        往返。查询里的 ``status != 'rejected'`` 是必要条件——被否掉的实体不该被复用。
+        排序 ``active → confirmed → 其余`` 取每个名字的**第一行**：同名有多个时优先那个
+        已经在用的（1.0 的 ``ORDER BY CASE status ...``，它只取一行）。
+        """
+        unique: list[EntitySpec] = []
+        seen: set[tuple[str, str]] = set()
+        for spec in specs:
+            key = (spec.entity_type, str(spec.name or "").strip())
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            unique.append(EntitySpec(key[0], key[1], spec.summary))
+        if not unique:
+            return {}
+
+        grouped: dict[str, list[str]] = {}
+        for spec in unique:
+            grouped.setdefault(spec.entity_type, []).append(spec.name)
+
+        scope = scope_id or DEFAULT_SCOPE_ID
+        now = _now()
+        found: dict[tuple[str, str], EntityRecord] = {}
+        with self._database.connect() as connection, connection:
+            for entity_type, names in grouped.items():
+                placeholders = ",".join("?" for _ in names)
+                rows = connection.execute(
+                    f"SELECT {_ENTITY_COLUMNS} FROM entities"
+                    " WHERE scope_id = ? AND entity_type = ? AND status != ?"
+                    f" AND canonical_name IN ({placeholders})"
+                    " ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END",
+                    (scope, entity_type, ENTITY_STATUS_REJECTED, *names),
+                ).fetchall()
+                taken: set[str] = set()
+                ids: list[str] = []
+                for row in rows:
+                    if row["canonical_name"] in taken:
+                        continue
+                    taken.add(row["canonical_name"])
+                    ids.append(row["id"])
+                    found[(entity_type, row["canonical_name"])] = _row_to_entity(row)
+                if ids:
+                    marks = ",".join("?" for _ in ids)
+                    connection.execute(
+                        "UPDATE entities SET confidence = MAX(confidence, ?), updated_at = ?"
+                        f" WHERE id IN ({marks})",
+                        (float(confidence or 0), now, *ids),
+                    )
+            for spec in unique:
+                if (spec.entity_type, spec.name) in found:
+                    continue
+                entity_id = _new_id("entity")
+                connection.execute(
+                    "INSERT INTO entities (id, scope_id, entity_type, canonical_name, status,"
+                    " family_role, summary, confidence, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entity_id,
+                        scope,
+                        spec.entity_type,
+                        spec.name,
+                        ENTITY_STATUS_PENDING,
+                        None,
+                        spec.summary,
+                        float(confidence or 0),
+                        now,
+                        now,
+                    ),
+                )
+                row = connection.execute(
+                    f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE id = ?", (entity_id,)
+                ).fetchone()
+                assert row is not None
+                found[(spec.entity_type, spec.name)] = _row_to_entity(row)
+        return found
+
+    def link_observation(
+        self,
+        entity_id: str,
+        observation_id: str,
+        *,
+        confidence: float = 0.0,
+        source: str = "observation_extraction",
+    ) -> None:
+        """1.0 ``db.py:3831-3837``。``ON CONFLICT`` 抬置信度而**不重复插入**——
+        重跑一次导入不会在这张表里留第二行，那是「重跑导入幂等」的一半。"""
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO entity_observations"
+                " (entity_id, observation_id, confidence, source, created_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT(entity_id, observation_id)"
+                " DO UPDATE SET confidence = MAX(confidence, excluded.confidence)",
+                (entity_id, observation_id, float(confidence or 0), source, _now()),
+            )
 
     def create_person(
         self,
@@ -425,6 +531,75 @@ class SqliteEntityRepository:
                 supersedes=current["id"] if current is not None else None,
                 revision=int(current["revision"] or 0) + 1 if current is not None else 1,
             )
+
+    def maintain_property_values(
+        self,
+        entity_id: str,
+        property_key: str,
+        values: Sequence[object],
+        *,
+        confidence: float = 0.0,
+        evidence_ids: Sequence[str] = (),
+        source: str = "derived",
+    ) -> EntityPropertyRecord:
+        """1.0 ``db.py:4728-4744``：多值属性**合并**而不是改口。
+
+        三处与 ``maintain_property`` 相反的口径，都是 1.0 的：
+
+        1. **用户值优先**——当前值是 ``user`` 就原样返回、不写；
+        2. **已有值时就地 UPDATE，不新起 ``pending`` 行**（多值属性是累积的证据，
+           每张照片起一条待确认的「改口」会让界面堆满没人确认的修订）；
+        3. **空列表也照写**（首次），但合并时丢掉空项——``_dedupe`` 那句
+           ``if str(item)`` 就是 1.0 的 ``if item``。
+
+        首次写入走 ``_insert_property``（与单值属性同一条路，``active``），
+        之后的合并走上面第 2 条。
+        """
+        self._require_entity(entity_id)
+        key = self._clean_key(property_key)
+        evidence = _dedupe(evidence_ids)
+        with self._database.connect() as connection, connection:
+            current = self._current_property(connection, entity_id, key)
+            if current is not None and current["source"] == PROPERTY_SOURCE_USER:
+                return _row_to_property(current)
+            existing = _decode_list(current["value_json"]) if current is not None else []
+            # 1.0 那一行是 ``dict.fromkeys([item for item in existing + list(values or [])
+            # if item])``——**按原始值判真假、且不做字符串化**。
+            # 写成先 ``str()`` 再判会留一个真实的坑：``str(None)`` 是 ``"None"``（真值），
+            # 于是 ``None`` 会以字符串形态进列表。那是第一版的错，用例抓到了它。
+            merged = list(dict.fromkeys([item for item in [*existing, *values] if item]))
+
+            if current is None:
+                return self._insert_property(
+                    connection,
+                    entity_id=entity_id,
+                    property_key=key,
+                    encoded=_encode(merged),
+                    source=source,
+                    confidence=confidence,
+                    evidence=evidence,
+                    status=PROPERTY_STATUS_ACTIVE,
+                    supersedes=None,
+                    revision=1,
+                )
+            connection.execute(
+                "UPDATE entity_properties SET value_json = ?, confidence = MAX(confidence, ?),"
+                " evidence_ids_json = ?, updated_at = ? WHERE id = ?",
+                (
+                    _encode(merged),
+                    float(confidence or 0),
+                    _encode(
+                        list(
+                            _dedupe(
+                                [*[str(i) for i in _decode_list(current["evidence_ids_json"])], *evidence]
+                            )
+                        )
+                    ),
+                    _now(),
+                    current["id"],
+                ),
+            )
+            return self._property_by_id(connection, current["id"])
 
     def set_property(
         self,

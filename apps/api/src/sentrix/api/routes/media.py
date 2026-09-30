@@ -13,6 +13,7 @@ from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportRes
 from sentrix.application.identity.enroll_face import EnrollFace
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
+from sentrix.application.media.maintain_entities import MaintainObservationEntities
 from sentrix.application.media.observe_asset import ObserveAsset
 from sentrix.application.memories.assign_events import AssignEvents, EventVisualSimilarity
 from sentrix.application.memories.maintain_facts import MaintainFacts
@@ -126,6 +127,7 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
         face_enroller=_face_enroller(container),
         fact_maintainer=_fact_maintainer(container),
         text_indexer=_text_indexer(container),
+        entity_extractor=_entity_extractor(container),
         lexical_index=container.lexical_index,
         # 记忆空间行（裁决一）。**只在这里接**：簇列表内连 ``memory_spaces``，
         # 少接这一处，全新部署导入一整册之后审阅页一个簇都不显示（第 97 / 103 条）。
@@ -169,6 +171,25 @@ def _text_indexer(container: Container) -> Callable[[Observation, str | None], i
 
     def run(observation: Observation, event_id: str | None) -> int:
         return index.index(observation, event_id).rows
+
+    return run
+
+
+def _entity_extractor(container: Container) -> Callable[[Observation, str], tuple[str, ...]]:
+    """非人物实体抽取的接线（S6 T127）。
+
+    **排在事件判定之后**（``ImportAssets.execute`` 的顺序），所以入参带 ``event_id``——
+    抽出来的地点/物件/时间要挂到那个事件上（``event_entities``）。与 1.0
+    ``pipeline.py:336`` 的位置一致。
+    """
+    maintain = MaintainObservationEntities(
+        entities=container.entity_repository,
+        events=container.event_participant_repository,
+        assets=container.asset_repository,
+    )
+
+    def run(observation: Observation, event_id: str) -> tuple[str, ...]:
+        return tuple(entity.id for entity in maintain.execute(observation, event_id=event_id).entities)
 
     return run
 

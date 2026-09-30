@@ -1323,3 +1323,46 @@ T124 注释承诺了代码里根本没有）：
 评审通过不打标、风格问题不打标），**定点变异 6 条全部变红**。
 后两条用例是必需的——只断言「判不实时会打标」的话，一个**永远打标**的实现也能过，
 而那种标什么都说明不了。
+
+
+### 8.11 T127 落了什么：非人物实体（迁移 0008 + 抽取）
+
+**裁决：甲**（2026-09-30）——只做四类实体与属性，两条关系留给 S7。理由与核查全在 §4 Task 127。
+
+**落的件**（两个提交：迁移、抽取）：
+
+| 落点 | 是什么 |
+|---|---|
+| `migrations/0008_semantic_entities.sql` | `semantic_profiles` + `semantic_claims` + `idx_semantic_claims_person`，列集照 1.0 `db.py:811-849` 逐字 |
+| `domain/identity/extraction.py`（新） | 纯规则：`OBJECT_CATEGORIES` 六类词表、`object_category`、`time_semantics`、`build_entity_specs`、`EVENT_RELATIONS` |
+| `application/media/maintain_entities.py`（新） | `MaintainObservationEntities`：建实体 → 挂 `entity_observations` → 写属性 → 挂 `event_entities` |
+| `EntityRepository` +3 | `find_or_create_entities` / `link_observation` / `maintain_property_values` |
+| `EventParticipantRepository` +1 | `upsert_entity`（**从 `_rehome_entities` 里那段私有形态提升**——那段注释写着「等 S6 有了写入者再开口」，T127 就是它） |
+| `ImportAssets` +1 协作者 | `entity_extractor`，位置照 1.0 `pipeline.py:336`：**事件判定之后** |
+
+**三处「1.0 也这样」的留白**（都不是省略，各自有代码依据）：
+
+1. **`atmosphere` 那一类不建**：它的两个来源（语义词表与 `emotions`）2.0 都没有，
+   而 1.0 在词表不可用时同样产不出名字。
+2. **`visual_place_descriptions` 不写**：1.0 的条件是
+   `visual_place and (visual_place != scene_type or has_semantic_place)`，
+   无语义词表时 `scene_type` 就等于 `visual_place`、`has_semantic_place` 为假 ——
+   **合取恒假**。地点在 2.0 的输入下写的是 `geo`（← asset 的 GPS）与 `scene_type`。
+3. **`semantic_primary` / `semantic_details` 不写**：1.0 把它们关在
+   `if has_semantic_place:` / `if spec:` 里面。
+
+**用例 53 条，定点变异 12 条里 11 条变红**，另一条是**等价变异**（`find_or_create` 里那句
+去重与后面的 `found` 检查冗余，行为完全一样——是防御性代码，不是门禁）。
+
+**变异先抓到、我再补的三处**：
+
+- `maintain_property_values` 的合并最初写成 `[str(item) for item in values if str(item)]`
+  ——**`str(None)` 是 `"None"`（真值），于是 `None` 会以字符串形态进列表**。
+  1.0 是按**原始值**判真假、不字符串化。用例先红、才改的实现。
+- `link_observation` 的 `ON CONFLICT ... DO NOTHING` 与 `DO UPDATE SET confidence=MAX(...)`
+  **在行数上完全一样**，只断言行数时互换是观察不到的；补了置信度那条断言。
+- `test_object_category("红色外套")` 是我写错了期望——`外套` 里没有词表里的「衣」。
+
+**顺带**：`EntityRepository.maintain_property` 的零调用登记**被反向规则自己删掉了**
+（T127 的抽取要写 `label`/`category`/时间属性）——它原来登记的是「Task 128 接线」，
+实际是 T127 接上的。`list_properties`（读）仍等 T128。

@@ -92,6 +92,58 @@ class SqliteEventParticipantRepository:
             self._upsert_participant(connection, event_id, person_id, role, evidence_ids, confidence)
         return self._find(event_id, person_id, role)
 
+    def upsert_entity(
+        self,
+        event_id: str,
+        entity_id: str,
+        relation: str,
+        evidence_ids: Sequence[str],
+        confidence: float = 0.0,
+    ) -> None:
+        """1.0 ``db.py:3287`` 的 ``upsert_event_entity``。
+
+        **写入者到 S6 才出现**——本模块的 docstring 写着「2.0 现在没有任何一处写
+        ``event_entities``……等 S6 有了写入者再开口」。T127 的语义实体抽取就是那个写入者，
+        所以这段从 ``_rehome_entities`` 里那段私有形态提升成公开方法：**合并语义只留一份**
+        （同键合并证据、置信度取 ``MAX``），搬迁与写入走同一套。
+        """
+        with self._database.connect() as connection, connection:
+            timestamp = _now()
+            existing = connection.execute(
+                "SELECT evidence_ids_json, confidence FROM event_entities"
+                " WHERE event_id = ? AND entity_id = ? AND relation = ?",
+                (event_id, entity_id, relation),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO event_entities"
+                    " (event_id, entity_id, relation, evidence_ids_json, confidence,"
+                    "  created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        event_id,
+                        entity_id,
+                        relation,
+                        json.dumps(_dedupe(evidence_ids), ensure_ascii=False),
+                        float(confidence or 0),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                return
+            merged = _dedupe([*_evidence(existing["evidence_ids_json"]), *evidence_ids])
+            connection.execute(
+                "UPDATE event_entities SET evidence_ids_json = ?, confidence = MAX(confidence, ?),"
+                " updated_at = ? WHERE event_id = ? AND entity_id = ? AND relation = ?",
+                (
+                    json.dumps(merged, ensure_ascii=False),
+                    float(confidence or 0),
+                    timestamp,
+                    event_id,
+                    entity_id,
+                    relation,
+                ),
+            )
+
     def list_participants(self, event_id: str) -> Sequence[EventParticipantRecord]:
         with self._database.connect() as connection:
             rows = connection.execute(

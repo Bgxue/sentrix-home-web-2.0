@@ -101,6 +101,11 @@ class ImportResult:
     # 「这台机器没有文本能力」与「这段文本拼出来是空的」要能分开，
     # 而它们都表现为「没有文本向量」。
     text_rows: int = 0
+    # 本次建/找到的非人物实体 id（S6 T127）。与 ``fact_ids`` 同一个理由：
+    # 「没接这个协作者」与「这张图里没有地点/物件」都表现为「实体数没变」，
+    # 要分开它们就得有个可观测面。**它在下游有用**：``retrieve_entity`` 的
+    # ``person_bridge`` 与 ``entity_groups`` 都按实体 id 聚合。
+    entity_ids: tuple[str, ...] = ()
 
 
 def _new_id(prefix: str) -> str:
@@ -124,6 +129,9 @@ class ImportAssets:
         face_enroller: Callable[[Asset, Observation], int] | None = None,
         fact_maintainer: Callable[[Observation], tuple[str, ...]] | None = None,
         text_indexer: Callable[[Observation, str | None], int] | None = None,
+        # 非人物实体抽取（S6 T127）。**入参带 event_id**：1.0 ``pipeline.py:336`` 在事件
+        # 判定之后才调它，实体要挂到那个事件上（``event_entities``）。
+        entity_extractor: Callable[[Observation, str], tuple[str, ...]] | None = None,
         lexical_index: LexicalIndex | None = None,
         spaces: SpaceRepository | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -139,6 +147,7 @@ class ImportAssets:
         self._face_enroller = face_enroller
         self._fact_maintainer = fact_maintainer
         self._text_indexer = text_indexer
+        self._entity_extractor = entity_extractor
         self._lexical_index = lexical_index
         self._spaces = spaces
         self._clock = clock
@@ -211,6 +220,7 @@ class ImportAssets:
         # 写在前面则 event_id 恒为空，而那条 metadata 只在召回时用得到——
         # 错了不报错，只是事件维度的扩展永远失效。
         text_rows = self._index_text(observation, event_id)
+        entity_ids = self._extract_entities(observation, event_id)
         fact_ids = self._maintain_facts(observation)
         lexical_terms = self._project_lexical(observation)
 
@@ -224,10 +234,21 @@ class ImportAssets:
             placed=placed,
             event_id=event_id,
             lexical_terms=lexical_terms,
+            entity_ids=entity_ids,
             fact_ids=fact_ids,
             faces=faces,
             text_rows=text_rows,
         )
+
+    def _extract_entities(self, observation: Observation, event_id: str | None) -> tuple[str, ...]:
+        """非人物实体抽取（S6 T127）。协作者缺失就静默跳过——与其余可选协作者同形。
+
+        **排在事件判定之后**，与 1.0 ``pipeline.py:336`` 的位置一致：抽出来的地点/物件/
+        时间要挂到那个事件上，事件还没定就挂不上去。
+        """
+        if self._entity_extractor is None:
+            return ()
+        return self._entity_extractor(observation, event_id or "")
 
     # ---- 可选协作者 ------------------------------------------------------------
 

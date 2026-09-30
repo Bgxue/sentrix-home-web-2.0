@@ -125,6 +125,28 @@ class EventParticipantRepository(Protocol):
         """
         ...
 
+    def upsert_entity(
+        self,
+        event_id: str,
+        entity_id: str,
+        relation: str,
+        evidence_ids: Sequence[str],
+        confidence: float = 0.0,
+    ) -> None:
+        """把「这个事件里有这个实体」记进 ``event_entities``。1.0 ``db.py:3287`` 的
+        ``upsert_event_entity``。
+
+        同键（``event_id`` + ``entity_id`` + ``relation``）合并证据、置信度取 ``MAX``——
+        与 ``participants.py`` 的 ``rehome`` 里那段私有形态是同一套语义。那段注释写着
+        「2.0 现在没有任何一处写 ``event_entities``……**等 S6 有了写入者再开口**」，
+        **T127 就是那个写入者**。
+
+        与 ``upsert_participant``（人）分开：这张表装的是**非人物实体**
+        （地点 / 物件 / 氛围 / 时间）。``relation`` 是中文关系名，由抽取那一层给
+        （「地点」「时间」「包含物件」「画面氛围」）。
+        """
+        ...
+
     def list_participants(self, event_id: str) -> Sequence[EventParticipantRecord]: ...
 
     def rehome(self, source_event_id: str, target_event_id: str) -> int:
