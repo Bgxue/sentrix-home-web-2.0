@@ -768,6 +768,60 @@ supersede 旧行 → 插新行（`source='user'`、`confidence=1`、`status='act
 `semantic_profiles` / `semantic_claims` 在 2.0 **零读路径**（只在迁移里建表），所以
 T130 要新建一个语义读的端口。
 
+#### T131 动工前核查（2026-09-30）：这不是接线，是新建
+
+§3 的任务表写「把非人类实体接进 ``retrieve_entity``，让实体通道服务它们」。
+**核查推翻了它的前提：1.0 从来没有把非人物实体接进检索。**
+
+##### 1.0 那边的事实
+
+- 1.0 的实体通道（``retrieval/entity.py``）**只服务人物**：``:28`` 只从
+  ``dimension == "person"`` 的条件里取名字，``:38-42`` 的 SQL 硬过滤
+  ``field_type = 'person_bridge'``。
+- 1.0 的词法投影（``retrieval_indexes.py:177-181``）写的是 **observation 的字段文本**
+  （``place`` / ``activity`` / ``caption`` / ``objects`` / ``clothing`` / ``ocr_text`` /
+  ``people``）与 asset 锚点（``:233-269`` 的 geo / time / file）——
+  **没有一处读 ``entities.canonical_name``**。
+- ``entity_mentions`` 在 1.0 只用于**人物**条件判定与结构化筛选
+  （``evidence_retrieval.py:499-508`` 的 docstring 原文就写着 "benchmark person linkage
+  lives in entity_mentions"），``structured_memory.py:147-150`` 那条 join 的 ``entity_ids``
+  只从 ``parsed.entity_names`` 来，而它的唯一写入者是 ``agent_runtime/tools.py:147`` 的
+  person 分支。
+- 1.0 的 place 走的是**另一条路**：``agent_runtime/tools.py:142-144`` 把它塞进
+  ``semantic_conditions``（``dimension="place"``），由条件判定与 metadata 通道的 geocode
+  预筛召回，**与 ``entities`` 表无关**。
+
+所以 place / object / time 那些实体在 1.0 只被写入与**在浏览接口里读**，**不进任何召回通道**。
+
+##### 2.0 那边的事实
+
+实体通道同样只服务 person，卡在三处：``search_terms.py:230`` 的
+``field_type = 'person_bridge'`` 硬过滤（docstring 自己写明理由：不加它，同名的地名或
+物品也会把 asset 带进来）、``retrieve_entity.py:94`` 的 ``observation.people`` 兜底、
+``retrieve_evidence.py:307`` 的输入侧只传 ``request.person``。
+
+而 1.0 用来召回 place / object 的那两条路，**2.0 都已经有了**：
+``domain/retrieval/lexical.py:37-45`` 的 ``place`` / ``object`` 字段（来源是 observation
+的 ``place`` / ``objects``）、``ANCHOR_FIELD_TYPES`` 的 ``geo`` / ``time`` / ``file``。
+
+##### 结论
+
+**T131 不是「把 1.0 已有的接线搬过来」，2.0 这边是新东西。** 按项目那条
+「不新增 1.0 没有的设计，遇到 1.0 做得不对的地方先报给用户」，**先不动手**，
+把证据摆出来等裁决。三个可选方向（都不在本次自行决定）：
+
+1. **不做**：1.0 的召回能力 2.0 已经等价具备（见上表），T131 记为「1.0 无此设计」。
+2. **做**：把 ``entities.canonical_name`` 写进词法投影（新增一个 ``field_type``），
+   让确认为 place/object 的实体名成为召回面——**这是新行为**，会改变召回结果，
+   需要先定「它该不该进融合、算不算 anchor」。
+3. **只做一半**：把非人物实体接进 ``Observation.people`` 那种「快照」面，
+   不改通道权重——仍然没有 1.0 依据。
+
+**顺带记一条**：``retrieval_indexes.py:344-359`` 的 ``search(scope_id, field_type, value)``
+在 1.0 生产代码里**没有调用者**（只有测试用），2.0 已经照此判断不移植它
+（``domain/retrieval/ports.py:80-83``）——与 T131 是同一类「1.0 有这个函数但没人调」，
+但那次判对了，这次的任务表没有。
+
 ### 收口
 
 | Task | 内容 |
