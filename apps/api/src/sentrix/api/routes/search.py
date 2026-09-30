@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sentrix.api.deps import get_container
 from sentrix.api.routes.media import to_summary
-from sentrix.api.schemas.search import SearchHit, SearchResponse
+from sentrix.api.schemas.search import ChannelTrace, SearchHit, SearchResponse
 from sentrix.application.retrieval.evaluate_conditions import EvaluateConditions
 from sentrix.application.retrieval.retrieve_entity import RetrieveEntity
 from sentrix.application.retrieval.retrieve_evidence import EvidenceRequest, RetrieveEvidence
@@ -172,5 +172,16 @@ def search_assets(
         degraded_reason=result.degraded_reason,
         authoritative_vectors=result.authoritative_vectors,
         excluded_count=result.excluded_count,
+        channel_trace=[
+            ChannelTrace(
+                channel=trace.channel,
+                status=trace.status,
+                candidate_count=trace.candidate_count,
+                latency_ms=trace.latency_ms,
+                backend=trace.backend,
+                reason=trace.reason,
+            )
+            for trace in result.channel_trace
+        ],
         items=items,
     )

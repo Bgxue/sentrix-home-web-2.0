@@ -33,7 +33,9 @@ primary 融合结果里的 exact/strong 当种子再 ``expand``（``evidence_ret
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import logging
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -54,7 +56,9 @@ from sentrix.application.retrieval.retrieve_visual import (
 from sentrix.domain.media.models import MediaType
 from sentrix.domain.retrieval.conditions import Condition
 from sentrix.domain.retrieval.fusion import DEFAULT_CHANNEL_WEIGHTS, fuse
-from sentrix.domain.retrieval.models import CandidateHit
+from sentrix.domain.retrieval.models import CandidateHit, ChannelTrace
+
+log = logging.getLogger("sentrix.retrieval.evidence")
 
 METADATA_CHANNEL = "metadata"
 ENTITY_CHANNEL = "entity"
@@ -132,6 +136,22 @@ class EvidenceResult:
     # **必须传出来**：没有它，「条件把所有候选都排除了」与「本来就没有候选」
     # 在响应上长得一模一样，而这两件事该做的处置相反。
     excluded_count: int = 0
+    # 每个通道这一次的轨迹。1.0 ``EvidencePacket.channel_trace``——**§8 给 S6 的
+    # 验收条件就是这一格**。顺序与融合的通道顺序一致（它有意义，见 ``execute``）。
+    channel_trace: Sequence[ChannelTrace] = field(default_factory=tuple)
+
+
+def _visual_candidates_health(
+    result: VisualSearchResult,
+) -> tuple[tuple[CandidateHit, ...], str, bool, str]:
+    """视觉通道的候选 + 它的健康度。**两个一起取**，理由见 ``record`` 的 docstring。"""
+    return _visual_candidates(result), result.backend, result.degraded, result.degraded_reason
+
+
+def _text_candidates_health(
+    result: TextSearchResult,
+) -> tuple[tuple[CandidateHit, ...], str, bool, str]:
+    return _text_candidates(result), result.backend, result.degraded, result.degraded_reason
 
 
 def _visual_candidates(result: VisualSearchResult) -> tuple[CandidateHit, ...]:
@@ -199,37 +219,117 @@ class RetrieveEvidence:
         limit = max(1, request.limit)
         recall_limit = limit * RECALL_OVERSAMPLE_FACTOR
 
-        visual = self._visual.execute(
-            VisualSearchRequest(text=text, scope_id=request.scope_id, limit=recall_limit)
-        )
-        text_result = self._text.execute(
-            TextSearchRequest(text=text, scope_id=request.scope_id, limit=recall_limit)
-        )
+        # **每个通道都先记一条 trace，再谈命中**——1.0 ``evidence_retrieval.py:203-230``。
+        # 通道抛异常时 ``channel_hits[name] = []`` 而 trace 照样留一条带 ``reason`` 的：
+        # 「这一路挂了」与「这一路跑了没找到」在候选列表上长得一模一样，
+        # 而那正是 S6 要证明的东西（见 ``ChannelTrace`` 的 docstring）。
+        traces: list[ChannelTrace] = []
+
+        def record(
+            name: str, run: Callable[[], tuple[Sequence[CandidateHit], str, bool, str]]
+        ) -> Sequence[CandidateHit]:
+            """跑一个通道并记下它的轨迹。
+
+            ``run`` **把调用本身包在里面**，返回 ``(候选, backend, 是否降级, 原因)``。
+            健康度必须在**跑完之后**才拿得到，所以不能像早先那样当参数先算出来——
+            那样两个向量通道的调用会落在 try 之外，它们抛异常时整次检索就挂了
+            （定点变异抓到过这一版）。**一个通道挂了不该让整次检索挂掉**，
+            那是 1.0 那个 ``except`` 的全部意义。
+            """
+            started = time.monotonic()
+            try:
+                hits, backend, degraded, degraded_reason = run()
+            except Exception as error:  # noqa: BLE001 - 见 docstring
+                log.warning("召回通道 %s 抛异常，本次按空结果继续: %s", name, error)
+                traces.append(
+                    ChannelTrace(
+                        channel=name,
+                        status="error",
+                        candidate_count=0,
+                        latency_ms=round((time.monotonic() - started) * 1000, 1),
+                        reason=str(error),
+                    )
+                )
+                return ()
+            traces.append(
+                ChannelTrace(
+                    channel=name,
+                    # 降级与失败是两回事：降级说明这一路**跑到了**、只是后端换了
+                    # （1.0 的 ``getattr(retriever, "status", "ok")`` 是同一个自由度）。
+                    status="degraded" if degraded else "ok",
+                    candidate_count=len(hits),
+                    latency_ms=round((time.monotonic() - started) * 1000, 1),
+                    backend=backend,
+                    reason=degraded_reason if degraded else "",
+                )
+            )
+            return hits
+
+        def plain(hits: Sequence[CandidateHit]) -> tuple[Sequence[CandidateHit], str, bool, str]:
+            """三条没有健康度的通道（metadata / entity / lexical）用这个包一下。"""
+            return hits, "", False, ""
+
+        # 视觉通道的健康度**还要往上报一层**（``EvidenceResult.backend`` / ``degraded``
+        # 是响应顶层的字段），而它的调用现在在 ``record`` 里面。用一个一格盒子把它带出来。
+        # 通道挂了时盒子是空的 → 顶层回 ``none``/未降级，那正是 ``EvidenceResult`` 的
+        # 默认值，也是实情。
+        visual_box: list[VisualSearchResult] = []
+
+        def run_visual() -> tuple[Sequence[CandidateHit], str, bool, str]:
+            result = self._visual.execute(
+                VisualSearchRequest(text=text, scope_id=request.scope_id, limit=recall_limit)
+            )
+            visual_box.append(result)
+            return _visual_candidates_health(result)
+
         # 这个 dict 的插入顺序必须与 1.0 的构建顺序一致：metadata 最先，锚点加成才会
         # 落在同时被 metadata 与语义通道命中的候选上。
         channel_hits: dict[str, Sequence[CandidateHit]] = {
-            METADATA_CHANNEL: self._metadata.execute(
-                scope_id=request.scope_id,
-                time_bounds=request.time_bounds,
-                media_types=request.media_types,
-                negated_media=request.negated_media,
-                place=request.place,
+            METADATA_CHANNEL: record(
+                METADATA_CHANNEL,
+                lambda: plain(
+                    self._metadata.execute(
+                        scope_id=request.scope_id,
+                        time_bounds=request.time_bounds,
+                        media_types=request.media_types,
+                        negated_media=request.negated_media,
+                        place=request.place,
+                    )
+                ),
             ),
             # entity 排在 metadata 之后、lexical 之前——1.0 ``build_default_retrievers``
             # 的构建顺序就是 metadata → entity → lexical → visual_ann。anchor 加成按
             # **候选第一次出现时**的通道给，顺序换了，同时被 entity 与 lexical 命中的
             # 候选就拿不到那 +1.0。
-            ENTITY_CHANNEL: self._entity.execute(
-                people=request.person, scope_id=request.scope_id, limit=recall_limit
+            ENTITY_CHANNEL: record(
+                ENTITY_CHANNEL,
+                lambda: plain(
+                    self._entity.execute(people=request.person, scope_id=request.scope_id, limit=recall_limit)
+                ),
             ),
-            LEXICAL_CHANNEL: self._lexical.execute(
-                whole_query=text, scope_id=request.scope_id, limit=recall_limit
+            LEXICAL_CHANNEL: record(
+                LEXICAL_CHANNEL,
+                lambda: plain(
+                    self._lexical.execute(whole_query=text, scope_id=request.scope_id, limit=recall_limit)
+                ),
             ),
-            VISUAL_CHANNEL: _visual_candidates(visual),
+            # 两个向量通道把后端的健康度一路带上来（``backend`` / ``degraded``）——
+            # 那是它们唯一能说清「为什么这一路没结果」的地方。
+            VISUAL_CHANNEL: record(
+                VISUAL_CHANNEL,
+                run_visual,
+            ),
             # text_ann 排在最后——1.0 ``build_default_retrievers`` 的构建顺序是
             # metadata → entity → lexical → visual_ann → text_ann。anchor 加成按
             # **候选第一次出现时**的通道给，顺序换了拿到的加成就不一样。
-            TEXT_CHANNEL: _text_candidates(text_result),
+            TEXT_CHANNEL: record(
+                TEXT_CHANNEL,
+                lambda: _text_candidates_health(
+                    self._text.execute(
+                        TextSearchRequest(text=text, scope_id=request.scope_id, limit=recall_limit)
+                    )
+                ),
+            ),
         }
         fused = fuse(channel_hits, channel_weights=DEFAULT_CHANNEL_WEIGHTS)
 
@@ -258,9 +358,10 @@ class RetrieveEvidence:
                 )
                 for candidate in fused[:limit]
             ),
-            backend=visual.backend,
-            degraded=visual.degraded,
-            degraded_reason=visual.degraded_reason,
-            authoritative_vectors=visual.authoritative_vectors,
+            backend=visual_box[0].backend if visual_box else "none",
+            degraded=visual_box[0].degraded if visual_box else False,
+            degraded_reason=visual_box[0].degraded_reason if visual_box else "",
+            authoritative_vectors=visual_box[0].authoritative_vectors if visual_box else 0,
             excluded_count=excluded_count,
+            channel_trace=tuple(traces),
         )

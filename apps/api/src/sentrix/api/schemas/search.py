@@ -15,6 +15,24 @@ class SearchHit(BaseModel):
     raw_scores: dict[str, float]
 
 
+class ChannelTrace(BaseModel):
+    """一个召回通道这一次的轨迹。
+
+    **这一块是 S6 的验收条件。** 它要回答的问题只有两个：这一路**跑了没有**、
+    以及没跑或降级时**为什么**。没有它，「通道跑了没找到」与「通道根本没跑」
+    在响应上完全一样——而 S6 要证明的正是六路（2.0 是五路，``adjacency`` 按裁决不实现）
+    真的都在跑。理由与判据写在 ``domain/retrieval/models.py`` 的 ``ChannelTrace`` 上。
+    """
+
+    channel: str
+    # ok / degraded / error。**非 ok 时 reason 一定非空**。
+    status: str
+    candidate_count: int
+    latency_ms: float
+    backend: str = ""
+    reason: str = ""
+
+
 class SearchResponse(BaseModel):
     query: str
     # 实际服务的后端：qdrant 或 sqlite_exact。
@@ -27,4 +45,6 @@ class SearchResponse(BaseModel):
     # 与「本来就没有候选」在响应上长得一模一样，而这两件事该做的处置相反
     # （前者是用户的条件太窄，后者是库里没有）。
     excluded_count: int = 0
+    # 每个通道的轨迹，顺序与融合的通道顺序一致。
+    channel_trace: list[ChannelTrace] = []
     items: list[SearchHit]

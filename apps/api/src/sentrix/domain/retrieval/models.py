@@ -37,3 +37,43 @@ class FusedCandidate:
     channels: Mapping[str, int] = field(default_factory=dict)
     raw_scores: Mapping[str, float] = field(default_factory=dict)
     evidence_class: str = "semantic"
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelTrace:
+    """一个召回通道这一次的轨迹。**S6 的验收条件就是它。**（1.0 ``evidence_retrieval.py:220-230``）
+
+    §8 给 S6 的验收条件是一句「证据包和 trace 能展开」，而它指的东西是具体的：
+    ``EvidencePacket.channel_trace``。1.0 那条注释写得比字段名清楚——
+    *per-channel recall trace so API/benchmark can prove each retriever was invoked
+    (or give an explicit unavailable reason)*。
+
+    **为什么「每候选的 ``channels``」不够。** 那是转置视角，它分不开这两件事：
+
+    - 通道跑了、一张都没召回 → 没有候选带这个键；
+    - 通道**根本没跑**（模型不可用、向量库空）→ **也没有**任何候选带这个键。
+
+    两者在读数上完全一样，而 S6「六路取证补齐」要证明的恰恰是「这一路真的在跑」。
+
+    ``status`` 三个取值，**非 ``ok`` 时 ``reason`` 必须非空**（用例钉住这一条）：
+
+    - ``ok``：跑了，拿到了（可能 0 条）；
+    - ``degraded``：跑了，但后端降级（2.0 的两个向量通道会这样报，见
+      ``TextSearchResult.degraded`` / ``VisualSearchResult.degraded``）；
+    - ``error``：抛了异常。1.0 也是这么收的——异常时 ``channel_hits[name] = []``
+      而 **trace 照样留一条带 ``reason`` 的**。
+
+    ``latency_ms`` 是 1.0 的 ``retrieval_timing``（同一个循环里落的，这里合成一格）。
+    ``embedding_ms`` / ``embedding_events`` **不搬**：那是 1.0 ``embedding_router`` 的
+    内部计时事件，2.0 的嵌入走 ``VisualEmbedder`` / ``TextEmbedder`` 端口，没有那套
+    路由器，搬过来只会是一个恒空字段。
+    """
+
+    channel: str
+    status: str
+    candidate_count: int
+    latency_ms: float
+    # 两个向量通道会报实际服务的后端；另外三条没有这一格（1.0 同样是
+    # ``getattr(retriever, "backend_used", None)``，取不到就是 None）。
+    backend: str = ""
+    reason: str = ""

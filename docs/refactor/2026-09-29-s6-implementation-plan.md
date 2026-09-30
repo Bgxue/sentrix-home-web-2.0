@@ -265,7 +265,7 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 
 | Task | 内容 |
 |---|---|
-| **125** | 证据包 + trace 的可展开面（§8 给 S6 的验收条件就是这一条） |
+| ~~**125**~~ | ✅ **完成**（§8.9）——证据包 + trace 的可展开面，**§8 给 S6 的验收条件** |
 | **126** | 语义评审层的第二层（「双层防伪」——**动工前核查 1.0 的第二层是什么**） |
 
 ### 第六组 · 语义实体（2026-09-29 裁决并入 S6）
@@ -824,8 +824,8 @@ method-reachability / module-map / capability-map / openapi **全绿**；覆盖�
 ~~**第一件事（T123/T124 共用，必须先做）**~~ → **已完成**，见 §8.5。
 
 **S6 的四个工具全部落地**（T122 §8.6 / T123 §8.7 / T124 §8.8）。
-剩下的是**第五、六组与收口**：T125（证据包 + trace 可展开）、T126（语义评审第二层）、
-T127–T131（语义实体）、T132（收口）。另外 T116（不实现 `adjacency`）的理由
+剩下的是**第五、六组与收口**：T126（语义评审第二层）、T127–T131（语义实体）、T132（收口）。
+**T125 已完成**（§8.9）——S6 的验收条件「证据包和 trace 能展开」现在有了可判定的落点。另外 T116（不实现 `adjacency`）的理由
 **还没记进 `frozen.md`**——那是 §3 定的落点，收口前要补。
 
 **T122 已按 §4 的「二核」清单落地**：四条读路径 + 接线 + 17 条新用例。
@@ -1068,3 +1068,45 @@ T127–T131（语义实体）、T132（收口）。另外 T116（不实现 `adja
 
 **用例与变异**：16 条新用例，**9 条定点变异全部变红**（含一条钉住 `cost_class=CHEAP`
 与一条钉住「不收 question」——**偏离也要有门禁**，否则下一个人会顺手改回「照抄 1.0」）。
+
+
+### 8.9 T125 落了什么：channel_trace（S6 的验收条件）
+
+§8 给 S6 的验收条件是一句「证据包和 trace 能展开」。核查把它落到了具体的一格：
+1.0 的 `EvidencePacket.channel_trace`（`evidence_retrieval.py:33-66`）。
+
+**为什么「每候选的 `channels`」不够。** 2.0 原来只有那个（转置视角：这个候选被哪些通道
+以第几名召回）。它分不开两件事：
+
+- `text_ann` 跑了、一张都没召回 → 没有候选带这个键；
+- `text_ann` **根本没跑**（嵌入器不可用）→ **也没有**任何候选带这个键。
+
+读数完全一样，而 S6「六路取证补齐」要证明的恰恰是「这一路真的在跑」。1.0 那条注释
+写得比字段名清楚：*per-channel recall trace so API/benchmark can prove each retriever
+was invoked (or give an explicit unavailable reason)*。
+
+**四个件**：
+
+| 落点 | 是什么 |
+|---|---|
+| `domain/retrieval/models.py` | `ChannelTrace`：`channel` / `status` / `candidate_count` / `latency_ms` / `backend` / `reason` |
+| `application/retrieval/retrieve_evidence.py` | 五路各一条 trace；**通道抛异常时照样留一条带原因的**（1.0 那个 `except` 分支的逐字对应） |
+| `api/schemas/search.py` + `api/routes/search.py` | 响应多一块 `channel_trace`（`packages/contracts/openapi/sentrix-v1.yaml` 已重新生成） |
+| 用例 | 单元 9 条（桩件控失败与降级）+ 集成 3 条（真接线上五条真 trace） |
+
+**`status` 三个取值**：`ok` / `degraded` / `error`，**非 `ok` 时 `reason` 必须非空**
+（一条不变量用例钉住）。降级与失败分开是必须的：降级说明这一路**跑到了**、只是后端换了
+（`backend` 那一格说明换成了什么）——合成一个状态会让「修后端」与「修接线」分不开。
+
+**两处与 1.0 的差异**：
+
+- `embedding_ms` / `embedding_events` **不搬**：那是 1.0 `embedding_router` 的内部计时
+  事件，2.0 的嵌入走 `VisualEmbedder` / `TextEmbedder` 端口，没有那套路由器，
+  搬过来只会是一个恒空字段；
+- 1.0 的 `retrieval_timing` 与 `channel_trace` 是两块，2.0 合成一格 `latency_ms`
+  ——它们在 1.0 本来就是同一个循环里落的。
+
+**定点变异 8 条全部变红**，其中一条抓到了实现里的真 bug：两个向量通道原本在 `record()`
+**之外**被调用（健康度要跑完才知道，早先写成当参数先算），于是它们抛异常时**整次检索
+直接挂掉**——而「一个通道挂了不该让整次检索挂掉」正是 1.0 那个 `except` 的全部意义。
+用例先红、才改的实现。这一条写进了 `record` 的 docstring。

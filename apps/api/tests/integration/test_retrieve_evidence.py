@@ -336,3 +336,53 @@ def test_the_visual_channel_still_reports_its_backend_health(library):
     assert result.degraded is True
     assert result.degraded_reason == "no_index_configured"
     assert result.authoritative_vectors == 3
+
+
+# ---- 通道轨迹（T125：S6 的验收条件）------------------------------------------------
+
+
+def test_the_real_wiring_reports_a_trace_for_every_channel(library):
+    """**真接线上的那一半。** 桩件那半边（``tests/unit/test_channel_trace.py``）验的是
+    失败与降级两条路；这一条验的是**五条真通道真的各留下了一条轨迹**。
+
+    没有它的话，「五路都在跑」这件事就只有一个用桩件搭出来的证明，
+    而桩件里通道是随便接的——接错一条、漏接一条，那边都不会知道。
+    """
+    result = build(library).execute(EvidenceRequest(text="海边", scope_id=SCOPE, limit=3))
+
+    assert [trace.channel for trace in result.channel_trace] == [
+        "metadata",
+        "entity",
+        "lexical",
+        "visual_ann",
+        "text_ann",
+    ]
+    assert all(trace.status in {"ok", "degraded", "error"} for trace in result.channel_trace)
+
+
+def test_a_real_degraded_channel_says_so_and_still_reports(library):
+    """这个夹具里没有 Qdrant 索引，所以视觉通道**降级**而不是失败——
+    「跑了、只是换了个后端」与「没跑」在 trace 里必须长得不一样。"""
+    result = build(library).execute(EvidenceRequest(text="海边", scope_id=SCOPE, limit=3))
+
+    visual = next(item for item in result.channel_trace if item.channel == "visual_ann")
+    assert visual.status == "degraded"
+    assert visual.reason == "no_index_configured"
+    assert visual.backend == "sqlite_exact"
+    assert visual.candidate_count > 0, "降级不等于没结果"
+
+
+def test_a_real_silent_channel_is_distinguishable_from_a_degraded_one(library):
+    """**这一条把 S6 的验收条件钉在真接线上。**
+
+    同一次检索里，``metadata`` 没有任何正向条件所以它**跑了但一条都没给**（ok / 0 条），
+    而 ``visual_ann`` 是**降级了但给了候选**。两者的候选表现完全不同，
+    而 trace 把「跑了没找到」与「跑了但后端换了」也分得开——那正是这一格存在的理由。
+    """
+    result = build(library).execute(EvidenceRequest(text="海边", scope_id=SCOPE, limit=3))
+
+    by_channel = {trace.channel: trace for trace in result.channel_trace}
+    assert by_channel["metadata"].status == "ok"
+    assert by_channel["metadata"].candidate_count == 0
+    assert by_channel["visual_ann"].status == "degraded"
+    assert by_channel["visual_ann"].candidate_count > 0
