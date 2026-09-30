@@ -25,6 +25,15 @@ class TurnProfile:
     max_steps: int
     max_tool_calls: int
     max_search_calls: int
+    # 一轮里最多几次「精读」（``ToolSpec.cost_class == EXPENSIVE``）。1.0
+    # ``budget_manager.py:17`` 的 ``max_inspections = 1``。
+    #
+    # **它是 T123 与 T124 共用的**：1.0 的 ``inspect_photo`` 与 ``read_photo_text``
+    # 都是 ``cost_class="expensive"``，共用一个 ``inspections`` 计数器——所以这条
+    # 约束是「一轮总共只能精读一张图一次」，不是「每个工具各一次」。
+    # 1.0 的工具描述里那句「同一张图最多复核一次，不要反复检查同一张」的**执行机构**
+    # 就是它；少了它，那句话只是一句劝告。
+    max_inspections: int
     wall_time_s: float
     final_reserve_s: float
 
@@ -37,6 +46,8 @@ DEFAULT_PROFILE = TurnProfile(
     # 1.0 runtime.py:1895 的硬收敛。实测小模型会反复改 query 重搜，把工具预算耗光后
     # 以空答案收场（e8c9d4 的 35 题里 52%）；收敛到 1 次后逼它翻页或直接作答。
     max_search_calls=1,
+    # 1.0 budget_manager.py:17。一轮总共一次精读，inspect_photo 与 read_photo_text 共用。
+    max_inspections=1,
     wall_time_s=180.0,
     final_reserve_s=10.0,
 )

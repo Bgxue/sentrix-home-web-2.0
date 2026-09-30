@@ -21,6 +21,7 @@ from sentrix.domain.assistant.models import (
     TerminationReason,
 )
 from sentrix.domain.assistant.profile import TurnProfile
+from sentrix.domain.assistant.tools import TOOLS_BY_NAME, CostClass
 
 # 阶段用模块级字符串常量而不是枚举：它只影响日志可读性，不参与任何判定。
 PLANNING = "planning"
@@ -100,6 +101,32 @@ class TaskState:
     @property
     def search_calls(self) -> int:
         return sum(1 for record in self.records if record.tool == "search_memories")
+
+    @property
+    def inspection_calls(self) -> int:
+        """一轮里已经**成功执行**过几次精读（``cost_class == EXPENSIVE``）。
+
+        与 ``search_calls`` 不同，这里**按契约查而不是按工具名硬编码**：昂贵与否是
+        ``ToolSpec`` 上的一个声明（1.0 ``cost_class``），第二个昂贵工具出现时
+        不该再来这个文件加一行。``TOOLS_BY_NAME`` 用 ``.get`` 兜底——未知工具名在
+        ``ToolPolicy`` 那一步就被拒了，根本落不进 ``records``，但这条属性不该因此抛。
+        """
+        return sum(
+            1
+            for record in self.records
+            if record.status == "ok"
+            and (spec := TOOLS_BY_NAME.get(record.tool)) is not None
+            and spec.cost_class is CostClass.EXPENSIVE
+        )
+
+    def can_inspect(self) -> bool:
+        """还能不能再精读一次。1.0 ``can_tool_call(inspection=True)`` 的那一半。
+
+        工具预算那半由 ``can_call_tool`` 管，这里只管精读那半——两件事分开，
+        拒绝时说得出是哪一条满了（1.0 把它们合在一次检查里，只会回一句
+        ``budget exhausted``）。
+        """
+        return self.inspection_calls < self.profile.max_inspections
 
     def can_step(self) -> bool:
         """还能不能再问一次模型。

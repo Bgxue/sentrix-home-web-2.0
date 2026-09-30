@@ -24,7 +24,7 @@ from typing import Any
 
 from sentrix.domain.assistant.models import ToolArgumentError, ToolCall
 from sentrix.domain.assistant.task_state import TaskState
-from sentrix.domain.assistant.tools import TOOLS_BY_NAME
+from sentrix.domain.assistant.tools import TOOLS_BY_NAME, CostClass
 
 # 同工具同失败原因连续几次之后强制换动作。
 MAX_CONSECUTIVE_FAILURES = 2
@@ -112,6 +112,20 @@ class ToolPolicy:
                 action=ToolAction.DENY,
                 code="tool_budget_exhausted",
                 reason="本轮的工具调用预算已经用完，请基于已有结果作答。",
+            )
+
+        # 1.0 ``tool_policy.py:37-38`` 的 ``can_tool_call(inspection=...)``。**单独一条、
+        # 单独一个码**：它与上面那条是两笔预算（工具有 6 次，精读只有 1 次），
+        # 合在一起拒就只能说一句「预算用完了」，而模型分不出是「别再调工具了」
+        # 还是「这次可以换张图但不能再精读」。1.0 正是合着写的。
+        if spec.cost_class is CostClass.EXPENSIVE and not state.can_inspect():
+            return ToolDecision(
+                action=ToolAction.DENY,
+                code="inspection_budget_exhausted",
+                reason=(
+                    "本轮的精读预算已经用完（一轮最多精读一张图）。"
+                    "请基于已经看过的内容作答，不要反复检查同一张照片。"
+                ),
             )
 
         for record in reversed(state.records):

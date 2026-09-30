@@ -17,9 +17,29 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
+
+
+class CostClass(StrEnum):
+    """一次工具调用有多贵。**它不是一个标签，是一条预算的开关。**
+
+    1.0 用的是裸字符串（``cost_class="expensive"``，``tools.py:2755`` 与 ``:2769``），
+    而它唯一的用途是喂给 ``BudgetManager``：
+
+        self.budget.can_tool_call(inspection=spec.cost_class == "expensive")   # tool_policy.py:38
+        self.budget.record_tool_call(inspection=spec.cost_class == "expensive")  # :62
+
+    而 ``BudgetState.max_inspections = 1``（``budget_manager.py:17``）——所以
+    ``"expensive"`` 的实际含义是「**它算一次精读，而一轮总共只准精读一次**」。
+    2.0 收成枚举（同 ``EvidenceType`` 的理由）：拼错的 ``"expensiv"`` 在 1.0 里会
+    静默退化成``cheap``、那条预算永不触发，而这里会当场报错。
+    """
+
+    CHEAP = "cheap"
+    EXPENSIVE = "expensive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +49,8 @@ class ToolSpec:
     parameters: Mapping[str, Any]
     satisfies: tuple[EvidenceType, ...]
     required: tuple[str, ...] = ()
+    # 默认便宜：1.0 的 ``ToolSpec`` 默认值就是 ``"cheap"``，只有两个视觉工具是昂贵的。
+    cost_class: CostClass = CostClass.CHEAP
 
     def as_openai_tool(self) -> Mapping[str, Any]:
         return {
