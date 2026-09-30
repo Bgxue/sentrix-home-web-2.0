@@ -533,6 +533,65 @@ entity（本体）
 | **128b** | `GET /entities/{id}`：先读 `GET /people/{person_id}` 与 `read_timeline` 的编排先例，再定**哪几块搬、哪几块留 S7** | 一个 application 用例 |
 | **129/130** | `entity-groups` / `knowledge`：1.0 是 `db.py:4194` 现算的投影（不落表）。**动工前要核那个投影的分组键**，以及 `knowledge` 三块（profiles + claims + spaces）各来自哪 | 未核 |
 
+#### 128a 的第二次核查（2026-09-30）：装饰不是可选项
+
+上表把 128a 判成「薄映射」。**核查推翻了它的一半**：`GET /entities` 不是，`PUT` 是。
+
+**`GET /entities` 落在 `list_entities`（1.0 `db.py:4041-4055`）的完整实现上，它有三段**：
+
+| 段 | 1.0 | 体量 |
+|---|---|---|
+| 1 | `SELECT * FROM entities` 的 WHERE 三段 | 薄 |
+| 2 | `_decorate_entities`（`db.py:4056-4141`） | **7 条批量聚合，补 11 个派生字段** |
+| 3 | `public_entity`（`db.py:4674-4685`，由 `db.py:4055` 逐条调用） | 仅 `place`：读 `private_flag`/`alias` 两个属性，追加 `private`，并可按 `alias` 覆盖 `canonical_name` |
+
+**第 2 段是承重的，证据是 1.0 前端自己读它**：
+
+| 字段 | 1.0 前端的读取点 |
+|---|---|
+| `reviewable` | `src/app.js:675`——实体总览网格的**入口过滤谓词**：`state.entities.filter(e => e.status === "confirmed" \|\| e.reviewable !== false)` |
+| `avatar_face_instance_id` | `app.js:678` 实体卡头像；`:874` 人物卡；`:955`、`:1002`、`:1085` |
+| `mention_count` `cluster_count` `relationship_count` | `app.js:678` 实体卡的三条统计 |
+| `evidence_count` | `app.js:876`（`> 0` 过滤）、`:910` 事件实体行、`:929` 归并弹窗 |
+| `photo_count` | `app.js:939` 批量确认、`:2112` 批量确认的排序与筛选 |
+| `single_sample` | `app.js:2112` 同上 |
+| `preview_asset_id` `preview_media_type` | ⚠️ **只在 `entityGroups` 上被读到**（`app.js:785-786` 的 `group.preview_asset_id`），那是 T129 的投影。实体列表上**产出了但前端当前没有读者**——如实记下，不要为了「有人用」而把它说成承重 |
+
+`GET /api/entities` 在前端的消费点是 `state.entities`（`app.js:1191`，来自 `calls[6]`，
+请求写在 `src/api.js:42`），服务 `knowledgeView()`（`app.js:673`，「语义记忆 / 实体治理」）
+的实体总览网格、归并弹窗（`:928`）与建立关系时的目标下拉（`:958`）。
+
+**一处留 S7**：`relationship_count` 来自 `relationships` 表，而它的读路径是 S7（与 T127
+那两条关系同形）。2.0 的规矩是「不留恒空的占位键」（`routes/insights.py` 的 module-map 条目），
+所以**这个键不出现在响应里**，而不是恒返回 0——恒 0 会让「S7 没做」读起来像「这个实体没关系」。
+
+**`PUT` 那一半确实是薄映射，而且仓储已经完整**：2.0 的 `set_property`
+（`entities.py:604-649`）与 1.0 的 `set_entity_property`（`db.py:4746-4774`）逐步对应——
+supersede 旧行 → 插新行（`source='user'`、`confidence=1`、`status='active'`、
+`supersedes_property_id`、`revision+1`）→ 追一条修订 → 返回新行。连两个错误分支的字面量
+都一致：`_require_entity` 抛 `KeyError(entity_id)`（`entities.py:718`）、
+`_clean_key` 抛 `ValueError("property_key is required")`（`entities.py:725`）。
+1.0 的 route 映成 404 `detail="entity not found"` / 400 `detail=str(error)`（`app.py:1963-1966`）；
+2.0 用 `NotFoundError` / `InvalidRequestError`——响应体的 `{code, message, detail}` 形状
+是全 v1 统一的既有偏离（`api/errors.py` 的模块 docstring），不是这次引入的。
+
+**`list_people` → `list_entities` 是恢复 1.0 的形状，不是新增设计**：1.0 只有一个
+`list_entities`，person 过滤在**路由层**做（`app.py:1514` 的 `/api/people`、`:1862` 的
+`/api/entities`）。2.0 的 `list_people` 把类型绑死进 SQL（`entities.py:181` 的
+`entity_type = ?` + `ENTITY_TYPE_PERSON`），那是 S5 只为人物列表服务时的收窄。
+两个路由各自在 Python 里过滤即可。影响面：端口 `ports.py:342`、实现 `entities.py:169`、
+路由 `identity.py:297-303`、测试 `test_import_memory_space.py:171,188`，
+外加 `spaces/models.py:6`、`import_assets.py:17`、`media.py:132` 等处的 docstring 措辞。
+
+**两条 1.0 的事实，记下来免得被当成契约搬过去**：
+
+1. `/api/entities` 的 `includePeople` 默认 `false`，但 1.0 前端**永远传 `true`**
+   （`src/api.js:42` 把它写死在函数体里）。那个默认值在 1.0 自己的 UI 上是死路径。
+   **默认值照搬**（它是 API 契约），但不要为它编造消费场景。
+2. `app.js:695` 的 `if (ent?.is_self) return` 是**死检查**：`entities` 表没有 `is_self` 列
+   （`SELECT *` 的列里没有，`_decorate_entities` 也不补），这个 `if` 永远不成立。
+   **别把 `is_self` 当字段移植进 2.0。**
+
 ### 收口
 
 | Task | 内容 |
