@@ -409,11 +409,27 @@ T128 接上之后那个零调用登记可以删。
 - **乙：只补 `object` / `atmosphere` / `time` 三类**，地点继续走 `asset_places`
   （2.0 的既有选择），entity 通道对地点不生效。
 
-**这一条决定 T127 到 T131 的整个形状，动工前要定。** 我倾向先核一件事再定：
-2.0 的 `retrieve_metadata` 与时间线已经让 `asset_places` 承担了多少 1.0 里
-「place 实体」承担的职责——如果完全覆盖，乙就是对的；如果 1.0 的 place 实体还承担了
-`asset_places` 没有的东西（比如 `semantic_details` 那种受控词表属性、以及
-「同一个地点跨照片聚合」），那甲才站得住。
+**这条口径核完了，结论是甲，而且理由比「照 1.0」更硬：两者不冲突，因为 1.0 两样都有。**
+
+`asset_places`（`0005_timeline.sql:16-29`）的主键是 **`asset_id`**——**一行一张照片**，
+存的是 GPS 反编码（`admin_*` 面 / `nearest_*` 点 / `precision` / `source`）。
+1.0 的 place 实体是**跨照片的命名实体**（「家中餐厅」），带 `entity_observations`
+关联（哪些观察提到它）与多值属性累积（`semantic_details` / `visual_place_descriptions`）。
+
+两者回答的是**不同问题**：
+
+| | 回答 | 来源 | 粒度 |
+|---|---|---|---|
+| `asset_places` | **这张照片在哪** | 照片的 GPS 反编码 | 一行一 asset |
+| 1.0 的 place 实体 | **这个地方是哪儿、哪些照片拍到它** | 观察里的语义地点 | 跨照片 |
+
+**而 1.0 两样都有**：前者是 `metadata_json` 的 `reverse_geocode`（§4 Task 121b 那张
+对照表里列过它），后者是 `_find_or_create_entities_batch` 建的 place 实体。
+2.0 把前者提升成了 `asset_places`（S4 的选择，做得比 1.0 好），**后者则整个没搬**。
+
+所以补四类**不是新增一条 1.0 没有的路，是补回缺的那一半**，且与 `asset_places` 并存
+正是 1.0 的形状。乙（只做 object/atmosphere/time）会让「家中餐厅出现在哪些照片里」
+这类问题在 2.0 永远答不了，而 1.0 答得了。
 
 ### 收口
 
