@@ -169,6 +169,58 @@ class SeedIdentityResponse(BaseModel):
     photos_without_faces: int
 
 
+class EntitySummaryPayload(BaseModel):
+    """实体目录里的一条。
+
+    1.0 ``/api/entities`` 返回的是**扁平的**实体记录：``entities`` 表的十三列 +
+    ``_decorate_entities`` 补的派生字段 + ``public_entity`` 补的 ``private``。
+    这里保持扁平，不套一层 ``entity`` 子对象——套着的是 ``GET /entities/{id}``
+    （1.0 ``get_entity_detail`` 返回 ``{"entity": {...}, ...}``），两者形状本来就不同。
+
+    两个**只在特定类型上才有**的键，2.0 用 ``None`` 表达「不适用」而不是把键省掉：
+    ``single_sample`` 只有人物有（1.0 非人物那支不写它），``private`` 只有地点有
+    （1.0 ``public_entity`` 对非地点原样返回）。1.0 是**键缺席**、2.0 是 ``null``——
+    这是一处偏离，理由是固定响应模型下「缺席」只能靠 ``exclude_none`` 或 ``null``，
+    而全仓没有 ``exclude_none`` 的先例（``PersonDetailResponse.avatar_face_instance_id``
+    同样用 ``None``）。消费方按真值判断时两者等价。
+
+    **没有 ``relationship_count``。** 1.0 有，但它来自 ``relationships`` 表，读路径是 S7。
+    按「不留恒空的占位键」，这个键不出现在响应里——恒 0 会让「S7 还没做」读起来像
+    「这个实体确实没有关系」。
+    """
+
+    id: str
+    scope_id: str
+    entity_type: str
+    canonical_name: str
+    status: str
+    family_role: str | None
+    summary: str
+    confidence: float
+    identity_state: str
+    role_state: str
+    name_state: str
+    created_at: str | None
+    updated_at: str | None
+    cluster_count: int
+    photo_count: int
+    mention_count: int
+    evidence_count: int
+    reviewable: bool
+    single_sample: bool | None
+    avatar_face_instance_id: str | None
+    preview_asset_id: str | None
+    preview_file_name: str | None
+    preview_media_type: str | None
+    private: bool | None
+
+
+class EntityListResponse(BaseModel):
+    """``GET /entities`` 的响应。1.0 的外层键就是 ``entities``（``app.py:1868``）。"""
+
+    entities: list[EntitySummaryPayload]
+
+
 class EntityPropertyRequest(BaseModel):
     """``PUT /entities/{id}/properties/{key}`` 的请求体。
 

@@ -31,6 +31,8 @@ from sentrix.domain.identity.models import (
     PROPERTY_STATUS_PENDING,
     RETIRED_CANDIDATE_SUMMARY,
     REVISION_SOURCE_USER_RENAME,
+    ClusterState,
+    EntityDecoration,
     EntityMentionRecord,
     EntityPropertyRecord,
     EntityRecord,
@@ -197,6 +199,111 @@ class SqliteEntityRepository:
                 params,
             ).fetchall()
         return [_row_to_entity(row) for row in rows]
+
+    def decorate_entities(self, entity_ids: Sequence[str]) -> Mapping[str, EntityDecoration]:
+        """1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``，六条批量聚合逐条对齐。
+
+        **每条都是一条 ``IN (...)``**，不是在实体循环里逐个查——1.0 的 docstring 专为
+        这件事写过（"with batched queries instead of N+1 lookups"）。
+
+        三处取舍，都不是省略：
+
+        - **没有 ``relationship_count``**：``relationships`` 的读路径是 S7。恒返回 0
+          会让「S7 还没做」读起来像「这个实体确实没有关系」。
+        - **1.0 的两条簇查询合成了一条**：``cluster_count`` 的 ``COUNT(*)`` 与
+          ``cluster_rows`` 的 ``member_count``/``status`` 用的是同一个 ``WHERE``
+          （都只有 ``entity_id IN (...)``，都没有状态过滤），所以 ``len(rows)`` 就是那个
+          count。**哪天其中一条加了过滤，这个等式立刻不成立**——合成的前提是过滤条件相同。
+        - **avatar 的排序键照抄** 1.0 的 ``ORDER BY fi.detection_confidence DESC,
+          fi.created_at ASC``。``created_at`` 是 ISO 串，字典序即时间序，不必解成时间
+          （与 ``list_photos`` 那类查询是同一条理由）。
+
+        ``member_count`` 可能是 NULL，1.0 用 ``int(row.get("member_count", 0) or 0)``
+        兜底，这里同样 ``or 0``。
+        """
+        if not entity_ids:
+            return {}
+        ids = list(entity_ids)
+        marks = ",".join("?" * len(ids))
+        with self._database.connect() as connection:
+            clusters: dict[str, list[ClusterState]] = {}
+            for row in connection.execute(
+                f"SELECT entity_id, status, member_count FROM face_clusters WHERE entity_id IN ({marks})",
+                ids,
+            ).fetchall():
+                clusters.setdefault(row["entity_id"], []).append(
+                    ClusterState(status=row["status"], member_count=int(row["member_count"] or 0))
+                )
+            photo_counts = {
+                row["entity_id"]: int(row["c"])
+                for row in connection.execute(
+                    "SELECT fc.entity_id, COUNT(DISTINCT a.id) AS c FROM face_instances fi"
+                    " JOIN face_clusters fc ON fc.id = fi.cluster_id"
+                    " JOIN assets a ON a.id = fi.asset_id"
+                    f" WHERE fc.entity_id IN ({marks}) AND fc.status != 'rejected'"
+                    " GROUP BY fc.entity_id",
+                    ids,
+                ).fetchall()
+            }
+            mention_counts = {
+                row["entity_id"]: int(row["c"])
+                for row in connection.execute(
+                    "SELECT entity_id, COUNT(*) AS c FROM entity_mentions"
+                    f" WHERE entity_id IN ({marks}) GROUP BY entity_id",
+                    ids,
+                ).fetchall()
+            }
+            evidence_counts = {
+                row["entity_id"]: int(row["c"])
+                for row in connection.execute(
+                    "SELECT entity_id, COUNT(*) AS c FROM entity_observations"
+                    f" WHERE entity_id IN ({marks}) GROUP BY entity_id",
+                    ids,
+                ).fetchall()
+            }
+            avatars = {
+                row["entity_id"]: row["id"]
+                for row in connection.execute(
+                    "SELECT entity_id, id FROM ("
+                    " SELECT fc.entity_id, fi.id,"
+                    " ROW_NUMBER() OVER (PARTITION BY fc.entity_id"
+                    "  ORDER BY fi.detection_confidence DESC, fi.created_at ASC) AS rn"
+                    " FROM face_instances fi JOIN face_clusters fc ON fc.id = fi.cluster_id"
+                    f" WHERE fc.entity_id IN ({marks}) AND fc.status != 'rejected'"
+                    ") WHERE rn = 1",
+                    ids,
+                ).fetchall()
+            }
+            previews = {
+                row["entity_id"]: row
+                for row in connection.execute(
+                    "SELECT entity_id, asset_id, file_name, media_type FROM ("
+                    " SELECT eob.entity_id, a.id AS asset_id, a.file_name, a.media_type,"
+                    " ROW_NUMBER() OVER (PARTITION BY eob.entity_id"
+                    "  ORDER BY o.captured_at DESC, o.id DESC) AS rn"
+                    " FROM entity_observations eob"
+                    " JOIN observations o ON o.id = eob.observation_id"
+                    " JOIN assets a ON a.id = o.asset_id"
+                    f" WHERE eob.entity_id IN ({marks})"
+                    ") WHERE rn = 1",
+                    ids,
+                ).fetchall()
+            }
+        decorated: dict[str, EntityDecoration] = {}
+        for entity_id in ids:
+            preview = previews.get(entity_id)
+            decorated[entity_id] = EntityDecoration(
+                cluster_count=len(clusters.get(entity_id, ())),
+                photo_count=photo_counts.get(entity_id, 0),
+                mention_count=mention_counts.get(entity_id, 0),
+                evidence_count=evidence_counts.get(entity_id, 0),
+                clusters=tuple(clusters.get(entity_id, ())),
+                avatar_face_instance_id=avatars.get(entity_id),
+                preview_asset_id=preview["asset_id"] if preview else None,
+                preview_file_name=preview["file_name"] if preview else None,
+                preview_media_type=preview["media_type"] if preview else None,
+            )
+        return decorated
 
     def find_or_create_entities(
         self,

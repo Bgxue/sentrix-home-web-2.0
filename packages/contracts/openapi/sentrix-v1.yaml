@@ -822,6 +822,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/entities:
+    get:
+      tags:
+      - identity
+      summary: List Entities
+      description: '实体目录。1.0 ``app.py:1858-1868``。
+
+
+        **``includePeople`` 默认 ``False``，也就是默认不给人物。** 这个默认值是 API 契约
+
+        （1.0 的三个查询参数之一），虽然 1.0 自己的前端永远传 ``true``
+
+        （``src/api.js:42`` 写死在请求里）——**照搬默认值，但不为它编造消费场景**。
+
+
+        参数名走 ``alias`` 而不是把 Python 参数写成驼峰：线上名字是 ``includePeople``
+
+        （契约），代码里保持 snake_case（本仓库的命名规则）。'
+      operationId: list_entities_api_v1_entities_get
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: includePeople
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Includepeople
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntityListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/entities/{entity_id}/properties/{property_key}:
     put:
       tags:
@@ -1758,6 +1814,18 @@ components:
           default: ''
       type: object
       title: CreateConversationRequest
+    EntityListResponse:
+      properties:
+        entities:
+          items:
+            $ref: '#/components/schemas/EntitySummaryPayload'
+          type: array
+          title: Entities
+      type: object
+      required:
+      - entities
+      title: EntityListResponse
+      description: '``GET /entities`` 的响应。1.0 的外层键就是 ``entities``（``app.py:1868``）。'
     EntityPropertyPayload:
       properties:
         id:
@@ -1851,6 +1919,155 @@ components:
         把它们写成必填字段，这两种请求就变成 422——同一个产品行为换了一个码。
 
         与 ``ConfirmClusterRequest`` / ``BatchConfirmItem`` 是同一条理由。'
+    EntitySummaryPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        entity_type:
+          type: string
+          title: Entity Type
+        canonical_name:
+          type: string
+          title: Canonical Name
+        status:
+          type: string
+          title: Status
+        family_role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Role
+        summary:
+          type: string
+          title: Summary
+        confidence:
+          type: number
+          title: Confidence
+        identity_state:
+          type: string
+          title: Identity State
+        role_state:
+          type: string
+          title: Role State
+        name_state:
+          type: string
+          title: Name State
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        cluster_count:
+          type: integer
+          title: Cluster Count
+        photo_count:
+          type: integer
+          title: Photo Count
+        mention_count:
+          type: integer
+          title: Mention Count
+        evidence_count:
+          type: integer
+          title: Evidence Count
+        reviewable:
+          type: boolean
+          title: Reviewable
+        single_sample:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Single Sample
+        avatar_face_instance_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Avatar Face Instance Id
+        preview_asset_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preview Asset Id
+        preview_file_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preview File Name
+        preview_media_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Preview Media Type
+        private:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Private
+      type: object
+      required:
+      - id
+      - scope_id
+      - entity_type
+      - canonical_name
+      - status
+      - family_role
+      - summary
+      - confidence
+      - identity_state
+      - role_state
+      - name_state
+      - created_at
+      - updated_at
+      - cluster_count
+      - photo_count
+      - mention_count
+      - evidence_count
+      - reviewable
+      - single_sample
+      - avatar_face_instance_id
+      - preview_asset_id
+      - preview_file_name
+      - preview_media_type
+      - private
+      title: EntitySummaryPayload
+      description: '实体目录里的一条。
+
+
+        1.0 ``/api/entities`` 返回的是**扁平的**实体记录：``entities`` 表的十三列 +
+
+        ``_decorate_entities`` 补的派生字段 + ``public_entity`` 补的 ``private``。
+
+        这里保持扁平，不套一层 ``entity`` 子对象——套着的是 ``GET /entities/{id}``
+
+        （1.0 ``get_entity_detail`` 返回 ``{"entity": {...}, ...}``），两者形状本来就不同。
+
+
+        两个**只在特定类型上才有**的键，2.0 用 ``None`` 表达「不适用」而不是把键省掉：
+
+        ``single_sample`` 只有人物有（1.0 非人物那支不写它），``private`` 只有地点有
+
+        （1.0 ``public_entity`` 对非地点原样返回）。1.0 是**键缺席**、2.0 是 ``null``——
+
+        这是一处偏离，理由是固定响应模型下「缺席」只能靠 ``exclude_none`` 或 ``null``，
+
+        而全仓没有 ``exclude_none`` 的先例（``PersonDetailResponse.avatar_face_instance_id``
+
+        同样用 ``None``）。消费方按真值判断时两者等价。
+
+
+        **没有 ``relationship_count``。** 1.0 有，但它来自 ``relationships`` 表，读路径是 S7。
+
+        按「不留恒空的占位键」，这个键不出现在响应里——恒 0 会让「S7 还没做」读起来像
+
+        「这个实体确实没有关系」。'
     FaceClusterListResponse:
       properties:
         clusters:

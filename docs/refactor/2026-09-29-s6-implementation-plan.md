@@ -592,6 +592,56 @@ supersede 旧行 → 插新行（`source='user'`、`confidence=1`、`status='act
    （`SELECT *` 的列里没有，`_decorate_entities` 也不补），这个 `if` 永远不成立。
    **别把 `is_self` 当字段移植进 2.0。**
 
+#### 128a 完成（2026-09-30）：拆成两半，各自一次提交
+
+| | 内容 | 提交 |
+|---|---|---|
+| **128a（一）** | `list_people` → `list_entities`（恢复 1.0 形状，person 过滤回到路由层）+ `PUT /entities/{id}/properties/{key}` | `267124a` |
+| **128a（二）** | `_decorate_entities` 的六条批量聚合 + `public_entity` 私密投影 + `GET /entities` | 本提交 |
+
+**与上面「建议的拆法」的差别**：那张表把 `GET /entities` 与 `PUT` 放在一起、把装饰留给
+128b。核查之后反过来了——`PUT` 才是真正薄的那半（仓储 `set_property` 早就写完且与 1.0
+逐步对应），而 `GET /entities` 的体量全在装饰上。所以按**薄 / 厚**切，不按端点切。
+
+**落点**：装饰的**判断**在 `domain/identity/decoration.py`（纯函数，边界可穷举），
+**取数**在 `EntityRepository.decorate_entities`（六条批量聚合，逐条对 1.0），
+**读侧拼装**在路由层——与 `routes/identity.py` 既有的簇列表同一条路（该文件模块 docstring
+写着这是有意为之，不额外发明一层）。
+
+**两处留白，都不是省略**：
+
+- **`relationship_count` 不出现在响应里**（`relationships` 的读路径是 S7）。恒 0 会让
+  「S7 还没做」读起来像「这个实体确实没有关系」。有一条用例专门钉「这个键不在」。
+- **`/entities/{id}` 仍然没有**（那是 128b，九个子查询的复合读）。
+
+**顺带补的一处**：`_person_payload` 原本只做了 1.0 那个改写块四条里的三条
+（`canonical_name` / `family_role` / `confirmed`），漏了 `summary`。1.0 里它们是相邻三行
+（`app.py:1518-1521`），所以这是**同一个块移植得不完整**，不是独立的设计问题。
+不补的话，本次反而会造出 `/entities` 与 `/people` 对同一个 pending 人物给出两句不同的说明。
+补了，并有一条用例专门钉住两个端点给同一句话——**只改一处就能让它们分叉，而两边各自的
+用例都不会红**，那条用例就是为这个存在的。
+
+**一处发现但没动的差异**：1.0 的 `/api/people` 给 pending 人物的是**带序号**的
+`待命名成员 {n}`（`app.py:1517-1519`，按列表位置递增），2.0 用的是不带序号的
+`PENDING_CLUSTER_NAME`。序号是**列表位置**的函数，放进 `_person_payload` 意味着那个函数
+要知道自己的下标——是个需要单独裁决的形状问题，记在 `behaviour-baseline.md` 里，本次不动。
+
+**定点变异 24 条全部被杀**（128a 两批：一 6 条、二 18 条）。其中两处值得留档：
+
+1. **`preview` 的 `o.id DESC` 次序那条用例，第一版是恒真的。** 我写的两条观察指向
+   **同一个 asset**，所以去掉 id 次序也照样给出同一个 `asset_id`。变异测试把它抓了出来，
+   改成指向不同 asset 之后才真正验得出来。
+2. **变异脚本本身出过一次假结论。** 没关字节码缓存时，两个变异改的行不同、但产物**字节数
+   相同**，写入落在同一秒的话 Python 会复用上一条的 `.pyc`——于是那一条跑的是上一条的
+   变异体，把真变异体判成了「存活」。加 `PYTHONDONTWRITEBYTECODE=1` 重跑，18/18 全红。
+   **教训**：变异脚本必须关字节码缓存，否则「存活」这个结论本身就不可信；反过来，
+   它也可能把该红的判成红。
+
+**门禁自己删掉的一条登记**：`EntityRepository.list_properties` 在 128a 之前挂在
+`PENDING_METHODS` 上（登记理由是「等 T128」）。私密地点的投影要读实体的 `private_flag` /
+`alias` 两个属性，接上的那一刻反向规则就报红要求删——与 facts 那三条、`maintain_property`
+走的是同一条路。**又一条被门禁自己删掉的登记。**
+
 ### 收口
 
 | Task | 内容 |

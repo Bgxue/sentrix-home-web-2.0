@@ -938,3 +938,174 @@ def test_a_body_without_a_value_is_accepted_and_writes_null(identity_client: Tes
     assert response.status_code == 200
     assert response.json()["value"] is None
     assert response.json()["evidence_ids"] == []
+
+
+# ---- 实体目录 --------------------------------------------------------------------
+
+
+def _add_property(client: TestClient, entity_id: str, key: str, value: object) -> None:
+    """直接落一行属性。走 ``PUT /entities/.../properties/...`` 也可以，但那样测的是
+    另一个端点的写入路径；这里要的是「库里有这么一行时列表怎么读」。"""
+    with _db(client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entity_properties (id, entity_id, property_key, value_json, source,"
+            " confidence, status, evidence_ids_json, revision, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, 'user', 1.0, 'active', '[]', 1, ?, ?)",
+            (f"prop_{entity_id}_{key}", entity_id, key, json.dumps(value), NOW, NOW),
+        )
+
+
+def test_the_entity_catalogue_hides_people_unless_asked(identity_client: TestClient):
+    """``includePeople`` 默认 ``false``——这是 1.0 的 API 契约（``app.py:1861``）。
+
+    1.0 自己的前端**永远传 ``true``**（``src/api.js:42`` 写死在请求里），所以这个默认值
+    在生产里是死路径。**仍然照搬**——它是契约的一部分，但也不该为它编造消费场景。
+
+    定点变异：把默认值改成 ``True``，这条的前半变红。
+    """
+    add_entity(identity_client, "ent_person", name="妈妈", status="confirmed")
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    default = identity_client.get("/api/v1/entities").json()["entities"]
+    with_people = identity_client.get("/api/v1/entities", params={"includePeople": "true"}).json()["entities"]
+
+    assert [item["id"] for item in default] == ["ent_place"]
+    assert {item["id"] for item in with_people} == {"ent_person", "ent_place"}
+
+
+def test_a_pending_person_in_the_catalogue_is_an_unnamed_member(identity_client: TestClient):
+    """三件事一起做，指 1.0 ``app.py:1863-1867``：换名字、去掉角色、**换说明**。
+
+    说明那一格是本切片补上的：库里存的是「由 buffalo_l embedding 生成，等待用户确认」，
+    接口上给的是「由人脸聚类生成，等待用户确认」——API 上不该出现模型代号。
+    ``/people`` 走的是同一个块，所以断言保持一致。
+
+    定点变异：把 ``summary`` 那一行去掉，这条变红。
+    """
+    add_entity(identity_client, "ent_1", name="待确认人物簇 · cluster_1", summary="由 buffalo_l 生成")
+
+    entity = identity_client.get("/api/v1/entities", params={"includePeople": "true"}).json()["entities"][0]
+
+    assert entity["canonical_name"] == PENDING_CLUSTER_NAME
+    assert entity["family_role"] is None
+    assert entity["summary"] == "由人脸聚类生成，等待用户确认"
+
+
+def test_the_people_route_shows_the_same_summary_as_the_catalogue(identity_client: TestClient):
+    """两个端点对同一个 pending 人物必须给同一句话。
+
+    这条单独存在是因为 ``summary`` 的改写发生在 ``_person_payload`` 与 ``_entity_summary``
+    两个地方——**只改一处就能让它们分叉**，而两边各自的用例都不会红。
+    """
+    add_entity(identity_client, "ent_1", name="待确认人物簇 · cluster_1", summary="由 buffalo_l 生成")
+
+    person = identity_client.get("/api/v1/people").json()["people"][0]
+    entity = identity_client.get("/api/v1/entities", params={"includePeople": "true"}).json()["entities"][0]
+
+    assert person["summary"] == entity["summary"] == "由人脸聚类生成，等待用户确认"
+
+
+def test_a_private_place_gives_its_alias_instead_of_its_name(identity_client: TestClient):
+    """用户标了私密的地点，目录上给的是别名，并带 ``private: true``。
+
+    定点变异：把 ``private_place`` 的调用去掉，这条变红（名字会原样透出去——
+    这正是私密标记要挡的事）。
+    """
+    add_entity(identity_client, "ent_place", name="某某小区", status="confirmed", entity_type="place")
+    _add_property(identity_client, "ent_place", "private_flag", True)
+    _add_property(identity_client, "ent_place", "alias", "家")
+
+    entity = identity_client.get("/api/v1/entities").json()["entities"][0]
+
+    assert entity["canonical_name"] == "家"
+    assert entity["private"] is True
+
+
+def test_a_place_without_the_flag_carries_private_false(identity_client: TestClient):
+    """非私密地点给 ``private: false`` 而不是省掉这个键——1.0 也是显式给 ``False``。"""
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    entity = identity_client.get("/api/v1/entities").json()["entities"][0]
+
+    assert entity["canonical_name"] == "西湖"
+    assert entity["private"] is False
+
+
+def test_an_integer_one_does_not_make_a_place_private(identity_client: TestClient):
+    """``private_flag`` 是 JSON 里的任意类型，1.0 判的是 ``is True``。
+
+    这条走完整链路（库 → 仓储 → 纯函数 → 响应）再验一次那个边界：属性值是整数 ``1``
+    时名字**不该**被换掉。真值判断会让它通过。
+    """
+    add_entity(identity_client, "ent_place", name="某某小区", status="confirmed", entity_type="place")
+    _add_property(identity_client, "ent_place", "private_flag", 1)
+
+    entity = identity_client.get("/api/v1/entities").json()["entities"][0]
+
+    assert entity["canonical_name"] == "某某小区"
+    assert entity["private"] is False
+
+
+def test_the_catalogue_carries_the_derived_counts(identity_client: TestClient):
+    """派生字段真的进了响应：簇数、照片数、提及数、证据数、封面。
+
+    定点变异：把 ``decorate_entities`` 的调用去掉（全部用零值），这条变红。
+    """
+    add_entity(identity_client, "ent_1", name="妈妈", status="confirmed")
+    add_cluster(identity_client, "cluster_1", status="confirmed", entity_id="ent_1", member_count=2)
+    add_instance(identity_client, "face_1", cluster_id="cluster_1", detection_confidence=0.8)
+    with _db(identity_client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entity_observations (entity_id, observation_id, confidence, source,"
+            " created_at) VALUES ('ent_1', 'obs_1', 0.5, 'observation_extraction', ?)",
+            (NOW,),
+        )
+        connection.execute(
+            "INSERT INTO entity_mentions (id, entity_id, observation_id, confidence, created_at)"
+            " VALUES ('mention_1', 'ent_1', 'obs_1', 0.5, ?)",
+            (NOW,),
+        )
+
+    entity = identity_client.get("/api/v1/entities", params={"includePeople": "true"}).json()["entities"][0]
+
+    assert entity["cluster_count"] == 1
+    assert entity["photo_count"] == 1
+    assert entity["mention_count"] == 1
+    assert entity["evidence_count"] == 1
+    assert entity["avatar_face_instance_id"] == "face_1"
+    assert entity["preview_asset_id"] == "asset_1"
+    assert entity["preview_media_type"] == "image"
+
+
+def test_the_catalogue_has_no_relationship_count_key(identity_client: TestClient):
+    """``relationship_count`` **刻意不在响应里**：它来自 ``relationships`` 表，读路径是 S7。
+
+    按「不留恒空的占位键」，恒返回 0 会让「S7 还没做」读起来像「这个实体确实没有关系」。
+    这条钉住那个决定——哪天 S7 把它加回来，这条会红，提醒改文档而不是悄悄多一个键。
+
+    定点变异：在 ``EntitySummaryPayload`` 里加 ``relationship_count: int = 0``，这条变红。
+    """
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    entity = identity_client.get("/api/v1/entities").json()["entities"][0]
+
+    assert "relationship_count" not in entity
+
+
+def test_a_non_person_is_reviewable_by_evidence_count(identity_client: TestClient):
+    """非人物「值不值得看」看证据条数，与簇无关——这条走完整链路再验一次。"""
+    add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
+
+    without = identity_client.get("/api/v1/entities").json()["entities"][0]
+    assert without["reviewable"] is False
+    assert without["single_sample"] is None  # 只对人物有意义
+
+    with _db(identity_client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entity_observations (entity_id, observation_id, confidence, source,"
+            " created_at) VALUES ('ent_place', 'obs_1', 0.5, 'observation_extraction', ?)",
+            (NOW,),
+        )
+
+    after = identity_client.get("/api/v1/entities").json()["entities"][0]
+    assert after["reviewable"] is True

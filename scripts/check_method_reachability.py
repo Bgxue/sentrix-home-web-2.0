@@ -72,8 +72,9 @@ PENDING_METHODS: dict[str, str] = {
     # —— 本门禁首跑查出 ——
     # EntityRepository.maintain_property 在 T127（非人物实体抽取）接线，按反向规则删掉。
     # **它是被 T127 接上的，不是被 T128 接上的**——抽取要写 label/category/时间那几个属性。
-    # list_properties（读）仍然等 T128 的实体详情路由。
-    "EntityRepository.list_properties": "Task 128（S6 语义实体：实体属性读）",
+    # list_properties（读）在 T128a 接线，按反向规则删掉——私密地点的投影要读实体的
+    # ``private_flag`` / ``alias`` 两个属性（``domain/identity/decoration.py``）。
+    # **又一条被门禁自己删掉的登记**：接线那一刻它就报红要求删。
     "RelationshipRepository.list_person_relationships": "S7（家庭关系，设计文档 §8）",
     "EventRepository.dissolve": "S7（重分段；s5-deviations 第 15/35 条记「随 S7」）",
     "PortraitRepository.list_for_person": "S6 · 依赖核查（画像版本列表，归属未定）",

@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
 
 from sentrix.api.deps import get_container
@@ -30,8 +30,10 @@ from sentrix.api.schemas.identity import (
     BatchConfirmResponse,
     ConfirmClusterRequest,
     ConfirmClusterResponse,
+    EntityListResponse,
     EntityPropertyPayload,
     EntityPropertyRequest,
+    EntitySummaryPayload,
     FaceClusterListResponse,
     FaceClusterSummary,
     FaceCropRef,
@@ -56,13 +58,17 @@ from sentrix.application.identity.seed_identity import (
 )
 from sentrix.application.memories.assign_events import ConfirmedPersonEvents, EventVisualSimilarity
 from sentrix.bootstrap.container import Container
+from sentrix.domain.identity.decoration import is_reviewable, is_single_sample, private_place
 from sentrix.domain.identity.models import (
     CLUSTER_STATUS_PENDING,
     CLUSTER_STATUS_REJECTED,
     ENTITY_STATUS_CONFIRMED,
     ENTITY_STATUS_PENDING,
     ENTITY_TYPE_PERSON,
+    ENTITY_TYPE_PLACE,
     PENDING_CLUSTER_NAME,
+    PENDING_SUMMARY_DISPLAY,
+    EntityDecoration,
     EntityPropertyRecord,
     EntityRecord,
     FaceClusterRecord,
@@ -162,6 +168,11 @@ def _person_payload(container: Container, entity: EntityRecord) -> PersonPayload
     那是**落库的数据**，不该出现在接口上——1.0 同样在这一层把它换掉
     （``app.py:1518`` 的 ``display_name``）。与 ``FaceRepository`` 的簇记录用同一个常量，
     两处漂开一次，同一个实体会在簇列表里叫一个名字、在人物列表里叫另一个。
+
+    **``summary`` 也换**，这一步与换名字是 1.0 的同一段（``app.py:1518-1521``）：
+    库里存的是「由 buffalo_l embedding 生成，等待用户确认」，接口上给的是
+    ``PENDING_SUMMARY_DISPLAY``——API 上不该出现模型代号。少了这一步，同一个人物候选
+    在 ``/people`` 与 ``/entities`` 上会有两句不同的说明。
     """
     pending = entity.status == ENTITY_STATUS_PENDING
     return PersonPayload(
@@ -170,7 +181,7 @@ def _person_payload(container: Container, entity: EntityRecord) -> PersonPayload
         canonical_name=PENDING_CLUSTER_NAME if pending else entity.canonical_name,
         status=entity.status,
         family_role=None if pending else entity.family_role,
-        summary=entity.summary,
+        summary=PENDING_SUMMARY_DISPLAY if pending else entity.summary,
         confidence=entity.confidence,
         confirmed=entity.status == ENTITY_STATUS_CONFIRMED,
         aliases=list(container.entity_repository.person_aliases(entity.id)),
@@ -293,7 +304,97 @@ def split_face_cluster(
     return _cluster_payload(container, created)
 
 
-# ---- 实体属性 ------------------------------------------------------------------
+# ---- 实体 --------------------------------------------------------------------
+
+
+def _entity_summary(
+    container: Container, entity: EntityRecord, decoration: EntityDecoration
+) -> EntitySummaryPayload:
+    """一条实体记录 + 它的派生字段 → 实体目录里的一行。
+
+    三段改写，各自指着 1.0 的一处：
+
+    1. **pending 的人物**：换名字、去掉角色、换说明（``app.py:1863-1867``）。
+       三件事是一组，与 ``_person_payload`` 里那一段同源。
+    2. **私密地点**（``db.py:4674-4685``，经 ``list_entities`` 的 ``public_entity``）：
+       **只对 place 生效**，要读这个实体的属性，所以这里多一次仓储调用——
+       1.0 也是逐条调的（``db.py:4055`` 的列表推导里每条一次 ``list_entity_properties``），
+       不是批量。
+    3. **两个派生布尔**：判断在 ``domain/identity/decoration.py``，这里只把数喂进去。
+    """
+    canonical_name = entity.canonical_name
+    family_role = entity.family_role
+    summary = entity.summary
+    single_sample: bool | None = None
+    private: bool | None = None
+    if entity.entity_type == ENTITY_TYPE_PERSON and entity.status == ENTITY_STATUS_PENDING:
+        canonical_name = PENDING_CLUSTER_NAME
+        family_role = None
+        summary = PENDING_SUMMARY_DISPLAY
+    if entity.entity_type == ENTITY_TYPE_PERSON:
+        single_sample = is_single_sample(status=entity.status, clusters=decoration.clusters)
+    if entity.entity_type == ENTITY_TYPE_PLACE:
+        properties = {
+            item.property_key: item.value for item in container.entity_repository.list_properties(entity.id)
+        }
+        canonical_name, private = private_place(canonical_name, properties)
+    return EntitySummaryPayload(
+        id=entity.id,
+        scope_id=entity.scope_id,
+        entity_type=entity.entity_type,
+        canonical_name=canonical_name,
+        status=entity.status,
+        family_role=family_role,
+        summary=summary,
+        confidence=entity.confidence,
+        identity_state=entity.identity_state,
+        role_state=entity.role_state,
+        name_state=entity.name_state,
+        created_at=_optional_isoformat(entity.created_at),
+        updated_at=_optional_isoformat(entity.updated_at),
+        cluster_count=decoration.cluster_count,
+        photo_count=decoration.photo_count,
+        mention_count=decoration.mention_count,
+        evidence_count=decoration.evidence_count,
+        reviewable=is_reviewable(
+            entity_type=entity.entity_type,
+            status=entity.status,
+            clusters=decoration.clusters,
+            evidence_count=decoration.evidence_count,
+        ),
+        single_sample=single_sample,
+        avatar_face_instance_id=decoration.avatar_face_instance_id,
+        preview_asset_id=decoration.preview_asset_id,
+        preview_file_name=decoration.preview_file_name,
+        preview_media_type=decoration.preview_media_type,
+        private=private,
+    )
+
+
+@router.get("/entities")
+def list_entities(
+    status: str | None = None,
+    include_people: bool = Query(False, alias="includePeople"),
+    scope_id: str | None = None,
+    container: Container = Depends(get_container),
+) -> EntityListResponse:
+    """实体目录。1.0 ``app.py:1858-1868``。
+
+    **``includePeople`` 默认 ``False``，也就是默认不给人物。** 这个默认值是 API 契约
+    （1.0 的三个查询参数之一），虽然 1.0 自己的前端永远传 ``true``
+    （``src/api.js:42`` 写死在请求里）——**照搬默认值，但不为它编造消费场景**。
+
+    参数名走 ``alias`` 而不是把 Python 参数写成驼峰：线上名字是 ``includePeople``
+    （契约），代码里保持 snake_case（本仓库的命名规则）。
+    """
+    records = container.entity_repository.list_entities(status=status, scope_id=scope_id)
+    if not include_people:
+        # 类型过滤在路由层，与 ``GET /people`` 那一处是同一条理由——仓储给「全部实体」。
+        records = [item for item in records if item.entity_type != ENTITY_TYPE_PERSON]
+    decorations = container.entity_repository.decorate_entities([item.id for item in records])
+    return EntityListResponse(
+        entities=[_entity_summary(container, item, decorations[item.id]) for item in records]
+    )
 
 
 def _property_payload(record: EntityPropertyRecord) -> EntityPropertyPayload:

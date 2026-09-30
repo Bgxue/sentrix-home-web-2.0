@@ -22,6 +22,7 @@ from sentrix.domain.identity.models import (
     PORTRAIT_TRIGGER_MANUAL,
     PROPERTY_SOURCE_DERIVED,
     AppearanceEvidenceRecord,
+    EntityDecoration,
     EntityMentionRecord,
     EntityPropertyRecord,
     EntityRecord,
@@ -355,6 +356,25 @@ class EntityRepository(Protocol):
 
         方法名从 ``list_people`` 改回 ``list_entities`` 是**恢复 1.0 的形状**，不是新设计：
         2.0 早先把 ``entity_type = ?`` 绑死进 SQL，那是只服务人物列表时的收窄。
+        """
+        ...
+
+    def decorate_entities(self, entity_ids: Sequence[str]) -> Mapping[str, EntityDecoration]:
+        """批量取实体列表要用的派生字段。1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``。
+
+        **一次取一批，不是一条一查。** 1.0 的 docstring 写的就是这句
+        （"with batched queries instead of N+1 lookups"）：六条聚合各自走一遍
+        ``IN (...)``，簇的两种用途（计数、判两个布尔要用到的 ``status``/``member_count``）
+        合并成一条。
+
+        **只取数，不做判断。** 两个派生布尔与私密地点的投影在
+        ``domain/identity/decoration.py`` 里算——那里的边界（``is True`` 不是真值、
+        空簇列表下 ``all()`` 为真）值得单独穷举，混在 SQL 里就只能靠造库来验。
+
+        返回的表**对每个传入的 id 都有一条**，没有任何一行数据的实体拿到全零——
+        1.0 也是这个形状（它对每条实体 ``.get(id, 0)``）。传空列表时返回空表，不查库。
+
+        没有 ``relationship_count``：``relationships`` 的读路径是 S7。
         """
         ...
 

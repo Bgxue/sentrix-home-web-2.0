@@ -31,6 +31,10 @@ from datetime import datetime
 # 空结果——所以收在这里一份。
 
 ENTITY_TYPE_PERSON = "person"
+# 语义实体里的地点。1.0 的 ``entity_type`` 有五个取值（person / place / object / time /
+# atmosphere），2.0 目前只有 person 与非人物两类的**判据**用到具体类型名：``public_entity``
+# 的私密投影只对 place 生效（``db.py:4676``）。别的类型名等真有判据依赖它们时再收进来。
+ENTITY_TYPE_PLACE = "place"
 
 # 没指定记忆空间时的落点。1.0 把这个字面量写了十几处（``db.py:4816`` 等），
 # 2.0 收成一份：它出现在 SQL 的 ``DEFAULT``、仓储的兜底与用例的入参默认值里，
@@ -68,6 +72,13 @@ PENDING_CLUSTER_NAME = "待命名成员"
 # 一字不差是要求：换一次措辞，老库里的行与新行就再也对不上了。
 PENDING_CLUSTER_NAME_PREFIX = "待确认人物簇"
 PENDING_CLUSTER_SUMMARY = "由 buffalo_l embedding 生成，等待用户确认"
+
+# 未命名人物簇**在接口上**的说明。与上面那个**不是一回事**，两个都要留着：
+# ``PENDING_CLUSTER_SUMMARY`` 是落库的原文，``PENDING_SUMMARY_DISPLAY`` 是 1.0 的**路由层**
+# 在交给用户之前换掉的那一句（``app.py:1521`` / ``:1549`` / ``:1564`` / ``:1867`` 四处）。
+# API 上不该出现模型代号，所以这两个串必须分开：合成一个，要么库里存着给用户看的文案，
+# 要么接口上泄漏实现细节。一字不差是要求。
+PENDING_SUMMARY_DISPLAY = "由人脸聚类生成，等待用户确认"
 
 # 全局重聚类之后，已经没有活着的人脸簇的候选人物会被转成 rejected——**删掉的是状态，
 # 不是行**：这个人在确认之前的所有痕迹（簇、实例、提及、修订）都要留在库里可查。
@@ -289,6 +300,42 @@ class EntityPropertyRecord:
     revision: int
     created_at: datetime | None
     updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ClusterState:
+    """一个实体名下某簇的**两个判据字段**，不是整行。
+
+    ``_decorate_entities`` 只用 ``status`` 与 ``member_count`` 算两个实体级布尔
+    （1.0 ``db.py:4129-4133``），别的一律不看。只带这两个而不是整行
+    ``FaceClusterRecord``，是为了让「哪些字段参与了判断」在类型上就看得见——
+    拿着整行记录去写判据，很容易顺手用上一个 1.0 没用过的字段。
+    """
+
+    status: str
+    member_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class EntityDecoration:
+    """``_decorate_entities``（1.0 ``db.py:4056-4141``）取出来的那几组数。
+
+    **只有数，没有判断。** 派生的两个布尔在 ``domain/identity/decoration.py`` 里算，
+    理由是它们的边界（``is True`` 而不是真值、空簇列表下 ``all()`` 为真）值得单独穷举。
+
+    没有 ``relationship_count``：它来自 ``relationships`` 表，读路径是 S7。恒返回 0
+    会让「S7 还没做」读起来像「这个实体确实没有关系」，所以那个键不出现在响应里。
+    """
+
+    cluster_count: int
+    photo_count: int
+    mention_count: int
+    evidence_count: int
+    clusters: tuple[ClusterState, ...]
+    avatar_face_instance_id: str | None
+    preview_asset_id: str | None
+    preview_file_name: str | None
+    preview_media_type: str | None
 
 
 @dataclass(frozen=True, slots=True)

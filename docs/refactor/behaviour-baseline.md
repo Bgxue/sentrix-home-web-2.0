@@ -276,3 +276,62 @@
 > 1.0 生产 venv 里装着 `paddleocr`，所以 2,867 次调用跑的都是小模型。
 > **2.0 的 `read_photo_text` 因此只有一条路：读导入期已落库的 `observations.ocr_text`**
 > （那是 1.0 的第一条路，见上表最后一行）。裁决与理由记在 S6 计划 §8.8。
+
+## 实体目录（S6 · T128a，2026-09-30）
+
+`GET /api/entities`（1.0 `app.py:1858-1868`）是**全部实体**的目录；`/api/people` 是
+**家庭成员**，两个端点。下面这些数值、字面量与边界照搬，不改。
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| `includePeople` 默认 | `false`（不给人物） | `backend/app.py:1859` |
+| pending 人物在**这个**端点上的名字 | `待命名成员`（**不带序号**） | `backend/app.py:1865` |
+| pending 人物在 `/api/people` 上的名字 | `待命名成员 1`、`待命名成员 2`（按列表顺序递增） | `backend/app.py:1517-1519` |
+| pending 人物的接口说明 | `由人脸聚类生成，等待用户确认` | `backend/app.py:1867` |
+| 同一件事在**库里**的原文 | `由 buffalo_l embedding 生成，等待用户确认` | `backend/db.py:4639` |
+| `status` 为空时排除的取值 | `rejected` / `superseded` | `backend/db.py:4047` |
+| 空间规则 | 恒有 `scope_id NOT IN (SELECT id FROM memory_spaces WHERE include_in_people = 0)` | `backend/db.py:4043-4045` |
+| 排序与上限 | `updated_at DESC`，**无 LIMIT** | `backend/db.py:4052` |
+| `cluster_count` | `face_clusters` 计数，**没有状态过滤**（被拒的簇也算） | `backend/db.py:4060-4062` |
+| `photo_count` | `COUNT(DISTINCT a.id)` 且 `fc.status != 'rejected'` | `backend/db.py:4067-4072` |
+| `mention_count` / `evidence_count` | `entity_mentions` / `entity_observations` 的行数——**两张不同的表** | `backend/db.py:4078-4086` |
+| `relationship_count` | subject 侧 + object 侧两轮相加，`status != 'retracted'`；**2.0 留 S7，不出现在响应里** | `backend/db.py:4088-4100` |
+| `avatar_face_instance_id` | 非 rejected 簇里按 `detection_confidence DESC, created_at ASC` 取第一 | `backend/db.py:4102-4110` |
+| `preview_asset_id` / `preview_file_name` / `preview_media_type` | `entity_observations ⋈ observations ⋈ assets`，按 `captured_at DESC, o.id DESC` 取第一 | `backend/db.py:4111-4120` |
+| `reviewable`（person） | `status == 'confirmed'` 或 存在 `status != 'rejected'` 且 `member_count > 0` 的簇 | `backend/db.py:4128-4131` |
+| `single_sample`（person） | `status != 'confirmed'` 且 所有簇 `member_count <= 1` | `backend/db.py:4132-4133` |
+| `reviewable`（非 person） | `evidence_count > 0`——与簇无关，**也不看 status** | `backend/db.py:4135` |
+| 私密地点 | 仅 `place`：`private_flag` **`is True`** 时名字换成 `alias`（缺省 `私密地点`）并给 `private: true` | `backend/db.py:4674-4685` |
+| 私密地点的两个属性键 | `private_flag` 与 **`alias`（单数）**——人物别名用的是 `aliases`（复数），差一个字母 | `backend/db.py:4679-4681` |
+
+> **三处反直觉的边界，都不要「修好」。**
+>
+> 1. **`private_flag` 判的是 `is True`，不是真值。** 属性值是从 JSON 解出来的任意类型，
+>    整数 `1` 与字符串 `"true"` 都能通过真值判断，而 1.0 只认真正的布尔。
+> 2. **`single_sample` 不看簇的 `status`。** 一个**被拒**的、有两张脸的簇照样让它不是
+>    孤证——而 `reviewable` 是看 status 的。两处规则不同，都是 1.0 的原样。
+> 3. **空簇列表下 `all()` 为真**，所以一个还没聚出任何簇的 pending 人物判为
+>    `single_sample`。
+>
+> **一条死检查，别当字段搬过来。** 1.0 前端 `src/app.js:695` 有
+> `if (ent?.is_self) return`——`entities` 表**没有 `is_self` 列**（`SELECT *` 的列里没有，
+> `_decorate_entities` 也不补），这个 `if` 永远不成立。
+>
+> **一条在生产里是死路径的默认值。** `includePeople` 默认 `false`，但 1.0 前端
+> **永远传 `true`**（`src/api.js:42` 把它写死在请求里）。默认值照搬——它是 API 契约——
+> 但没有任何 1.0 的界面场景走那条默认路径，**不要为它编造消费场景**。
+>
+> **装饰字段在前端是承重的**（这是 128a 不做减法、全量搬的理由）：
+> `reviewable` 是 `src/app.js:675` 实体网格的入口过滤谓词；`avatar_face_instance_id` 与
+> `mention_count` / `cluster_count` / `relationship_count` 在 `:678` 的实体卡上；
+> `evidence_count` 在 `:876` / `:910` / `:929`；`photo_count` / `single_sample` 驱动
+> `:939` / `:2112` 的批量确认。
+> 例外：`preview_*` 在**实体列表上**产出了但前端当前没有读者——它被读的地方是
+> `entityGroups`（`:785-786`，T129 的投影）。如实记下，不夸大成承重。
+>
+> **一处已存在的 2.0 与 1.0 的差异（不在 T128a 范围内，未改）：** 1.0 的 `/api/people`
+> 给 pending 人物的是**带序号**的 `待命名成员 {n}`（`backend/app.py:1517-1519`，按列表
+> 位置递增），2.0 的 `_person_payload` 用的是不带序号的 `PENDING_CLUSTER_NAME`。
+> 本次只把两边的 **summary** 对齐了（那是同一个改写块里漏掉的一条），序号这件事需要
+> 单独裁决：序号是**列表位置**的函数，放进 `_person_payload` 意味着那个函数要知道
+> 自己在列表里的下标。
