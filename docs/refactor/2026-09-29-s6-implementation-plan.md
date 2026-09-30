@@ -282,6 +282,49 @@ S4 栽过两次「代码在、没人调」，这条门禁把那个教训变成�
 | **130** | `GET /knowledge`（1.0 返回 profiles + claims + spaces 三块） | — |
 | **131** | 把非人物实体接通 `retrieve_entity`，让 entity 通道对语义实体也生效 | 与 119（人物硬条件）的边界：人物是硬条件，语义实体是召回通道，**两者在 1.0 里不是一回事** |
 
+### Task 125 · 动工前核查（2026-09-30）：S6 的验收条件，差的是「每通道那一格」
+
+设计 §8 给 S6 的验收条件只有一句：**「证据包和 trace 能展开」**。核完 1.0 之后，
+那句话指的东西是具体的——`EvidencePacket.as_dict()`（`backend/evidence_retrieval.py:33-66`）：
+
+| 1.0 的字段 | 是什么 | 2.0 现状 |
+|---|---|---|
+| `assets` / `exact_results` / `strong_results` / `approximate_results` | 四档候选 | **部分**：`retrieve_evidence.py` 有融合后的候选与 `channels` |
+| `gaps` | 缺口（哪类证据没拿到） | **有**：`retrieve_evidence.py` 的缺口传递到 HTTP 响应 |
+| `excluded_count` | 被硬条件排除的候选数 | **有**（T119 落的，`evaluate_conditions.py:67`） |
+| `result_summary` | 四档计数 + `hard_constraint_violations` | **没有**（派生的，便宜） |
+| **`channel_trace`** | **每通道的召回轨迹**：证明每个召回器**被调用过**，或者给出**明确的不可用原因** | ❌ **没有** |
+| `retrieval_timing` | 每通道耗时 | ❌ 没有 |
+
+**缺的那一格为什么是要紧的。** 1.0 那条注释写得比字段名清楚
+（`evidence_retrieval.py:43-44`）：
+
+> per-channel recall trace so API/benchmark can prove each retriever was invoked
+> (or give an explicit unavailable reason)
+
+2.0 现在只有**每候选**的 `channels`（`retrieve_evidence.py:109-113`：
+「被哪些通道以第几名召回」）。那是**转置**过来的视角，少了一整类信息：
+
+- `text_ann` 跑过但一张都没召回 → 响应里没有任何候选带 `text_ann` 键；
+- `text_ann` **根本没跑**（模型不可用、向量库空）→ 响应里**也是**没有任何候选带那个键。
+
+两者在读数上**完全一样**。而 §3 的 T117 对照验收要判的正是「`channels` 里出现了
+`text_ann` 键且名次不是垫底」——**只有转置视角时，那条判据在「通道没跑」与
+「通道跑了没找到」之间分不开**，而这正是 S6「六路取证补齐」要证明的东西。
+
+**动工清单**：
+
+| # | 落点 | 是什么 |
+|---|---|---|
+| 1 | `domain/retrieval/models.py` | `ChannelTrace`（通道名 / 是否被调用 / 候选数 / 不可用原因）与 `RetrievalTiming` |
+| 2 | `application/retrieval/retrieve_evidence.py` | 六路各写一条 trace；**不可用也要写一条带原因的**（这是重点，不是可选项） |
+| 3 | `api/schemas/search.py` + `api/routes/search.py` | 响应里多一块可展开的 `packet`（trace + timing + `result_summary`） |
+| 4 | `apps/api/tests/` | 一条对照用例：**把某一通道弄成不可用，断言它在 trace 里仍有一条带原因的记录**——那才是「能展开」 |
+
+**判据**：关掉 `text_ann` 的嵌入器之后，响应里那条 trace 必须仍然存在且写明原因；
+而候选列表里不会因此多出任何东西。两半都要断言——只断言前一半的话，
+一个「永远写六条、不管跑没跑」的实现也能过。
+
 ### 收口
 
 | Task | 内容 |
