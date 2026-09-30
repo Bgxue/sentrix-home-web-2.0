@@ -17,12 +17,14 @@ from sentrix.domain.identity.models import (
     CLUSTER_STATUS_CONFIRMED,
     CLUSTER_STATUS_REJECTED,
     DEFAULT_SCOPE_ID,
+    ENTITY_STATUS_CONFIRMED,
     ENTITY_STATUS_PENDING,
     FACE_VALIDITY_UNCERTAIN,
     FACE_VALIDITY_VERIFIED,
     PENDING_CLUSTER_NAME,
     FaceClusterRecord,
     FaceInstanceRecord,
+    FaceManifestRecord,
     FacePrototypeRecord,
     PhotoIdentityRecord,
 )
@@ -334,6 +336,55 @@ class SqliteFaceRepository:
 
     def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]:
         return self._instances_where("fi.cluster_id = ?", (cluster_id,))
+
+    def list_face_manifest(self, asset_id: str) -> Sequence[FaceManifestRecord]:
+        """1.0 ``tools.py:2328-2357`` 那条 SQL，逐字。
+
+        **两个 LEFT JOIN 与 ``list_photo_identities`` 的两个 INNER JOIN 是相反的口径**：
+        这条要的是「图里有几张脸」（含没绑簇的、簇没绑实体的），那条要的是「图里有谁」。
+        两条都保留，因为两个问题在 1.0 里都要答。
+
+        ``face_id`` 由这里的行序分配（``face_1``…）——排序在 SQL 里，编号跟着它走；
+        放到调用方去数会让「两次调用给同一张脸不同编号」有可乘之机，而模型要靠这个编号
+        回指某个人。1.0 的第三键 ``fi.id`` 正是为此存在的。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT fi.id AS face_instance_id, fi.asset_id, fi.bbox_json,
+                       fi.detection_confidence, fi.quality,
+                       fc.id AS cluster_id, fc.status AS cluster_status,
+                       e.canonical_name, e.family_role, e.status AS entity_status
+                FROM face_instances fi
+                LEFT JOIN face_clusters fc ON fc.id = fi.cluster_id
+                LEFT JOIN entities e ON e.id = fc.entity_id
+                WHERE fi.asset_id = ?
+                ORDER BY fi.quality DESC, fi.detection_confidence DESC, fi.id
+                """,
+                (asset_id,),
+            ).fetchall()
+        manifest: list[FaceManifestRecord] = []
+        for index, row in enumerate(rows, 1):
+            # 1.0 ``:2343-2347`` 的三重合取——「未确认者不得猜姓名」就落在这一行。
+            confirmed = bool(
+                row["cluster_status"] == CLUSTER_STATUS_CONFIRMED
+                and row["entity_status"] == ENTITY_STATUS_CONFIRMED
+                and row["canonical_name"]
+            )
+            manifest.append(
+                FaceManifestRecord(
+                    face_id=f"face_{index}",
+                    face_instance_id=str(row["face_instance_id"] or ""),
+                    asset_id=str(row["asset_id"] or asset_id),
+                    bbox=_vector(row["bbox_json"]),
+                    identity_status="confirmed" if confirmed else "unconfirmed",
+                    person_name=str(row["canonical_name"] or "") if confirmed else "",
+                    family_role=str(row["family_role"] or "") if confirmed else "",
+                    detection_confidence=row["detection_confidence"],
+                    quality=row["quality"],
+                )
+            )
+        return manifest
 
     def list_photo_identities(self, asset_id: str) -> Sequence[PhotoIdentityRecord]:
         """1.0 ``tools.py:2281-2300`` 那条 SQL，逐字。

@@ -83,6 +83,9 @@ PENDING_METHODS: dict[str, str] = {
     # + 它的对照用例，再 T123、再 T124），所以它落地的那一刻必然没有生产调用者。
     # 登记在此，等两条工具接上时**由反向规则自己删掉**——与 facts 那三条走的是同一条路。
     "PhotoInspector.inspect": "Task 123/124（inspect_photo / read_photo_text 两个工具）",
+    # 同一次「先落地、后接线」：人脸清单这条读路径是 T123 的，而 T123 分两步落
+    # （读路径先行、工具后到）。接上的那一刻反向规则会要求删掉这一条。
+    "FaceRepository.list_face_manifest": "Task 123（inspect_photo 的人脸清单）",
     "MediaStorage.path_for": "S6 · 依赖核查（媒体路径解析，归属未定）",
     "LexicalIndex.rebuild_scope": "S6 · 依赖核查（词法索引重建，归属未定）",
     "AssetRepository.update_status": "S6 · 依赖核查（资产状态流转，归属未定）",

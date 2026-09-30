@@ -90,6 +90,12 @@ _TYPE_ALIASES: Mapping[str, str] = {
     "identity": EvidenceType.PERSON_PROFILE.value,
     "profile": EvidenceType.PERSON_PROFILE.value,
     "person_profile": EvidenceType.PERSON_PROFILE.value,
+    # S6（T123）补上的两个轴词。1.0 ``goal_planner.py:68-69`` 的
+    # ``"visual" / "detail" → "visual_observation"``——收窄期（S3 只有三类）它们无处可去，
+    # 现在 ``VISUAL_OBSERVATION`` 落地了，照 1.0 映射回来。
+    "visual": EvidenceType.VISUAL_OBSERVATION.value,
+    "detail": EvidenceType.VISUAL_OBSERVATION.value,
+    "visual_observation": EvidenceType.VISUAL_OBSERVATION.value,
 }
 
 _HEX_DIGITS = re.compile(r"^[0-9a-f]+$")

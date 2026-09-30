@@ -138,6 +138,42 @@ class PhotoIdentityRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class FaceManifestRecord:
+    """一张照片里**检测到的每一张脸**，带一个给模型看的局部编号。T123 独用。
+
+    与 ``PhotoIdentityRecord`` 是两条不同的查询，**不要合并**（两条都有出处）：
+
+    | | ``PhotoIdentityRecord`` | 本记录 |
+    |---|---|---|
+    | 含未绑定的人脸 | 否（两个 INNER JOIN） | **是**（两个 LEFT JOIN） |
+    | 名字 | ``person_name``（实体本名） | 只在 cluster 与 entity **双确认**时才填 |
+    | 编号 | 无 | ``face_1`` / ``face_2``… |
+
+    ``face_id`` 是**给提示词用的局部编号**，不是持久化的 id——它由那条
+    ``ORDER BY`` 的行序决定，所以由仓储（持有排序的那一层）分配，不由调用方再数一遍。
+    模型据此在「问题指向某个人但没给名字」时回一个 ``face_id``
+    （1.0 ``tools.py:2620-2622`` 的提示词就是这么要求的）。
+
+    **``identity_status`` 的三重合取是「未确认者不得猜姓名」的落点**
+    （1.0 ``:2343-2347``）：``cluster_status == 'confirmed'`` **且**
+    ``entity_status == 'confirmed'`` **且** 有 ``canonical_name``，三者缺一就不填名字。
+    注意这与 ``PhotoIdentityRecord`` 那条「一个状态过滤都没有」是**相反**的口径——
+    两条各有出处，不要用一条的直觉去改另一条。
+    """
+
+    # 局部编号：``face_1`` / ``face_2``…，按行序从一开始。
+    face_id: str
+    face_instance_id: str
+    asset_id: str
+    bbox: tuple[float, ...]
+    identity_status: str
+    person_name: str
+    family_role: str
+    detection_confidence: float
+    quality: float
+
+
+@dataclass(frozen=True, slots=True)
 class FaceInstanceRecord:
     """``face_instances`` 一行 + 它所属 asset 的四个字段。
 

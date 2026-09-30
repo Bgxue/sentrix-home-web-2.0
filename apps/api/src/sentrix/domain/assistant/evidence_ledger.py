@@ -58,6 +58,13 @@ class EvidenceType(StrEnum):
     # 确认**照片中的人名**时才声明 photo_identity」），``runtime.py:1011`` 还为它单独
     # 做工具准入——它不是 ``confirmed_identity`` 的同义词。
     PHOTO_IDENTITY = "photo_identity"
+    # ``inspect_photo`` 的产物（1.0 ``tools.py:2756``：``produces_evidence=("visual_observation",
+    # "photo_identity")``）。1.0 的公共表里有它（``evidence_contract.py:15``），
+    # 而且规划器的轴词表把它当作 ``visual`` / ``detail`` 两个词的目标
+    # （``goal_planner.py:68-69``）——**「看细节」与「这是谁」在 1.0 是两类需求**，
+    # 前者由 ``inspect_photo`` 满足，后者由 ``query_photo_people`` / ``inspect_photo``
+    # 一起满足，这个区别在 T123 的 ``satisfies`` 上是两个条目。
+    VISUAL_OBSERVATION = "visual_observation"
 
 
 class RequirementStatus(StrEnum):

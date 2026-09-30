@@ -29,6 +29,7 @@ from sentrix.domain.identity.models import (
     FaceClusterRecord,
     FaceDetection,
     FaceInstanceRecord,
+    FaceManifestRecord,
     FacePrototypeRecord,
     PersonMomentRecord,
     PersonNameMatch,
@@ -100,6 +101,20 @@ class FaceRepository(Protocol):
         ...
 
     def list_instances(self, cluster_id: str) -> Sequence[FaceInstanceRecord]: ...
+
+    def list_face_manifest(self, asset_id: str) -> Sequence[FaceManifestRecord]:
+        """一张照片里**检测到的每一张脸**（含没绑定到人的那些），按提示词要的顺序。T123 用。
+
+        1.0 ``agent_runtime/tools.py:2320-2358`` 的 ``_photo_face_manifest``，逐字。
+        与 ``list_photo_identities`` 的关系见 ``FaceManifestRecord`` 的 docstring——
+        **两条查询、两种口径，不要合并**。
+
+        排序是 ``quality DESC, detection_confidence DESC, id``——**三键**，第三键是
+        ``id``。1.0 的 ``list_photo_identities`` 只有前两键（同分时取到哪一行由 SQLite
+        定），这一条有第三键，所以 ``face_id`` 的编号是**确定的**。这个差别是必须的：
+        编号要进提示词、还要被模型回指，两次调用给出不同的编号会让那条回指失效。
+        """
+        ...
 
     def list_photo_identities(self, asset_id: str) -> Sequence[PhotoIdentityRecord]:
         """一张照片里**已经绑到人物实体**的那些脸（T122/T123 共用）。
