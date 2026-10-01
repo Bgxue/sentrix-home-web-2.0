@@ -1758,3 +1758,40 @@ T124 注释承诺了代码里根本没有）：
 **顺带**：`EntityRepository.maintain_property` 的零调用登记**被反向规则自己删掉了**
 （T127 的抽取要写 `label`/`category`/时间属性）——它原来登记的是「Task 128 接线」，
 实际是 T127 接上的。`list_properties`（读）仍等 T128。
+
+
+### 8.12 S6 完成（2026-10-01）
+
+**S6 全部任务已了结。** 本切片最后一次全量验证：静态门禁全绿
+（ruff / format / mypy / arch 五契约 + 两条可达性 / check-docs 含 OpenAPI 契约），
+`make ci` 的 coverage 一步 **1836 passed / 1 failed / 29 skipped**，
+`make web-check` 单独补跑通过（tsc + oxlint + 38 个 vitest + vite build）。
+
+**那一条 failed 是已知的模型侧 flaky**，不是回归：
+`tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`
+（§8.1 记着「不要修」，上一次全量跑失败的是同一条）。`make ci` 会因此在 coverage
+那一步停住、`web-check` 不跑——**跑完 coverage 记得单独补一次 `make web-check`**。
+
+#### 本切片最后三段（T128–T132）的清单
+
+| 任务 | 落点 | 关键判断 |
+|---|---|---|
+| T128a | `GET /entities` + `PUT /entities/{id}/properties/{key}` | 计划判它是「薄映射」——**错**，装饰是七条批量聚合；于是按**薄 / 厚**切而不是按端点切 |
+| T128b | `GET /entities/{id}` | 计划说「九个子查询」——**错**，是**十二个键**；搬九个，`relationships` 留 S7、`profile`/`claims` 留 T130 |
+| T129 | `entity-groups` 两条路由 | 四级语义标签短路；**单成员组也返回**；emotion 那一支按 T127 的记录留白 |
+| T130 | `GET /knowledge` | `semantic_profiles` / `semantic_claims` 的**第一个读者**；`scope_id` 的过滤在 `LIMIT 1000` **之后** |
+| T131 | **不做** | 核查发现 1.0 **从未**把非人物实体接进检索——不是接线是新建，按「不新增 1.0 没有的设计」裁决不做 |
+| T132 | capability-map 加反向规则 | 前三条规则都是单向的，抓不到「其实验过、却还标着 pending」；两条卡住的登记改正 |
+
+#### 三条留给 S7 的显式后续
+
+1. **T127 的两条关系**（「出现在」/「记录于」）——`relationships` 表归 S7。
+2. **`GET /entities/{id}` 的 `relationships[]`** 与 **`GET /entity-groups/{id}` 合并的 `relationships`**——同上，两个键都不进响应。
+3. **`relationship_count`** 在 `GET /entities` 与 `entity-groups` 两处都不进响应（恒 0 会让「S7 还没做」读起来像「确实没有关系」）。
+
+#### 下一步
+
+S6 之后是 **S7（家庭关系与关系图谱）**。开工前照旧：先把上面三条后续接上，
+再读 S7 的计划或设计文档 §8，并**按本切片的教训先做依赖核查**——
+本切片五次「任务定义被核查推翻」，其中三次是计划里的**汇总性描述**错了
+（「薄映射」「九个子查询」「零调用」），一次是「1.0 有而任务表没有」，一次是方向相反。
