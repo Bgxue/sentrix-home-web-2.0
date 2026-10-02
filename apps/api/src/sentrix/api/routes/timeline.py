@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sentrix.api.deps import get_container
+from sentrix.api.routes.family import TRIGGER_INGEST, run_family_graph_for_scope
 from sentrix.api.routes.insights import run_insights_for_scope
 from sentrix.api.routes.media import build_import_assets
+from sentrix.api.schemas.family import FamilyRunResponse
 from sentrix.api.schemas.timeline import (
     ImportBatchRequest,
     ImportBatchResponse,
@@ -147,6 +150,8 @@ def import_album(
         )
     except NotADirectoryError:
         raise HTTPException(status_code=400, detail="directory not found") from None
+    # **顺序照 1.0**：``pipeline.py:733-734`` 是先 family 后 person-insights。
+    family_graph = _maybe_run_family_graph(container, request.scope_id)
     insights = _maybe_run_insights(container, request.scope_id, result.imported)
     return ImportBatchResponse(
         scope_id=result.scope_id,
@@ -158,7 +163,54 @@ def import_album(
         summarized=result.summarized,
         failures=[ImportFailure(file_name=item.file_name, reason=item.reason) for item in result.failures],
         insights=insights,
+        family_graph=family_graph,
     )
+
+
+def _watermark(stats: Mapping[str, object]) -> int:
+    """``stats['event_watermark']``。1.0 是裸 ``int(...)``——缺键当 0；
+    值不是数字（老库、手工改过）时也当 0，那样下一趟会重跑而不是崩。"""
+    value = stats.get("event_watermark", 0)
+    return int(value) if isinstance(value, (int, float, str)) else 0
+
+
+def _maybe_run_family_graph(container: Container, scope_id: str) -> FamilyRunResponse | None:
+    """批末跑一趟家庭图谱推断。**没有新事件就不跑。**
+
+    判据是 **event watermark**（1.0 ``pipeline.py:746-749``）：拿本 scope 当前的事件数，
+    与最近一次 run 写进 ``stats['event_watermark']`` 的那个数比——**没涨就不跑**。
+
+    与 ``_maybe_run_insights`` 的判据（``imported > 0``）**不同，而且这次是刻意的**：
+    insights 没有 run 表，只能用「这次真导入进了照片」表达同一意图；家庭图谱有
+    ``family_analysis_runs``，所以能用 1.0 那个判据。**两者不可互换**——按 ``imported``
+    判的话，「导入的全是重复照片、但事件早就变了」这种情况会漏跑。
+
+    **失败时 ``stats`` 保持空 → watermark 缺失 → 下次一定重跑**（T312 钉过）。
+
+    **单张导入不触发**：``POST /media/import`` 走 ``ImportAssets.execute``，那里没有
+    「一批结束」这个概念——裁决④取的是「贴 1.0」（1.0 也是按批次收尾）。
+
+    **为什么这里必须接住异常。** 1.0 的触发跑在 ``threading.Thread(daemon=True)`` 里
+    （``pipeline.py:762``），**它的失败根本传不到导入响应上**；2.0 裁决成同步之后，
+    异常会顺着 ``POST /imports`` 冒出去变成 500。要让导入的行为与 1.0 一致，
+    就得在这里接住——**家庭图谱是导入的副作用，不是它的前置**。
+
+    这条不是纸上推演：实测撞到过。``family_analysis_runs.scope_id`` 有指向
+    ``memory_spaces(id)`` 的外键，而契约测试里那个 scope 不是真的 memory_space
+    （``POST /imports`` 本身不要求它是），于是 ``create_run`` 抛 ``IntegrityError``，
+    把整个导入请求带崩了。
+    """
+    try:
+        repository = container.family_graph_repository
+        latest = repository.latest_run(scope_id)
+        event_count = container.event_repository.count_by_scope(scope_id)
+        watermark = _watermark(latest.stats if latest is not None else {})
+        if latest is not None and event_count <= watermark:
+            return None
+        return run_family_graph_for_scope(container, scope_id, trigger_type=TRIGGER_INGEST)
+    except Exception as error:  # noqa: BLE001 —— 见下面那段「为什么这里必须接住」
+        log.warning("批末触发家庭图谱推断失败（scope=%s）: %s", scope_id, error)
+        return None
 
 
 def _maybe_run_insights(container: Container, scope_id: str, imported: int) -> InsightCounts | None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from sentrix.api.schemas.family import FamilyRunResponse
+
 
 class TimelinePhoto(BaseModel):
     asset_id: str
@@ -87,3 +89,6 @@ class ImportBatchResponse(BaseModel):
     # 用 ``None`` 而不是全 0 的计数对象：那两件事不一样——「没跑」与「跑了但一个人都
     # 没认出来」在排查时是完全不同的结论。
     insights: InsightCounts | None = None
+    # **2.0 自加的第二个键**（``insights`` 是第一个，同一条理由）：批末触发是**同步**的，
+    # 装作异步只会把「跑没跑、跑成没成」藏起来。1.0 那边它是后台线程，响应里什么都没有。
+    family_graph: FamilyRunResponse | None = None

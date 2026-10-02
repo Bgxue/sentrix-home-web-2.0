@@ -66,7 +66,10 @@ USER_CONFIDENCE = 1.0
 # 1.0 ``app.py:1715`` 的 409 判据——这两个状态下的 run 还在跑。
 PENDING_RUN_STATUSES = ("queued", "running")
 
-# 1.0 ``app.py:1719`` 的 ``config``。手工重跑与批末触发（T314）用不同的 trigger_type。
+# 1.0 的 ``config`` 里那两个 trigger_type。手工重跑写 ``user_rerun``（``app.py:1719``）、
+# 批末触发写 ``ingest``（``pipeline.py:750``）。
+TRIGGER_USER = "user_rerun"
+TRIGGER_INGEST = "ingest"
 INPUT_MODE = "semantic_text_only"
 
 
@@ -354,14 +357,23 @@ def _family_graph_service(container: Container) -> FamilyGraphService:
     )
 
 
-def run_family_graph_for_scope(container: Container, scope_id: str) -> FamilyAnalysisRunRecord | None:
+def run_family_graph_for_scope(
+    container: Container, scope_id: str, *, trigger_type: str = TRIGGER_USER
+) -> FamilyRunResponse | None:
     """跑一趟推断。**同步**——与 ``run_insights_for_scope`` 同体例。
 
     ``POST /family-graph/runs`` 与批末触发（T314）共用这一处，与
     ``api/routes/insights.py`` 把那两个入口收在一个模块级函数里是同一条理由。
 
+    ``trigger_type`` 是**留痕不是判据**：1.0 手工路由写 ``user_rerun``、
+    批末触发写 ``ingest``，两者都会出现在 run 的 ``config`` 里。所以这个参数
+    不在服务里判，只在建 run 时如实记下。
+
     返回 ``None`` 表示「已经有 queued/running 的 run，没开新的」（1.0 的 409 分支）；
     其余情况返回那趟跑完之后的 run（``completed`` 或 ``failed``）。
+
+    **回的是响应模型不是记录**：批末触发与手工路由都要把同一趟 run 放进响应，
+    转换只做一次，省掉跨模块引一个私有函数。
     """
     repository = container.family_graph_repository
     latest = repository.latest_run(scope_id)
@@ -369,8 +381,9 @@ def run_family_graph_for_scope(container: Container, scope_id: str) -> FamilyAna
     # 挡的是「上一次崩在半路、状态还写着 running」的行。
     if latest is not None and latest.status in PENDING_RUN_STATUSES:
         return None
-    run = repository.create_run(scope_id, {"trigger_type": "user_rerun", "input_mode": INPUT_MODE})
-    return _family_graph_service(container).run(run.id, scope_id)
+    run = repository.create_run(scope_id, {"trigger_type": trigger_type, "input_mode": INPUT_MODE})
+    finished = _family_graph_service(container).run(run.id, scope_id)
+    return FamilyRunResponse(run=_run_payload(finished)) if finished is not None else None
 
 
 @router.post("/family-graph/runs")
@@ -388,4 +401,4 @@ def start_family_graph_run(
     run = run_family_graph_for_scope(container, scope_id)
     if run is None:
         raise ConflictError("family analysis run already in progress")
-    return FamilyRunResponse(run=_run_payload(run))
+    return run

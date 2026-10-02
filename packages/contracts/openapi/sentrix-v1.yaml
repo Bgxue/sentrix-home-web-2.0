@@ -4152,6 +4152,10 @@ components:
           anyOf:
           - $ref: '#/components/schemas/InsightCounts'
           - type: 'null'
+        family_graph:
+          anyOf:
+          - $ref: '#/components/schemas/FamilyRunResponse'
+          - type: 'null'
       type: object
       required:
       - scope_id
