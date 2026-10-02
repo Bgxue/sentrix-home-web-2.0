@@ -211,6 +211,15 @@ startFamilyGraphRun` 全仓无调用）。自动那条是
 **S7a 明确不做的**（§3.2）：`get_core_memory`（属 core memory 子系统，2.0 无表）、
 实体合并时的关系边迁移（2.0 无实体级合并）、关系假设与角色假设（冻结）。
 
+**S7a 的终态验证**（2026-10-02，`make ci`）：静态门禁全绿
+（ruff / format / mypy 185 个文件 / arch 五契约 + 两条可达性 / check-docs 含 OpenAPI 契约），
+coverage **1868 passed / 1 failed / 29 skipped**（S6 时是 1836 passed）。
+
+**那一条 failed 是已知的模型侧 flaky，不是回归**：
+`tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`
+（§8.1 记着「不要修」；S6 的全量跑失败的是同一条）。`make ci` 会因此在 coverage 一步
+停住、**`web-check` 不跑**——已单独补跑并通过（tsc + oxlint + vitest + vite build）。
+
 ### 8.2 下一步：S7b（家庭图谱）
 
 **S7b 是 S7 里最大的一段**：`family_*` 六张表 + 仓储 + `RELATION_INVERSES`（38 条白名单）
