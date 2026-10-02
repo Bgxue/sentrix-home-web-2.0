@@ -161,3 +161,24 @@ class FamilyPersonProjection:
     avatar_face_instance_id: str | None
     appearance_count: int
     representative_media: tuple[Mapping[str, object], ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class FamilyEvidenceRow:
+    """``_build_text_evidence`` 的一条原始行（1.0 ``family_graph_service.py:174-190``）。
+
+    一次「某个人的某张脸出现在某条观察里」。**它是给模型看的文本的来源**，
+    所以每一列都是输入的一部分。
+
+    ``detail_json`` 在 2.0 **恒为 ``'{}'``**：列在、但没有任何写入者（见
+    ``repositories/family.py`` 的查询注释）。1.0 那个查询还选了一个
+    ``canonical_json``，2.0 连列都没有。
+    """
+
+    entity_id: str
+    face_instance_id: str
+    confidence: float
+    observation_id: str
+    caption: str
+    activity: str
+    detail_json: str

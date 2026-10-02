@@ -47,6 +47,9 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。机制一直在，下一次有
 # 「本切片先落地、随后接线」的模块时它还会被用上——那时请照上面那句写给任务。
 PENDING_WIRING: dict[str, str] = {
+    # T312 落了 ``FamilyGraphService``（四阶段推断）。它的第一个生产调用者是
+    # **T313 的 ``POST /family-graph/runs``** 与 **T314 的批末触发**。
+    "sentrix.application.identity.family_graph_service": "S7b2 · T313/T314（手动路由与批末触发）",
     # T121b 曾在这里登记 ``sentrix.domain.retrieval.structured_query``，随后被这条反向
     # 规则自己删掉了：端口 ``domain/retrieval/ports.py`` 要引用 ``StructuredFilter``，
     # 而 ``ports.py`` 从 ``container.py`` 可达，于是那个模块「被引用过」了。

@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from sentrix.domain.identity.family import (
     FamilyAnalysisRunRecord,
+    FamilyEvidenceRow,
     FamilyMembershipRecord,
     FamilyPersonProjection,
     FamilyPortraitRecord,
@@ -1201,6 +1202,19 @@ class FamilyGraphRepository(Protocol):
         """推进一次运行。**``None`` 表示「不改这一项」**，不是「写成 NULL」——
         所以 ``error`` 一旦写上就清不掉（1.0 同样做不到）。``status='completed'`` 时
         额外写 ``completed_at``。
+        """
+        ...
+
+    def family_text_evidence(self, scope_id: str) -> Sequence[FamilyEvidenceRow]:
+        """这条 scope 里**未被拒的人物**的全部「脸 × 观察」行。1.0 那条大查询。
+
+        四个 JOIN 与两个过滤逐条照搬：``face_instances ⋈ face_clusters ⋈ entities ⋈
+        observations``（``entity_mentions`` 是 LEFT JOIN，只为了拿一个更好的置信度），
+        过滤是 ``o.scope_id = e.scope_id = ?``、``entity_type = 'person'``、
+        ``status NOT IN ('rejected', 'superseded')``，排序 ``o.created_at ASC``。
+
+        **返回原始行而不是拼好的文本**：拼文本是判断（用哪几列、怎么连接、截断多少），
+        归用例；这一层只负责把行取回来。
         """
         ...
 

@@ -41,6 +41,7 @@ from sentrix.domain.identity.family import (
     STATE_RETRACTED,
     STATE_SUPERSEDED,
     FamilyAnalysisRunRecord,
+    FamilyEvidenceRow,
     FamilyMembershipRecord,
     FamilyPersonProjection,
     FamilyPortraitRecord,
@@ -723,6 +724,42 @@ class SqliteFamilyGraphRepository:
                 (*fields.values(), run_id),
             )
         return self.get_run(run_id)
+
+    def family_text_evidence(self, scope_id: str) -> Sequence[FamilyEvidenceRow]:
+        """1.0 ``family_graph_service.py:174-190`` 那条大查询。
+
+        **与 1.0 的两处列差异**（都记在端口 docstring 里）：``canonical_json`` 2.0
+        没有这一列；``detail_json`` 有列但恒为 ``'{}'``（没有写入者）。所以照抄 SELECT
+        会在第一处直接报 ``no such column``——这里去掉它，保留另一列以免列清单继续漂。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT fc.entity_id, fi.id AS face_instance_id,"
+                " COALESCE(em.confidence, fi.detection_confidence, 0) AS confidence,"
+                " o.id AS observation_id, o.caption, o.activity, o.detail_json"
+                " FROM face_instances fi"
+                " JOIN face_clusters fc ON fc.id = fi.cluster_id"
+                " JOIN entities e ON e.id = fc.entity_id"
+                " JOIN observations o ON o.id = fi.observation_id"
+                " LEFT JOIN entity_mentions em"
+                "   ON em.entity_id = fc.entity_id AND em.face_instance_id = fi.id"
+                " WHERE o.scope_id = ? AND e.scope_id = ?"
+                " AND e.entity_type = 'person' AND e.status NOT IN ('rejected', 'superseded')"
+                " ORDER BY o.created_at ASC",
+                (scope_id, scope_id),
+            ).fetchall()
+        return [
+            FamilyEvidenceRow(
+                entity_id=row["entity_id"],
+                face_instance_id=row["face_instance_id"] or "",
+                confidence=float(row["confidence"] or 0),
+                observation_id=row["observation_id"],
+                caption=row["caption"] or "",
+                activity=row["activity"] or "",
+                detail_json=row["detail_json"] or "{}",
+            )
+            for row in rows
+        ]
 
     # ---- 跨 scope 的图 ---------------------------------------------------------
 
