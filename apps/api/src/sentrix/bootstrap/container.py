@@ -29,6 +29,7 @@ from sentrix.domain.identity.ports import (
     EntityRepository,
     FaceDetector,
     FaceRepository,
+    FamilyGraphRepository,
     MomentRepository,
     PersonCropRenderer,
     PersonPreviewRenderer,
@@ -93,6 +94,7 @@ from sentrix.infrastructure.persistence.repositories.entities import SqliteEntit
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
 from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
+from sentrix.infrastructure.persistence.repositories.family import SqliteFamilyGraphRepository
 from sentrix.infrastructure.persistence.repositories.moments import SqliteMomentRepository
 from sentrix.infrastructure.persistence.repositories.participants import (
     SqliteEventParticipantRepository,
@@ -191,6 +193,7 @@ class Container:
     # （Task 86g）与其读侧路由（Task 86h）上出现。
     moment_repository: MomentRepository
     relationship_repository: RelationshipRepository
+    family_graph_repository: FamilyGraphRepository
     portrait_repository: PortraitRepository
 
     chat_model: ChatModel
@@ -261,6 +264,7 @@ class Container:
             person_preview_renderer=PillowPersonPreviewRenderer(),
             moment_repository=SqliteMomentRepository(database),
             relationship_repository=SqliteRelationshipRepository(database),
+            family_graph_repository=SqliteFamilyGraphRepository(database),
             portrait_repository=SqlitePortraitRepository(database),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,

@@ -1,0 +1,610 @@
+"""家庭图谱仓储。SQL 只出现在这一层。
+
+逐行移植 1.0 ``backend/db.py:5631-5949`` 那一段（``get_effective_family_membership``
+到 ``family_graph_scope_ids``）。
+
+**这一层的中心是 ``locked``，而它带来三条「静默跳过」。** 用户写下的行 ``locked = 1``，
+模型的推断遇到它就**什么都不做、直接返回已有行**；撤回过的边另外在
+``family_relationship_blocks`` 里留一行挡着。三条跳过都**不抛异常、不返回错误**——
+「保留用户的选择」就是它们要的效果，所以调用方分不出「刚写成功」与「被跳过」。
+这是 1.0 原样，见端口各方法的 docstring。
+
+**三处 1.0 的不一致照搬不统一**（复核时逐条记下的）：
+
+1. ``get_active_portrait`` 按 ``created_at DESC`` 取当前行，而
+   ``get_effective_membership`` 按 ``locked DESC, revision DESC, updated_at DESC``。
+   同一批「取当前有效行」的语义，两个排序键。
+2. ``set_membership`` 的新行**回填** ``supersedes_id``；``set_relationship`` 的新行
+   **恒 NULL**（``returning`` 里也不给）——关系侧的历史链是断的。
+3. ``write_portrait`` **不校验 ``source``**，另外两个写方法都校验 ``FAMILY_SOURCES``。
+
+**``_person_exists`` 那条先例在这里的形态是 ``_family_entity``**：它不走
+``EntityRepository``，而是在同一条连接里直接 SELECT——与 ``participants.py`` 的
+``_person_exists`` 同一条理由：这是个**校验**不是一次实体读取，套一层仓储只会多一次连接。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from collections.abc import Sequence
+from datetime import UTC, datetime
+
+from sentrix.domain.identity.family import (
+    FAMILY_MEMBERSHIPS,
+    FAMILY_SOURCES,
+    SOURCE_MODEL,
+    SOURCE_USER_OVERRIDE,
+    STATE_EFFECTIVE,
+    STATE_RETRACTED,
+    STATE_SUPERSEDED,
+    FamilyMembershipRecord,
+    FamilyPortraitRecord,
+    FamilyRelationshipRecord,
+)
+from sentrix.domain.identity.family_graph import validate_relationship_pair
+from sentrix.infrastructure.persistence.database import Database
+
+# 运行（``family_analysis_runs``）的四个方法归 S7b2——它们的调用者是
+# ``FamilyGraphService``，b1 里没有调用者。``_row_to_run`` 与 ``_RUN_COLUMNS``
+# 也就一并不落在这份文件里（「到达不了的分支不搬」）。
+
+# ``r.*`` 之外的别名只在读侧用；单条读取用这张清单就够。
+_MEMBERSHIP_COLUMNS = (
+    "id, scope_id, entity_id, membership, source, confidence, evidence_refs_json,"
+    " inference_run_id, state, locked, revision, supersedes_id, created_at, updated_at"
+)
+_RELATIONSHIP_COLUMNS = (
+    "id, scope_id, family_graph_id, subject_entity_id, predicate, object_entity_id,"
+    " inverse_predicate, source, confidence, evidence_refs_json, inference_run_id,"
+    " state, locked, revision, supersedes_id, created_at, updated_at"
+)
+_PORTRAIT_COLUMNS = (
+    "id, scope_id, entity_id, portrait_text, evidence_refs_json, source,"
+    " inference_run_id, state, locked, revision, created_at, updated_at"
+)
+# 1.0 ``db.py:5691`` 等的 ``scope_id or "home-default"``。三处写方法都做这个归一，
+# 读方法**不做**（读一个空 scope 就是读一个不存在的 scope，返回空是对的）。
+DEFAULT_SCOPE_ID = "home-default"
+
+
+def _new_id(prefix: str) -> str:
+    """1.0 ``make_id(prefix)``：``f"{prefix}_{uuid4().hex[:12]}"``。"""
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _timestamp(raw: object) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def _refs(raw: object) -> tuple[str, ...]:
+    """解 ``evidence_refs_json``。1.0 的 ``_decode`` 解不开时回落空表，这里一样。"""
+    try:
+        parsed = json.loads(str(raw) if raw is not None else "[]")
+    except json.JSONDecodeError:
+        return ()
+    return tuple(str(item) for item in parsed) if isinstance(parsed, list) else ()
+
+
+def _dump(values: Sequence[str]) -> str:
+    """1.0 的 ``json_value(list(dict.fromkeys(...)), [])``：**保序去重**后序列化。"""
+    return json.dumps(list(dict.fromkeys(values)), ensure_ascii=False)
+
+
+def _row_to_membership(row: sqlite3.Row) -> FamilyMembershipRecord:
+    return FamilyMembershipRecord(
+        id=row["id"],
+        scope_id=row["scope_id"],
+        entity_id=row["entity_id"],
+        membership=row["membership"],
+        source=row["source"],
+        confidence=row["confidence"],
+        evidence_refs=_refs(row["evidence_refs_json"]),
+        inference_run_id=row["inference_run_id"],
+        state=row["state"],
+        locked=bool(row["locked"]),
+        revision=row["revision"],
+        supersedes_id=row["supersedes_id"],
+        created_at=_timestamp(row["created_at"]),
+        updated_at=_timestamp(row["updated_at"]),
+    )
+
+
+def _row_to_relationship(row: sqlite3.Row) -> FamilyRelationshipRecord:
+    return FamilyRelationshipRecord(
+        id=row["id"],
+        scope_id=row["scope_id"],
+        family_graph_id=row["family_graph_id"],
+        subject_entity_id=row["subject_entity_id"],
+        predicate=row["predicate"],
+        object_entity_id=row["object_entity_id"],
+        inverse_predicate=row["inverse_predicate"],
+        source=row["source"],
+        confidence=row["confidence"],
+        evidence_refs=_refs(row["evidence_refs_json"]),
+        inference_run_id=row["inference_run_id"],
+        state=row["state"],
+        locked=bool(row["locked"]),
+        revision=row["revision"],
+        supersedes_id=row["supersedes_id"],
+        created_at=_timestamp(row["created_at"]),
+        updated_at=_timestamp(row["updated_at"]),
+    )
+
+
+def _row_to_portrait(row: sqlite3.Row) -> FamilyPortraitRecord:
+    return FamilyPortraitRecord(
+        id=row["id"],
+        scope_id=row["scope_id"],
+        entity_id=row["entity_id"],
+        portrait_text=row["portrait_text"],
+        evidence_refs=_refs(row["evidence_refs_json"]),
+        source=row["source"],
+        inference_run_id=row["inference_run_id"],
+        state=row["state"],
+        locked=bool(row["locked"]),
+        revision=row["revision"],
+        created_at=_timestamp(row["created_at"]),
+        updated_at=_timestamp(row["updated_at"]),
+    )
+
+
+class SqliteFamilyGraphRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    # ---- 校验 ----------------------------------------------------------------
+
+    @staticmethod
+    def _family_entity(connection: sqlite3.Connection, scope_id: str, entity_id: str) -> None:
+        """两端必须是**同一个记忆空间里的 person 实体**，否则抛 ``ValueError``。
+
+        两句话术逐字照 1.0（``db.py:5620`` 附近）。**两条判据分先后**：先判存在与类型，
+        再判空间——因为「不是 person」与「不在同一个空间」是两种不同的用户错误。
+        """
+        row = connection.execute(
+            "SELECT entity_type, scope_id FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if row is None or row["entity_type"] != "person":
+            raise ValueError("family graph requires a person entity")
+        if (row["scope_id"] or DEFAULT_SCOPE_ID) != (scope_id or DEFAULT_SCOPE_ID):
+            raise ValueError("family graph entities must belong to the same memory space")
+
+    @staticmethod
+    def _effective_pair(
+        connection: sqlite3.Connection, scope_id: str, subject_entity_id: str, object_entity_id: str
+    ) -> list[sqlite3.Row]:
+        """这一对**两个方向**的全部有效边，按 ``locked DESC, revision DESC, updated_at DESC``。
+
+        排序里 ``locked`` 在第一位：用户写下的边压过模型写的（同一个无序对正反两行都命中，
+        所以最多两行）。
+        """
+        return connection.execute(
+            f"SELECT {_RELATIONSHIP_COLUMNS} FROM family_relationships"
+            " WHERE scope_id = ? AND state = ? AND ("
+            " (subject_entity_id = ? AND object_entity_id = ?)"
+            " OR (subject_entity_id = ? AND object_entity_id = ?))"
+            " ORDER BY locked DESC, revision DESC, updated_at DESC",
+            (
+                scope_id,
+                STATE_EFFECTIVE,
+                subject_entity_id,
+                object_entity_id,
+                object_entity_id,
+                subject_entity_id,
+            ),
+        ).fetchall()
+
+    @staticmethod
+    def _pair_key(subject_entity_id: str, object_entity_id: str) -> tuple[str, str]:
+        """无序对的规范键。block 表按它做唯一约束，所以**两端必须走同一个函数**。"""
+        return tuple(sorted((subject_entity_id, object_entity_id)))  # type: ignore[return-value]
+
+    def _block(
+        self, connection: sqlite3.Connection, scope_id: str, subject_entity_id: str, object_entity_id: str
+    ) -> sqlite3.Row | None:
+        left_entity_id, right_entity_id = self._pair_key(subject_entity_id, object_entity_id)
+        row: sqlite3.Row | None = connection.execute(
+            "SELECT id, locked FROM family_relationship_blocks"
+            " WHERE scope_id = ? AND left_entity_id = ? AND right_entity_id = ?",
+            (scope_id, left_entity_id, right_entity_id),
+        ).fetchone()
+        return row
+
+    @staticmethod
+    def _supersede_pair(
+        connection: sqlite3.Connection,
+        scope_id: str,
+        subject_entity_id: str,
+        object_entity_id: str,
+        state: str,
+        timestamp: str,
+    ) -> None:
+        """把这一对的双向有效边一次置成 ``state``。``retract`` 用 ``retracted``、
+        ``set_relationship`` 用 ``superseded``——**两个不同的值，别合并**。"""
+        connection.execute(
+            "UPDATE family_relationships SET state = ?, updated_at = ?"
+            " WHERE scope_id = ? AND state = ? AND ("
+            " (subject_entity_id = ? AND object_entity_id = ?)"
+            " OR (subject_entity_id = ? AND object_entity_id = ?))",
+            (
+                state,
+                timestamp,
+                scope_id,
+                STATE_EFFECTIVE,
+                subject_entity_id,
+                object_entity_id,
+                object_entity_id,
+                subject_entity_id,
+            ),
+        )
+
+    # ---- 成员归属 --------------------------------------------------------------
+
+    def get_effective_membership(self, scope_id: str, entity_id: str) -> FamilyMembershipRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_MEMBERSHIP_COLUMNS} FROM family_person_memberships"
+                " WHERE scope_id = ? AND entity_id = ? AND state = ?"
+                " ORDER BY locked DESC, revision DESC, updated_at DESC LIMIT 1",
+                (scope_id, entity_id, STATE_EFFECTIVE),
+            ).fetchone()
+        return _row_to_membership(row) if row else None
+
+    def set_membership(
+        self,
+        scope_id: str,
+        entity_id: str,
+        membership: str,
+        *,
+        source: str,
+        confidence: float = 0.0,
+        evidence_refs: Sequence[str] = (),
+        inference_run_id: str | None = None,
+    ) -> FamilyMembershipRecord | None:
+        scope_id = scope_id or DEFAULT_SCOPE_ID
+        membership = str(membership or "").strip()
+        if membership not in FAMILY_MEMBERSHIPS:
+            raise ValueError("unsupported family membership")
+        if source not in FAMILY_SOURCES:
+            raise ValueError("unsupported family membership source")
+        with self._database.connect() as connection, connection:
+            self._family_entity(connection, scope_id, entity_id)
+            current = connection.execute(
+                f"SELECT {_MEMBERSHIP_COLUMNS} FROM family_person_memberships"
+                " WHERE scope_id = ? AND entity_id = ? AND state = ?"
+                " ORDER BY locked DESC, revision DESC, updated_at DESC LIMIT 1",
+                (scope_id, entity_id, STATE_EFFECTIVE),
+            ).fetchone()
+            # **静默跳过**：用户改过的归属，模型不许覆盖。返回的是**当前行**，
+            # 与「刚写成功」形状一样。
+            if source == SOURCE_MODEL and current is not None and current["locked"]:
+                return _row_to_membership(current)
+            timestamp = _now()
+            if current is not None:
+                connection.execute(
+                    "UPDATE family_person_memberships SET state = ?, updated_at = ? WHERE id = ?",
+                    (STATE_SUPERSEDED, timestamp, current["id"]),
+                )
+            record_id = _new_id("family_membership")
+            connection.execute(
+                "INSERT INTO family_person_memberships"
+                " (id, scope_id, entity_id, membership, source, confidence, evidence_refs_json,"
+                "  inference_run_id, state, locked, revision, supersedes_id, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                (
+                    record_id,
+                    scope_id,
+                    entity_id,
+                    membership,
+                    source,
+                    float(confidence or 0),
+                    _dump(evidence_refs),
+                    inference_run_id,
+                    STATE_EFFECTIVE,
+                    1 if source == SOURCE_USER_OVERRIDE else 0,
+                    current["id"] if current is not None else None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            written = connection.execute(
+                f"SELECT {_MEMBERSHIP_COLUMNS} FROM family_person_memberships WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+        return _row_to_membership(written) if written else None
+
+    # ---- 关系边 ----------------------------------------------------------------
+
+    def list_effective_relationships(
+        self, scope_id: str, entity_id: str | None = None
+    ) -> Sequence[FamilyRelationshipRecord]:
+        with self._database.connect() as connection:
+            if entity_id:
+                rows = connection.execute(
+                    f"SELECT {_RELATIONSHIP_COLUMNS} FROM family_relationships"
+                    " WHERE scope_id = ? AND state = ?"
+                    " AND (subject_entity_id = ? OR object_entity_id = ?)"
+                    " ORDER BY locked DESC, updated_at DESC",
+                    (scope_id, STATE_EFFECTIVE, entity_id, entity_id),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"SELECT {_RELATIONSHIP_COLUMNS} FROM family_relationships"
+                    " WHERE scope_id = ? AND state = ? ORDER BY locked DESC, updated_at DESC",
+                    (scope_id, STATE_EFFECTIVE),
+                ).fetchall()
+        return [_row_to_relationship(row) for row in rows]
+
+    def set_relationship(
+        self,
+        scope_id: str,
+        subject_entity_id: str,
+        predicate: str,
+        object_entity_id: str,
+        inverse_predicate: str,
+        *,
+        source: str,
+        confidence: float = 0.0,
+        evidence_refs: Sequence[str] = (),
+        inference_run_id: str | None = None,
+    ) -> Sequence[FamilyRelationshipRecord]:
+        scope_id = scope_id or DEFAULT_SCOPE_ID
+        if source not in FAMILY_SOURCES:
+            raise ValueError("unsupported family relationship source")
+        if subject_entity_id == object_entity_id:
+            raise ValueError("family relationship requires distinct people")
+        predicate = str(predicate or "").strip()
+        inverse_predicate = str(inverse_predicate or "").strip()
+        if not predicate or not inverse_predicate:
+            raise ValueError("family relationship requires both predicates")
+        validate_relationship_pair(predicate, inverse_predicate)
+
+        with self._database.connect() as connection, connection:
+            self._family_entity(connection, scope_id, subject_entity_id)
+            self._family_entity(connection, scope_id, object_entity_id)
+            block = self._block(connection, scope_id, subject_entity_id, object_entity_id)
+            # 模型遇到用户撤回过的边：**什么都不做**。返回空列表是它唯一的信号，
+            # 调用方（FamilyGraphService）据此跳过。
+            if source == SOURCE_MODEL and block is not None and block["locked"]:
+                return []
+            # 用户重新建边 = 解锁：**先删 block**，再查 current——顺序反了会把
+            # 刚解锁的那一对还当成「被 block 过」。
+            if source == SOURCE_USER_OVERRIDE and block is not None:
+                connection.execute("DELETE FROM family_relationship_blocks WHERE id = ?", (block["id"],))
+            current = self._effective_pair(connection, scope_id, subject_entity_id, object_entity_id)
+            if source == SOURCE_MODEL and any(row["locked"] for row in current):
+                return [_row_to_relationship(row) for row in current]
+            timestamp = _now()
+            if current:
+                self._supersede_pair(
+                    connection,
+                    scope_id,
+                    subject_entity_id,
+                    object_entity_id,
+                    STATE_SUPERSEDED,
+                    timestamp,
+                )
+            refs = _dump(evidence_refs)
+            locked = 1 if source == SOURCE_USER_OVERRIDE else 0
+            inserted: list[str] = []
+            # **一次落两行**（正 + 反）。两行同 timestamp、同 source/confidence/refs，
+            # 只是方向与标签对调——查一个人的关系时不用做反向映射。
+            for left, relation, right, inverse in (
+                (subject_entity_id, predicate, object_entity_id, inverse_predicate),
+                (object_entity_id, inverse_predicate, subject_entity_id, predicate),
+            ):
+                record_id = _new_id("family_rel")
+                connection.execute(
+                    "INSERT INTO family_relationships"
+                    " (id, scope_id, family_graph_id, subject_entity_id, predicate,"
+                    "  object_entity_id, inverse_predicate, source, confidence,"
+                    "  evidence_refs_json, inference_run_id, state, locked, revision,"
+                    "  supersedes_id, created_at, updated_at)"
+                    " VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)",
+                    (
+                        record_id,
+                        scope_id,
+                        left,
+                        relation,
+                        right,
+                        inverse,
+                        source,
+                        float(confidence or 0),
+                        refs,
+                        inference_run_id,
+                        STATE_EFFECTIVE,
+                        locked,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                inserted.append(record_id)
+            # 用一条 IN 一次取回，顺序按传入的 id 顺序排（正行在前、反行在后）。
+            rows = connection.execute(
+                f"SELECT {_RELATIONSHIP_COLUMNS} FROM family_relationships"
+                f" WHERE id IN ({','.join('?' * len(inserted))})",
+                inserted,
+            ).fetchall()
+            by_id = {row["id"]: row for row in rows}
+        return [_row_to_relationship(by_id[record_id]) for record_id in inserted]
+
+    def retract_relationship(
+        self, scope_id: str, subject_entity_id: str, object_entity_id: str
+    ) -> Sequence[FamilyRelationshipRecord]:
+        scope_id = scope_id or DEFAULT_SCOPE_ID
+        with self._database.connect() as connection, connection:
+            self._family_entity(connection, scope_id, subject_entity_id)
+            self._family_entity(connection, scope_id, object_entity_id)
+            current = self._effective_pair(connection, scope_id, subject_entity_id, object_entity_id)
+            timestamp = _now()
+            if current:
+                self._supersede_pair(
+                    connection,
+                    scope_id,
+                    subject_entity_id,
+                    object_entity_id,
+                    STATE_RETRACTED,
+                    timestamp,
+                )
+            # **顺手写 block 挡住模型恢复**——撤回不只是改状态，它是一条护栏。
+            left_entity_id, right_entity_id = self._pair_key(subject_entity_id, object_entity_id)
+            block = self._block(connection, scope_id, subject_entity_id, object_entity_id)
+            if block is not None:
+                connection.execute(
+                    "UPDATE family_relationship_blocks"
+                    " SET source = ?, locked = 1, updated_at = ? WHERE id = ?",
+                    (SOURCE_USER_OVERRIDE, timestamp, block["id"]),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO family_relationship_blocks"
+                    " (id, scope_id, left_entity_id, right_entity_id, source, locked,"
+                    "  created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    (
+                        _new_id("family_rel_block"),
+                        scope_id,
+                        left_entity_id,
+                        right_entity_id,
+                        SOURCE_USER_OVERRIDE,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            rows = []
+            if current:
+                rows = connection.execute(
+                    f"SELECT {_RELATIONSHIP_COLUMNS} FROM family_relationships"
+                    f" WHERE id IN ({','.join('?' * len(current))})",
+                    [row["id"] for row in current],
+                ).fetchall()
+        return [_row_to_relationship(row) for row in rows]
+
+    # ---- 家庭画像 --------------------------------------------------------------
+
+    def get_active_portrait(self, scope_id: str, entity_id: str) -> FamilyPortraitRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_PORTRAIT_COLUMNS} FROM family_person_portraits"
+                " WHERE scope_id = ? AND entity_id = ? AND state = ?"
+                " ORDER BY created_at DESC LIMIT 1",
+                (scope_id, entity_id, STATE_EFFECTIVE),
+            ).fetchone()
+        return _row_to_portrait(row) if row else None
+
+    def write_portrait(
+        self,
+        scope_id: str,
+        entity_id: str,
+        portrait_text: str,
+        *,
+        source: str,
+        evidence_refs: Sequence[str] = (),
+        inference_run_id: str | None = None,
+    ) -> FamilyPortraitRecord | None:
+        """**不校验 ``source``**——1.0 这个函数就是只按 ``source == 'model'`` 分支，
+        非法值原样落库。对比 ``set_membership`` / ``set_relationship`` 都会校验。
+        缺口照搬，别顺手补：补上会让某个 1.0 能跑通的调用在这里抛错。"""
+        with self._database.connect() as connection, connection:
+            current = connection.execute(
+                f"SELECT {_PORTRAIT_COLUMNS} FROM family_person_portraits"
+                " WHERE scope_id = ? AND entity_id = ? AND state = ?"
+                " ORDER BY created_at DESC LIMIT 1",
+                (scope_id, entity_id, STATE_EFFECTIVE),
+            ).fetchone()
+            if source == SOURCE_MODEL and current is not None and current["locked"]:
+                return _row_to_portrait(current)
+            timestamp = _now()
+            if current is not None:
+                connection.execute(
+                    "UPDATE family_person_portraits SET state = ?, updated_at = ? WHERE id = ?",
+                    (STATE_SUPERSEDED, timestamp, current["id"]),
+                )
+            portrait_id = _new_id("family_portrait")
+            connection.execute(
+                "INSERT INTO family_person_portraits"
+                " (id, scope_id, entity_id, portrait_text, evidence_refs_json, source,"
+                "  inference_run_id, state, locked, revision, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                (
+                    portrait_id,
+                    scope_id,
+                    entity_id,
+                    str(portrait_text or "").strip(),
+                    _dump(evidence_refs),
+                    source,
+                    inference_run_id,
+                    STATE_EFFECTIVE,
+                    1 if source == SOURCE_USER_OVERRIDE else 0,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            written = connection.execute(
+                f"SELECT {_PORTRAIT_COLUMNS} FROM family_person_portraits WHERE id = ?",
+                (portrait_id,),
+            ).fetchone()
+        return _row_to_portrait(written) if written else None
+
+    # ---- 跨 scope 的图 ---------------------------------------------------------
+
+    def merge_scopes(self, scope_ids: Sequence[str]) -> tuple[str, Sequence[str]]:
+        ordered = list(dict.fromkeys(str(item) for item in scope_ids if item))
+        if len(ordered) < 2:
+            raise ValueError("at least two scopes are required")
+        marks = ",".join("?" * len(ordered))
+        with self._database.connect() as connection, connection:
+            for scope_id in ordered:
+                if (
+                    connection.execute("SELECT id FROM memory_spaces WHERE id = ?", (scope_id,)).fetchone()
+                    is None
+                ):
+                    raise ValueError("unknown memory space")
+            # **先查已有的 graph_id，再 UPSERT**——顺序反了的话，刚写进去的行也会参与
+            # ``ORDER BY updated_at DESC``，于是可能选到一张刚建出来的图。
+            existing = connection.execute(
+                f"SELECT graph_id FROM family_scope_groups WHERE scope_id IN ({marks})"
+                " ORDER BY updated_at DESC LIMIT 1",
+                ordered,
+            ).fetchone()
+            graph_id = existing["graph_id"] if existing else _new_id("family_graph")
+            timestamp = _now()
+            for scope_id in ordered:
+                connection.execute(
+                    "INSERT INTO family_scope_groups"
+                    " (scope_id, graph_id, source, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(scope_id) DO UPDATE SET"
+                    " graph_id = excluded.graph_id, updated_at = excluded.updated_at",
+                    (scope_id, graph_id, SOURCE_USER_OVERRIDE, timestamp, timestamp),
+                )
+            # UPSERT 的 ``DO UPDATE`` **只改 graph_id 与 updated_at，不碰 source**——
+            # 1.0 原样。已属于某张图的 scope 并过来时，它原来的 source 留着。
+            rows = connection.execute(
+                "SELECT scope_id FROM family_scope_groups WHERE graph_id = ? ORDER BY scope_id",
+                (graph_id,),
+            ).fetchall()
+        return graph_id, [row["scope_id"] for row in rows]
+
+    def graph_scope_ids(self, scope_id: str) -> Sequence[str]:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT graph_id FROM family_scope_groups WHERE scope_id = ?", (scope_id,)
+            ).fetchone()
+            if row is None:
+                return [scope_id]
+            rows = connection.execute(
+                "SELECT scope_id FROM family_scope_groups WHERE graph_id = ? ORDER BY scope_id",
+                (row["graph_id"],),
+            ).fetchall()
+        return [item["scope_id"] for item in rows]
