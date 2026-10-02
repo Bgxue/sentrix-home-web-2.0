@@ -110,3 +110,92 @@ class FamilyGraphResponse(BaseModel):
     people: list[FamilyPersonPayload]
     scope_ids: list[str]
     relationships: list[FamilyRelationshipPayload]
+
+
+# ---- 写侧（S7b1 · T306） ---------------------------------------------------------
+#
+# 五个写操作的请求体字段**全部可省**：1.0 是裸 ``dict`` 收的，用 ``str(... or "").strip()``
+# 取值再判空，所以「给了 null」「给空串」「没给」在 1.0 里**走的是同一个 400 分支**。
+# 写成必填字段会把那三种都变成 422 加 pydantic 的话术——同一个产品行为换一个码。
+# 与 ``RelationshipCreateRequest`` / ``EntityPropertyRequest`` 是同一条理由。
+
+
+class FamilyMembershipRequest(BaseModel):
+    """``PATCH /family-graph/people/{id}/membership`` 的请求体。"""
+
+    scope_id: str | None = None
+    membership: str | None = None
+    evidence_refs: list[str] | None = None
+
+
+class FamilyMembershipResponse(BaseModel):
+    """1.0 的 ``{"ok": True, "membership": <整行>}``。"""
+
+    ok: bool
+    membership: FamilyMembershipPayload | None
+
+
+class FamilyRelationshipRequest(BaseModel):
+    """``PUT /family-graph/relationships`` 的请求体。"""
+
+    scope_id: str | None = None
+    subject_entity_id: str | None = None
+    predicate: str | None = None
+    object_entity_id: str | None = None
+    inverse_predicate: str | None = None
+    evidence_refs: list[str] | None = None
+
+
+class FamilyRelationshipResponse(BaseModel):
+    """``{"ok": True, "relationships": [正行, 反行]}``——**一次落两行**，所以是列表。"""
+
+    ok: bool
+    relationships: list[FamilyRelationshipPayload]
+
+
+class FamilyRetractRequest(BaseModel):
+    """``DELETE /family-graph/relationships`` 的请求体。
+
+    **``DELETE`` 带 body 是 1.0 原样**（两个实体 id 塞不进路径），FastAPI 支持。
+    """
+
+    scope_id: str | None = None
+    subject_entity_id: str | None = None
+    object_entity_id: str | None = None
+
+
+class FamilyRetractResponse(BaseModel):
+    """``{"ok": True, "retracted": [...]}``——返回的是**撤回之后**的行（``state='retracted'``）。"""
+
+    ok: bool
+    retracted: list[FamilyRelationshipPayload]
+
+
+class FamilyPortraitRequest(BaseModel):
+    """``PATCH /family-graph/people/{id}/portrait`` 的请求体。"""
+
+    scope_id: str | None = None
+    portrait_text: str | None = None
+    evidence_refs: list[str] | None = None
+
+
+class FamilyPortraitResponse(BaseModel):
+    ok: bool
+    portrait: FamilyPortraitPayload | None
+
+
+class FamilyScopeMergeRequest(BaseModel):
+    """``POST /family-graph/scopes/merge`` 的请求体。"""
+
+    scope_ids: list[str] | None = None
+
+
+class FamilyScopeMergeResponse(BaseModel):
+    """**没有 ``ok`` 键**——1.0 这个端点直接返回仓储那个 dict。
+
+    与另外四个写路由的 ``{"ok": True, ...}`` 不一致，照搬：统一它会让这个端点的响应
+    多一个 1.0 没有的键。
+    """
+
+    graph_id: str
+    scope_ids: list[str]

@@ -1750,6 +1750,171 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/family-graph/people/{person_id}/membership:
+    patch:
+      tags:
+      - family
+      summary: Update Family Membership
+      description: '改一个人的家庭归属。1.0 ``app.py:1660-1673``。
+
+
+        ``source="user_override"`` 与 ``confidence=1.0`` 都是**写死的**：这是用户按下的动作，
+
+        落库行 ``locked = 1``，此后模型的推断不许覆盖它。'
+      operationId: update_family_membership_api_v1_family_graph_people__person_id__membership_patch
+      parameters:
+      - name: person_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Person Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FamilyMembershipRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyMembershipResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/family-graph/relationships:
+    put:
+      tags:
+      - family
+      summary: Update Family Relationship
+      description: '建一对亲属边。1.0 ``app.py:1676-1693``。
+
+
+        这里**不判两个实体 id 是否给全**——1.0 只判 ``scope_id``，其余四个原样交给仓储，
+
+        由它抛 ``family relationship requires both predicates`` 之类。少判一步的结果是
+
+        错误消息不同，多判一步会挡掉仓储自己那几句话术。'
+      operationId: update_family_relationship_api_v1_family_graph_relationships_put
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FamilyRelationshipRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyRelationshipResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - family
+      summary: Retract Family Relationship
+      description: 撤回一对亲属边，**同时落一行 block 挡住模型恢复**。1.0 ``app.py:1696-1708``。
+      operationId: retract_family_relationship_api_v1_family_graph_relationships_delete
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FamilyRetractRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyRetractResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/family-graph/people/{person_id}/portrait:
+    patch:
+      tags:
+      - family
+      summary: Update Family Portrait
+      description: '手写一段家庭画像。1.0 ``app.py:1733-1740``。
+
+
+        **1.0 这个端点没有 ``try/except``**（另外几个都有）——因为 ``write_family_portrait``
+
+        不抛 ``ValueError``（它连 ``source`` 都不校验）。照搬：这里也不接。'
+      operationId: update_family_portrait_api_v1_family_graph_people__person_id__portrait_patch
+      parameters:
+      - name: person_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Person Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FamilyPortraitRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyPortraitResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/family-graph/scopes/merge:
+    post:
+      tags:
+      - family
+      summary: Merge Family Graph Scopes
+      description: '把若干 scope 并成一张图。1.0 ``app.py:1725-1730``。
+
+
+        **响应没有 ``ok`` 键**：1.0 直接 ``return store.merge_family_scopes(...)``，
+
+        而那个函数返回 ``{"graph_id", "scope_ids"}``。与另外四个写路由不一致，照搬。'
+      operationId: merge_family_graph_scopes_api_v1_family_graph_scopes_merge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FamilyScopeMergeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyScopeMergeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -3382,6 +3547,43 @@ components:
       - updated_at
       title: FamilyMembershipPayload
       description: '``family_person_memberships`` 一行。'
+    FamilyMembershipRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        membership:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Membership
+        evidence_refs:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Evidence Refs
+      type: object
+      title: FamilyMembershipRequest
+      description: '``PATCH /family-graph/people/{id}/membership`` 的请求体。'
+    FamilyMembershipResponse:
+      properties:
+        ok:
+          type: boolean
+          title: Ok
+        membership:
+          anyOf:
+          - $ref: '#/components/schemas/FamilyMembershipPayload'
+          - type: 'null'
+      type: object
+      required:
+      - ok
+      - membership
+      title: FamilyMembershipResponse
+      description: '1.0 的 ``{"ok": True, "membership": <整行>}``。'
     FamilyPersonPayload:
       properties:
         id:
@@ -3490,6 +3692,42 @@ components:
       - updated_at
       title: FamilyPortraitPayload
       description: '``family_person_portraits`` 一行。**与人物画像那套（``PersonPortrait*``）不是一张表。**'
+    FamilyPortraitRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        portrait_text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Portrait Text
+        evidence_refs:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Evidence Refs
+      type: object
+      title: FamilyPortraitRequest
+      description: '``PATCH /family-graph/people/{id}/portrait`` 的请求体。'
+    FamilyPortraitResponse:
+      properties:
+        ok:
+          type: boolean
+          title: Ok
+        portrait:
+          anyOf:
+          - $ref: '#/components/schemas/FamilyPortraitPayload'
+          - type: 'null'
+      type: object
+      required:
+      - ok
+      - portrait
+      title: FamilyPortraitResponse
     FamilyRelationshipPayload:
       properties:
         id:
@@ -3576,6 +3814,59 @@ components:
       - updated_at
       title: FamilyRelationshipPayload
       description: '``family_relationships`` 一行。库里一条边是**两行**，所以这里也是两条。'
+    FamilyRelationshipRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        subject_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Entity Id
+        predicate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Predicate
+        object_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Object Entity Id
+        inverse_predicate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Inverse Predicate
+        evidence_refs:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Evidence Refs
+      type: object
+      title: FamilyRelationshipRequest
+      description: '``PUT /family-graph/relationships`` 的请求体。'
+    FamilyRelationshipResponse:
+      properties:
+        ok:
+          type: boolean
+          title: Ok
+        relationships:
+          items:
+            $ref: '#/components/schemas/FamilyRelationshipPayload'
+          type: array
+          title: Relationships
+      type: object
+      required:
+      - ok
+      - relationships
+      title: FamilyRelationshipResponse
+      description: '``{"ok": True, "relationships": [正行, 反行]}``——**一次落两行**，所以是列表。'
     FamilyRepresentativeMedia:
       properties:
         id:
@@ -3601,6 +3892,78 @@ components:
         连接路径都不同（``face_instances⋈face_clusters⋈assets`` 对
 
         ``entity_observations⋈observations⋈assets``）。'
+    FamilyRetractRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        subject_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Entity Id
+        object_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Object Entity Id
+      type: object
+      title: FamilyRetractRequest
+      description: '``DELETE /family-graph/relationships`` 的请求体。
+
+
+        **``DELETE`` 带 body 是 1.0 原样**（两个实体 id 塞不进路径），FastAPI 支持。'
+    FamilyRetractResponse:
+      properties:
+        ok:
+          type: boolean
+          title: Ok
+        retracted:
+          items:
+            $ref: '#/components/schemas/FamilyRelationshipPayload'
+          type: array
+          title: Retracted
+      type: object
+      required:
+      - ok
+      - retracted
+      title: FamilyRetractResponse
+      description: '``{"ok": True, "retracted": [...]}``——返回的是**撤回之后**的行（``state=''retracted''``）。'
+    FamilyScopeMergeRequest:
+      properties:
+        scope_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Scope Ids
+      type: object
+      title: FamilyScopeMergeRequest
+      description: '``POST /family-graph/scopes/merge`` 的请求体。'
+    FamilyScopeMergeResponse:
+      properties:
+        graph_id:
+          type: string
+          title: Graph Id
+        scope_ids:
+          items:
+            type: string
+          type: array
+          title: Scope Ids
+      type: object
+      required:
+      - graph_id
+      - scope_ids
+      title: FamilyScopeMergeResponse
+      description: '**没有 ``ok`` 键**——1.0 这个端点直接返回仓储那个 dict。
+
+
+        与另外四个写路由的 ``{"ok": True, ...}`` 不一致，照搬：统一它会让这个端点的响应
+
+        多一个 1.0 没有的键。'
     HTTPValidationError:
       properties:
         detail:

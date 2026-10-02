@@ -320,3 +320,170 @@ def test_a_merged_graph_spans_people_and_relationships_across_scopes(family_clie
     assert {item["id"] for item in body["people"]} == {"mom", "kid", "neighbour"}
     # 关系也跨图——两条边各落两行，一共四行。
     assert len(body["relationships"]) == 4
+
+
+# ---- 写侧（S7b1 · T306） ---------------------------------------------------------
+
+
+def _patch_membership(client: TestClient, **body: object):
+    return client.patch("/api/v1/family-graph/people/mom/membership", json=body)
+
+
+def _put_relationship(client: TestClient, **body: object):
+    payload = {
+        "scope_id": HOME,
+        "subject_entity_id": "mom",
+        "predicate": "母亲",
+        "object_entity_id": "kid",
+        "inverse_predicate": "儿子",
+    }
+    payload.update(body)
+    return client.put("/api/v1/family-graph/relationships", json=payload)
+
+
+def _blocks(client: TestClient) -> list[dict]:
+    with _db(client).connect() as connection:
+        return [dict(row) for row in connection.execute("SELECT * FROM family_relationship_blocks")]
+
+
+def test_a_user_membership_lands_locked_with_full_confidence(family_client: TestClient) -> None:
+    """五个写路由**全部**写死 ``source="user_override"``、``confidence=1.0``。
+
+    ``locked`` 由 source 决定——它是「模型从此不许覆盖这一行」的标记，所以这三个值
+    是一组，改一个就动了整条规则。
+    """
+    body = _patch_membership(family_client, scope_id=HOME, membership="family").json()
+
+    assert body["ok"] is True
+    assert body["membership"]["membership"] == "family"
+    assert body["membership"]["source"] == "user_override"
+    assert body["membership"]["confidence"] == 1.0
+    assert body["membership"]["locked"] is True
+
+
+def test_a_membership_without_a_scope_is_a_400_with_the_literal_message(
+    family_client: TestClient,
+) -> None:
+    """消息逐字照 1.0。写成 pydantic 必填会变成 422——同一个产品行为换一个码。"""
+    response = _patch_membership(family_client, membership="family")
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "scope_id and membership are required"
+
+
+def test_the_repository_message_survives_the_400(family_client: TestClient) -> None:
+    """仓储抛的 ``ValueError`` 翻成 400，但**消息不改写**。
+
+    那几句话（``unsupported family membership`` 等）是调用方用来区分失败的，润色一遍
+    就等于换了契约。定点变异：把 ``str(error)`` 换成固定文案，这条变红。
+    """
+    response = _patch_membership(family_client, scope_id=HOME, membership="邻居")
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "unsupported family membership"
+
+
+def test_a_user_relationship_lands_as_two_locked_rows(family_client: TestClient) -> None:
+    body = _put_relationship(family_client).json()
+
+    assert body["ok"] is True
+    assert [
+        (item["subject_entity_id"], item["predicate"], item["object_entity_id"])
+        for item in body["relationships"]
+    ] == [("mom", "母亲", "kid"), ("kid", "儿子", "mom")]
+    assert all(item["locked"] for item in body["relationships"])
+    assert {item["source"] for item in body["relationships"]} == {"user_override"}
+
+
+def test_a_relationship_without_a_scope_is_a_400(family_client: TestClient) -> None:
+    response = _put_relationship(family_client, scope_id=None)
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "scope_id is required"
+
+
+def test_a_label_outside_the_whitelist_is_a_400_with_the_whitelist_message(
+    family_client: TestClient,
+) -> None:
+    """白名单校验在仓储里，路由只把它的话术带出去。"""
+    response = _put_relationship(family_client, predicate="同事", inverse_predicate="同事")
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "关系标签不匹配: 同事 -> 同事"
+
+
+def test_retracting_writes_a_block_so_the_model_cannot_restore_it(family_client: TestClient) -> None:
+    """撤回**同时**落 block——那是这个端点与「删除」的区别：它在库里留一道护栏。"""
+    _put_relationship(family_client)
+
+    body = family_client.request(
+        "DELETE",
+        "/api/v1/family-graph/relationships",
+        json={"scope_id": HOME, "subject_entity_id": "mom", "object_entity_id": "kid"},
+    ).json()
+
+    assert body["ok"] is True
+    assert {item["state"] for item in body["retracted"]} == {"retracted"}
+    block = _blocks(family_client)[0]
+    assert (block["left_entity_id"], block["right_entity_id"]) == ("kid", "mom")
+    assert block["locked"] == 1
+
+
+def test_a_retract_without_one_of_the_three_ids_is_a_400(family_client: TestClient) -> None:
+    response = family_client.request(
+        "DELETE",
+        "/api/v1/family-graph/relationships",
+        json={"scope_id": HOME, "subject_entity_id": "mom"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["message"] == ("scope_id, subject_entity_id and object_entity_id are required")
+
+
+def test_a_user_portrait_lands_locked(family_client: TestClient) -> None:
+    body = family_client.patch(
+        "/api/v1/family-graph/people/mom/portrait",
+        json={"scope_id": HOME, "portrait_text": "妈妈是家里的主心骨"},
+    ).json()
+
+    assert body["ok"] is True
+    assert body["portrait"]["portrait_text"] == "妈妈是家里的主心骨"
+    assert body["portrait"]["source"] == "user_override"
+    assert body["portrait"]["locked"] is True
+
+
+def test_a_portrait_without_text_is_a_400(family_client: TestClient) -> None:
+    response = family_client.patch("/api/v1/family-graph/people/mom/portrait", json={"scope_id": HOME})
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "scope_id and portrait_text are required"
+
+
+def test_merging_scopes_answers_without_an_ok_key(family_client: TestClient) -> None:
+    """**这个端点的响应没有 ``ok`` 键**——1.0 直接返回仓储那个 dict。
+
+    与另外四个写路由的 ``{"ok": True, ...}`` 不一致，而统一它会给这个端点加一个
+    1.0 没有的键。定点变异：给它补上 ``ok``，这条变红。
+    """
+    body = family_client.post("/api/v1/family-graph/scopes/merge", json={"scope_ids": [HOME, OTHER]}).json()
+
+    assert "ok" not in body
+    assert body["scope_ids"] == [HOME, OTHER]
+    assert body["graph_id"]
+
+
+def test_merging_fewer_than_two_scopes_is_a_400(family_client: TestClient) -> None:
+    response = family_client.post("/api/v1/family-graph/scopes/merge", json={"scope_ids": [HOME]})
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "at least two scopes are required"
+
+
+def test_a_relationship_built_over_http_shows_up_in_the_graph(family_client: TestClient) -> None:
+    """闭环：``PUT`` 建边 → ``GET`` 读得到，而且两端的人都出现在 ``people`` 里。"""
+    _put_relationship(family_client)
+
+    body = family_client.get("/api/v1/family-graph", params={"scope_id": HOME}).json()
+
+    assert {item["predicate"] for item in body["relationships"]} == {"母亲", "儿子"}
+    assert {item["id"] for item in body["people"]} == {"mom", "kid"}
