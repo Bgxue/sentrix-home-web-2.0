@@ -157,6 +157,31 @@ startFamilyGraphRun` 全仓无调用）。自动那条是
 
 ---
 
+## 4. 施工记录（S7b1）
+
+| 任务 | 提交 | 关键判断 |
+|---|---|---|
+| T301 迁移 `0009_family_graph.sql` | `92e333b` | 六张表 DDL 逐字；**四处「错了不会当场报错」的约束各一条断言**（block 的 UNIQUE、三个外键、`locked` 默认值、`scope_groups` 的主键） |
+| T302 领域记录 + 端口 + 白名单 | `4eb8d01` | 31 条白名单逐字。**端口只声明 b1 会接的 9 个方法**——4 个 run 方法归 b2，提前声明只会换来要挂一整个切片的登记。最贵的用例是**往返对称**（`a` 的反向里有 `b` ⇔ 反之） |
+| T303 仓储（9 方法）+ 接进 container | `43aac71` | 三条静默跳过 + 两条顺序约束。接进 container 时 `check_reachability` 的反向规则**立刻报红**要求删掉 T302 那条登记 |
+| T305 `GET /family-graph` | `d450026` | `family_graph_people` 的三个派生字段**不能复用 `decorate_entities`**（连接路径/条数/排序三处都不同），各有「两种口径给出不同答案」的夹具 |
+| T306 五条写路由 | `b32c81f` | 五条全部 `source=user_override` / `confidence=1.0`；merge 的响应**没有 `ok` 键** |
+| T307 收口 | 本次 | PENDING_METHODS / module-map / capability-map / behaviour-baseline / OpenAPI |
+
+**PENDING_METHODS 在 S7b1 里走完了一个完整循环**：T302 登记 9 条 →
+T303 接上白名单模块（模块级那条）→ T305 接上四个读方法 → T306 接上五个写方法，
+**每一步都是那张表自己报红要求删的**，删到不剩。与 S6 的 `PhotoInspector.inspect`
+走的是同一条路，但这次是**在一个切片内走完的**。
+
+**两处「变异假存活」，成因不同：**
+
+- **T303 的「用户建边不删 block」**：查出来是**行为被 `locked` 掩盖**——用户重新建的
+  那条边自己 `locked = 1`，模型无论 block 在不在都进不来，差别只在 **block 表的状态**上。
+  改成直接断言状态表才杀掉。这与 S6 记的三种（字节码缓存 / 指错目标用例 / 真等价）
+  和 S7a 记的第四种（上游不变量掩盖）都不同：**这次是下游不变量掩盖**。
+- **T305 的 M1**（代表照改走观察）：夹具必须让两条口径给出**不同**的答案，
+  否则「看起来能复用」的那条路也能过。
+
 ## 4b. S7b 的动工前核查（2026-10-02）
 
 ### 4b.1 三条裁决的依据
@@ -259,7 +284,42 @@ coverage **1868 passed / 1 failed / 29 skipped**（S6 时是 1836 passed）。
 （§8.1 记着「不要修」；S6 的全量跑失败的是同一条）。`make ci` 会因此在 coverage 一步
 停住、**`web-check` 不跑**——已单独补跑并通过（tsc + oxlint + vitest + vite build）。
 
-### 8.2 下一步：S7b1（家庭图谱的存储与手工读写）
+### 8.2 S7b1 完成（2026-10-02）
+
+**T301–T307 七项、六个提交**（`92e333b` `4eb8d01` `43aac71` `d450026` `b32c81f` +
+本次收口）。定点变异 **36/36 被杀**（T301 7 / T302 6 / T303 11 / T305 7 / T306 7）。
+
+**设计文档 S7 的验收是「能建关系，助手能引用」——前半句到此成立**：用户能改成员归属、
+建/撤亲属边、手写家庭画像、合并多个相册为一张图，`GET /family-graph` 读得到全部。
+
+**S7b1 明确不做、留给 S7b2 的**（都不是遗漏）：
+
+- `FamilyGraphService` 四阶段状态机、两道文本证据闸、提示词；
+- `POST /family-graph/runs`（手动触发）与**批末触发 + event watermark**；
+- 四个 run 方法（`create_run` / `get_run` / `latest_run` / `update_run`）与
+  `supersede_model_relationships`——它们的调用者都是上面那些；
+- `GET /family-graph` 响应里的 **`run` 键**（b1 没有任何东西会创建 run）。
+
+### 8.3 S7b2 的已知坑（动工前要复核）
+
+- `FamilyGraphService` 是**纯文本路径**（`images=None`），只有 person_insights 的
+  `infer_person_graph` 才传图——两条链不能混。
+- 触发锚点已裁决：**挂在 `POST /imports` 批末**（`api/routes/timeline.py:152`，
+  `_maybe_run_insights` 就在那一行）；**`POST /media/import` 单张路径不触发**。
+  2.0 没有 batch 概念（`ingest_batches` 零写入者、0 行），所以 1.0 的
+  `finish_ingest_batch` 收尾**没有对应物**，要另找落点。
+- watermark 存 `family_analysis_runs.stats['event_watermark']`，计数用
+  `EventRepository.count_by_scope`（`events.py:149`，SQL 与 1.0 同一句）。
+- **两条静默降级路径不要改成抛错**：`gamma=None` 与模型 JSON 解析失败都返回空结果、
+  run 照样 `completed`（stats 全 0）；只有 SQL/写库异常才 `failed`。
+- **失败不回滚**：`_persist` 边写边推进，写到第 5 个人崩了前 4 个已经 commit；
+  且 `failed` 时 stats 保持 `{}` → watermark 缺失 → 下次重跑。
+- 两道证据闸用的文本**比模型输入宽**（全量 descriptions 每人最多 20 条 vs 模型看前 2 条）。
+- 边落库后会把两端**强制升为 `family`**，而且**绕过** membership 那道闸。
+- `role="verify"` = 主模型 + temperature 0 + **num_predict 512** + num_ctx 4096——
+  512 token 对 top-8 人的 JSON 是偏紧的预算。
+
+### 8.4 原 S7b1 任务表（已完成，留作对照）
 
 **裁决③ 之后的 S7b1 任务表**（依赖顺序即表序）：
 
@@ -280,7 +340,7 @@ coverage **1868 passed / 1 failed / 29 skipped**（S6 时是 1836 passed）。
 **S7b2 再做**：`FamilyGraphService` 四阶段状态机、两道文本证据闸、`POST /family-graph/runs`、
 批末触发 + watermark。
 
-### 8.3 原 S7b 的备忘（已由 8.2 取代）
+### 8.5 原 S7b 的备忘（已由 8.2 取代）
 
 **S7b 是 S7 里最大的一段**：`family_*` 六张表 + 仓储 + `RELATION_INVERSES`（38 条白名单）
 + `GET /family-graph` 与三个写路由 + block 机制 + scope merge +

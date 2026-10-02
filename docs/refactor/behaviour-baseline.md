@@ -375,3 +375,40 @@
 > 视频/音频的转写属于 **S8**（`application/retrieval/index_observation_text.py` 的
 > docstring 已写明「不是遗漏，是那一侧还没做」）。1.0 前端拿它当 caption 的兜底，
 > 所以少一个键的后果是那句话落到常量，不会渲染出错。
+
+## 家庭图谱（S7b1 · T301–T306，2026-10-02）
+
+六张表与五条写路由里的常量与判据，逐条指着 1.0。**这些值只存在于 1.0 的代码里、无文档**，
+而它们中的每一个都决定了「用户改过的会不会被模型覆盖」。
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| membership 合法值 | `family` / `friend` / `unknown`——**`unknown` 是合法值不是缺失** | `backend/db.py:5617` |
+| 来源合法值 | `model` / `user_override`，**只有两个** | `backend/db.py:5618` |
+| `state` 取值 | `effective` / `superseded` / `retracted`（**`retracted` 只出现在关系侧**） | 六张表 DDL（`db.py:702-781`） |
+| `locked` | `1 if source == "user_override" else 0`；**block 表恒 1，且那是它的默认值** | `db.py:5658` / `:5766` |
+| 用户写死的两个值 | `source="user_override"`、`confidence=1.0`（**五个写路由全部如此**） | `app.py:1668` / `:1684` / `:1700` |
+| 关系标签白名单 | **31 条**；一对多是常态（`父亲` 的反向是 `{儿子, 女儿}`，由孩子的性别决定用哪个） | `family_graph.py:1-34` |
+| 校验话术 | `关系标签不能为空` / `关系标签不匹配: X -> Y`——两句不同的话 | `family_graph.py:38-41` |
+| 一条边 | **落两行**（正 + 反），同 timestamp、同 source、同证据 | `db.py:5793-5805` |
+| 关系新行的 `family_graph_id` / `supersedes_id` | **恒 NULL** | `db.py:5797` |
+| membership 取当前 | `ORDER BY locked DESC, revision DESC, updated_at DESC LIMIT 1` | `db.py:5636` |
+| portrait 取当前 | `ORDER BY created_at DESC LIMIT 1` | `db.py:5913` |
+| 头像排序 | `fi.quality DESC, fi.detection_confidence DESC, fi.created_at ASC LIMIT 1` | `db.py:5659` |
+| 代表照 | 走**人脸**（`face_instances⋈face_clusters⋈assets`），`ORDER BY a.id DESC LIMIT 3` | `db.py:5662-5669` |
+| `appearance_count` | `COUNT(*)` 人脸实例行数——**不是不同资产数** | `db.py:5671-5675` |
+| pending 人物的占位 | **「待命名人物」** | `db.py:5677` |
+
+> **三处「1.0 就是这样」不要统一。** ① `get_active_family_portrait` 用 `created_at DESC`，
+> 而 `get_effective_family_membership` 用三个键——同一批「取当前有效行」的语义，两个排序。
+> ② `set_family_relationship` 的新行 `supersedes_id` **恒 NULL**（历史链断在关系侧），
+> 而 `set_family_membership` **会回填** `supersedes_id`。③ `write_family_portrait`
+> **不校验 `source`**，另两个写方法都校验 `FAMILY_SOURCES`。
+>
+> **三条「静默跳过」，都不抛异常——调用方分不出「刚写成功」与「被跳过」：**
+> 用户写下的行模型不许覆盖（membership / portrait 直接返回当前行）；撤回过的边在
+> `family_relationship_blocks` 里挡着模型；用户重新建边时**删掉**那一行 block。
+>
+> **`GET /family-graph` 的 `run` 键 b1 不返回。** 1.0 的响应里有它，但 b1 阶段**没有任何
+> 东西会创建 run**（自动触发与手动路由都归 S7b2）——恒 `null` 读起来像「确实没跑过」，
+> 而真相是「b1 还没有会跑的路径」。S7b2 连创建路径一起补。
