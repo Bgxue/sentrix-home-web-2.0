@@ -22,8 +22,10 @@
 
 **两处与 1.0 的适配**（都是 2.0 的既有形状逼出来的，不是选择）：
 
-- ``canonical_json`` 2.0 没有这一列、``detail_json`` 恒为 ``'{}'``——所以
-  ``_semantic_description`` 在 2.0 只拼得出 ``caption`` + ``activity``，**比 1.0 少两块**；
+- 1.0 拼的 ``canonical_json`` / ``detail_json`` 两列在 2.0 **都没有写入者**，但 1.0
+  装在 canonical 里的那批语义在 2.0 是**平铺列且有值**。``_semantic_description``
+  于是**重建**那个块（见该函数 docstring）——它一度只拼 ``caption`` + ``activity``，
+  实测 46/53 行的 ``objects_json`` 在喂模型前就被丢掉了；
 - 1.0 把提示词与 JSON 拼成**一条** user 消息；2.0 的 ``OpenAIChatModel`` 硬性要求
   ``messages[0]`` 是 system 且**只能有一条** system，所以拆成 system（提示词）+
   user（JSON）。``SummarizeEvent`` 是同一种拆法。
@@ -461,21 +463,65 @@ def has_explicit_membership_evidence(membership: str, person: FamilyPersonEviden
 
 
 def _semantic_description(row: FamilyEvidenceRow) -> str:
-    """一条观察的文本：``caption`` / ``activity`` / 两个 JSON。
+    """一条观察的文本：``caption`` / ``activity`` / 语义块。
 
-    **2.0 只拼得出前两样**：``canonical_json`` 这一列在 2.0 不存在，``detail_json``
-    恒为 ``'{}'``（没有写入者），而空对象被 ``if payload:`` 挡掉。所以这个函数在 2.0
-    与 1.0 **不等价**——它产出的文本更短。见模块与 ``repositories/family.py`` 的注释。
+    1.0 ``:232-242`` 拼四段——``caption`` / ``activity`` / ``canonical_json`` /
+    ``detail_json``。2.0 那两列**都没有写入者**（见模块 docstring），但 1.0 装在
+    canonical 里的语义在 2.0 是平铺列。所以这里**重建**那个块，而不是照抄一个恒空的列。
+
+    与 1.0 的两处有意差异：
+
+    1. **不把 caption / activity 再放进块里。** 1.0 的 canonical 含这两键，于是同一段
+       文本里它们出现两次；而每段描述要被 ``MODEL_DESCRIPTION_CHARS``（300）截断，
+       重复会把真正新增的 place / objects 挤出预算。1.0 是转储一个落库的 blob，
+       2.0 是重建，没有理由保留这份冗余。
+    2. **空值不进块。** 1.0 转储 ``analysis.get(key)``，缺的键写成 ``null``；这里按
+       「有值才收」过滤——``facts_json`` 实测 53 行全空，收进去只是每段多个 ``"facts": []``。
     """
     parts = [str(row.caption or "").strip(), str(row.activity or "").strip()]
-    for raw in (row.detail_json,):
-        try:
-            payload = json.loads(raw or "{}")
-        except (TypeError, ValueError):
-            payload = {}
-        if payload:
-            parts.append(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    canonical = _canonical_block(row)
+    if canonical:
+        parts.append(canonical)
     return "；".join(part for part in parts if part)
+
+
+def _canonical_block(row: FamilyEvidenceRow) -> str:
+    """按 1.0 ``pipeline.py:529`` 那个 canonical 的**键名**重建语义块。
+
+    键名沿用 1.0（``place`` / ``event_type`` / ``objects`` / ``clothing`` / ``people``
+    / ``ocr_text``），值来自 2.0 的同义列。序列化方式也与 1.0 一致
+    （``ensure_ascii=False, sort_keys=True``），这样同一批数据在两版产出的文本形状相同。
+
+    2.0 没有对应列的键（``scene_type`` / ``semantic`` / ``raw_labels`` / ``emotions``
+    / ``spatial_relations``）**不补空占位**——补了就是每段多一串 ``null``，纯噪声。
+    """
+    payload: dict[str, object] = {
+        "place": str(row.place or "").strip(),
+        "event_type": str(row.event_type or "").strip(),
+        "ocr_text": str(row.ocr_text or "").strip(),
+    }
+    for key, raw in (
+        ("objects", row.objects_json),
+        ("clothing", row.clothing_json),
+        ("people", row.people_json),
+        ("facts", row.facts_json),
+    ):
+        value = _json_list(raw)
+        if value:
+            payload[key] = value
+    filled = {key: value for key, value in payload.items() if value}
+    if not filled:
+        return ""
+    return json.dumps(filled, ensure_ascii=False, sort_keys=True)
+
+
+def _json_list(raw: str) -> list[object]:
+    """列里存的是 JSON 数组文本；坏值当空处理，不让一条脏数据毁掉整段证据。"""
+    try:
+        parsed = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return list(parsed) if isinstance(parsed, list) else []
 
 
 def _parse_object(text: str) -> Mapping[str, object]:

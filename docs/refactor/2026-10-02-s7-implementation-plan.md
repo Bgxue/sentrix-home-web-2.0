@@ -359,11 +359,15 @@ coverage **1953 passed / 1 failed**（S7a 时是 1868 passed，本段 +85 条用
 
 ### 8.4 T312 查出来的两处「与 1.0 的适配」（都不是选择）
 
-1. **`observations.canonical_json` 在 2.0 不存在**，而 **`detail_json` 恒为 `'{}'`**
-   （全 `src/` 没有写入者——写入语句的列清单里根本没有它）。所以 1.0 的
-   `_semantic_description`（`caption` + `activity` + 两个 JSON blob）在 2.0 只拼得出
-   **前两样**——**喂给家庭图谱模型的文本比 1.0 少两块**。这是 S1/S4 的既有缺口，
-   不是 S7b2 引入的，但它直接影响推断质量，**值得你实测时留意**。
+1. ~~**`observations.canonical_json` 在 2.0 不存在**，而 **`detail_json` 恒为 `'{}'`**
+   ……喂给家庭图谱模型的文本比 1.0 少两块。~~ **——2026-10-02 实测证伪并已修，见 §8.5。**
+
+   1.0 装的 `canonical_json` / `detail_json` 两列在 2.0 确实都没有写入者，
+   **但同一批语义在 2.0 是平铺列，而且有真实数据**（53 行里 `place` 46 行、
+   `event_type` 46、`objects_json` 46、`clothing_json` 33、`people_json` 11）。
+   原来的 `family_text_evidence` **一列都没选**——所以这不是「2.0 缺数据」，
+   是**移植时漏读**。修法：SELECT 取这批列，`_semantic_description` 按 1.0
+   `pipeline.py:529` 的键名**重建** canonical 块。
 2. **1.0 把提示词与 JSON 拼成一条 user 消息**；2.0 的 `OpenAIChatClient` 硬性要求
    `messages[0]` 是 system 且只能有一条 system，所以拆成 system（提示词）+ user（JSON）。
    同一段文字、不同的角色标记。`SummarizeEvent` 是同一种拆法。
@@ -445,3 +449,37 @@ coverage **1953 passed / 1 failed**（S7a 时是 1868 passed，本段 +85 条用
 
 **S6 教训照用**：动工前先核依赖，不要照任务表的「依赖」栏直接动手——
 S6 **五次**任务定义被核查推翻，三次是汇总性描述错了。
+
+
+### 8.5 2026-10-02 实测记录（触发 §8.4 第 1 条的修复）
+
+**怎么测的**：153 上对真实库 `data/sentrix.db`（53 张照片 / 17 条事件 / 9 个实体）
+跑 `POST /api/v1/family-graph/runs`，并用 `/tmp/repro_family.py` 直接复现模型调用、
+打印喂进去的证据与模型的原始回复。
+
+**结果**：
+
+```
+status=completed  stats={"people":8,"memberships":8,"relationships":0,"portraits":8}
+模型原始回复：memberships 全部 "unknown" + confidence 0.0，relationships 为 []
+```
+
+**这不是移植丢的**（复现脚本直接拿到原始回复）。顺着往上查，发现两件事：
+
+1. **喂进去的文本本身不全**（§8.4 第 1 条）——已修，7/7 定点变异被杀。
+   修完后重跑，模型输出**不变**（数据侧原因，见下），但输入保真度恢复了。
+2. **这份数据里确实没有亲属信号**。对全部 53 条观察扫 36 个亲属/关系词，
+   只命中三个：「合影」2 条、「家庭成员」1 条、「朋友」1 条。
+   **「父亲/母亲/儿子/女儿/丈夫/妻子/夫妻/家人/全家/婚礼/新娘/新郎」零命中。**
+
+   而提示词明写「低频或证据不足必须为 unknown」。所以模型判 unknown 是**对的**。
+
+**1.0 的对照**：1.0 自己的库里有 18 行 `family_relationships`（9 条 `model` 推出来的
+亲子关系，confidence 0.85–0.9）、511 行 memberships（其中 `family` 34 条、
+覆盖 23 个不同 person），作用域是 `family-plan-album3-video10-20260914`。
+**这条链在 1.0 是跑通过的**，差的不是代码是相册——那个相册有婚礼、有家庭聚会。
+
+**副产品**：`obs_0faf9c038276` 的 caption 是「夜间，一群**家庭成员**在户外进行篝火活动」，
+是这份数据里唯一的家庭成员信号——但它那 3 张脸 **`cluster_id` 全是 NULL**（没进任何簇），
+而证据查询是 `JOIN face_clusters`。所以这条观察根本没到达模型。
+那是人脸聚类侧的缺口，不是家庭图谱的。

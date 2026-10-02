@@ -728,15 +728,22 @@ class SqliteFamilyGraphRepository:
     def family_text_evidence(self, scope_id: str) -> Sequence[FamilyEvidenceRow]:
         """1.0 ``family_graph_service.py:174-190`` 那条大查询。
 
-        **与 1.0 的两处列差异**（都记在端口 docstring 里）：``canonical_json`` 2.0
-        没有这一列；``detail_json`` 有列但恒为 ``'{}'``（没有写入者）。所以照抄 SELECT
-        会在第一处直接报 ``no such column``——这里去掉它，保留另一列以免列清单继续漂。
+        1.0 选的 ``canonical_json`` 2.0 没有这一列（照抄会 ``no such column``），
+        ``detail_json`` 有列但没有写入者。**1.0 装在 canonical 里的那批语义在 2.0
+        是平铺列**，所以这里改选它们：``place`` / ``event_type`` / ``ocr_text`` /
+        ``objects_json`` / ``clothing_json`` / ``people_json`` / ``facts_json``。
+
+        这是一次**实测逼出来的补选**：只选 ``caption`` + ``activity`` 时，
+        ``objects_json``（实测 46/53 行有值）这类数据在喂模型前就被丢掉了，
+        而 1.0 是喂的。
         """
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT fc.entity_id, fi.id AS face_instance_id,"
                 " COALESCE(em.confidence, fi.detection_confidence, 0) AS confidence,"
-                " o.id AS observation_id, o.caption, o.activity, o.detail_json"
+                " o.id AS observation_id, o.caption, o.activity, o.detail_json,"
+                " o.place, o.event_type, o.ocr_text, o.objects_json, o.clothing_json,"
+                " o.people_json, o.facts_json"
                 " FROM face_instances fi"
                 " JOIN face_clusters fc ON fc.id = fi.cluster_id"
                 " JOIN entities e ON e.id = fc.entity_id"
@@ -757,6 +764,13 @@ class SqliteFamilyGraphRepository:
                 caption=row["caption"] or "",
                 activity=row["activity"] or "",
                 detail_json=row["detail_json"] or "{}",
+                place=row["place"] or "",
+                event_type=row["event_type"] or "",
+                ocr_text=row["ocr_text"] or "",
+                objects_json=row["objects_json"] or "[]",
+                clothing_json=row["clothing_json"] or "[]",
+                people_json=row["people_json"] or "[]",
+                facts_json=row["facts_json"] or "[]",
             )
             for row in rows
         ]

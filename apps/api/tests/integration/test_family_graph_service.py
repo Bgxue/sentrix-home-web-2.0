@@ -398,3 +398,96 @@ def test_the_gates_are_substring_matches_over_all_descriptions() -> None:
     assert not has_explicit_membership_evidence("friend", person_a)
     # ``unknown`` 的表是空的——调用方先判掉它，所以这里恒假。
     assert not has_explicit_membership_evidence("unknown", person_a)
+
+
+# ---- 平铺列 → canonical 块（实测逼出来的回归）--------------------------------------
+
+
+def _user_message(service, model) -> str:  # noqa: ANN001
+    """跑一趟，把送给模型的 user 消息取回来。**它就是这条链的全部输入。**"""
+    service["build"](model).run(service["run"].id, HOME)
+    return json.loads(model.calls[0][1][1])
+
+
+def test_the_model_sees_the_flat_columns_that_stand_in_for_canonical_json(service) -> None:
+    """**2026-10-02 实测逼出来的回归。**
+
+    153 上的真实数据里 ``objects_json`` 46/53 行有值、``clothing_json`` 33/53、
+    ``place`` 与 ``event_type`` 各 46/53，而当时的证据查询**一列都没选**——
+    于是模型只看到 ``caption`` + ``activity``。1.0 是把这些（连同更多）拼进
+    ``canonical_json`` 一起喂的。
+
+    这条从**模型的 user 消息**倒着断言：只要 SELECT 少一列、或拼接少一段，它就红。
+    只测 ``_canonical_block`` 的函数级用例抓不到 SELECT 那一半。
+    """
+    with service["db"].connect() as connection, connection:
+        connection.execute(
+            "UPDATE observations SET place = '公园', event_type = '家庭出游',"
+            " objects_json = ?, clothing_json = ?, ocr_text = '生日快乐' WHERE id = 'obs_1'",
+            ('["帐篷", "野餐垫"]', '["红色外套"]'),
+        )
+
+    model = FakeModel(content=json.dumps({"memberships": [], "relationships": []}))
+    evidence = _user_message(service, model)
+    blobs = " ".join(" ".join(person["descriptions"]) for person in evidence["people"])
+
+    assert "帐篷" in blobs
+    assert "野餐垫" in blobs
+    assert "红色外套" in blobs
+    assert "家庭出游" in blobs
+    assert "生日快乐" in blobs
+    assert '"place"' in blobs
+
+
+def test_a_malformed_json_column_does_not_break_the_run(service) -> None:
+    """列是 TEXT，脏值是可能的。**一条脏数据不该让整个 run 落 failed**——
+    这条链是挂在导入批末的，抛出去会连累导入响应（T314 的教训）。
+
+    定点变异：去掉 ``_json_list`` 的 ``except``，这条变红（run 落 failed）。
+    """
+    with service["db"].connect() as connection, connection:
+        connection.execute("UPDATE observations SET objects_json = '不是 JSON' WHERE id = 'obs_1'")
+
+    model = FakeModel(content=json.dumps({"memberships": [], "relationships": []}))
+    finished = service["build"](model).run(service["run"].id, HOME)
+
+    assert finished is not None
+    assert finished.status == "completed"
+
+
+def test_the_block_is_omitted_when_every_column_is_empty(service) -> None:
+    """全空时**不加空块**。1.0 用 ``if payload:`` 挡掉空对象；这里是同一条意图的
+    延续——每段都拖一个 ``{}`` 只会白占 300 字的截断预算。
+
+    定点变异：把 ``_canonical_block`` 的「空则返回空串」去掉、恒返回一个 ``{}``
+    字符串，这条变红。
+    """
+    with service["db"].connect() as connection, connection:
+        connection.execute(
+            "UPDATE observations SET place = '', event_type = '', ocr_text = '',"
+            " objects_json = '[]', clothing_json = '[]', people_json = '[]',"
+            " facts_json = '[]' WHERE id = 'obs_1'"
+        )
+
+    model = FakeModel(content=json.dumps({"memberships": [], "relationships": []}))
+    evidence = _user_message(service, model)
+    descriptions = evidence["people"][0]["descriptions"]
+
+    assert descriptions
+    assert all("{}" not in text for text in descriptions)
+
+
+def test_caption_and_activity_are_not_repeated_inside_the_block(service) -> None:
+    """**与 1.0 的有意差异**：1.0 的 canonical 里含 caption / activity，于是同一段
+    文本里它们出现两次；每段描述被截到 300 字，重复会把新补的 place / objects 挤出去。
+    2.0 是重建而不是转储，所以不保留这份冗余。
+
+    定点变异：往 ``_canonical_block`` 的 payload 里塞回 ``caption``，这条变红。
+    """
+    model = FakeModel(content=json.dumps({"memberships": [], "relationships": []}))
+    evidence = _user_message(service, model)
+    descriptions = evidence["people"][0]["descriptions"]
+
+    assert descriptions
+    for text in descriptions:
+        assert text.count("一家人在公园野餐") == 1

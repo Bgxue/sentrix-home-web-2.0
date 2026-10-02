@@ -170,9 +170,14 @@ class FamilyEvidenceRow:
     一次「某个人的某张脸出现在某条观察里」。**它是给模型看的文本的来源**，
     所以每一列都是输入的一部分。
 
-    ``detail_json`` 在 2.0 **恒为 ``'{}'``**：列在、但没有任何写入者（见
-    ``repositories/family.py`` 的查询注释）。1.0 那个查询还选了一个
-    ``canonical_json``，2.0 连列都没有。
+    1.0 那条查询选的是 ``caption`` / ``activity`` / ``canonical_json`` / ``detail_json``。
+    前两列 2.0 同名；后两列 2.0 **都没有写入者**（``detail_json`` 恒 ``'{}'``，
+    ``canonical_json`` 连列都没有）。但 1.0 装在 canonical 里的那批语义，2.0 是
+    **平铺列**且**有值**——``place`` / ``event_type`` / ``objects_json`` /
+    ``clothing_json`` / ``people_json`` / ``facts_json`` / ``ocr_text``。
+    所以这里带的是它们的等价物，由 ``_semantic_description`` 重建成同一个块。
+
+    **默认值不是装饰**：这些字段是后补的，给默认值让既有构造点不必逐个改。
     """
 
     entity_id: str
@@ -182,3 +187,10 @@ class FamilyEvidenceRow:
     caption: str
     activity: str
     detail_json: str
+    place: str = ""
+    event_type: str = ""
+    ocr_text: str = ""
+    objects_json: str = "[]"
+    clothing_json: str = "[]"
+    people_json: str = "[]"
+    facts_json: str = "[]"
