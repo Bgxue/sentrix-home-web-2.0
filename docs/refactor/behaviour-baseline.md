@@ -399,6 +399,15 @@
 | `appearance_count` | `COUNT(*)` 人脸实例行数——**不是不同资产数** | `db.py:5671-5675` |
 | pending 人物的占位 | **「待命名人物」** | `db.py:5677` |
 
+| 触发去抖 | **event watermark**：`COUNT(*) FROM events WHERE scope_id = ?` 与上一次 run 的 `stats['event_watermark']` 比，**没涨就不跑**；`latest is None` 时**不跳过** | `backend/pipeline.py:746-749` |
+| `trigger_type` | 手工路由写 `user_rerun`、批末触发写 `ingest`；`input_mode` 恒 `semantic_text_only` | `app.py:1719` / `pipeline.py:750` |
+| run 初始态 | `status='queued'`、`current_stage='queued'`、`stats={}` | `db.py:5869` |
+| run 完成 | `status='completed'` 时额外写 `completed_at` | `db.py:5895` |
+| run 失败 | 只写 `error`，**`stats` 保持空** → watermark 缺失 → 下次一定重跑 | `family_graph_service.py:43` |
+| 模型截断（送进去的） | 人 `[:8]`（按 observation 数降序、同数按 id 升序）、每人 observation_ids `[:6]`、descriptions `[:2]` 每条 `[:300]`、共现 `[:30]` 且**只留两端都在 top-8 内的对** | `family_graph_service.py:56/63/64/66-67` |
+| 证据里的描述上限 | 每人 `[:20]`（**模型只看前 2 条，两道闸看这 20 条**） | `family_graph_service.py:214` |
+| `_has_explicit_relation_evidence` 的词表 | **只覆盖 13 个谓词**；表外的退化成「字面匹配谓词自己」 | `family_graph_service.py:132-145` |
+
 > **三处「1.0 就是这样」不要统一。** ① `get_active_family_portrait` 用 `created_at DESC`，
 > 而 `get_effective_family_membership` 用三个键——同一批「取当前有效行」的语义，两个排序。
 > ② `set_family_relationship` 的新行 `supersedes_id` **恒 NULL**（历史链断在关系侧），

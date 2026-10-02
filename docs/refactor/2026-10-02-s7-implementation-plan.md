@@ -308,7 +308,31 @@ coverage **1953 passed / 1 failed**（S7a 时是 1868 passed，本段 +85 条用
 ——已知的模型侧 flaky，§8.1 记着「不要修」。`make ci` 因此停在 coverage、`web-check` 不跑，
 已单独补跑通过（tsc + oxlint + vitest + vite build）。
 
-### 8.3 S7b2 的进度（2026-10-02）
+### 8.3 S7b2 完成（2026-10-02）
+
+**T311–T315 五项、五个提交**（`f3cdca2` `cae10ca` `7c3213f` `638f889` `6473c13`）。
+定点变异 **25/25 被杀**（T311 5 / T312 8 / T313 6 / T314 6）。
+
+**设计文档 S7 的验收「能建关系，助手能引用」——到 S7b2 为止，自动推断那条链也通了**：
+导入一批之后批末自动跑一趟（event watermark 去抖），三个相册可以并成一张图，
+`GET /family-graph` 读得到 run 与全部有效边。
+
+**S7 还剩 S7c（助手引用）**：`get_person_profile` 扩到 membership + `relationships[]`。
+它读的是 `family_person_memberships` / `family_relationships`，两套表现在都有了。
+
+### 8.3b T314 查出的一处「同步化必须补的东西」
+
+1.0 的批末触发跑在 `threading.Thread(daemon=True)` 里——**它的失败传不到导入响应上**。
+2.0 裁决成同步之后，异常会顺着 `POST /imports` 冒成 500。所以
+`_maybe_run_family_graph` **必须接住异常**。
+
+**这不是纸上推演，是实测撞出来的**：`family_analysis_runs.scope_id` 有指向
+`memory_spaces(id)` 的外键，而契约测试里那个 scope 本来就不是真的 memory_space
+（`POST /imports` 不要求它是），加上触发之后 `test_import_insights.py` 三条立刻报
+`FOREIGN KEY constraint failed`。**这是一条只会在「异步改同步」时才浮现的坑**——
+原样移植线程版本永远不会遇到它。
+
+### 8.4 S7b2 的进度（已被 8.3 取代）
 
 **T311 与 T312 已完成**（`f3cdca2` `cae10ca` `7c3213f`）。
 
