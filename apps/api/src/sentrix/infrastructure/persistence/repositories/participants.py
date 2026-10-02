@@ -26,7 +26,10 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sentrix.domain.memories.events import EventParticipantRecord
+from sentrix.domain.memories.events import (
+    PARTICIPANT_ROLE_VISIBLE_SUBJECT,
+    EventParticipantRecord,
+)
 from sentrix.infrastructure.persistence.database import Database
 
 _PARTICIPANT_COLUMNS = (
@@ -153,6 +156,23 @@ class SqliteEventParticipantRepository:
                 (event_id,),
             ).fetchall()
         return [_row_to_participant(row) for row in rows]
+
+    def cooccurrence_event_count(self, left_person_id: str, right_person_id: str) -> int:
+        """1.0 ``db.py:2517-2522`` 那条自连接的 ``SELECT DISTINCT``，逐字搬。"""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT ep.event_id FROM event_participants ep"
+                " JOIN event_participants other ON other.event_id = ep.event_id"
+                " WHERE ep.person_id = ? AND other.person_id = ?"
+                " AND ep.role = ? AND other.role = ?",
+                (
+                    left_person_id,
+                    right_person_id,
+                    PARTICIPANT_ROLE_VISIBLE_SUBJECT,
+                    PARTICIPANT_ROLE_VISIBLE_SUBJECT,
+                ),
+            ).fetchall()
+        return len(rows)
 
     # ---- 合并时的换家 ----------------------------------------------------------
 

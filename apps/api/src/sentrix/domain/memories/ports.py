@@ -149,6 +149,17 @@ class EventParticipantRepository(Protocol):
 
     def list_participants(self, event_id: str) -> Sequence[EventParticipantRecord]: ...
 
+    def cooccurrence_event_count(self, left_person_id: str, right_person_id: str) -> int:
+        """两人**同时**以 ``visible_subject`` 出现在同一个事件里的**事件数**。
+
+        1.0 ``db.py:2517-2522`` 的 ``SELECT DISTINCT ep.event_id``。两条边界：它跨
+        **全部**事件统计（不是只看当前那一个），而 ``DISTINCT`` 让「同一个人在一个事件里
+        有多行参与者记录」只算一次。共现边的 ``confidence`` 是这个数的函数
+        （``min(0.9, 0.45 + 0.1 * N)``），所以它算错的后果是**所有共现边的置信度一起偏**，
+        而且不报错。
+        """
+        ...
+
     def rehome(self, source_event_id: str, target_event_id: str) -> int:
         """把源事件的两张投影行搬到目标事件上（按 1.0 的合并语义），返回搬动的参与者行数。
 

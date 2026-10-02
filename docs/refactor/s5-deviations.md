@@ -902,6 +902,19 @@ capability-map 里那条指向它的记录同步改成新实现（`person_direct
 只有写入者、没有读者的表——S4 已在「零调用的能力」上栽过两次。搬它的那一天，
 `create_relationship` 也要一起搬，否则这条候选连落库都做不到。
 
+**（2026-10-02 了结）S7a · T205 已搬。** 这条登记的两个前提**都消失了**：
+`create_relationship` 早就落了（`repositories/relationships.py`，S6 之前）；
+「没有读者」被 S7a 自己消掉——T201 的实体详情 `relationships[]`、T202 的实体目录
+`relationship_count`、T203 的 `/api/relationships` 关系图。这是本仓库第三次
+「延期的理由被后续任务自己追上」（前两次：`check_capability_map.py` 的反向规则、
+`test_maintain_entities.py` 的「不建关系」）。
+
+补上的是 `ConfirmedPersonEvents._suggest_cooccurrence`（`assign_events.py`）；
+1.0 那条自连接的 `SELECT DISTINCT ep.event_id` 落在
+`SqliteEventParticipantRepository.cooccurrence_event_count`。
+**它是建议不是判定**：写进去的边恒 `pending`（1.0 的 docstring 原话
+*Suggest co-occurrence only; users decide whether it represents a real relationship*）。
+
 #### 第 77 条 · `refresh_event_summary` 的两处缩减与一次合并
 
 参与者的摘要重写（1.0 `db.py:2585-2610`）在 2.0 少了三样东西：

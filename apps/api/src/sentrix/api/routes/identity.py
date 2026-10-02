@@ -137,6 +137,7 @@ def _confirmed_person_events(container: Container) -> ConfirmedPersonEvents:
         observations=container.observation_repository,
         assets=container.asset_repository,
         entities=container.entity_repository,
+        relationships=container.relationship_repository,
         visual_similarity=EventVisualSimilarity(
             vectors=container.vector_repository,
             observations=container.observation_repository,

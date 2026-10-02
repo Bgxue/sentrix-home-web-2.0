@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -336,6 +337,154 @@ def test_two_people_in_one_event_are_both_named_in_the_summary(
     # 进了正文、且用的是 ``{名字}在{地点}参与{活动}`` 这个句式」。
     assert summary.endswith("在公园参与野餐")
     assert sorted(summary.removesuffix("在公园参与野餐").split("、")) == ["妈妈", "爸爸"]
+
+
+# ---- 共现建议（S7a · T205） ------------------------------------------------------
+
+
+def test_two_confirmed_people_in_one_event_get_a_pending_cooccurrence_edge(
+    db: Database, entities: SqliteEntityRepository, projector: ConfirmedPersonEvents
+):
+    """1.0 ``db.py:2508-2526``：同一事件里两个**已确认**的人写一条「共同出现」边。
+
+    它是**建议**不是判定——1.0 的 docstring 原话是 *Suggest co-occurrence only; users
+    decide whether it represents a real relationship*，所以 ``status`` 必须是
+    ``pending``（写成 active 就等于替用户拍了板）。``confidence`` 按同时出现的事件数算，
+    这里是 1 个事件 → ``0.45 + 0.1 = 0.55``。
+    """
+    add_asset(db, "asset_1")
+    add_observation(db, "obs_1", asset_id="asset_1")
+    add_event(db, "evt_1", time_start=BASE_TIME)
+    link_event(db, "evt_1", "obs_1")
+    add_person(db, "ent_1", name="妈妈")
+    add_person(db, "ent_2", name="爸爸")
+    entities.link_confirmed_mention("ent_1", "obs_1")
+    entities.link_confirmed_mention("ent_2", "obs_1")
+
+    projector.refresh_participants(["obs_1"])
+
+    edges = query(db, "SELECT * FROM relationships")
+    assert len(edges) == 1
+    assert edges[0]["predicate"] == "共同出现"
+    assert edges[0]["status"] == "pending"
+    assert edges[0]["confidence"] == pytest.approx(0.55)
+    # 证据是两人各自参与者行的并集——就是那条观察。
+    assert json.loads(str(edges[0]["evidence_ids_json"])) == ["obs_1"]
+
+
+def test_the_cooccurrence_edge_is_directed_by_sorted_id(
+    db: Database, entities: SqliteEntityRepository, projector: ConfirmedPersonEvents
+):
+    """两人是**无序对**，1.0 按 id ``sorted`` 定向（``db.py:2516``）。
+
+    不排的话，边的方向跟着 ``list_participants`` 的 ``updated_at DESC`` 走——
+    同一个无序对会因为参与者落库的先后写出方向相反的边，而**不报错**。
+
+    夹具让顺序可预测：两条观察各提到一个人，于是 ``ent_1`` 的参与者行先落、
+    ``ent_2`` 的**后**落，``DESC`` 排出的是 ``[ent_2, ent_1]``——左是 ``ent_2``。
+    没有 ``sorted`` 的话 subject 就是 ``ent_2``，断言 ``subject < object`` 会红。
+    """
+    add_asset(db, "asset_1")
+    add_observation(db, "obs_1", asset_id="asset_1")
+    add_observation(db, "obs_2", asset_id="asset_1")
+    add_event(db, "evt_1", time_start=BASE_TIME)
+    link_event(db, "evt_1", "obs_1")
+    link_event(db, "evt_1", "obs_2")
+    add_person(db, "ent_1", name="妈妈")
+    add_person(db, "ent_2", name="爸爸")
+    entities.link_confirmed_mention("ent_1", "obs_1")
+    entities.link_confirmed_mention("ent_2", "obs_2")
+
+    projector.refresh_participants(["obs_1", "obs_2"])
+
+    edges = query(db, "SELECT * FROM relationships WHERE predicate = '共同出现'")
+    assert len(edges) == 1
+    assert str(edges[0]["subject_entity_id"]) < str(edges[0]["object_entity_id"])
+
+
+def test_the_cooccurrence_confidence_counts_events_across_the_whole_store(
+    db: Database, entities: SqliteEntityRepository, projector: ConfirmedPersonEvents
+):
+    """``confidence`` 数的是**跨全部事件**的同时出现次数，不是「当前这一个事件」。
+
+    同一对人在**两个**事件里各出现一次 → N=2 → ``0.45 + 0.2 = 0.65``。一条边，
+    ``create`` 的去重合并取 ``MAX(confidence)``。
+
+    写成「恒按一个事件算」的话这里会是 0.55——**两个数都不报错**，只是所有共现边的
+    置信度一起偏。
+    """
+    add_asset(db, "asset_1")
+    add_observation(db, "obs_1", asset_id="asset_1")
+    add_observation(db, "obs_2", asset_id="asset_1")
+    add_event(db, "evt_1", time_start=BASE_TIME)
+    add_event(db, "evt_2", time_start=BASE_TIME)
+    link_event(db, "evt_1", "obs_1")
+    link_event(db, "evt_2", "obs_2")
+    add_person(db, "ent_1", name="妈妈")
+    add_person(db, "ent_2", name="爸爸")
+    for observation_id in ("obs_1", "obs_2"):
+        entities.link_confirmed_mention("ent_1", observation_id)
+        entities.link_confirmed_mention("ent_2", observation_id)
+
+    projector.refresh_participants(["obs_1", "obs_2"])
+
+    edges = query(db, "SELECT * FROM relationships WHERE predicate = '共同出现'")
+    assert len(edges) == 1
+    assert edges[0]["confidence"] == pytest.approx(0.65)
+
+
+def test_three_confirmed_people_make_three_cooccurrence_edges(
+    db: Database, entities: SqliteEntityRepository, projector: ConfirmedPersonEvents
+):
+    """**两两组合**（1.0 是 ``enumerate`` + 切片），不是「每个事件一条」。
+
+    三个人一条边的话，这条会红——而「少写几条边」是不会被别的东西发现的。
+    """
+    add_asset(db, "asset_1")
+    add_observation(db, "obs_1", asset_id="asset_1")
+    add_event(db, "evt_1", time_start=BASE_TIME)
+    link_event(db, "evt_1", "obs_1")
+    for entity_id in ("ent_1", "ent_2", "ent_3"):
+        add_person(db, entity_id, name=entity_id)
+        entities.link_confirmed_mention(entity_id, "obs_1")
+
+    projector.refresh_participants(["obs_1"])
+
+    pairs = {
+        (str(row["subject_entity_id"]), str(row["object_entity_id"]))
+        for row in query(db, "SELECT * FROM relationships WHERE predicate = '共同出现'")
+    }
+    assert pairs == {("ent_1", "ent_2"), ("ent_1", "ent_3"), ("ent_2", "ent_3")}
+
+
+def test_a_participant_who_is_not_confirmed_is_left_out_of_the_cooccurrence(
+    db: Database,
+    entities: SqliteEntityRepository,
+    participants: SqliteEventParticipantRepository,
+    projector: ConfirmedPersonEvents,
+):
+    """只取 ``person_status == 'confirmed'`` 的参与者（1.0 ``db.py:2510-2513``）。
+
+    **这条必须手工插一行未确认的参与者。** ``refresh_participants`` 自己只会给已确认的
+    人写参与者行，所以「参与者行在、人却未确认」这个状态**从生产路径走不到**——
+    不手工造，把那个过滤删掉是**等价变异**（夹具里每行都是 confirmed），不会有任何东西
+    报错。而 ``person_status`` 取自 ``entities.status``，实体状态一变它就非空，
+    1.0 的判据在那儿就得留着。
+    """
+    add_asset(db, "asset_1")
+    add_observation(db, "obs_1", asset_id="asset_1")
+    add_event(db, "evt_1", time_start=BASE_TIME)
+    link_event(db, "evt_1", "obs_1")
+    add_person(db, "ent_1", name="妈妈")
+    add_person(db, "ent_2", name="爸爸", status="pending")
+    entities.link_confirmed_mention("ent_1", "obs_1")
+    participants.upsert_participant(
+        "evt_1", "ent_2", role="visible_subject", evidence_ids=("obs_1",), confidence=0.75
+    )
+
+    projector.refresh_participants(["obs_1"])
+
+    assert query(db, "SELECT * FROM relationships WHERE predicate = '共同出现'") == []
 
 
 # ---- 重分段 ----------------------------------------------------------------------

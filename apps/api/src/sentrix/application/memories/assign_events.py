@@ -31,7 +31,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sentrix.domain.identity.ports import EntityRepository
+from sentrix.domain.identity.models import ENTITY_STATUS_CONFIRMED
+from sentrix.domain.identity.ports import EntityRepository, RelationshipRepository
 from sentrix.domain.media.models import Asset, Observation
 from sentrix.domain.media.ports import AssetRepository, ObservationRepository
 from sentrix.domain.memories.events import (
@@ -59,6 +60,14 @@ from sentrix.domain.retrieval.ports import VectorRepository
 # 打分只在前 1000 个里做——1.0 就是这么写死的，2.0 不变，但把它写成常量而不是
 # 函数里的字面量，免得被当成随手可调的数。
 ACTIVE_EVENT_SCAN_LIMIT = 1000
+
+# 1.0 ``db.py:2515`` / ``:2523-2525`` 那条共现**建议**的三个字面量。写成常量是因为
+# 它们是产品行为：改一个数，所有共现边的置信度一起偏，而且不报错。
+COOCCURRENCE_PREDICATE = "共同出现"
+COOCCURRENCE_STATUS = "pending"
+COOCCURRENCE_BASE_CONFIDENCE = 0.45
+COOCCURRENCE_STEP = 0.1
+COOCCURRENCE_CEILING = 0.9
 
 
 def _new_event_id() -> str:
@@ -367,10 +376,11 @@ class ConfirmedPersonEvents:
     理由与 ``AssignEvents`` 完全相同（Task 80）：少写一个就是 ``TypeError``，而不是
     一个恒空的 ``person_score``。
 
-    **这一层不写人物画像、也不写关系候选。** 1.0 的 ``upsert_event_participant`` 末尾还会
-    调 ``_maintain_event_cooccurrence_candidates``（``db.py:2508``，往 ``relationships`` 写
-    「共同出现」的待确认关系）；2.0 没有任何地方读 ``relationships``（那是 S6 的实体页），
-    写进去就是一张没有读者的表。登记在 ``s5-deviations.md``。
+    **这一层不写人物画像，但写关系候选。** 1.0 的 ``upsert_event_participant`` 末尾还会
+    调 ``_maintain_event_cooccurrence_candidates``（``db.py:2508``，往 ``relationships``
+    写「共同出现」的待确认边）。S6 时这里写着「2.0 没有任何地方读 ``relationships``，
+    写进去就是一张没有读者的表」——**S7a · T205 把读者造出来了**（T201 的实体详情、
+    T202 的实体目录计数、T203 的关系图），所以这一半补回来。人物画像仍然不在这里。
     """
 
     def __init__(
@@ -381,6 +391,7 @@ class ConfirmedPersonEvents:
         observations: ObservationRepository,
         assets: AssetRepository,
         entities: EntityRepository,
+        relationships: RelationshipRepository,
         visual_similarity: EventVisualSimilarity,
         confirmed_people: Callable[[str], frozenset[str]],
         confirmed_event_people: Callable[[str], frozenset[str]],
@@ -390,6 +401,7 @@ class ConfirmedPersonEvents:
         self._observations = observations
         self._assets = assets
         self._entities = entities
+        self._relationships = relationships
         self._visual = visual_similarity
         self._confirmed_people = confirmed_people
         self._confirmed_event_people = confirmed_event_people
@@ -430,6 +442,7 @@ class ConfirmedPersonEvents:
                         evidence_ids=(observation_id,),
                         confidence=VISIBLE_SUBJECT_CONFIDENCE,
                     )
+            self._suggest_cooccurrence(event_id)
             self._events.apply_summary(
                 event_id,
                 title=event.title,
@@ -439,6 +452,50 @@ class ConfirmedPersonEvents:
             )
             affected.append(event_id)
         return tuple(affected)
+
+    def _suggest_cooccurrence(self, event_id: str) -> None:
+        """1.0 ``_maintain_event_cooccurrence_candidates``（``db.py:2508-2526``）。
+
+        **只提议、不判定。** 1.0 的 docstring 原话：*Suggest co-occurrence only; users
+        decide whether it represents a real relationship.* 所以写进去的是 ``pending``
+        边，不是 active。
+
+        1.0 在每次 ``upsert_event_participant`` 末尾都调它一次（同一个事件会被重复调，
+        靠 ``create`` 的去重合并收敛）；2.0 在**一个事件的所有参与者落完之后调一次**——
+        最终状态相同，少写几遍。
+
+        三处照搬：
+
+        - **只取 ``role='visible_subject'`` 且 ``person_status='confirmed'`` 的参与者**
+          （``db.py:2510-2513``）。2.0 这一层写进去的参与者本来就都是已确认的人，所以
+          这个过滤在**当前**调用链下恒真——但它是 1.0 的判据，而且 ``person_status``
+          随实体状态走，留着才是照搬；
+        - **无序对按 id ``sorted`` 定向**（``:2516``）。不排的话同一对会写出方向相反
+          的两条边，而且不报错；
+        - **证据是两人各自参与者行的证据并集**，而 ``confidence`` 数的是**跨全部事件**
+          的同时出现次数（``:2517-2524``），不是当前这一个。
+        """
+        participants = [
+            item
+            for item in self._participants.list_participants(event_id)
+            if item.role == PARTICIPANT_ROLE_VISIBLE_SUBJECT and item.person_status == ENTITY_STATUS_CONFIRMED
+        ]
+        for index, left in enumerate(participants):
+            for right in participants[index + 1 :]:
+                subject_id, object_id = sorted((left.person_id, right.person_id))
+                self._relationships.create(
+                    subject_entity_id=subject_id,
+                    predicate=COOCCURRENCE_PREDICATE,
+                    object_entity_id=object_id,
+                    evidence_ids=list(dict.fromkeys((*left.evidence_ids, *right.evidence_ids))),
+                    confidence=min(
+                        COOCCURRENCE_CEILING,
+                        COOCCURRENCE_BASE_CONFIDENCE
+                        + COOCCURRENCE_STEP
+                        * self._participants.cooccurrence_event_count(subject_id, object_id),
+                    ),
+                    status=COOCCURRENCE_STATUS,
+                )
 
     # ---- 确认之后的重分段 --------------------------------------------------------
 

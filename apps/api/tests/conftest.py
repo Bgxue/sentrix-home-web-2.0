@@ -182,6 +182,9 @@ def confirmed_person_events():
     from sentrix.infrastructure.persistence.repositories.participants import (
         SqliteEventParticipantRepository,
     )
+    from sentrix.infrastructure.persistence.repositories.relationships import (
+        SqliteRelationshipRepository,
+    )
     from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
 
     def _build(db: Database) -> ConfirmedPersonEvents:
@@ -194,6 +197,7 @@ def confirmed_person_events():
             observations=observations,
             assets=assets,
             entities=entities,
+            relationships=SqliteRelationshipRepository(db),
             # 视觉向量一路留空：这些用例验的是投影与阈值，不是嵌入模型。没有向量时
             # ``visual_boost`` 恒 0、``split_guard`` 走 ``not visual_available`` 那一支，
             # 都是 1.0 在生产上真实会走到的状态。
