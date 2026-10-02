@@ -600,3 +600,247 @@ export async function reclusterFaces(scopeId: string | null): Promise<ReclusterF
     body: JSON.stringify({ scope_id: scopeId }),
   });
 }
+
+// ---- 家庭图谱（F7） ---------------------------------------------------------------
+//
+// 六个端点由 S7b1/S7b2 上线（`apps/api/src/sentrix/api/routes/family.py`）。形状按
+// `GET /openapi.json` 的 `components.schemas` 落。**三处与直觉相反的地方**，都在各自
+// 函数上写明：写路由的响应包了 `{ok, …}`、DELETE 的体里**没有** predicate、
+// POST runs 包了 `{run}`（1.0 是 `{status, run}`，2.0 裁决成同步后去掉了 status）。
+
+/** 家庭归属。`unknown` 与 `membership === null` 是同一件事：还没被推断归类过。 */
+export type FamilyMembershipValue = "family" | "friend" | "unknown";
+
+export interface FamilyMembership {
+  id: string;
+  scope_id: string;
+  entity_id: string;
+  membership: string;
+  source: string;
+  confidence: number;
+  evidence_refs: string[];
+  inference_run_id: string | null;
+  state: string;
+  locked: boolean;
+  revision: number;
+  supersedes_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FamilyPortrait {
+  id: string;
+  scope_id: string;
+  entity_id: string;
+  portrait_text: string;
+  evidence_refs: string[];
+  source: string;
+  inference_run_id: string | null;
+  state: string;
+  locked: boolean;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FamilyRepresentativeMedia {
+  id: string;
+  media_type: string;
+  file_name: string;
+}
+
+/**
+ * `people[]` 的一项。
+ *
+ * `membership` / `portrait` 是**行对象或 null**（未推断过是 null，不是缺字段）——
+ * 前端必须按对象取 `.membership`，把它当标量读会在真实数据上拿到 undefined。
+ */
+export interface FamilyPerson {
+  id: string;
+  scope_id: string;
+  display_name: string;
+  membership: FamilyMembership | null;
+  portrait: FamilyPortrait | null;
+  avatar_face_instance_id: string | null;
+  appearance_count: number;
+  representative_media: FamilyRepresentativeMedia[];
+}
+
+export interface FamilyRelationship {
+  id: string;
+  scope_id: string;
+  family_graph_id: string | null;
+  subject_entity_id: string;
+  predicate: string;
+  object_entity_id: string;
+  inverse_predicate: string;
+  source: string;
+  confidence: number;
+  evidence_refs: string[];
+  state: string;
+  locked: boolean;
+  revision: number;
+}
+
+export interface FamilyRun {
+  id: string;
+  scope_id: string;
+  status: string;
+  current_stage: string;
+  config: Record<string, unknown>;
+  stats: Record<string, unknown>;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+}
+
+export interface FamilyGraph {
+  scope_id: string;
+  run: FamilyRun | null;
+  people: FamilyPerson[];
+  scope_ids: string[];
+  relationships: FamilyRelationship[];
+}
+
+/** 写路由统一包了 `{ok: true, …}`，不是裸对象——照 1.0 的 `{"ok": True, …}`。 */
+interface FamilyMembershipResponse {
+  ok: boolean;
+  membership: FamilyMembership | null;
+}
+
+interface FamilyPortraitResponse {
+  ok: boolean;
+  portrait: FamilyPortrait | null;
+}
+
+interface FamilyRelationshipResponse {
+  ok: boolean;
+  relationships: FamilyRelationship[];
+}
+
+/** 撤回返回的是**撤回之后**的行（`state = "retracted"`），键名是 `retracted`。 */
+interface FamilyRetractResponse {
+  ok: boolean;
+  retracted: FamilyRelationship[];
+}
+
+/** `POST /family-graph/runs` 同步跑完再回，体是 `{run}`——不是 1.0 的 `{status: 202, run}`。 */
+interface FamilyRunResponse {
+  run: FamilyRun;
+}
+
+export async function getFamilyGraph(scopeId: string): Promise<FamilyGraph> {
+  return request<FamilyGraph>(`/family-graph?scope_id=${encodeURIComponent(scopeId)}`);
+}
+
+/**
+ * 人脸裁剪图。
+ *
+ * `FamilyPerson` 只给 `avatar_face_instance_id`，整条路径由前端拼；`PeopleView` 那条
+ * 路是服务端把 `crop_url` 拼好带回来的（见 `FaceCropRef` 的注释）。两条路都留着：
+ * 家庭图谱的响应里没有 crop_url 这个字段。
+ */
+export function faceInstanceCropUrl(faceInstanceId: string): string {
+  return `${BASE}/face-instances/${encodeURIComponent(faceInstanceId)}/crop`;
+}
+
+/** 设一个人的家庭归属。用户按下的动作，后端写死 `source=user_override`、`locked=1`。 */
+export async function setFamilyMembership(
+  personId: string,
+  scopeId: string,
+  membership: FamilyMembershipValue,
+): Promise<FamilyMembership | null> {
+  const body = await request<FamilyMembershipResponse>(
+    `/family-graph/people/${encodeURIComponent(personId)}/membership`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope_id: scopeId, membership }),
+    },
+  );
+  return body.membership;
+}
+
+/** 手写一段家庭画像。**与人物画像那套不是一张表**，不要串到别的端点上。 */
+export async function setFamilyPortrait(
+  personId: string,
+  scopeId: string,
+  portraitText: string,
+): Promise<FamilyPortrait | null> {
+  const body = await request<FamilyPortraitResponse>(
+    `/family-graph/people/${encodeURIComponent(personId)}/portrait`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope_id: scopeId, portrait_text: portraitText }),
+    },
+  );
+  return body.portrait;
+}
+
+/** 建一对亲属边。后端一次落**两行**（正行 + 反行），所以回来的是列表。 */
+export async function putFamilyRelationship(input: {
+  scopeId: string;
+  subjectEntityId: string;
+  predicate: string;
+  objectEntityId: string;
+  inversePredicate: string;
+}): Promise<FamilyRelationship[]> {
+  const body = await request<FamilyRelationshipResponse>("/family-graph/relationships", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope_id: input.scopeId,
+      subject_entity_id: input.subjectEntityId,
+      predicate: input.predicate,
+      object_entity_id: input.objectEntityId,
+      inverse_predicate: input.inversePredicate,
+    }),
+  });
+  return body.relationships;
+}
+
+/**
+ * 撤回一对亲属边。
+ *
+ * **体里只有 scope + 两个实体 id，没有 predicate**——删的是这对人之间的那条边，
+ * 不是某一条谓词。1.0 就是这么传的（两个 id 塞不进路径，所以 DELETE 带 body）。
+ */
+export async function deleteFamilyRelationship(input: {
+  scopeId: string;
+  subjectEntityId: string;
+  objectEntityId: string;
+}): Promise<FamilyRelationship[]> {
+  const body = await request<FamilyRetractResponse>("/family-graph/relationships", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope_id: input.scopeId,
+      subject_entity_id: input.subjectEntityId,
+      object_entity_id: input.objectEntityId,
+    }),
+  });
+  return body.retracted;
+}
+
+/** 把若干 scope 并成一张图。**响应没有 `ok` 键**，1.0 直接返回仓储那个 dict。 */
+export async function mergeFamilyScopes(
+  scopeIds: string[],
+): Promise<{ graph_id: string; scope_ids: string[] }> {
+  return request<{ graph_id: string; scope_ids: string[] }>("/family-graph/scopes/merge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope_ids: scopeIds }),
+  });
+}
+
+/** 手工跑一趟家庭图谱推断。同步返回跑完的 run；已有 run 在跑时后端回 409。 */
+export async function runFamilyGraph(scopeId: string): Promise<FamilyRun> {
+  const body = await request<FamilyRunResponse>("/family-graph/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope_id: scopeId }),
+  });
+  return body.run;
+}

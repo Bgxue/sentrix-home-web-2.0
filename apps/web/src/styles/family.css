@@ -1,0 +1,114 @@
+/* 家庭图谱（F7）：名录 / 图谱 / 详情侧栏。
+ *
+ * 颜色全部取 `tokens.css` 的变量——那一份是设计令牌的唯一来源（计划书 §1 裁决⑥），
+ * 这里不写死十六进制，改配色时只动 tokens。 */
+
+/* ---- tab 外壳 ---- */
+
+.family-tabs { display: flex; align-items: center; gap: 6px; margin: 24px 0 8px; border-bottom: 1px solid var(--line); }
+.family-tab { border: 0; background: transparent; padding: 10px 14px; color: var(--muted); font-size: 12px; font-weight: 750; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.family-tab:hover { color: var(--ink); }
+.family-tab.active { color: var(--ink); border-bottom-color: var(--lime); }
+.family-tabs-note { margin-left: auto; color: var(--muted); font-size: 11px; padding-bottom: 8px; }
+
+/* ---- 名录 ---- */
+
+.roster-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.roster-search { flex: 1 1 220px; min-height: 38px; border: 1px solid var(--line); border-radius: 9px; padding: 0 12px; background: var(--surface); }
+.roster-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.roster-filter { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid var(--line); border-radius: 999px; padding: 0 12px; background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 700; }
+.roster-filter.active { border-color: var(--green); color: var(--green); background: var(--mint); }
+.roster-filter-count { font-variant-numeric: tabular-nums; opacity: .75; }
+.roster-count { color: var(--muted); font-size: 11px; margin-top: 14px; }
+
+.person-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+.person-card { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 18px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); text-align: center; transition: box-shadow .15s ease, border-color .15s ease; }
+.person-card:hover { border-color: var(--faint); box-shadow: var(--shadow); }
+.person-card.selected { border-color: var(--green); box-shadow: 0 0 0 2px var(--mint); }
+.person-card-name { font-size: 13px; font-weight: 750; color: var(--ink); }
+.person-card-meta { color: var(--muted); font-size: 10px; }
+
+.person-avatar { display: grid; place-items: center; border-radius: 50%; overflow: hidden; background: var(--mint); color: var(--green); font-weight: 800; flex: none; }
+.person-avatar.sm { width: 34px; height: 34px; font-size: 12px; }
+.person-avatar.md { width: 56px; height: 56px; font-size: 20px; }
+.person-avatar.lg { width: 68px; height: 68px; font-size: 24px; }
+.person-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.person-avatar.av-family { background: var(--mint); color: var(--green); }
+.person-avatar.av-friend { background: var(--blue); color: #557ba7; }
+.person-avatar.av-unknown { background: var(--soft); color: var(--muted); }
+
+.membership-badge { display: inline-flex; align-items: center; min-height: 20px; padding: 0 9px; border-radius: 999px; font-size: 10px; font-weight: 750; }
+.membership-badge.family { background: var(--mint); color: var(--green); }
+.membership-badge.friend { background: var(--blue); color: #557ba7; }
+.membership-badge.unknown { background: var(--soft); color: var(--muted); border: 1px dashed var(--faint); }
+
+/* ---- 相册范围合并 ---- */
+
+.scope-merge { margin-top: 26px; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.scope-merge summary { cursor: pointer; font-size: 12px; font-weight: 750; }
+.scope-merge p { color: var(--muted); font-size: 11px; line-height: 1.7; max-width: 640px; }
+.scope-merge-list { list-style: none; margin: 10px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; }
+.scope-merge-list label { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; }
+
+/* ---- 图谱 ---- */
+
+.graph-shell { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--surface); }
+.graph-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.graph-hint { color: var(--faint); font-size: 10px; }
+.graph-canvas { position: relative; height: 560px; background: linear-gradient(var(--soft), var(--surface)); touch-action: none; }
+.graph-svg { display: block; cursor: grab; }
+.graph-svg:active { cursor: grabbing; }
+
+.graph-edge { stroke: var(--faint); stroke-width: 1.5; }
+.graph-edge.active { stroke: var(--green); stroke-width: 2.25; }
+.graph-edge-label { fill: var(--green); font-size: 11px; font-weight: 750; text-anchor: middle; paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+.graph-relate-preview { stroke: var(--green); stroke-width: 2; stroke-dasharray: 6 5; }
+
+.graph-node { cursor: pointer; }
+.graph-node-circle { fill: var(--surface); stroke: var(--faint); stroke-width: 2; }
+.graph-node.av-family .graph-node-circle, .graph-node.family .graph-node-circle { fill: var(--mint); stroke: var(--green); }
+.graph-node.friend .graph-node-circle { fill: var(--blue); stroke: #557ba7; }
+/* 待归类：虚线圈。它单独成行画在底部，正是 F7 要保证「看得见」的那一类。 */
+.graph-node.unknown .graph-node-circle { fill: var(--soft); stroke: var(--muted); stroke-dasharray: 5 4; }
+.graph-node.selected .graph-node-circle { stroke: var(--green); stroke-width: 4; }
+.graph-node.hovered .graph-node-circle { stroke-width: 3; }
+.graph-node.dim { opacity: .25; }
+.graph-node-initial { fill: var(--ink); font-size: 17px; font-weight: 800; pointer-events: none; }
+.graph-node-name { fill: var(--ink); font-size: 11px; font-weight: 700; pointer-events: none; }
+.graph-node-tag { fill: var(--muted); font-size: 9px; pointer-events: none; }
+
+.graph-legend { display: flex; align-items: center; gap: 16px; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; flex-wrap: wrap; }
+.legend-item::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.legend-item.family::before { background: var(--mint); border: 1px solid var(--green); }
+.legend-item.friend::before { background: var(--blue); border: 1px solid #557ba7; }
+.legend-item.unknown::before { background: var(--soft); border: 1px dashed var(--muted); }
+.legend-count { margin-left: auto; }
+
+/* ---- 详情侧栏 ---- */
+
+.person-detail { position: fixed; top: 0; right: 0; width: min(400px, 100vw); height: 100vh; overflow-y: auto; background: var(--surface); border-left: 1px solid var(--line); box-shadow: var(--shadow); padding: 22px; z-index: 40; }
+.detail-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.detail-head strong { display: block; font-size: 16px; }
+.detail-head small { color: var(--muted); font-size: 11px; }
+.detail-close { margin-left: auto; border: 0; background: transparent; font-size: 22px; line-height: 1; color: var(--muted); }
+.detail-close:hover { color: var(--ink); }
+.detail-section { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+.detail-section h3 { font-size: 13px; margin: 0 0 12px; }
+.detail-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.detail-form label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
+.detail-field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); margin-bottom: 12px; }
+.detail-form input, .detail-form select, .detail-form textarea, .detail-field select { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font: inherit; color: var(--ink); background: var(--surface); }
+.detail-form textarea { resize: vertical; }
+.detail-form button { align-self: flex-start; }
+.detail-empty { color: var(--muted); font-size: 11px; }
+.detail-relations { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.detail-relations li { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12px; }
+.detail-relation-row { display: flex; gap: 8px; }
+.detail-relation-row select { flex: 1; }
+.detail-media { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+.detail-media li { width: 92px; }
+.detail-media img { width: 92px; height: 92px; object-fit: cover; border-radius: 10px; display: block; }
+.detail-media small { display: block; color: var(--muted); font-size: 9px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 只给读屏的文本。 */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
