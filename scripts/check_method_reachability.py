@@ -78,7 +78,12 @@ PENDING_METHODS: dict[str, str] = {
     # list_properties（读）在 T128a 接线，按反向规则删掉——私密地点的投影要读实体的
     # ``private_flag`` / ``alias`` 两个属性（``domain/identity/decoration.py``）。
     # **又一条被门禁自己删掉的登记**：接线那一刻它就报红要求删。
-    "EventRepository.dissolve": "S7（重分段；s5-deviations 第 15/35 条记「随 S7」）",
+    # **S7a 核查（2026-10-02）发现这条登记的出处引错了**：s5-deviations 第 15/35 条
+    # 讲的是 `graph_violations` 算完即弃，与 `dissolve` 无关（那两条已在 S7a 了结，
+    # 结论是「随 person_graph.py 判死」）。`dissolve` 本体是 **1.0 的重分段**留下的：
+    # `ConfirmedPersonEvents.resegment` 走的是 `events.merge`，一次都没调过它。
+    # 所以它现在**没有归属**，不是「等 S7」。留在这张表里是因为它确实零调用者。
+    "EventRepository.dissolve": "归属未定（S7a 核查：resegment 走 merge，没用到它）",
     "PortraitRepository.list_for_person": "S6 · 依赖核查（画像版本列表，归属未定）",
     "PortraitRepository.set_lock": "S6 · 依赖核查（画像手改/锁定，归属未定）",
     # ObservationRepository.list_by_asset 在 T119（条件排除）接线，按反向规则删掉。

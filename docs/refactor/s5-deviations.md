@@ -44,7 +44,7 @@ benchmark 泄漏、3 条是死代码、2 条是遗留表）；**7 条需要用�
 | 12 | 画像校验失败完全静默 | `person_insights.py:232-241` 里 `errors` 被赋值 4 次，**从不写日志、不落 `person_insight_runs.error`、不写 stats**。 | **修** |
 | 13 | `person_insights` 的向量去重从未生效 | `person_insights.py:271` `select_representatives(candidates, {}, limit=12, per_event=2)` —— 第二个参数是空 dict，而去重逻辑（`:92-97`）要求 `vector` 非空。只有测试传了真向量（`tests/test_person_insights.py:122`）。 | **待裁决**（修 or 照搬） |
 | 14 | 图推断的输入缺项 | `person_insights.py:309-318` 的 `graph_payload` 里 `cooccurrence: {}` / `moments: []` / `devices: {}` 恒空，而提示词（`person_graph.py:14-15`）宣称输入包含这三样。 | **待裁决** |
-| 15 | `graph_violations` 算完即弃 | `person_graph.py:187` 返回，`person_insights.py:327/346` 只取 `roles` / `relationships`。 | **随 S7** |
+| 15 | `graph_violations` 算完即弃 | `person_graph.py:187` 返回，`person_insights.py:327/346` 只取 `roles` / `relationships`。 | **S7a 了结（2026-10-02）：随 `person_graph.py` 一起判死。** 裁决① 判死的是整个文件（`ROLE_OPTIONS` 是唯一被捞出来的东西，落在 `domain/identity/portrait.py`），而 `find_graph_violations` 的唯一调用者是同文件的 `normalize_person_graph`——两者都在假设那一支上。2.0 没有这一步，「算完即弃」因此不存在 |
 | 16 | 两个 0.30 语义不同 | `db.py:4815` 的 `threshold=0.30` 是**余弦阈值**；`db.py:4868` 的 `if quality >= 0.30` 是**质量门槛**（低于它的已 verified 人脸不去匹配已有簇，直接建新簇）。数值相同、互不影响。 | **原样照搬，两个独立常量** |
 | 17 | 模型版本字段名与语义不符 | `model_clients.py:1784/1831` 的 `embedding_version = os.getenv("FACE_MODEL_NAME", "buffalo_l")` —— 变量叫 MODEL_NAME 却存进 version。**有真实后果**：签名比对（`db.py:4876-4884`）比较 `(model_name, model_version)`，所以换模型包时旧簇会被整体跳过。 | **原样照搬 + 注释写明** |
 | 18 | `person_bridge` 的真实位置 | `retrieval_indexes.py:20`（`_FIELD_TYPES` 列表）与 `:180`（`("person_bridge", "people")`）。**S4 的计划文档第 309 行把它记成 `retrieval_indexes.py:150`，那是笔误。** | 修正引用 |
@@ -74,7 +74,7 @@ benchmark 泄漏、3 条是死代码、2 条是遗留表）；**7 条需要用�
 | 32 | `persons` 遗留表与 `/api/persons` | `db.py:515/1327/3461/3499`、`app.py:1498/1505` | 无生产写入者（`upsert_person` 全仓零调用）；1.0 自己把 legacy person 迁进 native entity（`_migrate_legacy_persons`）；`frozen` 判据是「表 0 行」的同类 |
 | 33 | `pairwise_metrics` 与聚类评估脚本 | `face_clustering.py:149-182`、`scripts/benchmarks/evaluate_lfw_clusters.py`、`scan_cluster_params.py` | 只在 benchmark / 测试里用 |
 | 34 | `apply_relationship_threshold` | `person_graph.py:104-116` | 死代码：`normalize_person_graph` 不调它，全仓只有测试调 |
-| 35 | `find_graph_violations` 的返回值 | `person_graph.py:87-103` → `:187` | 算完即弃（证据 15）；随 S7 |
+| 35 | `find_graph_violations` 的返回值 | `person_graph.py:87-103` → `:187` | 随 `person_graph.py` 判死（S7a 了结，见第 15 条） |
 
 ---
 
