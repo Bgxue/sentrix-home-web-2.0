@@ -64,6 +64,21 @@ DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
 #     动工前先核依赖、核出缺口再写任务定义，**核查本身就是一个有交付物的任务**。
 #     把它们硬塞进一个编号会更像有归属，实际只是把问题推后。
 PENDING_METHODS: dict[str, str] = {
+    # —— S7b1 T302：家庭图谱端口先落地，T305/T306 接线 ——
+    #
+    # 与 S6 的 ``PhotoInspector.inspect`` 同一条路：端口与记录是**先落地、随后接线**
+    # 的一件（计划 §8.2 的 T302→T305/T306），落地的那一刻必然没有生产调用者。
+    # 读的四个由 T305（``GET /family-graph``）接，写的五个由 T306（四条写路由）接。
+    # **接线完成时反向规则会逐条要求删掉它们**——那正是这张表存在的形式。
+    "FamilyGraphRepository.get_effective_membership": "S7b1 · T305（GET /family-graph）",
+    "FamilyGraphRepository.list_effective_relationships": "S7b1 · T305（GET /family-graph）",
+    "FamilyGraphRepository.get_active_portrait": "S7b1 · T305（GET /family-graph）",
+    "FamilyGraphRepository.graph_scope_ids": "S7b1 · T305（GET /family-graph）",
+    "FamilyGraphRepository.set_membership": "S7b1 · T306（PATCH membership）",
+    "FamilyGraphRepository.set_relationship": "S7b1 · T306（PUT relationships）",
+    "FamilyGraphRepository.retract_relationship": "S7b1 · T306（DELETE relationships）",
+    "FamilyGraphRepository.write_portrait": "S7b1 · T306（PATCH portrait）",
+    "FamilyGraphRepository.merge_scopes": "S7b1 · T306（POST scopes/merge）",
     # —— 审计查出（2026-09-29）——
     # facts 的三条（list_facts / set_status / supersede_others）已在 T113/T114 接线，
     # 按反向规则从这张表里删掉。**这三条是被自己删掉的，不是被人想起来的**——

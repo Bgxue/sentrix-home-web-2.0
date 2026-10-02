@@ -16,6 +16,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from sentrix.domain.identity.family import (
+    FamilyMembershipRecord,
+    FamilyPortraitRecord,
+    FamilyRelationshipRecord,
+)
 from sentrix.domain.identity.models import (
     DEFAULT_SCOPE_ID,
     ENTITY_STATUS_PENDING,
@@ -995,5 +1000,158 @@ class SemanticRepository(Protocol):
         **``event_ids`` / ``valid_from`` / ``valid_to`` 三个参数 2.0 目前没有调用者传**
         （关系那条路三个都空），留着是因为它们参与合并的 SQL 与 ``support_count`` 的算法；
         等画像那一支落地时直接接上，不用回头改仓储。
+        """
+        ...
+
+
+class FamilyGraphRepository(Protocol):
+    """家庭图谱六张表的读写。SQL 在 ``repositories/family.py``。
+
+    **它与 ``RelationshipRepository`` 是两套，不要合并。** 那张通用表（S7a）的
+    ``predicate`` 是自由文本、没有白名单、没有 ``locked``、没有 ``state`` 版本链；
+    这一套是**受约束**的：标签必须过 ``family_graph.py`` 的白名单，每行带
+    ``state`` + ``locked``，而且**一条边在库里是两行**（正 + 反）。
+
+    **``locked`` 是这套表的中心。** 用户写下的行 ``locked = 1``，模型的推断遇到它
+    就跳过（``set_membership`` / ``write_portrait`` 直接返回已有行、
+    ``set_relationship`` 返回空列表），撤回过的边另外在
+    ``family_relationship_blocks`` 里留一行挡着。**这三条「跳过」都不报错**——
+    静默保留用户的选择就是它们要的效果，所以每一条都有用例钉。
+    """
+
+    # ---- 成员归属 --------------------------------------------------------------
+
+    def get_effective_membership(self, scope_id: str, entity_id: str) -> FamilyMembershipRecord | None:
+        """这个人在这个 scope 里当前生效的归属。
+
+        ``state = 'effective'`` 且按 ``locked DESC, revision DESC, updated_at DESC``
+        取第一行——**三个排序键缺一不可**：``locked`` 让用户写的压过模型的，
+        ``revision``/``updated_at`` 在没有 locked 的行之间定先手。
+        """
+        ...
+
+    def set_membership(
+        self,
+        scope_id: str,
+        entity_id: str,
+        membership: str,
+        *,
+        source: str,
+        confidence: float = 0.0,
+        evidence_refs: Sequence[str] = (),
+        inference_run_id: str | None = None,
+    ) -> FamilyMembershipRecord | None:
+        """写一条归属：旧行置 ``superseded``，新行 ``effective`` 且回填 ``supersedes_id``。
+
+        **三条边界，两条是静默的**：
+
+        - ``membership`` 不在 ``FAMILY_MEMBERSHIPS`` 或 ``source`` 不在
+          ``FAMILY_SOURCES`` → ``ValueError``（这两条会报错）；
+        - 实体不是 person、或与 scope 不符 → ``ValueError``；
+        - **``source='model'`` 且当前行 ``locked`` → 不写、不 commit，直接返回当前行**
+          ——用户改过的归属，模型不许覆盖。返回值与「刚写成功」长得一样，
+          调用方分不出来，这是 1.0 原样。
+
+        新行的 ``locked`` 是 ``source == 'user_override'``。
+        """
+        ...
+
+    # ---- 关系边 ----------------------------------------------------------------
+
+    def list_effective_relationships(
+        self, scope_id: str, entity_id: str | None = None
+    ) -> Sequence[FamilyRelationshipRecord]:
+        """这个 scope 的全部有效边；给了 ``entity_id`` 就只要他牵涉的（两个方向都算）。
+
+        排序 ``locked DESC, updated_at DESC``。**只有 ``effective``**——``retracted``
+        与 ``superseded`` 都不返回（这与通用 ``relationships`` 那边「连 retracted 都给」
+        相反，别照那边改）。
+        """
+        ...
+
+    def set_relationship(
+        self,
+        scope_id: str,
+        subject_entity_id: str,
+        predicate: str,
+        object_entity_id: str,
+        inverse_predicate: str,
+        *,
+        source: str,
+        confidence: float = 0.0,
+        evidence_refs: Sequence[str] = (),
+        inference_run_id: str | None = None,
+    ) -> Sequence[FamilyRelationshipRecord]:
+        """写一对亲属边——**一次落两行**（正向 + 反向），返回那两行。
+
+        校验顺序是行为的一部分（1.0 ``db.py:5808-5863``），前六道会抛、后两道静默：
+
+        1. ``source`` 合法；2. 两端不是同一个人；3. 两端都是同 scope 的 person 实体；
+        4. 两个标签 strip 后非空；5. **``validate_relationship_pair`` 过白名单**；
+        6. ``source='model'`` 且这对人被 block 过 → **返回空**（用户撤回过，模型不许恢复）；
+        7. ``source='user_override'`` 且存在 block → **先删掉那一行**（用户重新建边即解锁）；
+        8. ``source='model'`` 且当前有效边里有 ``locked`` 的 → **返回那些行**，不写。
+
+        通过之后：**先把这一对的双向旧边全部置 ``superseded``，再插两行新边**
+        ——顺序反了会留下两代并存的 ``effective``。新行的 ``family_graph_id`` 与
+        ``supersedes_id`` **恒为 NULL**（1.0 原样，见迁移 0009 的注释）。
+        """
+        ...
+
+    def retract_relationship(
+        self, scope_id: str, subject_entity_id: str, object_entity_id: str
+    ) -> Sequence[FamilyRelationshipRecord]:
+        """撤回一对人的边，**并落一行 block 挡住模型恢复**。
+
+        两步的顺序不能反：先双向置 ``retracted``，再 UPSERT 那一行 block
+        （``source='user_override'``、``locked=1``）。返回的是**撤回之后**的行。
+        """
+        ...
+
+    # ---- 家庭画像 --------------------------------------------------------------
+
+    def get_active_portrait(self, scope_id: str, entity_id: str) -> FamilyPortraitRecord | None:
+        """当前生效的那一段家庭画像。
+
+        排序是 ``created_at DESC LIMIT 1``——**与 membership 的三个排序键不一样**
+        （1.0 就是两个写法，见 §4b.3）。照搬。
+        """
+        ...
+
+    def write_portrait(
+        self,
+        scope_id: str,
+        entity_id: str,
+        portrait_text: str,
+        *,
+        source: str,
+        evidence_refs: Sequence[str] = (),
+        inference_run_id: str | None = None,
+    ) -> FamilyPortraitRecord | None:
+        """写一段家庭画像：旧行 ``superseded``，新行 ``effective``。
+
+        **不校验 ``source`` 白名单**——1.0 这个函数就是只按 ``source == 'model'``
+        分支，非法值会原样落库（对比 ``set_membership`` / ``set_relationship`` 都会校验）。
+        照搬这个缺口，别顺手补。
+
+        ``source='model'`` 且当前行 ``locked`` → 不写，返回当前行。
+        """
+        ...
+
+    # ---- 跨 scope 的图 ---------------------------------------------------------
+
+    def merge_scopes(self, scope_ids: Sequence[str]) -> tuple[str, Sequence[str]]:
+        """把若干 scope 并成一张图，返回 ``(graph_id, 这张图下的全部 scope_id)``。
+
+        少于两个 scope、或有不存在的 scope → ``ValueError``。**已属于某张图的 scope
+        会被并进那张图**（取这些 scope 里已有的 ``graph_id``，没有才新建），
+        所以这个操作是幂等的、也是可累积的。
+        """
+        ...
+
+    def graph_scope_ids(self, scope_id: str) -> Sequence[str]:
+        """这个 scope 所属那张图里的全部 scope（``ORDER BY scope_id``）。
+
+        **没并过图的 scope 返回它自己一个**——不是空列表。调用方据此遍历。
         """
         ...

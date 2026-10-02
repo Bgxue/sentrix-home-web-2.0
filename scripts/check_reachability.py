@@ -47,6 +47,11 @@ ROOTS = ("sentrix.main", "sentrix.bootstrap")
 # ``api/routes/identity.py`` 构造了，于是按反向规则逐条删掉。机制一直在，下一次有
 # 「本切片先落地、随后接线」的模块时它还会被用上——那时请照上面那句写给任务。
 PENDING_WIRING: dict[str, str] = {
+    # T302 落了白名单模块 ``domain/identity/family_graph.py``（1.0 那个 43 行的文件），
+    # 它的第一个生产调用者是 **T303 的 ``SqliteFamilyGraphRepository.set_relationship``**
+    # ——家庭边落库前必须过 ``validate_relationship_pair``。与 S6 的
+    # ``PhotoInspector.inspect`` 同一条路：先落地、后接线，接上时反向规则会要求删掉这一条。
+    "sentrix.domain.identity.family_graph": "S7b1 · T303（仓储的 set_relationship）",
     # T121b 曾在这里登记 ``sentrix.domain.retrieval.structured_query``，随后被这条反向
     # 规则自己删掉了：端口 ``domain/retrieval/ports.py`` 要引用 ``StructuredFilter``，
     # 而 ``ports.py`` 从 ``container.py`` 可达，于是那个模块「被引用过」了。
