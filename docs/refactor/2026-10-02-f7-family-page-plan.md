@@ -285,4 +285,62 @@ props `{ person, relationships, onClose, onChanged }`。
 
 ## 6. 施工记录
 
-（施工时逐条填）
+### 6.1 交付
+
+| 提交 | 内容 |
+|---|---|
+| `43d247c` | 前端主体：`/people` 三个 tab、名录、手写 SVG 图谱、详情侧栏、`family.css` |
+| `65bf87e` | 修「全部相册」下看得见改不了（后端 `family_graph_people` 用错 scope）+ 对抗性审查确认的四条 |
+| `aa030f5` | 补图谱 tab 的覆盖（把四段数学抽成纯函数）+ 裸 NUL 字节门禁 |
+
+`make web-check`：**61 passed**（原 38 → 49 → 61）。
+
+### 6.2 实测（§0 的依据）
+
+在 153 真实库（53 张照片 / 17 条事件 / 9 个实体）上跑 `POST /family-graph/runs`：
+
+```
+8 人 · membership 全 unknown · confidence 全 0.0 · relationships 0 条
+```
+
+复现模型调用确认是模型的原始回复。扫全部 53 条观察的 36 个亲属词，
+只命中「合影」2 /「家庭成员」1 /「朋友」1，**「父亲/母亲/儿子/女儿/丈夫/妻子/
+夫妻/家人/婚礼」零命中**——数据侧证实模型判 unknown 是对的。
+
+对照：1.0 自己的库里有 9 条模型推出的亲子关系（confidence 0.85–0.9）与
+34 条 `family` 归属，作用域 `family-plan-album3-video10-20260914`。链路是通的。
+
+**顺带修掉的既有缺陷**（`b067ba1`，不在 F7 范围但是实测的产物）：
+2.0 的家庭图谱证据查询漏读了 `place` / `event_type` / `objects_json` /
+`clothing_json`（实测 46/53、46/53、46/53、33/53 行有值），1.0 是把这些拼进
+`canonical_json` 喂模型的。已补，7/7 定点变异被杀。详见 S7 计划书 §8.5。
+
+### 6.3 偏离登记
+
+| # | 偏离 | 理由 |
+|---|---|---|
+| 1 | `client.ts` 多一个 `faceInstanceCropUrl(id)` | 该接口不返回 `crop_url`，路径只能前端拼；放 client 里做单一来源，不在组件里散拼 |
+| 2 | `PersonDetail` 多 `people` / `relateTarget` 两个 prop；`useFamilyGraph` 多返回 `error` | 前者用于显示「对方是谁」与拖拽预选，后者给页面错误条。四契约签名本身未改 |
+| 3 | 「合并相册范围」「重新推断」的入口做在 `PeoplePage` 里 | §1⑤ 把这两个列入写范围、§3.6 给了 client 函数，但 §4 没有对应组件契约 |
+| 4 | 把 `fit` / `zoomAt` / `screenToWorld` / `worldToScreen` / `nearestNodeId` 抽成 `graphLayout.ts` 的纯函数 | 它们原本埋在事件处理里，零覆盖。**公式与常量逐字未动**，组件改为调用 |
+| 5 | 图谱自带本地搜索框而非从 props 收 `query` | §4 要求「搜索命中高亮」，但 props 契约里没有 query |
+
+### 6.4 已知未修（留给后续）
+
+按对抗性审查的排序，这些**不拦「打开看一眼」，但都成立**：
+
+1. 触屏：`.graph-canvas { touch-action: none }` 挡掉滚动，且只监听 `wheel`，
+   没有捏合缩放——手机上图谱只能平移不能缩放。
+2. 拖拽建关系时每个 `pointermove` 都 `setRelatePreview`，全量重渲染节点+边+标签。
+   缩放的路径已经做到「只改 transform」，拖拽这条没有。
+3. 拖拽落点读 `relatePreviewRef`（passive effect 里写），与原生 `pointerup`
+   没有顺序保证——快速划过 B、C 后在 C 松手可能连到 B。**未复现，疑似。**
+4. 辈分传播遇环不收敛（`graphLayout.ts` 的迭代上限取人数，是兜底不是正确处理）。
+   1.0 同样没有处理，属照搬其缺陷。
+5. 层数多时行距被压到节点重叠（`rowGap = min(固定值, 可用高度/(层数-1))`）。
+6. 对比度：`.graph-hint`（`--faint` 对白底 ≈2.6:1）、`.membership-badge.unknown`
+   （≈4.3:1）均低于 AA 的 4.5:1，且都是 10px。
+7. 详情侧栏无焦点管理（不移焦点、无 Esc、无焦点陷阱）；tab 只做了半个 WAI-ARIA。
+8. 「改关系」只能删了重建（裁决⑤ 列的「改」没有独立路径）。
+9. 空画像无法清空——后端 `_required` 硬拒空串，前端只能挡住提交并说明。
+
