@@ -23,7 +23,7 @@ from sentrix.application.retrieval.retrieve_metadata import RetrieveMetadata
 from sentrix.application.retrieval.retrieve_text_ann import RetrieveTextAnn
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
-from sentrix.domain.assistant.models import PersonProfile
+from sentrix.domain.assistant.models import PersonProfile, PersonRelationship
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType
 from sentrix.domain.places.aliases import EMPTY_ALIASES
 from sentrix.domain.retrieval import scheme
@@ -153,7 +153,21 @@ def toolbox(migrations_ready_db, tmp_path):
         ),
         assets=assets,
         result_sets=result_sets,
-        people=StubPeople({"妈妈": PersonProfile(name="妈妈", family_role="母亲", confirmed=True)}),
+        people=StubPeople(
+            {
+                "妈妈": PersonProfile(
+                    name="妈妈",
+                    confirmed=True,
+                    membership="family",
+                    membership_source="user_override",
+                    summary="家庭归属：family；近期记忆：一起在公园野餐。",
+                    relationships=(PersonRelationship(predicate="母亲", other_name="小明", source="model"),),
+                ),
+                # **一条关系都没有的人**：实测那份 53 张照片的相册就是 8 个人 0 条关系，
+                # 所以这不是边角情形，是常态。他查得到，只是没关系数据。
+                "成员一": PersonProfile(name="成员一", confirmed=True),
+            }
+        ),
         memory_facts=QueryMemoryFacts(
             structured=SqliteStructuredQueryRepository(
                 migrations_ready_db,
@@ -318,12 +332,53 @@ def test_delivery_requires_a_known_result_set(toolbox):
 # ---- get_person_profile -----------------------------------------------------
 
 
-def test_a_known_person_returns_the_family_role(toolbox):
+def test_a_known_person_returns_membership_and_relationships(toolbox):
+    """S7c 之前这里只回 ``{"person", "family_role"}``——``family_role`` 是 S3 的占位。"""
     outcome = run(toolbox, "get_person_profile", person="妈妈")
 
     assert outcome.ok
-    assert outcome.model_visible == {"person": "妈妈", "family_role": "母亲"}
+    assert outcome.model_visible == {
+        "person": "妈妈",
+        "membership": "family",
+        "membership_source": "user_override",
+        "summary": "家庭归属：family；近期记忆：一起在公园野餐。",
+        "relationships": [{"predicate": "母亲", "other_name": "小明", "source": "model"}],
+    }
     assert outcome.blocks is None
+    # 「有几条关系」是**内部**投影里的量，不给模型看——给了它会拿数量当答案。
+    assert outcome.observation["relationship_count"] == 1
+    assert "relationship_count" not in outcome.model_visible
+
+
+def test_a_person_with_no_relationships_is_still_found(toolbox):
+    """**没有关系 ≠ 查不到这个人。** 实测那份相册就是 8 个人 0 条关系，如果这里回
+    ``found: False``，助手会对着一个明明存在的人说「查不到」。
+
+    定点变异：把 ``relationships`` 为空当成查不到（走 gap 分支），这条红。
+    """
+    outcome = run(toolbox, "get_person_profile", person="成员一")
+
+    assert outcome.ok
+    assert "found" not in outcome.model_visible
+    assert outcome.model_visible["person"] == "成员一"
+    assert outcome.model_visible["relationships"] == []
+    assert outcome.model_visible["membership"] == "unknown"
+    assert outcome.blocks is None
+
+
+def test_the_person_tool_description_no_longer_denies_relationships(toolbox):
+    """工具描述是**给模型看的说明书**，写错就是让模型去问拿不到的东西、或者
+    明明有却说没有。S7c 之前那句「人物关系…尚未建立」现在是假的。
+
+    定点变异：把描述改回旧的，这条红。
+    """
+    from sentrix.domain.assistant.tools import TOOLS_BY_NAME
+
+    description = TOOLS_BY_NAME["get_person_profile"].description
+
+    assert "尚未建立" not in description.split("常去地点")[0]
+    assert "relationships" in description
+    assert "家庭归属" in description
 
 
 def test_an_unknown_person_returns_a_gap_and_blocks_the_requirement(toolbox):

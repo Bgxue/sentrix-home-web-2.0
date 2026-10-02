@@ -116,7 +116,12 @@ class ResultSetRepository(Protocol):
 
 
 class PersonDirectory(Protocol):
-    """已确认人物的目录。S3 的实现只能回答「有没有这个人、家庭角色是什么」。"""
+    """已确认人物的目录：有没有这个人、他在家庭图谱里的归属与关系。
+
+    ``membership`` 缺省是 ``"unknown"``（1.0 ``db.py:2875`` 的 ``or "unknown"``）——
+    **没有归属行与「归属不明」是同一件事**，不区分。``relationships`` 为空数组同理：
+    查到了人但没有关系数据，不是「查不到这个人」。
+    """
 
     def lookup(self, name: str, scope_id: str) -> PersonProfile | None: ...
 

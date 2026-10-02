@@ -522,7 +522,13 @@ def test_batch_confirm_with_no_items_is_422(identity_client: TestClient):
 
 
 def test_the_container_directory_finds_a_confirmed_person(identity_client: TestClient):
-    """S3 的 ``NoIdentityDirectory`` 常驻 ``None``；S5 换上真实实现后这里必须查得到。"""
+    """S3 的 ``NoIdentityDirectory`` 常驻 ``None``；S5 换上真实实现后这里必须查得到。
+
+    **S7c 起 ``family_role`` 不在档案里了**：它是 2.0 在 S3 的占位，1.0 的 digest
+    根本不返回这个键——1.0 返回的是 ``membership``（家庭图谱那条轴）。两套口径在
+    1.0 的 298 对配对里一致率 0，不是一回事。``entities.family_role`` 列本身还在，
+    ``GET /api/v1/people/{id}`` 照旧返回它。
+    """
     add_entity(identity_client, "ent_1", name="妈妈", status="confirmed", family_role="母亲")
     add_entity(identity_client, "ent_pending", name="待确认人物簇 · cluster_1")
 
@@ -530,9 +536,66 @@ def test_the_container_directory_finds_a_confirmed_person(identity_client: TestC
 
     profile = directory.lookup("妈妈", HOME)
     assert profile is not None
-    assert (profile.name, profile.family_role, profile.confirmed) == ("妈妈", "母亲", True)
+    assert (profile.name, profile.confirmed) == ("妈妈", True)
+    # 没有家庭图谱行 → 归属按 1.0 ``db.py:2875`` 的 ``or "unknown"`` 报 unknown，
+    # **不是**空串、也不是「查不到这个人」。
+    assert profile.membership == "unknown"
+    assert profile.membership_source == ""
+    assert profile.relationships == ()
     assert directory.lookup("待确认人物簇 · cluster_1", HOME) is None
     assert directory.lookup("", HOME) is None
+
+
+def test_the_directory_reports_membership_portrait_and_relationships(identity_client: TestClient):
+    """S7c 的正题：家庭图谱里那三张表要能经人物目录答出来。
+
+    语料直接走容器里那个仓储的**写方法**（不是手插 SQL）——那样夹具与生产同一个口径，
+    仓储的写语义变了这里也跟着变，不会造出一个生产里不存在的形状。
+    """
+    add_entity(identity_client, "ent_mom", name="妈妈", status="confirmed")
+    family = identity_client.app.state.container.family_graph_repository
+    family.set_membership(HOME, "ent_mom", "family", source="user_override")
+    family.write_portrait(HOME, "ent_mom", "家庭归属：family；近期记忆：一起在公园野餐。", source="model")
+
+    profile = identity_client.app.state.container.person_directory.lookup("妈妈", HOME)
+
+    assert profile is not None
+    assert profile.membership == "family"
+    assert profile.membership_source == "user_override"
+    assert profile.summary == "家庭归属：family；近期记忆：一起在公园野餐。"
+
+
+def test_a_relationship_appears_on_both_ends_with_its_own_predicate(identity_client: TestClient):
+    """**一段关系在库里是两行，而两个人各自该看到自己那一面。**
+
+    ``set_relationship`` 一次写正向 + 反向（``母亲`` 与 ``儿子``）。所以：
+    - 查妈妈 → ``母亲``（她是对方的母亲），恰好**一条**，不是两条；
+    - 查小明 → ``儿子``（他是对方的儿子），也恰好一条。
+
+    **这一条同时钉住 1.0 的一个缺陷在 2.0 不成立。** 1.0 ``db.py:2852-2858`` 只收
+    ``subject == person`` 的出边，而那边一段关系只按一个方向存——于是查「儿子」的
+    档案拿不到母亲。2.0 双向存储，同一个过滤拿到的是完整的关系集。上面第二条断言
+    就是那个反例：把双向存储改成单向，它会红。
+
+    定点变异：去掉 ``_relationships`` 里那句 ``subject_entity_id != entity_id`` 的
+    过滤 → 妈妈会拿到两条（``母亲`` + ``儿子``），第一条断言红。
+    """
+    add_entity(identity_client, "ent_mom", name="妈妈", status="confirmed")
+    add_entity(identity_client, "ent_son", name="小明", status="confirmed")
+    family = identity_client.app.state.container.family_graph_repository
+    family.set_relationship(HOME, "ent_mom", "母亲", "ent_son", "儿子", source="model")
+
+    directory = identity_client.app.state.container.person_directory
+
+    mom = directory.lookup("妈妈", HOME)
+    assert mom is not None
+    assert [(item.predicate, item.other_name, item.source) for item in mom.relationships] == [
+        ("母亲", "小明", "model")
+    ]
+
+    son = directory.lookup("小明", HOME)
+    assert son is not None
+    assert [(item.predicate, item.other_name) for item in son.relationships] == [("儿子", "妈妈")]
 
 
 def test_the_directory_answers_by_alias(identity_client: TestClient):

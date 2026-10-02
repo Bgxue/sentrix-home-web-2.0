@@ -236,16 +236,41 @@ class TurnRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class PersonProfile:
-    """一位已确认人物的档案。S3 只有家庭角色这一格，其余在 S5 落地。
+class PersonRelationship:
+    """此人是对方的什么。1.0 ``db.py:2855-2859`` 那三个键，一个不多一个不少。
 
-    1.0 的 ``get_person_profile`` 返回 membership / relationships / patterns /
-    recent_events / claims / profile_text 七块（``tools.py:2665-2678``），全部来自
-    entities / person_patterns / person_event_memory / semantic_claims 四张表——那些表
-    在 2.0 属于 S5。**工具的描述因此必须同步收窄**：1.0 的描述承诺了「常去地点/常做
-    活动/常同行、近期事件与语义声明」，照抄到 S3 就是让模型去问一堆拿不到的数据。
+    ``predicate`` 读作「**此人**是 other_name 的 predicate」。所以只收此人为 subject
+    的边——方向那件事在 ``EntityPersonDirectory._relationships`` 里细说。
+    """
+
+    predicate: str
+    other_name: str
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonProfile:
+    """一位已确认人物的档案。
+
+    **2.0 现在给得出的是 1.0 digest 的一个子集。** 1.0 ``db.py:2840-2889`` 返回 12 个键，
+    这里对应的是 S7 家庭图谱带来的那几格：``membership`` / ``membership_source`` /
+    ``summary``（画像文本）/ ``relationships``。
+
+    还差的那些（``preference_summary_zh`` / ``activity_summary_zh`` / ``place_summary_zh``
+    / ``appearance_summary_zh`` / ``patterns`` / ``recent_events`` / ``claims``）来自
+    person memory / 语义画像 / claims 表，**属 S5**，2.0 还没有。
+    **工具的描述必须与这里一致**：既不承诺拿不到的，也不否认已经拿得到的。
+
+    **``family_role`` 不在这里了。** 1.0 的 digest 根本没有这个键——它是 2.0 在 S3 的
+    占位（那时家庭图谱还不存在）。两者也不是一回事：1.0 真实库里 298 对
+    「``family_role`` × ``membership``」的配对**一致率 0**，是一条自由文本轴
+    与一条三值分类轴。``entities.family_role`` 列本身保留，``GET /api/v1/people/{id}``
+    照旧返回它，只有助手工具不再拿它当家庭归属。
     """
 
     name: str
-    family_role: str
     confirmed: bool
+    membership: str = "unknown"
+    membership_source: str = ""
+    summary: str = ""
+    relationships: tuple[PersonRelationship, ...] = ()

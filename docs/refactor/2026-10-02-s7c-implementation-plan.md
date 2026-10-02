@@ -152,6 +152,63 @@ class PersonProfile:
 
 ---
 
-## 5. 施工记录
+## 5. 施工记录（2026-10-02 完成）
 
-（施工时逐条填）
+### 5.1 交付
+
+| 提交 | 内容 |
+|---|---|
+| `513c9bf` | 计划书 |
+| 本提交 | 实现 + 测试 + 收口 |
+
+改动 6 个源文件：`domain/assistant/models.py`（`PersonProfile` 换字段 + 新增
+`PersonRelationship`）、`domain/assistant/ports.py`（端口 docstring）、
+`application/identity/person_directory.py`（接 `FamilyGraphRepository` 富化）、
+`application/assistant/tools.py`（`_person` 两份投影）、
+`domain/assistant/tools.py`（工具描述）、`bootstrap/container.py`（装配）。
+
+**`api/routes/assistant.py` 没动**——它传的是 `container.person_directory`，
+目录的装配在容器里，所以接线只改容器那一行。
+
+### 5.2 定点变异 9/9 被杀
+
+M1 关系不过滤方向 · M2 方向判反 · M3 关系里给 id 而不是名字 ·
+M4 没有归属行时报空串 · M5 画像不取 · M6 没有关系就当作查不到 ·
+M7 关系条数也发给模型 · M8 画像文本不给模型 · M9 工具描述改回旧版。
+
+**M6 我第一次打错了地方**：改的是 `observation["found"]`，而那条断言看的是
+`model_visible`——所以它「存活」了。真实的变异是改 `_person` 的 gap 分支条件
+（`or not profile.relationships`）。**变异存活的第一种成因又出现一次：打错了靶子。**
+
+### 5.3 真实数据实测（153）
+
+**目录层**（只读）：
+
+```
+成员一: membership='unknown' src='model' 画像=「家庭归属：unknown；近期记忆：…」关系数=0
+成员二: membership='unknown' src='model' 画像=「…」关系数=0
+隔壁老王: None（查不到）
+```
+
+**助手回合**（真跑了一次完整问答，问「成员一和成员二是什么关系？他们算家人吗？」）：
+
+事件流里 `get_person_profile` **被调用两次**（成员一、成员二各一次，
+`agent_turn_events` 第 3、5 步），回答是：
+
+> 在一张照片（photo_2）中，同时出现了"成员一"和"成员二"，但他们的家庭归属
+> （membership）均显示为"unknown"（未知），且他们的关系图谱（relationships）为空。
+> 因此，仅凭现有数据，无法确认他们是否算作家人……
+
+`membership` 与 `relationships` 两个词都来自这个工具的新投影，而且它**如实说了没有**
+而不是编造——这正是 S7b2 实测里那份「53 张照片零亲属信号」的数据该得到的答案。
+
+`termination_reason` 是 `answered_with_gap`（与 2026-09-25 那条「没找到人物照片」的
+历史回合同一个值），属正常收尾。
+
+### 5.4 未做
+
+- **没有端到端的行为测试**。1.0 同样没有（全仓只有一条 store 层用例，Gold Set 里
+  那条人物 case 引用的还是 `agent_runtime` 里已不存在的 `get_person_memory`）。
+  2.0 这一段补到契约/工具层为止，上面那次助手回合是**人工实跑**，没有变成回归网。
+  要补的话得先有一个能稳定复现的模型桩，那是另一件事。
+- `preference_summary` / `patterns` / `recent_events` / `claims` 仍缺，属 S5。

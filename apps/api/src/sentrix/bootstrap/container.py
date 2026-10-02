@@ -223,6 +223,9 @@ class Container:
         # 对话与视觉是**同一个端点**（8100），所以共用同一个探测。分两个实例会让同一个
         # 进程里存两份可能不一致的答案，还要多探一轮。
         served_model = ServedModel(settings.vlm_base_url)
+        # 家庭图谱仓储被两个消费方用：容器自己的字段，以及人物目录——目录要靠它回答
+        # 「这个人的归属与关系」（S7c）。拿在手上传两次，而不是就地 new 两个实例。
+        family = SqliteFamilyGraphRepository(database, entities)
         return cls(
             settings=settings,
             database=database,
@@ -264,7 +267,7 @@ class Container:
             person_preview_renderer=PillowPersonPreviewRenderer(),
             moment_repository=SqliteMomentRepository(database),
             relationship_repository=SqliteRelationshipRepository(database),
-            family_graph_repository=SqliteFamilyGraphRepository(database, entities),
+            family_graph_repository=family,
             portrait_repository=SqlitePortraitRepository(database),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,
@@ -284,7 +287,7 @@ class Container:
             conversation_repository=SqliteConversationRepository(database),
             turn_repository=SqliteTurnRepository(database),
             result_set_repository=SqliteResultSetRepository(database),
-            person_directory=EntityPersonDirectory(entities=entities),
+            person_directory=EntityPersonDirectory(entities=entities, family=family),
             turn_event_broker=InProcessTurnEventBroker(),
         )
 

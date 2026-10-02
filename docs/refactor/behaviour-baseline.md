@@ -421,3 +421,34 @@
 > **`GET /family-graph` 的 `run` 键 b1 不返回。** 1.0 的响应里有它，但 b1 阶段**没有任何
 > 东西会创建 run**（自动触发与手动路由都归 S7b2）——恒 `null` 读起来像「确实没跑过」，
 > 而真相是「b1 还没有会跑的路径」。S7b2 连创建路径一起补。
+
+
+### 助手引用家庭图谱（S7c · 2026-10-02）
+
+助手工具 `get_person_profile` 从「只回 `family_role`」扩到家庭图谱那三张表的实际内容。
+**下面这些值同样只存在于 1.0 的代码里、无文档。**
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 工具新增的四个数据键 | `membership` / `membership_source` / `summary` / `relationships` | 1.0 `db.py:2875-2881` |
+| `membership` 缺省 | `"unknown"`——**没有归属行与「归属不明」是同一件事** | 1.0 `db.py:2875` 的 `or "unknown"` |
+| `membership_source` 缺省 | `""` | 1.0 `db.py:2876` |
+| `summary` 来自 | `family_person_portraits.portrait_text`（1.0 那格叫 `summary_zh`） | 1.0 `db.py:2877` |
+| 关系的三个键 | `predicate` / `other_name` / `source`，一个不多一个不少 | 1.0 `db.py:2855-2859` |
+| `other_name` 兜底 | `未命名成员` | 1.0 `db.py:2857` |
+| 关系方向 | **只收此人为 `subject` 的边**——`predicate` 才是「此人是对方的什么」 | 1.0 `db.py:2852-2858` |
+| **`family_role` 不再出现在工具结果里** | 1.0 的 digest **全文没有这个键**；它是 2.0 在 S3 的占位。`entities.family_role` 列保留，`GET /people/{id}` 照旧返回 | 1.0 `db.py:2840-2889` |
+
+**1.0 的方向过滤是残的，2.0 因为双向存储反而不残。** 1.0 一段关系只按一个方向存，
+配上「只收出边」之后，查「女儿」的档案**拿不到父亲**——而 1.0 的测试恰好只测了
+父为 subject 的方向，把这个缺口盖住了。2.0 的 `set_relationship` 一次写正向 + 反向
+两行，所以同一句过滤拿到的是**完整**的关系集。契约测试
+`test_a_relationship_appears_on_both_ends_with_its_own_predicate` 钉的就是这件事：
+同一条边，妈妈看到 `母亲`、小明看到 `儿子`，各恰好一条。
+
+**「没有关系」不是「查不到这个人」。** `relationships` 为空数组时 `found` 仍为真。
+实测那份 53 张照片的相册就是 8 个人 0 条关系——把空关系当成查不到，助手会对着一个
+明明存在的人说找不到。
+
+**这一格与 `entities.family_role` 是两条不同的轴。** 1.0 真实库里 298 对
+「`family_role` × `membership`」的配对**一致率 0**：一条是自由文本角色，一条是三值分类。

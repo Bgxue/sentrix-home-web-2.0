@@ -622,8 +622,29 @@ class AssistantToolbox:
                 blocks=EvidenceType.PERSON_PROFILE,
             )
         return ToolOutcome(
-            observation={"person": profile.name, "found": True, "family_role": profile.family_role},
-            model_visible={"person": profile.name, "family_role": profile.family_role},
+            # 两份投影的差集就是这个工具的信息边界（见模块 docstring）：内部那份多一个
+            # 「有几条关系」——那是给账本与门禁看的量，模型不需要它，给了反而会拿数量
+            # 当答案。关系本身逐条进 model_visible，因为模型要答的就是「谁是谁的谁」。
+            observation={
+                "person": profile.name,
+                "found": True,
+                "membership": profile.membership,
+                "relationship_count": len(profile.relationships),
+            },
+            model_visible={
+                "person": profile.name,
+                "membership": profile.membership,
+                "membership_source": profile.membership_source,
+                "summary": profile.summary,
+                "relationships": [
+                    {
+                        "predicate": item.predicate,
+                        "other_name": item.other_name,
+                        "source": item.source,
+                    }
+                    for item in profile.relationships
+                ],
+            },
         )
 
 
