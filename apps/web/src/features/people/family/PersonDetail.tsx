@@ -177,7 +177,15 @@ export function PersonDetail({
               onChange={(event) => setPortrait(event.target.value)}
             />
           </label>
-          <button type="submit" className="button ghost small" disabled={busy}>
+          {/* 后端对空画像文本是硬 400（`routes/family.py` 的 `_required`）。与其让用户
+              撞上一条「请改一下填写的内容再试」——他想做的就是清空，没有东西可改——
+              不如在这里挡住，并把原因写在他看得见的地方。**清空画像后端目前不支持。** */}
+          <button
+            type="submit"
+            className="button ghost small"
+            disabled={busy || portrait.trim() === ""}
+            title={portrait.trim() === "" ? "画像不能为空" : undefined}
+          >
             保存画像
           </button>
         </form>

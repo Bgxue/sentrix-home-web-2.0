@@ -107,7 +107,18 @@ export function PeoplePage() {
         title="把相册里的人，连成清楚的关系。"
         description="关系默认来自模型判断；你的修改会直接写入数据库，并永久优先于后续推断。"
         action={
-          <button type="button" className="button primary" disabled={busy} onClick={() => void handleRun()}>
+          // **「全部相册」下不能推断。** 后端 `POST /family-graph/runs` 对空 scope 是硬 400
+          // （`routes/family.py` 的 `_required`），一次 run 也本来就只针对一个 scope。
+          // 不禁用的话，新用户默认正好落在这个范围上，点一下换来一条无从下手的
+          // 「请求不成立：scope_id is required。请改一下填写的内容再试」——没有东西可改。
+          // GET 用同一个空 scope 返回 200，页面看着一切正常，所以这个失败格外迷惑人。
+          <button
+            type="button"
+            className="button primary"
+            disabled={busy || scopeId === ""}
+            title={scopeId === "" ? "先在上方的相册切换器里选一册" : undefined}
+            onClick={() => void handleRun()}
+          >
             {busy ? "正在推断…" : "重新推断关系"}
           </button>
         }

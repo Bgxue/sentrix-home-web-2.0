@@ -7,7 +7,7 @@
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../shared/api/client", async (importOriginal) => {
@@ -87,6 +87,12 @@ function relationshipLine(
   };
 }
 
+/** 把 router 当前的 search 暴露到 DOM 上——MemoryRouter 不写 `window.location`，
+ *  要断言「详情落没落到 URL 上」只能从 router 内部读。 */
+function LocationProbe() {
+  return <span data-testid="location-search">{useLocation().search}</span>;
+}
+
 function mount(graph: FamilyGraph = realShapeGraph()) {
   vi.mocked(client.listMemorySpaces).mockResolvedValue([
     { id: "album1", name: "第一册", kind: "benchmark", status: "active" },
@@ -99,6 +105,7 @@ function mount(graph: FamilyGraph = realShapeGraph()) {
   return render(
     <MemoryRouter>
       <ScopeProvider>
+        <LocationProbe />
         <PeoplePage />
       </ScopeProvider>
     </MemoryRouter>,
@@ -131,11 +138,19 @@ describe("/people 名人录（F7 §0 真实形状）", () => {
       expect(container.querySelectorAll("[data-person-id]")).toHaveLength(8);
     });
 
-    fireEvent.click(container.querySelectorAll("[data-person-id]")[0]);
+    const card = container.querySelectorAll("[data-person-id]")[0];
+    const clickedId = card.getAttribute("data-person-id");
+    fireEvent.click(card);
 
     // 详情是一个 aside，不再多一条路由；组件的取数/渲染都走查询参数
     expect(await screen.findByRole("complementary")).toBeTruthy();
     expect(container.querySelectorAll(".person-detail")).toHaveLength(1);
+
+    // **裁决③（可刷新 / 可分享 / 能后退）全靠下面这一句。** 只断言「有个 aside」的话，
+    // 把 `setSearchParams` 换成纯本地 state 也照样绿——而那时刷新页面就丢了详情。
+    // 两件事一起断言：**URL 里有人**，且**是被点的那一个**（换成别人也得红）。
+    expect(clickedId).not.toBeNull();
+    expect(screen.getByTestId("location-search").textContent).toContain(`person=${clickedId}`);
   });
 
   it("一次建关系在库里是两行，计数只算一条", async () => {

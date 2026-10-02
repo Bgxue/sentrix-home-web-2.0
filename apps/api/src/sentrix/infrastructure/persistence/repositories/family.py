@@ -316,17 +316,23 @@ class SqliteFamilyGraphRepository:
             for entity in self._entities.list_entities(scope_id=scope_id):
                 if entity.entity_type != "person":
                     continue
+                # **用实体自己的 scope，不是外层那个查询 scope。**
+                # 「全部相册」时外层传的是空串（`graph_scope_ids("")` → `[""]`），而
+                # `list_entities(scope_id="")` 返回的是**所有** scope 的实体。拿空串当这些
+                # 人的 scope 会同时错两处：`get_effective_membership("")` 查不到行 ⇒
+                # 归属恒为 `null`；前端再拿这个空 scope 写回 ⇒ 400。实体自己知道它在哪一册。
+                owner_scope = entity.scope_id or scope_id
                 with self._database.connect() as connection:
                     avatar = connection.execute(self._AVATAR_SQL, (entity.id,)).fetchone()
                     media = connection.execute(self._MEDIA_SQL, (entity.id,)).fetchall()
                     count = connection.execute(self._APPEARANCE_SQL, (entity.id,)).fetchone()
-                    membership = self.get_effective_membership(scope_id, entity.id)
-                    portrait = self.get_active_portrait(scope_id, entity.id)
+                    membership = self.get_effective_membership(owner_scope, entity.id)
+                    portrait = self.get_active_portrait(owner_scope, entity.id)
                     pending = entity.status == ENTITY_STATUS_PENDING
                     people.append(
                         FamilyPersonProjection(
                             id=entity.id,
-                            scope_id=scope_id,
+                            scope_id=owner_scope,
                             display_name=(
                                 FAMILY_PENDING_DISPLAY_NAME
                                 if pending or not entity.canonical_name

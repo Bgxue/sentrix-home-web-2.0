@@ -305,7 +305,10 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
           width="100%"
           height="100%"
           onPointerDown={handlePointerDown}
-          role="application"
+          // 不是 `application`：那个角色会让读屏交出虚拟光标、把按键直通页面，
+          // 而这图里没有任何可聚焦元素、也没有键盘处理——读屏用户会被推进应用
+          // 模式然后卡住。它的定位是「一张可看的图」，`img` 才对。
+          role="img"
           aria-label="家庭关系图"
         >
           <g ref={groupRef}>
