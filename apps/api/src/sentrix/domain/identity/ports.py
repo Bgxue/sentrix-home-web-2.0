@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sentrix.domain.identity.family import (
+    FamilyAnalysisRunRecord,
     FamilyMembershipRecord,
     FamilyPersonProjection,
     FamilyPortraitRecord,
@@ -1155,6 +1156,51 @@ class FamilyGraphRepository(Protocol):
         照搬这个缺口，别顺手补。
 
         ``source='model'`` 且当前行 ``locked`` → 不写，返回当前行。
+        """
+        ...
+
+    # ---- 模型边的清场 + 运行 ----------------------------------------------------
+
+    def supersede_model_relationships(self, scope_id: str) -> None:
+        """把本 scope 里**模型写过且未锁定**的有效边全部置 ``superseded``。
+
+        **三重过滤** ``state='effective' AND source='model' AND locked=0``——
+        每一轮推断开始前清场，**用户写的边一条都不动**。少任何一个条件都会把用户的边
+        也清掉，而且不报错。1.0 ``db.py:5782``。
+        """
+        ...
+
+    def create_run(self, scope_id: str, config: Mapping[str, object]) -> FamilyAnalysisRunRecord:
+        """开一次推断运行：``status`` / ``current_stage`` 都是 ``queued``，``stats`` 空。
+
+        ``config`` 是**这次为什么跑**（1.0 里有 ``trigger_type`` = ``ingest`` /
+        ``user_rerun``，以及 ``input_mode``）。它是留痕，不是判据。
+        """
+        ...
+
+    def get_run(self, run_id: str) -> FamilyAnalysisRunRecord | None: ...
+
+    def latest_run(self, scope_id: str) -> FamilyAnalysisRunRecord | None:
+        """最近一次运行，按 ``created_at DESC``——**不是 ``updated_at``**。
+
+        触发去抖读它的 ``stats['event_watermark']``：完成时写入当时的事件数，
+        下次触发时事件数没涨就不跑。**失败时 stats 保持空**，于是 watermark 缺失、
+        下次一定重跑——那是有意的。
+        """
+        ...
+
+    def update_run(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        stage: str | None = None,
+        stats: Mapping[str, object] | None = None,
+        error: str | None = None,
+    ) -> FamilyAnalysisRunRecord | None:
+        """推进一次运行。**``None`` 表示「不改这一项」**，不是「写成 NULL」——
+        所以 ``error`` 一旦写上就清不掉（1.0 同样做不到）。``status='completed'`` 时
+        额外写 ``completed_at``。
         """
         ...
 

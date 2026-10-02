@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 from sentrix.domain.identity.family import (
@@ -40,6 +40,7 @@ from sentrix.domain.identity.family import (
     STATE_EFFECTIVE,
     STATE_RETRACTED,
     STATE_SUPERSEDED,
+    FamilyAnalysisRunRecord,
     FamilyMembershipRecord,
     FamilyPersonProjection,
     FamilyPortraitRecord,
@@ -50,11 +51,11 @@ from sentrix.domain.identity.models import ENTITY_STATUS_PENDING
 from sentrix.domain.identity.ports import EntityRepository
 from sentrix.infrastructure.persistence.database import Database
 
-# 运行（``family_analysis_runs``）的四个方法归 S7b2——它们的调用者是
-# ``FamilyGraphService``，b1 里没有调用者。``_row_to_run`` 与 ``_RUN_COLUMNS``
-# 也就一并不落在这份文件里（「到达不了的分支不搬」）。
-
 # ``r.*`` 之外的别名只在读侧用；单条读取用这张清单就够。
+_RUN_COLUMNS = (
+    "id, scope_id, status, current_stage, config_json, stats_json, error,"
+    " created_at, updated_at, completed_at"
+)
 _MEMBERSHIP_COLUMNS = (
     "id, scope_id, entity_id, membership, source, confidence, evidence_refs_json,"
     " inference_run_id, state, locked, revision, supersedes_id, created_at, updated_at"
@@ -143,6 +144,30 @@ def _row_to_relationship(row: sqlite3.Row) -> FamilyRelationshipRecord:
         supersedes_id=row["supersedes_id"],
         created_at=_timestamp(row["created_at"]),
         updated_at=_timestamp(row["updated_at"]),
+    )
+
+
+def _object(raw: object) -> Mapping[str, object]:
+    """解一个 ``*_json`` 列成对象。1.0 的 ``json.loads`` 解不开时回落 ``{}``。"""
+    try:
+        parsed = json.loads(str(raw) if raw is not None else "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _row_to_run(row: sqlite3.Row) -> FamilyAnalysisRunRecord:
+    return FamilyAnalysisRunRecord(
+        id=row["id"],
+        scope_id=row["scope_id"],
+        status=row["status"],
+        current_stage=row["current_stage"],
+        config=_object(row["config_json"]),
+        stats=_object(row["stats_json"]),
+        error=row["error"],
+        created_at=_timestamp(row["created_at"]),
+        updated_at=_timestamp(row["updated_at"]),
+        completed_at=_timestamp(row["completed_at"]),
     )
 
 
@@ -621,6 +646,83 @@ class SqliteFamilyGraphRepository:
                 (portrait_id,),
             ).fetchone()
         return _row_to_portrait(written) if written else None
+
+    # ---- 模型边的清场 + 运行 ----------------------------------------------------
+
+    def supersede_model_relationships(self, scope_id: str) -> None:
+        """1.0 ``db.py:5782-5790``。**先清场再推断**：这一句在 ``_persist`` 的最前面。
+
+        ``locked = 0`` 那半个条件挡的是「用户写过、但 source 恰好是 model」的行——
+        理论上不存在（写侧按 source 定 locked），但 1.0 写了这个条件，照搬。
+        """
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "UPDATE family_relationships SET state = ?, updated_at = ?"
+                " WHERE scope_id = ? AND state = ? AND source = ? AND locked = 0",
+                (STATE_SUPERSEDED, _now(), scope_id, STATE_EFFECTIVE, SOURCE_MODEL),
+            )
+
+    def create_run(self, scope_id: str, config: Mapping[str, object]) -> FamilyAnalysisRunRecord:
+        run_id = _new_id("family_run")
+        timestamp = _now()
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO family_analysis_runs"
+                " (id, scope_id, status, current_stage, config_json, stats_json,"
+                "  created_at, updated_at) VALUES (?, ?, 'queued', 'queued', ?, '{}', ?, ?)",
+                (run_id, scope_id, json.dumps(dict(config), ensure_ascii=False), timestamp, timestamp),
+            )
+        created = self.get_run(run_id)
+        if created is None:  # 刚写完就读不到只会是磁盘坏了
+            raise LookupError(f"family analysis run disappeared: {run_id}")
+        return created
+
+    def get_run(self, run_id: str) -> FamilyAnalysisRunRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                f"SELECT {_RUN_COLUMNS} FROM family_analysis_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return _row_to_run(row) if row else None
+
+    def latest_run(self, scope_id: str) -> FamilyAnalysisRunRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM family_analysis_runs WHERE scope_id = ? ORDER BY created_at DESC LIMIT 1",
+                (scope_id,),
+            ).fetchone()
+        return self.get_run(row["id"]) if row else None
+
+    def update_run(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        stage: str | None = None,
+        stats: Mapping[str, object] | None = None,
+        error: str | None = None,
+    ) -> FamilyAnalysisRunRecord | None:
+        """**字段名与列名不是一一对应**：``stage`` → ``current_stage``、
+        ``stats`` → ``stats_json``（要序列化）。1.0 用字典按顺序拼 SQL，这里照拼——
+        列的顺序与值的顺序必须一致，所以用 ``fields`` 的插入序对齐。
+        """
+        fields: dict[str, object] = {"updated_at": _now()}
+        if status is not None:
+            fields["status"] = status
+        if stage is not None:
+            fields["current_stage"] = stage
+        if stats is not None:
+            fields["stats_json"] = json.dumps(dict(stats), ensure_ascii=False)
+        if error is not None:
+            fields["error"] = error
+        if status == "completed":
+            fields["completed_at"] = _now()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                f"UPDATE family_analysis_runs SET {assignments} WHERE id = ?",
+                (*fields.values(), run_id),
+            )
+        return self.get_run(run_id)
 
     # ---- 跨 scope 的图 ---------------------------------------------------------
 

@@ -29,7 +29,7 @@ OTHER = "album2"
 
 @pytest.fixture
 def repo(migrations_ready_db: Database) -> dict[str, object]:
-    """两个空间 · 三个人物 · 一个地点。外键是开的，父数据按顺序落。"""
+    """两个空间 · 五个人物 · 一个地点（``HOME`` 三个、``OTHER`` 两个）。外键是开的。"""
     db = migrations_ready_db
     with db.connect() as connection, connection:
         for scope_id in (HOME, OTHER):
@@ -44,6 +44,7 @@ def repo(migrations_ready_db: Database) -> dict[str, object]:
             ("kid", HOME, "person", "小明"),
             ("west", HOME, "place", "西湖"),
             ("other_mom", OTHER, "person", "隔壁妈妈"),
+            ("other_dad", OTHER, "person", "隔壁爸爸"),
         ):
             connection.execute(
                 "INSERT INTO entities (id, scope_id, entity_type, canonical_name, status,"
@@ -325,3 +326,151 @@ def test_merging_is_cumulative_and_reuses_the_existing_graph(repo) -> None:
 def test_an_ungrouped_scope_is_its_own_graph(repo) -> None:
     """没并过图的 scope 返回**它自己一个**，不是空列表。"""
     assert repo["repo"].graph_scope_ids(HOME) == [HOME]
+
+
+# ---- 运行表与模型边的清场（S7b2 · T311） ------------------------------------------
+
+
+def test_a_new_run_is_queued_with_an_empty_stats_and_keeps_its_config(repo) -> None:
+    """新 run 的 ``status`` / ``current_stage`` 都是 ``queued``、``stats`` 空。
+
+    ``stats`` 空**不是**没写——它是「还没跑完」的唯一标志：完成时才会写进
+    ``event_watermark``，而触发去抖读的正是它。失败时它也保持空，于是下次一定重跑。
+    """
+    run = repo["repo"].create_run(HOME, {"trigger_type": "ingest", "input_mode": "semantic_text_only"})
+
+    assert (run.status, run.current_stage) == ("queued", "queued")
+    assert dict(run.stats) == {}
+    assert run.config["trigger_type"] == "ingest"
+    assert run.error is None
+    assert run.completed_at is None
+    assert repo["repo"].get_run(run.id).id == run.id
+
+
+def test_latest_run_picks_by_created_at_not_updated_at(repo) -> None:
+    """``ORDER BY created_at DESC``——**不是 ``updated_at``**。
+
+    1.0 就是按 ``created_at`` 排的。夹具造一个「时间更早、但后来被更新过」的旧 run：
+    按 ``updated_at`` 排会选它，按 ``created_at`` 排会选新的那个。
+
+    定点变异：把排序键换成 ``updated_at``，这条变红。
+    """
+    old = repo["repo"].create_run(HOME, {"trigger_type": "ingest"})
+    # 把旧 run 的 created_at 推到很早，再把它的 updated_at 推到很晚。
+    with repo["db"].connect() as connection, connection:
+        connection.execute(
+            "UPDATE family_analysis_runs SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00", old.id),
+        )
+    new = repo["repo"].create_run(HOME, {"trigger_type": "user_rerun"})
+
+    assert repo["repo"].latest_run(HOME).id == new.id
+
+
+def test_latest_run_is_none_for_a_scope_that_never_ran(repo) -> None:
+    assert repo["repo"].latest_run(HOME) is None
+
+
+def test_updating_a_run_maps_stage_to_the_column_and_writes_completed_at(repo) -> None:
+    """``stage`` → ``current_stage``、``stats`` → ``stats_json``（要序列化）。
+
+    名字不是一一对应的，而写成 ``stage = ?`` 会直接报 SQL 错——那种错当场就发现。
+    真正会漏的是 ``completed_at``：``status='completed'`` 时要额外写它，
+    少了它「这趟跑了多久」就再也算不出来。
+    """
+    run = repo["repo"].create_run(HOME, {"trigger_type": "ingest"})
+
+    repo["repo"].update_run(run.id, status="running", stage="infer_graph")
+    updated = repo["repo"].get_run(run.id)
+
+    assert (updated.status, updated.current_stage) == ("running", "infer_graph")
+    assert updated.completed_at is None
+
+    done = repo["repo"].update_run(run.id, status="completed", stage="done", stats={"people": 3})
+
+    assert done.completed_at is not None
+    assert dict(done.stats) == {"people": 3}
+
+
+def test_an_omitted_field_means_do_not_change_not_write_null(repo) -> None:
+    """``None`` 是「不改这一项」而不是「写成 NULL」。
+
+    后果之一：**``error`` 一旦写上就清不掉**（1.0 同样做不到）。这条钉住那个语义——
+    把它实现成「写成 NULL」，写上去的错误会在下一次推进时静默消失。
+    """
+    run = repo["repo"].create_run(HOME, {"trigger_type": "ingest"})
+    repo["repo"].update_run(run.id, status="failed", error="模型不可用")
+
+    same = repo["repo"].update_run(run.id, stage="infer_graph")
+
+    assert same.error == "模型不可用"
+    assert same.status == "failed"
+
+
+def test_superseding_model_edges_leaves_user_and_retracted_ones_alone(repo) -> None:
+    """**三重过滤**：``effective`` + ``source='model'`` + ``locked=0``，三条缺一不可。
+
+    夹具四对边，各命中一个被排除的理由：模型未锁的（该被清）、用户写的（``locked=1``）、
+    已经 superseded 的、已经 retracted 的。
+
+    定点变异：去掉 ``locked = 0``，用户那条会被清掉——而它下一次读出来就没了。
+    """
+    repo["repo"].set_relationship(HOME, "mom", "母亲", "kid", "儿子", source="model")
+    repo["repo"].set_relationship(HOME, "dad", "父亲", "kid", "女儿", source="user_override")
+    repo["repo"].set_relationship(HOME, "mom", "朋友", "dad", "朋友", source="model")
+    repo["repo"].retract_relationship(HOME, "mom", "dad")
+    # 再写一对模型边、手工置成 superseded。
+    repo["repo"].set_relationship(HOME, "kid", "其他亲属", "mom", "其他亲属", source="model")
+    with repo["db"].connect() as connection, connection:
+        connection.execute(
+            "UPDATE family_relationships SET state = 'superseded'"
+            " WHERE subject_entity_id = 'kid' AND predicate = '其他亲属'"
+        )
+
+    repo["repo"].supersede_model_relationships(HOME)
+
+    effective = repo["repo"].list_effective_relationships(HOME)
+    # 只剩下用户写的那一对（两行）。
+    assert {item.id for item in effective} == {
+        item.id for item in repo["repo"].list_effective_relationships(HOME) if item.locked
+    }
+    assert all(item.locked for item in effective)
+    assert len(effective) == 2
+
+
+def test_superseding_keeps_a_locked_edge_even_if_its_source_says_model(repo) -> None:
+    """``locked = 0`` 那半个条件是**防御**：拦「locked 了、source 却写着 model」的行。
+
+    写侧**产不出**这种行（``locked`` 就是按 ``source`` 定的），所以从生产路径走不到
+    ——不手工插一行的话，把 ``AND locked = 0`` 删掉是**等价变异**（``source = 'model'``
+    已经先把用户的边排除了）。而 1.0 写了这个条件，它挡的是「老版本留下的、或手工修过的」
+    那种行：**用户锁住的边不该被一轮推断清掉**。
+
+    这条用例存在的唯一理由就是让那个条件有人守——它测的是一个**防御性**判据，
+    不是一条能走到的产品路径。
+    """
+    repo["repo"].set_relationship(HOME, "mom", "母亲", "kid", "儿子", source="user_override")
+    with repo["db"].connect() as connection, connection:
+        connection.execute(
+            "UPDATE family_relationships SET source = 'model'"
+            " WHERE subject_entity_id = 'mom' AND predicate = '母亲'"
+        )
+
+    repo["repo"].supersede_model_relationships(HOME)
+
+    assert len(repo["repo"].list_effective_relationships(HOME)) == 2
+    assert all(item.locked for item in repo["repo"].list_effective_relationships(HOME))
+
+
+def test_superseding_only_touches_the_given_scope(repo) -> None:
+    """**一个 scope 的清场不能碰另一个 scope 的边。**
+
+    定点变异：去掉 ``WHERE scope_id = ?``，另一张图的模型边会被一起清掉——
+    而那是一次静默的跨相册写入。
+    """
+    repo["repo"].set_relationship(HOME, "mom", "母亲", "kid", "儿子", source="model")
+    repo["repo"].set_relationship(OTHER, "other_mom", "朋友", "other_dad", "朋友", source="model")
+
+    repo["repo"].supersede_model_relationships(HOME)
+
+    assert len(repo["repo"].list_effective_relationships(OTHER)) == 2

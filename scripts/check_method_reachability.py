@@ -64,6 +64,18 @@ DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
 #     动工前先核依赖、核出缺口再写任务定义，**核查本身就是一个有交付物的任务**。
 #     把它们硬塞进一个编号会更像有归属，实际只是把问题推后。
 PENDING_METHODS: dict[str, str] = {
+    # —— S7b2 T311：运行表读写 + 模型边清场，T312/T313/T314 接线 ——
+    #
+    # 与 S7b1 的 T302 同一条路：这几个方法只有 ``FamilyGraphService``（T312）与
+    # ``POST /family-graph/runs``（T313）、批末触发（T314）会调。S7b1 刻意没搬它们
+    # （「到达不了的分支不搬」），S7b2 的调用者到了才落——落下的这一刻仍没有调用者，
+    # 所以照例登记，等接线时由反向规则自己删。（``get_run`` 没进这张表：它已经被
+    # ``create_run`` / ``latest_run`` / ``update_run`` 这三处 ``self.`` 调用用到了，
+    # 门禁认这个。）
+    "FamilyGraphRepository.create_run": "S7b2 · T313（POST /family-graph/runs）",
+    "FamilyGraphRepository.latest_run": "S7b2 · T314（批末触发的去抖）",
+    "FamilyGraphRepository.update_run": "S7b2 · T312（FamilyGraphService 的状态机）",
+    "FamilyGraphRepository.supersede_model_relationships": "S7b2 · T312（推断前清场）",
     # **这张表在 S7b1 里被清空过一次。** T302 落了家庭图谱端口（9 个方法）与标签
     # 白名单模块，按「先落地、后接线」登记在这里；随后 T303 接上模块（`check_reachability`
     # 那条）、T305 接上四个读方法、T306 接上五个写方法——**每一步都是这张表自己报红
