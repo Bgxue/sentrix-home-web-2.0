@@ -320,6 +320,12 @@ coverage **1953 passed / 1 failed**（S7a 时是 1868 passed，本段 +85 条用
 **S7 还剩 S7c（助手引用）**：`get_person_profile` 扩到 membership + `relationships[]`。
 它读的是 `family_person_memberships` / `family_relationships`，两套表现在都有了。
 
+**S7b2 的终态验证**（2026-10-02，`make ci`）：静态门禁全绿，coverage
+**1988 passed / 1 failed**（S7b1 时是 1953 passed，本段 +35 条用例）。
+
+**那一条 failed 与前三次是同一条**：`test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`
+——已知的模型侧 flaky。`make ci` 因此停在 coverage、`web-check` 不跑，已单独补跑通过。
+
 ### 8.3b T314 查出的一处「同步化必须补的东西」
 
 1.0 的批末触发跑在 `threading.Thread(daemon=True)` 里——**它的失败传不到导入响应上**。
