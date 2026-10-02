@@ -764,6 +764,18 @@ class RelationshipRepository(Protocol):
         """
         ...
 
+    def list_relationships(self, scope_id: str | None = None) -> Sequence[RelationshipRecord]:
+        """一个空间里的**全部**关系，**不过滤 status**。
+
+        1.0 ``db.py:5590`` 的 ``list_relationships`` 有两条分支：给了 ``entity_id`` 走
+        下面那条 ``list_for_entity``，**不给就是这一条**——``GET /api/relationships``
+        不带 ``kind=person`` 时走的正是它。它与 ``list_person_relationships`` 的口径不同：
+        那个排 ``retracted``，这个连 ``retracted`` 都给（1.0 同样是两条 SQL）。
+
+        ``scope_id`` 为空时**跨空间全给**——1.0 的守卫是 ``if scope_id:``。
+        """
+        ...
+
     def list_for_entity(self, entity_id: str, scope_id: str | None = None) -> Sequence[RelationshipRecord]:
         """这个人牵涉到的关系，**两个方向都算**（它可能是 subject 也可能是 object）。"""
         ...

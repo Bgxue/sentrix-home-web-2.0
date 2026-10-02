@@ -86,6 +86,21 @@ class SqliteRelationshipRepository:
             ).fetchall()
         return [record for row in rows if (record := _record(row, names=True)) is not None]
 
+    def list_relationships(self, scope_id: str | None = None) -> Sequence[RelationshipRecord]:
+        """1.0 ``db.py:5590`` 的 ``entity_id=None`` 那一支。**没有 status 过滤。**"""
+        scope_clause = " WHERE r.scope_id = ?" if scope_id else ""
+        params: tuple[str, ...] = (scope_id,) if scope_id else ()
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT r.*, s.canonical_name AS subject_name, o.canonical_name AS object_name"
+                " FROM relationships r"
+                " JOIN entities s ON s.id = r.subject_entity_id"
+                " JOIN entities o ON o.id = r.object_entity_id"
+                f"{scope_clause} ORDER BY r.updated_at DESC",
+                params,
+            ).fetchall()
+        return [record for row in rows if (record := _record(row, names=True)) is not None]
+
     def list_for_entity(self, entity_id: str, scope_id: str | None = None) -> Sequence[RelationshipRecord]:
         scope_clause = " AND r.scope_id = ?" if scope_id else ""
         params: tuple[str, ...] = (entity_id, entity_id, scope_id) if scope_id else (entity_id, entity_id)

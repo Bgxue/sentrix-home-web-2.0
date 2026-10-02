@@ -1552,6 +1552,172 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/relationships:
+    get:
+      tags:
+      - relationships
+      summary: List Relationships
+      description: '关系图。``kind == "person"`` 时**两端都必须是人物**，且排掉 ``retracted``。
+
+
+        两条分支的过滤位置不同，都是 1.0 的：``person`` 那支在 SQL 里
+
+        （``list_person_relationships``），另一支在 Python 里——``list_entities`` 不带类型
+
+        参数（``app.py:2100`` 的列表推导）。两边的**状态口径也相反**：``person`` 排
+
+        ``retracted``，另一支连 ``retracted`` 都给。'
+      operationId: list_relationships_api_v1_relationships_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipGraphResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - relationships
+      summary: Create Relationship
+      description: '建一条关系，或把已有的那条并掉（同三元组去重在仓储里）。
+
+
+        **三个必填项是路由判的**，不是 pydantic——1.0 给的是 400 加一句具体的话，
+
+        缺字段走 pydantic 会变成 422，那是同一个产品行为的另一个码。'
+      operationId: create_relationship_api_v1_relationships_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RelationshipCreateRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipPayload'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/relationships/batch:
+    post:
+      tags:
+      - relationships
+      summary: Import Relationships
+      description: '批量导入。**逐条失败不让整批失败**——1.0 的 ``except Exception`` 就在循环里。
+
+
+        调用方是 PhotoBench 的 identity_seed 阶段，详见用例的模块 docstring。'
+      operationId: import_relationships_api_v1_relationships_batch_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RelationshipBatchRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipBatchResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/relationships/{relationship_id}/confirm:
+    post:
+      tags:
+      - relationships
+      summary: Confirm Relationship
+      description: '确认。仓储会把同三元组的**其它 active 关系转 superseded**。
+
+
+        **这里不写 semantic claim**——1.0 的 ``confirm_relationship`` 也不写，只有
+
+        ``create_relationship(status=''active'')`` 写。那是一条反直觉但真实的行为，
+
+        写在仓储的 docstring 里。'
+      operationId: confirm_relationship_api_v1_relationships__relationship_id__confirm_post
+      parameters:
+      - name: relationship_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Relationship Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipPayload'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/relationships/{relationship_id}/retract:
+    post:
+      tags:
+      - relationships
+      summary: Retract Relationship
+      description: 撤回。转 ``retracted`` 并 ``revision + 1``，**不删行**——撤回也留痕。
+      operationId: retract_relationship_api_v1_relationships__relationship_id__retract_post
+      parameters:
+      - name: relationship_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Relationship Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationshipPayload'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -3538,6 +3704,321 @@ components:
       - rejected_entity_id
       title: RejectClusterResponse
       description: '``rejected_entity_id`` 为空表示这一簇本来就没有候选实体，调用没有改动任何行。'
+    RelationshipBatchItem:
+      properties:
+        subject:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject
+        predicate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Predicate
+        object:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Object
+        confidence:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Confidence
+      type: object
+      title: RelationshipBatchItem
+      description: manifest 里的一条。字段可省，省钱的理由同上。
+    RelationshipBatchRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        entity_by_name:
+          anyOf:
+          - additionalProperties:
+              type: string
+            type: object
+          - type: 'null'
+          title: Entity By Name
+        relationships:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/RelationshipBatchItem'
+            type: array
+          - type: 'null'
+          title: Relationships
+      type: object
+      title: RelationshipBatchRequest
+      description: '``POST /api/relationships/batch`` 的请求体。
+
+
+        ``entity_by_name`` 是 PhotoBench 上一步 ``/api/people/seed-batch`` 换出来的
+
+        ``{名字: entity_id}``；没有它也能跑，那时全靠用例里的名字索引。'
+    RelationshipBatchResponse:
+      properties:
+        requested:
+          type: integer
+          title: Requested
+        imported:
+          type: integer
+          title: Imported
+        results:
+          items:
+            $ref: '#/components/schemas/RelationshipBatchResultItem'
+          type: array
+          title: Results
+      type: object
+      required:
+      - requested
+      - imported
+      - results
+      title: RelationshipBatchResponse
+      description: '``requested`` 是**请求条数**（不是解析成功的条数），``imported`` 是没有 error 的
+
+        那些——1.0 ``app.py:2165-2166``。'
+    RelationshipBatchResultItem:
+      properties:
+        subject:
+          type: string
+          title: Subject
+        predicate:
+          type: string
+          title: Predicate
+        object:
+          type: string
+          title: Object
+        id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Id
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      type: object
+      required:
+      - subject
+      - predicate
+      - object
+      title: RelationshipBatchResultItem
+      description: 逐条结论。``id`` 与 ``error`` 二选一，见模块 docstring。
+    RelationshipCreateRequest:
+      properties:
+        subject_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Entity Id
+        predicate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Predicate
+        object_entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Object Entity Id
+        evidence_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Evidence Ids
+        confidence:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Confidence
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      type: object
+      title: RelationshipCreateRequest
+      description: '``POST /api/relationships`` 的请求体。
+
+
+        **三个 id / 谓词都可省，不是笔误。** 1.0 的路由用 ``payload.get()`` 取值再
+
+        ``if not all(...)`` 判，所以「缺一个」要给 400 加那句具体的话，而不是 pydantic 的
+
+        422。写成必填字段就把同一个产品行为换成了一个码——与 ``EntityPropertyRequest``
+
+        是同一条理由。
+
+
+        ``status`` 的「缺省」与「显式 null」在这里**不是一回事**：1.0 是
+
+        ``payload.get("status", "pending")``，键缺席才用默认值，显式 ``null`` 会把 ``None``
+
+        一路传进 INSERT。路由按 ``model_fields_set`` 区分，见那里的注释。'
+    RelationshipEdge:
+      properties:
+        source:
+          type: string
+          title: Source
+        target:
+          type: string
+          title: Target
+        label:
+          type: string
+          title: Label
+        status:
+          type: string
+          title: Status
+        id:
+          type: string
+          title: Id
+      type: object
+      required:
+      - source
+      - target
+      - label
+      - status
+      - id
+      title: RelationshipEdge
+      description: '关系图里的一条边。1.0 ``app.py:2105`` 把关系行的五个字段**改了名**——
+
+        ``subject_entity_id`` → ``source``、``object_entity_id`` → ``target``、
+
+        ``predicate`` → ``label``。图渲染库要的是后一组名字。'
+    RelationshipGraphResponse:
+      properties:
+        nodes:
+          items:
+            $ref: '#/components/schemas/RelationshipNode'
+          type: array
+          title: Nodes
+        edges:
+          items:
+            $ref: '#/components/schemas/RelationshipEdge'
+          type: array
+          title: Edges
+        relationships:
+          items:
+            $ref: '#/components/schemas/RelationshipPayload'
+          type: array
+          title: Relationships
+      type: object
+      required:
+      - nodes
+      - edges
+      - relationships
+      title: RelationshipGraphResponse
+      description: '``GET /api/relationships`` 的响应。外层三个键，1.0 ``app.py:2106``。'
+    RelationshipNode:
+      properties:
+        id:
+          type: string
+          title: Id
+        label:
+          type: string
+          title: Label
+        status:
+          type: string
+          title: Status
+        entity_type:
+          type: string
+          title: Entity Type
+      type: object
+      required:
+      - id
+      - label
+      - status
+      - entity_type
+      title: RelationshipNode
+      description: 关系图里的一个点。1.0 ``app.py:2104`` 的四个键，逐字。
+    RelationshipPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        subject_entity_id:
+          type: string
+          title: Subject Entity Id
+        predicate:
+          type: string
+          title: Predicate
+        object_entity_id:
+          type: string
+          title: Object Entity Id
+        inverse_predicate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Inverse Predicate
+        status:
+          type: string
+          title: Status
+        confidence:
+          type: number
+          title: Confidence
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        subject_name:
+          type: string
+          title: Subject Name
+        object_name:
+          type: string
+          title: Object Name
+      type: object
+      required:
+      - id
+      - scope_id
+      - subject_entity_id
+      - predicate
+      - object_entity_id
+      - inverse_predicate
+      - status
+      - confidence
+      - evidence_ids
+      - revision
+      - created_at
+      - updated_at
+      - subject_name
+      - object_name
+      title: RelationshipPayload
+      description: '``relationships`` 一行 + 两端实体的名字。
+
+
+        ``subject_name`` / ``object_name`` 是仓储 ``JOIN entities`` 带出来的，不在这里再查。
+
+
+        **写侧三个端点这两个字段是空串。** 1.0 的 ``POST`` / ``retract`` 返回的那条 SQL
+
+        没有 JOIN（``retract`` 甚至没解码 ``evidence_ids_json``），只有 ``confirm`` 有——
+
+        三处不一样是 1.0 的副作用，而它的前端哪个都不读（理由写在
+
+        ``api/routes/relationships.py`` 的模块 docstring 里）。2.0 统一成一个形状。'
     RenameConversationRequest:
       properties:
         title:

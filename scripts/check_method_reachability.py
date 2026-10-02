@@ -68,14 +68,16 @@ PENDING_METHODS: dict[str, str] = {
     # facts 的三条（list_facts / set_status / supersede_others）已在 T113/T114 接线，
     # 按反向规则从这张表里删掉。**这三条是被自己删掉的，不是被人想起来的**——
     # 接线完成的那一刻这条门禁就报红要求删，那正是它存在的形式。
-    "RelationshipRepository.retract": "Task 116（关系 CRUD）",
+    # RelationshipRepository.retract 与 .list_person_relationships 在 S7a · T203
+    # （关系端点）接线，按反向规则删掉——**又是两条被门禁自己删掉的登记**。
+    # 同一次接上的还有 .create / .confirm（这两个的名字在多个端口重名，落在本门禁的
+    # 盲区里，从来就没进过这张表）与新加的 .list_relationships。
     # —— 本门禁首跑查出 ——
     # EntityRepository.maintain_property 在 T127（非人物实体抽取）接线，按反向规则删掉。
     # **它是被 T127 接上的，不是被 T128 接上的**——抽取要写 label/category/时间那几个属性。
     # list_properties（读）在 T128a 接线，按反向规则删掉——私密地点的投影要读实体的
     # ``private_flag`` / ``alias`` 两个属性（``domain/identity/decoration.py``）。
     # **又一条被门禁自己删掉的登记**：接线那一刻它就报红要求删。
-    "RelationshipRepository.list_person_relationships": "S7（家庭关系，设计文档 §8）",
     "EventRepository.dissolve": "S7（重分段；s5-deviations 第 15/35 条记「随 S7」）",
     "PortraitRepository.list_for_person": "S6 · 依赖核查（画像版本列表，归属未定）",
     "PortraitRepository.set_lock": "S6 · 依赖核查（画像手改/锁定，归属未定）",
