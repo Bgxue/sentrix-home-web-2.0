@@ -6,15 +6,15 @@
 （关键字注入多个仓储、返回模块内的 frozen dataclass、HTTP 映射留在路由）。
 **不在路由里拼**——路由那条路是给「把记录字段搬进响应模型」用的，跨四个域的不是。
 
-**1.0 一共返回十二个键，这里搬九个，三个不搬，各有理由**：
+**1.0 一共返回十二个键，这里搬十个，两个不搬**：
 
-- ``relationships``：``relationships`` 表与它的读路径是 **S7**（设计文档 §8）。与 T127
-  那两条关系同形——留一个恒空的键，读起来像「这个实体确实没有关系」。
 - ``profile`` / ``claims``：``semantic_profiles`` / ``semantic_claims`` 在 2.0 **零读路径**，
   而这两张表的读法归 **T130**（``GET /knowledge`` 就是 profiles + claims + spaces）。
   1.0 前端渲染实体详情弹窗时也不读这两个键（``src/app.js:1026-1039``）。
 
-**三处照搬的 1.0 行为，每一处都反直觉：**
+（``relationships`` 在 S6 时是第三个留白键，**S7a · T201 已补上**——它的行为见下面第 4 条。）
+
+**四处照搬的 1.0 行为，每一处都反直觉：**
 
 1. ``facts`` 按 **``canonical_name`` 字符串**匹配，不按 entity_id。1.0（``db.py:4588``）
    是拉 ``list_facts(1000)``——**全库、无 scope 过滤**——再在 Python 里过一遍。
@@ -22,6 +22,12 @@
    （``entities.py`` 删实体时同样按名字删），所以按名字算**是照搬，不是将就**。
 2. ``clusters`` **没有状态过滤**：被拒的簇也会出现在详情里（1.0 ``db.py:4580``）。
 3. ``observations`` 在 ``captured_at`` 相同时没有第二排序键（1.0 ``:4590-4594``）。
+4. ``relationships`` **不过滤 ``status``**：``retracted`` / ``superseded`` 的行也返回
+   （1.0 ``db.py:5590-5597`` 的实体分支）。同一个响应里 ``properties`` 排 superseded、
+   ``clusters`` 不排 rejected，这里是第三种规矩——**而且与同仓的
+   ``list_person_relationships``（``:5601``，有 ``status != 'retracted'``）正好相反**。
+   消费方拿 ``status`` 自己区分。传不传 ``scope_id`` 也不一样：1.0 ``get_entity_detail``
+   调 ``list_relationships(entity_id)`` **不带 scope**，2.0 照搬不带。
 
 **一处同名不同义的坑**：``evidence_count`` 在这个响应里是
 ``len(observations)``——**取回来的**观察条数，上限 100；而 ``GET /entities``（T128a）
@@ -40,8 +46,14 @@ from sentrix.domain.identity.models import (
     EntityRecord,
     FaceClusterRecord,
     FaceInstanceRecord,
+    RelationshipRecord,
 )
-from sentrix.domain.identity.ports import AppearanceRepository, EntityRepository, FaceRepository
+from sentrix.domain.identity.ports import (
+    AppearanceRepository,
+    EntityRepository,
+    FaceRepository,
+    RelationshipRepository,
+)
 from sentrix.domain.media.models import Asset, Observation
 from sentrix.domain.media.ports import AssetRepository, ObservationRepository
 from sentrix.domain.memories.events import EventRecord
@@ -101,6 +113,7 @@ class EntityDetail:
     observations: tuple[DetailObservation, ...]
     appearance_evidence: tuple[AppearanceEvidenceRecord, ...]
     evidence_files: tuple[EvidenceFile, ...]
+    relationships: tuple[RelationshipRecord, ...]
 
 
 class ReadEntityDetail:
@@ -114,6 +127,7 @@ class ReadEntityDetail:
         observations: ObservationRepository,
         assets: AssetRepository,
         appearances: AppearanceRepository,
+        relationships: RelationshipRepository,
     ) -> None:
         self._entities = entities
         self._faces = faces
@@ -122,6 +136,7 @@ class ReadEntityDetail:
         self._observations = observations
         self._assets = assets
         self._appearances = appearances
+        self._relationships = relationships
 
     def execute(self, entity_id: str) -> EntityDetail | None:
         """实体不存在时返回 ``None``（1.0 ``db.py:4571-4573``），由路由翻成 404。"""
@@ -144,6 +159,7 @@ class ReadEntityDetail:
             observations=observations,
             appearance_evidence=appearances,
             evidence_files=_evidence_files(observations, appearances),
+            relationships=tuple(self._relationships.list_for_entity(entity_id)),
         )
 
     def _clusters_of(self, entity_id: str) -> tuple[DetailCluster, ...]:

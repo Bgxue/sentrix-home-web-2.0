@@ -382,14 +382,40 @@ class EntityEvidenceFile(BaseModel):
     kind: str
 
 
+class EntityDetailRelationship(BaseModel):
+    """``relationships`` 的一行：关系本体 + 两端实体的名字。
+
+    ``subject_name`` / ``object_name`` 是仓储 ``JOIN entities`` 带出来的（1.0 同形），
+    不在这里再查一次。
+
+    **没有 status 过滤**：``retracted`` / ``superseded`` 的行也在（1.0
+    ``db.py:5590-5597``）。这与同一个响应里的 ``properties``（排 superseded）相反，
+    也与同仓 ``list_person_relationships``（排 retracted）相反——消费方拿 ``status``
+    自己区分。
+    """
+
+    id: str
+    scope_id: str
+    subject_entity_id: str
+    predicate: str
+    object_entity_id: str
+    inverse_predicate: str | None
+    status: str
+    confidence: float
+    evidence_ids: list[str]
+    revision: int
+    created_at: str | None
+    updated_at: str | None
+    subject_name: str
+    object_name: str
+
+
 class EntityDetailResponse(BaseModel):
     """``GET /entities/{id}`` 的响应。
 
-    1.0 返回十二个键，这里**九个**——三个不在，各有理由（写在
-    ``application/identity/read_entity_detail.py`` 的模块 docstring 里）：
-    ``relationships`` 是 S7 的表；``profile`` / ``claims`` 的读路径归 T130。
-    **不补恒空的占位键**：留一个恒 ``[]`` 的 ``relationships``，读起来像
-    「这个实体确实没有关系」。
+    1.0 返回十二个键，这里**十个**——``profile`` / ``claims`` 不在，理由写在
+    ``application/identity/read_entity_detail.py`` 的模块 docstring 里（读路径归 T130）。
+    ``relationships`` 是 S6 留下的第三块空白，**S7a · T201 补齐**。
     """
 
     entity: EntityDetailEntity
@@ -401,6 +427,7 @@ class EntityDetailResponse(BaseModel):
     observations: list[EntityDetailObservation]
     appearance_evidence: list[EntityDetailAppearance]
     evidence_files: list[EntityEvidenceFile]
+    relationships: list[EntityDetailRelationship]
 
 
 class EntityGroupRationale(BaseModel):

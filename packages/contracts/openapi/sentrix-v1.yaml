@@ -2293,6 +2293,90 @@ components:
         （``src/app.js:1036`` 的 ``caption || transcript || "原始观察证据"``），所以这里少一个键
 
         的后果是那句话直接落到常量，不会渲染出错。'
+    EntityDetailRelationship:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        subject_entity_id:
+          type: string
+          title: Subject Entity Id
+        predicate:
+          type: string
+          title: Predicate
+        object_entity_id:
+          type: string
+          title: Object Entity Id
+        inverse_predicate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Inverse Predicate
+        status:
+          type: string
+          title: Status
+        confidence:
+          type: number
+          title: Confidence
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        subject_name:
+          type: string
+          title: Subject Name
+        object_name:
+          type: string
+          title: Object Name
+      type: object
+      required:
+      - id
+      - scope_id
+      - subject_entity_id
+      - predicate
+      - object_entity_id
+      - inverse_predicate
+      - status
+      - confidence
+      - evidence_ids
+      - revision
+      - created_at
+      - updated_at
+      - subject_name
+      - object_name
+      title: EntityDetailRelationship
+      description: '``relationships`` 的一行：关系本体 + 两端实体的名字。
+
+
+        ``subject_name`` / ``object_name`` 是仓储 ``JOIN entities`` 带出来的（1.0 同形），
+
+        不在这里再查一次。
+
+
+        **没有 status 过滤**：``retracted`` / ``superseded`` 的行也在（1.0
+
+        ``db.py:5590-5597``）。这与同一个响应里的 ``properties``（排 superseded）相反，
+
+        也与同仓 ``list_person_relationships``（排 retracted）相反——消费方拿 ``status``
+
+        自己区分。'
     EntityDetailResponse:
       properties:
         entity:
@@ -2337,6 +2421,11 @@ components:
             $ref: '#/components/schemas/EntityEvidenceFile'
           type: array
           title: Evidence Files
+        relationships:
+          items:
+            $ref: '#/components/schemas/EntityDetailRelationship'
+          type: array
+          title: Relationships
       type: object
       required:
       - entity
@@ -2348,19 +2437,16 @@ components:
       - observations
       - appearance_evidence
       - evidence_files
+      - relationships
       title: EntityDetailResponse
       description: '``GET /entities/{id}`` 的响应。
 
 
-        1.0 返回十二个键，这里**九个**——三个不在，各有理由（写在
+        1.0 返回十二个键，这里**十个**——``profile`` / ``claims`` 不在，理由写在
 
-        ``application/identity/read_entity_detail.py`` 的模块 docstring 里）：
+        ``application/identity/read_entity_detail.py`` 的模块 docstring 里（读路径归 T130）。
 
-        ``relationships`` 是 S7 的表；``profile`` / ``claims`` 的读路径归 T130。
-
-        **不补恒空的占位键**：留一个恒 ``[]`` 的 ``relationships``，读起来像
-
-        「这个实体确实没有关系」。'
+        ``relationships`` 是 S6 留下的第三块空白，**S7a · T201 补齐**。'
     EntityEvidenceFile:
       properties:
         evidence_id:

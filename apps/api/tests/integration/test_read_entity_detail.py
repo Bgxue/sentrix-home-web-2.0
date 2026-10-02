@@ -32,6 +32,9 @@ from sentrix.infrastructure.persistence.repositories.entities import SqliteEntit
 from sentrix.infrastructure.persistence.repositories.events import SqliteEventRepository
 from sentrix.infrastructure.persistence.repositories.faces import SqliteFaceRepository
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
+from sentrix.infrastructure.persistence.repositories.relationships import (
+    SqliteRelationshipRepository,
+)
 
 NOW = "2026-09-23T10:00:00+00:00"
 LATER = "2026-09-24T10:00:00+00:00"
@@ -143,6 +146,7 @@ def detail(migrations_ready_db: Database) -> dict[str, object]:
             observations=SqliteObservationRepository(db),
             assets=SqliteAssetRepository(db),
             appearances=SqliteAppearanceRepository(db),
+            relationships=SqliteRelationshipRepository(db),
         ),
     }
 
@@ -307,6 +311,49 @@ def test_an_appearance_id_colliding_with_an_observation_wins(detail):
     by_id = {item.evidence_id: item for item in result.evidence_files}
     assert by_id["obs_1"].kind == EVIDENCE_KIND_APPEARANCE
     assert by_id["obs_1"].asset_id == "asset_2"
+
+
+def test_relationships_cover_both_ends_and_ignore_status(detail):
+    """``relationships``（S7a · T201）。1.0 ``db.py:4587`` 调
+    ``list_relationships(entity_id)``（``:5590-5597``），三条边界一起钉：
+
+    - **两端都算**：``subject_entity_id = ? OR object_entity_id = ?``；
+    - **没有 status 过滤**：``retracted`` 的也返回——与同仓的
+      ``list_person_relationships``（``:5601``，有 ``status != 'retracted'``）相反，
+      也与同一响应里的 ``properties``（排 superseded）相反；
+    - **``updated_at DESC``**，每行带 JOIN 出的 ``subject_name`` / ``object_name``。
+
+    定点变异：给 ``list_for_entity`` 的 SQL 加 ``AND r.status != 'retracted'``，
+    这条变红。
+    """
+    db = detail["db"]
+    with db.connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entities (id, scope_id, entity_type, canonical_name, status, summary,"
+            " confidence, created_at, updated_at)"
+            " VALUES ('ent_2', ?, 'person', '妈妈', 'confirmed', '', 0.0, ?, ?)",
+            (SCOPE, NOW, NOW),
+        )
+        for rel_id, subject, predicate, obj, status, updated in (
+            ("rel_old", "ent_1", "出现在", "ent_2", "active", NOW),
+            ("rel_new", "ent_2", "记录于", "ent_1", "retracted", LATER),
+        ):
+            connection.execute(
+                "INSERT INTO relationships (id, scope_id, subject_entity_id, predicate,"
+                " object_entity_id, status, confidence, evidence_ids_json, revision,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0.5, '[]', 1, ?, ?)",
+                (rel_id, SCOPE, subject, predicate, obj, status, NOW, updated),
+            )
+
+    result = detail["use_case"].execute("ent_1")
+
+    assert [item.id for item in result.relationships] == ["rel_new", "rel_old"]
+    # 被撤回的那条也在——这一层不过滤 status。
+    assert result.relationships[0].status == "retracted"
+    # 两个方向都算：rel_old 里 ent_1 是 subject，rel_new 里 ent_1 是 object。
+    newest, oldest = result.relationships
+    assert (newest.subject_name, newest.object_name) == ("妈妈", "西湖")
+    assert (oldest.subject_name, oldest.object_name) == ("西湖", "妈妈")
 
 
 def test_the_property_value_round_trips_through_json(detail):

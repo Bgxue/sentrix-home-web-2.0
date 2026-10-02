@@ -38,6 +38,7 @@ from sentrix.api.schemas.identity import (
     EntityDetailEvent,
     EntityDetailFact,
     EntityDetailObservation,
+    EntityDetailRelationship,
     EntityDetailResponse,
     EntityEvidenceFile,
     EntityGroupDetailResponse,
@@ -438,7 +439,7 @@ def list_entities(
 
 
 def _read_entity_detail(container: Container) -> ReadEntityDetail:
-    """实体详情用例的装配。**七个协作者，只有这里知道它们是谁。**"""
+    """实体详情用例的装配。**八个协作者，只有这里知道它们是谁。**"""
     return ReadEntityDetail(
         entities=container.entity_repository,
         faces=container.face_repository,
@@ -447,6 +448,7 @@ def _read_entity_detail(container: Container) -> ReadEntityDetail:
         observations=container.observation_repository,
         assets=container.asset_repository,
         appearances=container.appearance_repository,
+        relationships=container.relationship_repository,
     )
 
 
@@ -568,6 +570,25 @@ def _entity_detail_payload(detail: EntityDetail, container: Container) -> Entity
                 kind=item.kind,
             )
             for item in detail.evidence_files
+        ],
+        relationships=[
+            EntityDetailRelationship(
+                id=item.id,
+                scope_id=item.scope_id,
+                subject_entity_id=item.subject_entity_id,
+                predicate=item.predicate,
+                object_entity_id=item.object_entity_id,
+                inverse_predicate=item.inverse_predicate,
+                status=item.status,
+                confidence=item.confidence,
+                evidence_ids=list(item.evidence_ids),
+                revision=item.revision,
+                created_at=_optional_isoformat(item.created_at),
+                updated_at=_optional_isoformat(item.updated_at),
+                subject_name=item.subject_name,
+                object_name=item.object_name,
+            )
+            for item in detail.relationships
         ],
     )
 

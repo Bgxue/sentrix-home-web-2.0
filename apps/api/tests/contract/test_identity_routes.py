@@ -1186,17 +1186,20 @@ def test_a_pending_person_in_the_people_list_does_change_its_role_and_summary(
     assert person["summary"] == "由人脸聚类生成，等待用户确认"
 
 
-def test_the_detail_has_no_relationships_key(identity_client: TestClient):
-    """``relationships`` 留 S7，**键不进响应**（按「不留恒空的占位键」）。
+def test_the_detail_carries_relationships(identity_client: TestClient):
+    """``relationships`` **S7a · T201 补上了**；S6 时这条钉的是反方向。
 
-    定点变异：在 ``EntityDetailResponse`` 上加一个 ``relationships: list[...] = []``，
-    这条变红——那正是它要挡的：恒空的键读起来像「这个实体确实没有关系」。
+    旧断言是「键不进响应」，理由是「恒空的占位键读起来像『这个实体确实没有关系』」——
+    那条理由成立的前提是**没有读路径**。T201 给了读路径，所以这里是真的读出来的空，
+    不是占位，断言随之反过来：**去掉这个键就变红**。
+    库里有关系的那些由 ``tests/integration/test_read_entity_detail.py`` 的
+    ``test_relationships_cover_both_ends_and_ignore_status`` 钉。
     """
     add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
 
     body = identity_client.get("/api/v1/entities/ent_place").json()
 
-    assert "relationships" not in body
+    assert body["relationships"] == []
 
 
 def test_the_detail_has_no_profile_or_claims_keys(identity_client: TestClient):
