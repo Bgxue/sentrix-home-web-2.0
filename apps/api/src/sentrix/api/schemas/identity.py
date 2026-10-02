@@ -184,9 +184,8 @@ class EntitySummaryPayload(BaseModel):
     而全仓没有 ``exclude_none`` 的先例（``PersonDetailResponse.avatar_face_instance_id``
     同样用 ``None``）。消费方按真值判断时两者等价。
 
-    **没有 ``relationship_count``。** 1.0 有，但它来自 ``relationships`` 表，读路径是 S7。
-    按「不留恒空的占位键」，这个键不出现在响应里——恒 0 会让「S7 还没做」读起来像
-    「这个实体确实没有关系」。
+    ``relationship_count`` 是 ``relationships`` 上两条计数（subject 侧 + object 侧）
+    之和，所以**一条关系给两端各记 1**——1.0 ``db.py:4087-4098`` 就是这个算法。
     """
 
     id: str
@@ -206,6 +205,7 @@ class EntitySummaryPayload(BaseModel):
     photo_count: int
     mention_count: int
     evidence_count: int
+    relationship_count: int
     reviewable: bool
     single_sample: bool | None
     avatar_face_instance_id: str | None

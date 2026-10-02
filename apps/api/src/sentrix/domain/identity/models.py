@@ -336,14 +336,17 @@ class EntityDecoration:
     **只有数，没有判断。** 派生的两个布尔在 ``domain/identity/decoration.py`` 里算，
     理由是它们的边界（``is True`` 而不是真值、空簇列表下 ``all()`` 为真）值得单独穷举。
 
-    没有 ``relationship_count``：它来自 ``relationships`` 表，读路径是 S7。恒返回 0
-    会让「S7 还没做」读起来像「这个实体确实没有关系」，所以那个键不出现在响应里。
+    ``relationship_count`` 是**两条查询相加**（分别按 subject 侧与 object 侧计数），
+    所以同一条关系会给**两端各记 1**——1.0 ``db.py:4087-4098`` 就是这个算法。
+    它唯一的过滤是 ``status != 'retracted'``：``pending`` / ``superseded`` 都算，
+    与同表的 ``cluster_count`` 同口径。
     """
 
     cluster_count: int
     photo_count: int
     mention_count: int
     evidence_count: int
+    relationship_count: int
     clusters: tuple[ClusterState, ...]
     avatar_face_instance_id: str | None
     preview_asset_id: str | None

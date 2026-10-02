@@ -219,15 +219,17 @@ class SqliteEntityRepository:
         return [row["id"] for row in rows]
 
     def decorate_entities(self, entity_ids: Sequence[str]) -> Mapping[str, EntityDecoration]:
-        """1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``，六条批量聚合逐条对齐。
+        """1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``，七条批量聚合逐条对齐。
 
         **每条都是一条 ``IN (...)``**，不是在实体循环里逐个查——1.0 的 docstring 专为
         这件事写过（"with batched queries instead of N+1 lookups"）。
 
         三处取舍，都不是省略：
 
-        - **没有 ``relationship_count``**：``relationships`` 的读路径是 S7。恒返回 0
-          会让「S7 还没做」读起来像「这个实体确实没有关系」。
+        - **``relationship_count`` 是两条查询相加**：1.0 按 ``subject_entity_id`` 与
+          ``object_entity_id`` 各 ``COUNT(*)`` 一次再相加（``db.py:4087-4098``），所以
+          **一条关系给两端各记 1**。它唯一的过滤是 ``status != 'retracted'``——
+          ``pending`` / ``superseded`` 都算，与 ``cluster_count`` 同口径。
         - **1.0 的两条簇查询合成了一条**：``cluster_count`` 的 ``COUNT(*)`` 与
           ``cluster_rows`` 的 ``member_count``/``status`` 用的是同一个 ``WHERE``
           （都只有 ``entity_id IN (...)``，都没有状态过滤），所以 ``len(rows)`` 就是那个
@@ -292,6 +294,24 @@ class SqliteEntityRepository:
                     ids,
                 ).fetchall()
             }
+            as_subject = {
+                row["eid"]: int(row["c"])
+                for row in connection.execute(
+                    "SELECT subject_entity_id AS eid, COUNT(*) AS c FROM relationships"
+                    f" WHERE subject_entity_id IN ({marks}) AND status != 'retracted'"
+                    " GROUP BY subject_entity_id",
+                    ids,
+                ).fetchall()
+            }
+            as_object = {
+                row["eid"]: int(row["c"])
+                for row in connection.execute(
+                    "SELECT object_entity_id AS eid, COUNT(*) AS c FROM relationships"
+                    f" WHERE object_entity_id IN ({marks}) AND status != 'retracted'"
+                    " GROUP BY object_entity_id",
+                    ids,
+                ).fetchall()
+            }
             previews = {
                 row["entity_id"]: row
                 for row in connection.execute(
@@ -315,6 +335,7 @@ class SqliteEntityRepository:
                 photo_count=photo_counts.get(entity_id, 0),
                 mention_count=mention_counts.get(entity_id, 0),
                 evidence_count=evidence_counts.get(entity_id, 0),
+                relationship_count=as_subject.get(entity_id, 0) + as_object.get(entity_id, 0),
                 clusters=tuple(clusters.get(entity_id, ())),
                 avatar_face_instance_id=avatars.get(entity_id),
                 preview_asset_id=preview["asset_id"] if preview else None,

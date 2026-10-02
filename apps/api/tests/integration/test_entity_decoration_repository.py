@@ -1,7 +1,7 @@
 """``decorate_entities`` 的真 SQLite 用例（S6 · T128a）。
 
 对应 1.0 ``db.py:4056-4141`` 的 ``_decorate_entities``。纯判断部分（两个派生布尔、私密
-投影）在 ``tests/unit/test_entity_decoration.py``；这里只验**取数**，也就是那六条聚合
+投影）在 ``tests/unit/test_entity_decoration.py``；这里只验**取数**，也就是那七条聚合
 的 SQL 有没有把该算的算进去。
 
 每条还是钉一个「会说谎的数」，不是「SQL 能跑通」：
@@ -105,6 +105,17 @@ def _link_observation(db: Database, entity_id: str, observation_id: str) -> None
         )
 
 
+def _add_relationship(db: Database, rel_id: str, subject: str, obj: str, *, status: str) -> None:
+    with db.connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO relationships (id, scope_id, subject_entity_id, predicate,"
+            " object_entity_id, status, confidence, evidence_ids_json, revision,"
+            " created_at, updated_at)"
+            " VALUES (?, 'album1', ?, '出现在', ?, ?, 0.5, '[]', 1, ?, ?)",
+            (rel_id, subject, obj, status, NOW, NOW),
+        )
+
+
 def _mention(db: Database, mention_id: str, entity_id: str, observation_id: str) -> None:
     with db.connect() as connection, connection:
         connection.execute(
@@ -125,6 +136,7 @@ def test_an_entity_with_no_rows_gets_zeroes_not_a_missing_entry(repos):
     assert decoration.photo_count == 0
     assert decoration.mention_count == 0
     assert decoration.evidence_count == 0
+    assert decoration.relationship_count == 0
     assert decoration.clusters == ()
     assert decoration.avatar_face_instance_id is None
     assert decoration.preview_asset_id is None
@@ -296,6 +308,37 @@ def test_mentions_and_evidence_are_counted_separately(repos):
 
     assert decoration.evidence_count == 2
     assert decoration.mention_count == 1
+
+
+def test_relationship_count_counts_both_ends_and_skips_retracted(repos):
+    """一条关系给**两端各记 1**，且**只排 ``retracted``**。
+
+    1.0 ``db.py:4087-4098`` 是**两条**查询——按 ``subject_entity_id`` 一条、按
+    ``object_entity_id`` 一条——再把结果相加。两个后果各自容易被「顺手优化」掉：
+
+    - **两端都算**：``ent_1 → ent_2`` 让两个实体各得 1。只数一侧的话，被指向的那个
+      实体永远显示 0 条关系；
+    - **只排 ``retracted``**：``pending`` / ``superseded`` 都算——与 ``cluster_count``
+      同口径，与 ``photo_count``（排 rejected）相反。
+
+    定点变异：只留 subject 那一条查询，``ent_2`` 变成 0；把过滤换成 ``status = 'active'``，
+    两个数都变成 1。
+    """
+    db = repos["db"]
+    for rel_id, status in (
+        ("rel_active", "active"),
+        ("rel_pending", "pending"),
+        ("rel_superseded", "superseded"),
+        ("rel_retracted", "retracted"),
+    ):
+        _add_relationship(db, rel_id, "ent_1", "ent_2", status=status)
+
+    both = repos["entities"].decorate_entities(["ent_1", "ent_2"])
+
+    # 四条里被排除的只有 retracted。
+    assert both["ent_1"].relationship_count == 3
+    # 同三条，从 object 那一侧数出来——两端各记 1。
+    assert both["ent_2"].relationship_count == 3
 
 
 def test_decorating_one_entity_does_not_pick_up_anothers_rows(repos):

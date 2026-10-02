@@ -2791,6 +2791,9 @@ components:
         evidence_count:
           type: integer
           title: Evidence Count
+        relationship_count:
+          type: integer
+          title: Relationship Count
         reviewable:
           type: boolean
           title: Reviewable
@@ -2843,6 +2846,7 @@ components:
       - photo_count
       - mention_count
       - evidence_count
+      - relationship_count
       - reviewable
       - single_sample
       - avatar_face_instance_id
@@ -2876,11 +2880,9 @@ components:
         同样用 ``None``）。消费方按真值判断时两者等价。
 
 
-        **没有 ``relationship_count``。** 1.0 有，但它来自 ``relationships`` 表，读路径是 S7。
+        ``relationship_count`` 是 ``relationships`` 上两条计数（subject 侧 + object 侧）
 
-        按「不留恒空的占位键」，这个键不出现在响应里——恒 0 会让「S7 还没做」读起来像
-
-        「这个实体确实没有关系」。'
+        之和，所以**一条关系给两端各记 1**——1.0 ``db.py:4087-4098`` 就是这个算法。'
     FaceClusterListResponse:
       properties:
         clusters:

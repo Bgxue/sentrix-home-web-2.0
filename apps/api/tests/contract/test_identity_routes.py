@@ -1077,19 +1077,19 @@ def test_the_catalogue_carries_the_derived_counts(identity_client: TestClient):
     assert entity["preview_media_type"] == "image"
 
 
-def test_the_catalogue_has_no_relationship_count_key(identity_client: TestClient):
-    """``relationship_count`` **刻意不在响应里**：它来自 ``relationships`` 表，读路径是 S7。
+def test_the_catalogue_carries_relationship_count(identity_client: TestClient):
+    """``relationship_count`` **S7a · T202 加回来了**；S6 时这条钉的是反方向。
 
-    按「不留恒空的占位键」，恒返回 0 会让「S7 还没做」读起来像「这个实体确实没有关系」。
-    这条钉住那个决定——哪天 S7 把它加回来，这条会红，提醒改文档而不是悄悄多一个键。
-
-    定点变异：在 ``EntitySummaryPayload`` 里加 ``relationship_count: int = 0``，这条变红。
+    旧断言的理由是「没有读路径，恒 0 会被读成『这个实体确实没有关系』」——T202 给了
+    读路径，理由不再成立，断言随之反过来：**去掉这个键就变红**。
+    算得对不对由 ``tests/integration/test_entity_decoration_repository.py`` 的
+    ``test_relationship_count_counts_both_ends_and_skips_retracted`` 钉。
     """
     add_entity(identity_client, "ent_place", name="西湖", status="confirmed", entity_type="place")
 
     entity = identity_client.get("/api/v1/entities").json()["entities"][0]
 
-    assert "relationship_count" not in entity
+    assert entity["relationship_count"] == 0
 
 
 def test_a_non_person_is_reviewable_by_evidence_count(identity_client: TestClient):

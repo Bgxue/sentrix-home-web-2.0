@@ -397,6 +397,7 @@ def _entity_summary(
         photo_count=decoration.photo_count,
         mention_count=decoration.mention_count,
         evidence_count=decoration.evidence_count,
+        relationship_count=decoration.relationship_count,
         reviewable=is_reviewable(
             entity_type=entity.entity_type,
             status=entity.status,
