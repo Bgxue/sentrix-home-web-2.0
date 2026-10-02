@@ -11,6 +11,9 @@
 |---|---|---|---|
 | ① | S7 怎么切 | 2026-10-02 | 切三段 **S7a → S7b → S7c**，按依赖顺序做 |
 | ② | `FamilyGraphService`（导入后自动跑的纯文本模型推断）搬不搬 | 2026-10-02 | **搬，照 1.0 接进导入管线** |
+| ③ | S7b 核查出 20+ 个任务，怎么切 | 2026-10-02 | **切两段 S7b1（存储与手工读写）→ S7b2（自动推断）** |
+| ④ | 自动推断的触发锚点 | 2026-10-02 | **挂在 `POST /imports` 批末**（与 `_maybe_run_insights` 并列）；**单张导入不触发** |
+| ⑤ | 自动推断同步还是起线程 | 2026-10-02 | **同步**——与相邻钩子 `_maybe_run_insights` 同体例 |
 
 ### 裁决①的分段与依赖
 
@@ -18,7 +21,9 @@
 |---|---|---|---|
 | **S7a** | 通用 `relationships` 的读写打通 + 了结 S6 遗留三条 | 无 | 中 |
 | **S7b** | `family_*` 家庭图谱全套（6 张表 + 仓储 + 读写路由 + `FamilyGraphService` + 导入管线触发） | 无 | 大 |
-| **S7c** | 助手引用（`get_person_profile` 扩到 membership + `relationships[]`） | **依赖 S7b** | 小 |
+| **S7b1** | `family_*` 六张表 + 领域 + 仓储 + `RELATION_INVERSES` + 五条读写路由 | 无 | 大 |
+| **S7b2** | `FamilyGraphService` 四阶段 + 两道文本证据闸 + 批末触发 + `POST /family-graph/runs` | 依赖 S7b1 | 中 |
+| **S7c** | 助手引用（`get_person_profile` 扩到 membership + `relationships[]`） | **依赖 S7b1/S7b2** | 小 |
 
 **为什么 S7c 必须在 S7b 之后**：1.0 的 `person_profile_digest`（`db.py:2840`）读的是
 `family_person_memberships` + `family_relationships` + `family_person_portraits`，
@@ -152,6 +157,40 @@ startFamilyGraphRun` 全仓无调用）。自动那条是
 
 ---
 
+## 4b. S7b 的动工前核查（2026-10-02）
+
+### 4b.1 三条裁决的依据
+
+**④ 触发锚点**：1.0 的锚点是 `pipeline.py:733` 的 `finish_ingest_batch` 收尾，靠
+**event watermark** 去抖（`event_count <= watermark` 就不跑）。**2.0 的 batch 概念不存在**：
+`ingest_batches` 表零写入者、零读取者（0 行），`assets.batch_id` 全 NULL——已实测确认。
+2.0 现成的批末只有 `POST /imports`（`api/routes/timeline.py:152`，
+`_maybe_run_insights` 就在那一行），而 **`POST /media/import` 单张路径绕过它**（走
+`ImportAssets.execute`，没有批次概念）。裁决取「贴 1.0」：挂在批末，单张不触发。
+
+**⑤ 同步**：2.0 的相邻钩子 `_maybe_run_insights` 是同步的，`api/routes/insights.py:9-19`
+的 docstring 明文写着「2.0 没有任务队列，装作异步只会把跑到哪藏起来」。1.0 起的是
+`threading.Thread(daemon=True)`。**一个切片里两个相邻钩子一个同步一个开线程，会让人
+分不清该学哪个**，所以取同步。
+
+### 4b.2 本次核查推翻/补正的四处
+
+| 原以为 | 实测 |
+|---|---|
+| `family_graph_people` 的三个派生字段可以复用 2.0 的 `decorate_entities` | **不能**。头像排序 1.0 多一位 `fi.quality DESC`；`representative_media` 走的是 `face_instances⋈face_clusters⋈assets`（**这个人的脸出现在哪些照片**）+ `LIMIT 3`，而 `preview_*` 走 `entity_observations⋈observations⋈assets`（**实体最新的观察**）——连接路径/条数/排序三处都不同；`appearance_count` 是 `COUNT(*)` 按人脸实例行数，`photo_count` 是 `COUNT(DISTINCT a.id)` |
+| `POST /family-graph/runs` 前端不调 ⇒ runs 是死路 | 手动那条确实是孤儿（`api.js:110` 全仓只有定义），**但自动那条是活的**且是 run 的唯一生产者 |
+| 两道文本证据闸用模型看到的文本判 | **闸口的文本比模型输入宽**：闸用 evidence 全量 descriptions（每人最多 20 条），模型只看前 2 条 |
+| 1.0 的 `display_name` 占位是「待命名成员」 | `family_graph_people` 里硬编码的是 **「待命名人物」**——与 `app.py` 那处是两个串，**这个端点照搬它自己那个** |
+
+### 4b.3 复核时顺手记下的 1.0 不一致（逐条照搬，不许统一）
+
+- `get_active_family_portrait` 排序是 `created_at DESC`，而 `get_effective_family_membership`
+  是 `locked DESC, revision DESC, updated_at DESC`——同一批「取当前有效行」语义，两个排序键。
+- `set_family_membership` 新行**回填** `supersedes_id`；`set_family_relationship` 新行
+  **恒 NULL**（历史链断在关系侧）。
+- `write_family_portrait` **不校验 `source` 白名单**，另两个方法都校验。
+- `list_effective_family_memberships`（`db.py:5640`）**死代码**：全仓库 grep 只命中定义行。
+
 ## 4. 施工记录
 
 ### 4.1 S7a（T201–T206）
@@ -220,7 +259,28 @@ coverage **1868 passed / 1 failed / 29 skipped**（S6 时是 1836 passed）。
 （§8.1 记着「不要修」；S6 的全量跑失败的是同一条）。`make ci` 会因此在 coverage 一步
 停住、**`web-check` 不跑**——已单独补跑并通过（tsc + oxlint + vitest + vite build）。
 
-### 8.2 下一步：S7b（家庭图谱）
+### 8.2 下一步：S7b1（家庭图谱的存储与手工读写）
+
+**裁决③ 之后的 S7b1 任务表**（依赖顺序即表序）：
+
+| # | 任务 | 落点 |
+|---|---|---|
+| **T301** | 迁移 `0009_family_graph.sql`：六张表 + 索引，1.0 `db.py:702-781` 的 DDL **逐字** | `infrastructure/persistence/migrations/` |
+| **T302** | 领域记录 + 端口：membership / relationship / block / run / portrait / scope-group 六个记录 + `FamilyGraphRepository` 端口族 | `domain/identity/family.py`、`domain/identity/ports.py` |
+| **T303** | 仓储 `SqliteFamilyGraphRepository`：12 个方法，含 `locked` / `state` / `supersede` / `block` 的全部顺序约束 | `infrastructure/persistence/repositories/family.py` |
+| **T304** | `RELATION_INVERSES`（38 条）+ `validate_relationship_pair` | `domain/identity/family_graph.py` |
+| **T305** | `GET /family-graph`：`family_graph_people` 投影（**自己那三套查询**，不复用 `decorate_entities`）+ 有效边 + `scope_ids` | `application/identity/read_family_graph.py`、`api/routes/family.py` |
+| **T306** | 四个写路由：`PATCH membership`、`PUT/DELETE relationships`、`PATCH portrait`、`POST scopes/merge` | 同上 |
+| **T307** | 收口：`PENDING_METHODS`、module-map、capability-map、behaviour-baseline、OpenAPI | — |
+
+**T305 的一处刻意留白**：`GET /family-graph` 的 1.0 响应有 `run` 键，但 **b1 阶段没有任何
+东西会创建 run**（自动触发归 b2、手动路由也归 b2）。按「不留恒空的占位键」那条规矩，
+**b1 不返回 `run`，b2 补上**——与 T128b 留 `relationships`、T201 补回来是同一个做法。
+
+**S7b2 再做**：`FamilyGraphService` 四阶段状态机、两道文本证据闸、`POST /family-graph/runs`、
+批末触发 + watermark。
+
+### 8.3 原 S7b 的备忘（已由 8.2 取代）
 
 **S7b 是 S7 里最大的一段**：`family_*` 六张表 + 仓储 + `RELATION_INVERSES`（38 条白名单）
 + `GET /family-graph` 与三个写路由 + block 机制 + scope merge +
