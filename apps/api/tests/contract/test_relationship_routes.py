@@ -334,3 +334,181 @@ def test_batch_always_imports_as_pending_without_evidence(relationship_client):
     assert edge["status"] == "pending"
     assert edge["evidence_ids"] == []
     assert edge["confidence"] == 0.5
+
+
+# ---- 确认时「写入长期记忆」（S7a · T206） -----------------------------------------
+
+
+def _create(client: TestClient, *, status: str, predicate: str = "出现在", obj: str = "ent_west"):
+    return client.post(
+        "/api/v1/relationships",
+        json={
+            "subject_entity_id": "ent_mom",
+            "predicate": predicate,
+            "object_entity_id": obj,
+            "status": status,
+        },
+    )
+
+
+def _claims(client: TestClient) -> list[dict]:
+    return client.get("/api/v1/knowledge").json()["claims"]
+
+
+def test_an_active_relationship_writes_a_semantic_claim(relationship_client):
+    """``status="active"`` 时写一条 claim——1.0 那句「已保存家庭关系：X，**并写入长期记忆**」。
+
+    1.0 前端三处建关系传的都是 ``active``（``app.js:1732`` / ``:1765`` / ``:1831``），
+    所以这是主路径不是边角。claim 挂在 **subject** 上，``value_text`` 是**对方的名字**。
+    """
+    _create(relationship_client, status="active")
+
+    claims = _claims(relationship_client)
+    assert len(claims) == 1
+    assert claims[0]["person_id"] == "ent_mom"
+    assert claims[0]["dimension"] == "relationship"
+    assert claims[0]["predicate"] == "出现在"
+    assert claims[0]["value_text"] == "西湖"
+    assert claims[0]["status"] == "active"
+    assert claims[0]["confidence_source"] == "user-confirmed"
+
+
+def test_the_relationship_evidence_lands_on_the_claim(relationship_client):
+    """``evidence_ids`` 从关系行带到 claim（1.0 ``db.py:5958``）。"""
+    relationship_client.post(
+        "/api/v1/relationships",
+        json={
+            "subject_entity_id": "ent_mom",
+            "predicate": "出现在",
+            "object_entity_id": "ent_west",
+            "status": "active",
+            "evidence_ids": ["obs_1", "obs_2"],
+        },
+    )
+
+    assert _claims(relationship_client)[0]["evidence_ids"] == ["obs_1", "obs_2"]
+
+
+def test_a_pending_relationship_writes_no_claim(relationship_client):
+    """``pending`` 不写。**这是对照臂**：没有它，把 ``status == 'active'`` 那个条件
+    去掉不会有任何东西报错——只是表里多了几行。
+    """
+    _create(relationship_client, status="pending")
+
+    assert _claims(relationship_client) == []
+
+
+def test_confirming_a_pending_relationship_writes_no_claim(relationship_client):
+    """**``confirm`` 不写 claim。** 1.0 ``db.py:6014`` 里没有那一步，只有
+    ``create_relationship(status='active')`` 有（``:6002``）。
+
+    这条反直觉：用户点「确认」把一条待确认关系变成 active，**长期记忆里什么都不会多**。
+    照搬——顺手「补上」会产出 1.0 没有的 claim，所以它必须有用例钉住。
+    """
+    created = _create(relationship_client, status="pending").json()
+    relationship_client.post(f"/api/v1/relationships/{created['id']}/confirm")
+
+    assert _claims(relationship_client) == []
+
+
+def test_the_claim_predicate_goes_through_the_alias_table(relationship_client):
+    """1.0 ``db.py:2655-2659`` 的九条谓词别名：``位于`` → ``出现在``。
+
+    别名表是**改写**不是白名单——没命中的谓词原样落库。
+    """
+    _create(relationship_client, status="active", predicate="位于")
+
+    assert [item["predicate"] for item in _claims(relationship_client)] == ["出现在"]
+
+
+def test_the_claim_keeps_an_unknown_predicate_verbatim(relationship_client):
+    """别名表没命中的原样落库（1.0 那个 ``.get(key, key)`` 的兜底）。
+
+    与上一条成对：只测命中那半边的话，把整张表换成「凡是谓词都改写成出现在」也照样绿。
+    """
+    _create(relationship_client, status="active", predicate="妻子")
+
+    assert [item["predicate"] for item in _claims(relationship_client)] == ["妻子"]
+
+
+def test_a_second_active_relationship_on_the_same_predicate_supersedes_the_first(
+    relationship_client,
+):
+    """``relationship`` **不在多值维度里**（1.0 ``db.py:2689`` 的集合只有
+    activity / place / clothing / capture / attendance），所以同人同谓词的第二条 claim
+    落 ``pending``、记下 ``supersedes_claim_id``、``revision`` 取旧值 + 1。
+
+    把 ``relationship`` 混进多值维度的话这里会变成两条 active——而「一个人不能在同一个
+    谓词上同时有两个值」正是 1.0 用 pending 表达的东西。
+    """
+    _create(relationship_client, status="active", obj="ent_west")
+    _create(relationship_client, status="active", obj="ent_dad")
+
+    claims = {item["value_text"]: item for item in _claims(relationship_client)}
+    assert set(claims) == {"西湖", "爸爸"}
+    assert claims["西湖"]["status"] == "active"
+    assert claims["西湖"]["revision"] == 1
+    assert claims["爸爸"]["status"] == "pending"
+    assert claims["爸爸"]["supersedes_claim_id"] == claims["西湖"]["id"]
+    assert claims["爸爸"]["revision"] == 2
+
+
+def test_a_same_named_person_merges_into_the_same_claim_and_keeps_the_higher_confidence(
+    relationship_client,
+):
+    """claim 的合并键用**对方的名字**（``value_text``）不是对方的 id，所以两个**同名**
+    实体会并到同一条 claim 上；``confidence`` 取 ``MAX``（1.0 ``db.py:2678``）。
+
+    这条钉两件在别处看不到的事：
+
+    - **合并键是名字**：两次写入落到**一行** claim；
+    - **MAX 的方向**：后写的那次置信度**更低**时结果仍是高的那个。
+
+    定点变异：把 ``MAX(confidence, ?)`` 换成 ``?``，这条变红（结果变成 0.4）——而
+    「同一条关系写两遍」那种夹具是杀不掉它的（关系行自己的 ``confidence`` 已经单调，
+    喂进来的值只增不减）。
+    """
+    with _db(relationship_client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO entities (id, scope_id, entity_type, canonical_name, status,"
+            " family_role, summary, confidence, created_at, updated_at)"
+            " VALUES ('ent_west_2', ?, 'place', '西湖', 'confirmed', NULL, '', 0.0, ?, ?)",
+            (HOME, NOW, NOW),
+        )
+    payload = {"subject_entity_id": "ent_mom", "predicate": "出现在", "status": "active"}
+    relationship_client.post(
+        "/api/v1/relationships",
+        json={**payload, "object_entity_id": "ent_west", "confidence": 0.9},
+    )
+    relationship_client.post(
+        "/api/v1/relationships",
+        json={**payload, "object_entity_id": "ent_west_2", "confidence": 0.4},
+    )
+
+    claims = _claims(relationship_client)
+    assert len(claims) == 1
+    assert claims[0]["confidence"] == 0.9
+
+
+def test_the_same_triple_twice_merges_the_claim_instead_of_adding_one(relationship_client):
+    """同键的二次写入**并掉**：证据并集、``confidence`` 取 ``MAX``，claim 仍只有一条。
+
+    第二次建的还是同一条关系（``create`` 会合并），返回的 ``status`` 仍是 active，
+    所以 claim 会被再写一遍——那一次必须并到同一行上（1.0 ``db.py:2675-2685``）。
+    """
+    payload = {
+        "subject_entity_id": "ent_mom",
+        "predicate": "出现在",
+        "object_entity_id": "ent_west",
+        "status": "active",
+        "confidence": 0.4,
+    }
+    relationship_client.post("/api/v1/relationships", json=payload)
+    relationship_client.post(
+        "/api/v1/relationships", json={**payload, "confidence": 0.9, "evidence_ids": ["obs_1"]}
+    )
+
+    claims = _claims(relationship_client)
+    assert len(claims) == 1
+    assert claims[0]["confidence"] == 0.9
+    assert claims[0]["evidence_ids"] == ["obs_1"]

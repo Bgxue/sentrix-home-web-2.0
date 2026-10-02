@@ -937,12 +937,12 @@ class AppearanceRepository(Protocol):
 
 
 class SemanticRepository(Protocol):
-    """语义画像与声明的**只读**面（S6 · T130）。
+    """语义画像与声明。读侧是 S6 · T130，写侧是 S7a · T206。
 
     两张表在 2.0 从 T127 建起来之后一直**没有任何读写路径**，这个端口是它们的第一个
-    读者。写入侧不在本切片：1.0 的写入者是人像流水线（``run_person_insights`` 那一路），
-    2.0 的画像写的是 ``person_portrait_revisions``，与这两张表不是一套——**这是 S6 之前
-    就存在的分叉，不在本次范围内**。
+    读者。**写侧只有一条路**：``maintain_claim``——关系被确认时那句「写入长期记忆」。
+    画像那一套的写入者 ``rebuild_person_memory`` 不在 2.0（2.0 的画像写的是
+    ``person_portrait_revisions``，与这两张表不是一套），**那是 S6 之前就存在的分叉**。
     """
 
     def get_profile(self, person_id: str) -> SemanticProfileRecord | None:
@@ -960,5 +960,40 @@ class SemanticRepository(Protocol):
         （``include_history=False``），也是唯一被用到的取值。1.0 还有 ``include_history``
         分支，2.0 没有调用者需要它，所以不搬那个参数（不是漏）。
         ``person_id`` 为空表示全表，仍受 ``limit`` 约束。
+        """
+        ...
+
+    def maintain_claim(
+        self,
+        *,
+        person_id: str,
+        scope_id: str,
+        dimension: str,
+        predicate: str,
+        value_text: str,
+        evidence_ids: Sequence[str] = (),
+        event_ids: Sequence[str] = (),
+        confidence: float = 0.5,
+        confidence_source: str = "derived",
+        valid_from: str | None = None,
+        valid_to: str | None = None,
+    ) -> SemanticClaimRecord:
+        """写一条语义声明，或把同键已有的那条并掉。1.0 ``db.py:2654-2710``。
+
+        **合并的键是四元组** ``(person_id, dimension, predicate, COALESCE(normalized_value_text,
+        value_text))``，且只在 ``status IN ('active','pending')`` 里找——命中了就
+        **不新建**：证据并集、``confidence`` 取 ``MAX``、``confidence_source`` 覆盖、
+        ``support_count`` 取 ``max(旧的, 支持事件数)``、``updated_at`` 刷新。
+
+        没命中才插新行。新行的 ``status`` 由维度决定：**多值维度**
+        （activity / place / clothing / capture / attendance）恒 ``active``；其余维度
+        （含 ``relationship``）在**同 (person, dimension, predicate) 已有 active 行**时
+        落 ``pending`` 并记下 ``supersedes_claim_id`` 与 ``revision = 旧 + 1``。
+
+        ``predicate`` 会先过一遍 1.0 的九条别名表（``db.py:2655-2659``）。
+
+        **``event_ids`` / ``valid_from`` / ``valid_to`` 三个参数 2.0 目前没有调用者传**
+        （关系那条路三个都空），留着是因为它们参与合并的 SQL 与 ``support_count`` 的算法；
+        等画像那一支落地时直接接上，不用回头改仓储。
         """
         ...

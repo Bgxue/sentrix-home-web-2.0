@@ -17,6 +17,10 @@ WHERE id = ?``（**没有 JOIN**，所以没有 ``subject_name`` / ``object_name
 既然没有消费方，2.0 给一个形状（``RelationshipPayload``）：名字留空，
 ``evidence_ids`` 统一解成列表。不为一个没人读的差异再造两个响应模型。
 
+**``POST`` 走用例，``confirm`` / ``retract`` 直连仓储。** 差别是 ``POST`` 在
+``status == "active"`` 时还要往语义声明层写一条 claim（1.0 那句「已保存家庭关系：X，
+并写入长期记忆」）——那是编排，归 ``CreateRelationship``；另外两条是一对一的转发。
+
 **``POST`` 上那条同空间校验不接。** 1.0 的 ``create_relationship`` 对「两端不在同一个
 记忆空间」抛 ``ValueError``，而 1.0 的 ``app.py`` **没有任何** ``exception_handler``
 （实测 grep 零命中），所以它当时就是一个裸 500。2.0 照搬不接——改成 400 是引入 1.0
@@ -41,6 +45,7 @@ from sentrix.api.schemas.relationships import (
     RelationshipNode,
     RelationshipPayload,
 )
+from sentrix.application.identity.create_relationship import CreateRelationship
 from sentrix.application.identity.import_relationships import (
     ImportRelationships,
     RelationshipRequest,
@@ -65,6 +70,15 @@ def _optional_isoformat(value: datetime | None) -> str | None:
     提到公共位置只会为一个四行的纯函数多开一个模块。"""
 
     return value.isoformat() if value is not None else None
+
+
+def _create_relationship(container: Container) -> CreateRelationship:
+    """建关系那条路要三个协作者：关系、实体（取对方的名字）、语义声明（确认时写 claim）。"""
+    return CreateRelationship(
+        entities=container.entity_repository,
+        relationships=container.relationship_repository,
+        claims=container.semantic_repository,
+    )
 
 
 def _payload(record: RelationshipRecord) -> RelationshipPayload:
@@ -153,7 +167,7 @@ def create_relationship(
         status = DEFAULT_STATUS
     else:
         status = payload.status
-    created = container.relationship_repository.create(
+    created = _create_relationship(container).execute(
         subject_entity_id=payload.subject_entity_id,
         predicate=payload.predicate,
         object_entity_id=payload.object_entity_id,
