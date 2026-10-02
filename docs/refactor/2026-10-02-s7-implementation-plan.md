@@ -308,6 +308,41 @@ coverage **1953 passed / 1 failed**（S7a 时是 1868 passed，本段 +85 条用
 ——已知的模型侧 flaky，§8.1 记着「不要修」。`make ci` 因此停在 coverage、`web-check` 不跑，
 已单独补跑通过（tsc + oxlint + vitest + vite build）。
 
+### 8.3 S7b2 的进度（2026-10-02）
+
+**T311 与 T312 已完成**（`f3cdca2` `cae10ca` `7c3213f`）。
+
+| 任务 | 状态 | 关键判断 |
+|---|---|---|
+| **T311** 运行表读写 + 模型边清场 | ✅ `f3cdca2` | `latest_run` 按 `created_at` 排；`update_run` 的 `None` 是「不改」而不是「写 NULL」（后果：`error` 清不掉）；`supersede` 三重过滤。**M4（去掉 `locked=0`）是等价变异**——手工插一行把它钉住 |
+| **T312** `FamilyGraphService` 四阶段 | ✅ `cae10ca` | 见下 |
+
+**剩下的（S7b2 未完）**：
+
+| 任务 | 内容 |
+|---|---|
+| **T313** | `POST /family-graph/runs`（同步，照 `routes/insights.py:87-98` 的形状）+ `GET /family-graph` 补 `run` 键 + `FamilyGraphService` 接线（它在 `PENDING_WIRING` 里等着） |
+| **T314** | 批末触发：`api/routes/timeline.py` 的 `POST /imports` 里与 `_maybe_run_insights` **并列**加 `_maybe_run_family_graph`，判据用 **event watermark**（`container.event_repository.count_by_scope` 对比 `latest_run().stats['event_watermark']`）——**单张导入 `POST /media/import` 不触发** |
+| **T315** | 收口：module-map / capability-map / behaviour-baseline / 计划 |
+
+**T313 要顺手做的**：`FamilyGraphService` 的 `PENDING_WIRING` 条目（T312 登记的）到那时会被反向规则要求删掉。
+
+### 8.4 T312 查出来的两处「与 1.0 的适配」（都不是选择）
+
+1. **`observations.canonical_json` 在 2.0 不存在**，而 **`detail_json` 恒为 `'{}'`**
+   （全 `src/` 没有写入者——写入语句的列清单里根本没有它）。所以 1.0 的
+   `_semantic_description`（`caption` + `activity` + 两个 JSON blob）在 2.0 只拼得出
+   **前两样**——**喂给家庭图谱模型的文本比 1.0 少两块**。这是 S1/S4 的既有缺口，
+   不是 S7b2 引入的，但它直接影响推断质量，**值得你实测时留意**。
+2. **1.0 把提示词与 JSON 拼成一条 user 消息**；2.0 的 `OpenAIChatClient` 硬性要求
+   `messages[0]` 是 system 且只能有一条 system，所以拆成 system（提示词）+ user（JSON）。
+   同一段文字、不同的角色标记。`SummarizeEvent` 是同一种拆法。
+3. **1.0 的 `role="verify"`（num_predict 512 / num_ctx 4096 / 独立模型槽）在 2.0 无落点**：
+   `ChatModel` 端口不暴露这些参数，连 role 概念都没有，而 2.0 既有的纯文本先例
+   `SummarizeEvent._from_model` 也走默认参数。**按 2.0 的默认 `max_tokens` 公式走**，
+   不扩适配器（那会动到助手那条共享链路）。后果：1.0 在大家族上可能因 512 token
+   截断而静默降级，2.0 不会。
+
 ### 8.3 S7b2 的已知坑（动工前要复核）
 
 - `FamilyGraphService` 是**纯文本路径**（`images=None`），只有 person_insights 的
