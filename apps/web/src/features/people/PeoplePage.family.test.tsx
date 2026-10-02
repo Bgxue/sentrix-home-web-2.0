@@ -7,7 +7,7 @@
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../shared/api/client", async (importOriginal) => {
@@ -30,6 +30,37 @@ import * as client from "../../shared/api/client";
 import type { FamilyGraph, FamilyPerson, FamilyRelationship } from "../../shared/api/client";
 import { ScopeProvider } from "../../app/ScopeProvider";
 import { PeoplePage } from "./PeoplePage";
+
+/** 后端一条关系落**两行**（正行 + 反行）。夹具按这个形状造，才测得到归并。 */
+function relationRow(
+  subject: string,
+  predicate: string,
+  inverse: string,
+  object: string,
+): FamilyRelationship {
+  return {
+    id: `r_${subject}_${object}_${predicate}`,
+    scope_id: "album1",
+    family_graph_id: null,
+    subject_entity_id: subject,
+    predicate,
+    object_entity_id: object,
+    inverse_predicate: inverse,
+    source: "model",
+    confidence: 0.8,
+    evidence_refs: [],
+    state: "active",
+    locked: false,
+    revision: 1,
+  };
+}
+
+function withMembership(person: FamilyPerson, membership: string): FamilyPerson {
+  return {
+    ...person,
+    membership: { ...(person.membership as NonNullable<FamilyPerson["membership"]>), membership },
+  };
+}
 
 /** 一份「8 个人、0 条关系、全 unknown」的真实形状。 */
 function realShapeGraph(): FamilyGraph {
@@ -63,37 +94,7 @@ function realShapeGraph(): FamilyGraph {
   return { scope_id: "album1", run: null, people, scope_ids: ["album1"], relationships: [] };
 }
 
-/** 一条库里的关系行。**注意：一次用户操作会在库里留下两行**（见下面那条用例）。 */
-function relationshipLine(
-  subject: string,
-  predicate: string,
-  object: string,
-  inverse: string,
-): FamilyRelationship {
-  return {
-    id: `rel_${subject}_${object}`,
-    scope_id: "album1",
-    family_graph_id: null,
-    subject_entity_id: subject,
-    predicate,
-    object_entity_id: object,
-    inverse_predicate: inverse,
-    source: "user_override",
-    confidence: 1,
-    evidence_refs: [],
-    state: "effective",
-    locked: true,
-    revision: 1,
-  };
-}
-
-/** 把 router 当前的 search 暴露到 DOM 上——MemoryRouter 不写 `window.location`，
- *  要断言「详情落没落到 URL 上」只能从 router 内部读。 */
-function LocationProbe() {
-  return <span data-testid="location-search">{useLocation().search}</span>;
-}
-
-function mount(graph: FamilyGraph = realShapeGraph()) {
+function mount(graph: FamilyGraph = realShapeGraph(), search = "/?scope=album1") {
   vi.mocked(client.listMemorySpaces).mockResolvedValue([
     { id: "album1", name: "第一册", kind: "benchmark", status: "active" },
   ]);
@@ -101,11 +102,12 @@ function mount(graph: FamilyGraph = realShapeGraph()) {
   vi.mocked(client.listFaceClusters).mockResolvedValue([]);
   vi.mocked(client.listPeople).mockResolvedValue([]);
   // ScopeProvider 优先读 `?scope=`；设上它，取数才是 album1（而不是「全部相册」）。
-  window.history.replaceState(null, "", "/?scope=album1");
+  window.history.replaceState(null, "", search);
   return render(
-    <MemoryRouter>
+    // `initialEntries` 与 `window.history` 都要设：ScopeProvider 读 window.location，
+    // 而 `useSearchParams`（`?person=`）读的是 router 自己的 location，两者不是一份。
+    <MemoryRouter initialEntries={[search]}>
       <ScopeProvider>
-        <LocationProbe />
         <PeoplePage />
       </ScopeProvider>
     </MemoryRouter>,
@@ -138,38 +140,71 @@ describe("/people 名人录（F7 §0 真实形状）", () => {
       expect(container.querySelectorAll("[data-person-id]")).toHaveLength(8);
     });
 
-    const card = container.querySelectorAll("[data-person-id]")[0];
-    const clickedId = card.getAttribute("data-person-id");
-    fireEvent.click(card);
+    fireEvent.click(container.querySelectorAll("[data-person-id]")[0]);
 
     // 详情是一个 aside，不再多一条路由；组件的取数/渲染都走查询参数
     expect(await screen.findByRole("complementary")).toBeTruthy();
     expect(container.querySelectorAll(".person-detail")).toHaveLength(1);
+  });
+});
 
-    // **裁决③（可刷新 / 可分享 / 能后退）全靠下面这一句。** 只断言「有个 aside」的话，
-    // 把 `setSearchParams` 换成纯本地 state 也照样绿——而那时刷新页面就丢了详情。
-    // 两件事一起断言：**URL 里有人**，且**是被点的那一个**（换成别人也得红）。
-    expect(clickedId).not.toBeNull();
-    expect(screen.getByTestId("location-search").textContent).toContain(`person=${clickedId}`);
+/** 图谱 tab 的渲染覆盖。此前图谱组件在任何测试里都没挂载过：`fit()` 的居中项、
+ *  缩放的不动点、拖拽命中判定写错都只会让画面错位，不会抛错。 */
+describe("图谱 tab", () => {
+  function transformOf(container: HTMLElement): string | null {
+    return container.querySelector(".graph-svg > g")?.getAttribute("transform") ?? null;
+  }
+
+  async function openGraph(container: HTMLElement) {
+    fireEvent.click(screen.getByRole("tab", { name: "关系图谱" }));
+    await waitFor(() => {
+      expect(container.querySelector(".graph-svg")).not.toBeNull();
+    });
+  }
+
+  it("0 条边（8 人全 unknown）：8 个节点都画出来，初始变换不是 NaN", async () => {
+    const { container } = mount();
+    await openGraph(container);
+
+    // 夹具是 8 人 0 边——节点数 8 与边数 0 是两个不同的量，0 比 0 抓不到东西。
+    await waitFor(() => {
+      expect(container.querySelectorAll("[data-node-id]")).toHaveLength(8);
+    });
+    expect(container.querySelectorAll(".graph-edge")).toHaveLength(0);
+
+    // fit() 跑过才会写 transform；漏写或算出 NaN 都会在这里现形。
+    const transform = transformOf(container);
+    expect(transform).not.toBeNull();
+    expect(transform).not.toContain("NaN");
+    expect(transform).toMatch(/^translate\(-?[\d.]+ -?[\d.]+\) scale\([\d.]+\)$/);
   });
 
-  it("一次建关系在库里是两行，计数只算一条", async () => {
-    // 实测确认：`PUT /family-graph/relationships` 会写**正向 + 反向两行**
-    // （父亲→儿子 与 儿子→父亲，state 都是 effective），GET 原样返回。
-    // 所以直接数 `relationships.length` 会把用户建的 1 条关系显示成「2 条关系」。
-    // 布局与详情面板都走了 `dedupeRelationships`，页头那个计数也得对齐。
-    mount({
-      ...realShapeGraph(),
-      relationships: [
-        relationshipLine("person_0", "父亲", "person_1", "儿子"),
-        relationshipLine("person_1", "儿子", "person_0", "父亲"),
-      ],
-    });
+  it("后端一次写两行 + 一条同对的其他关系：图上只画 1 条边，且是优先级最高的那条", async () => {
+    const base = realShapeGraph();
+    const dad = withMembership({ ...base.people[0], display_name: "爸爸" }, "family");
+    const son = withMembership({ ...base.people[1], display_name: "儿子" }, "family");
+    // 三条输入行都落在同一对人身上：正行、反行、以及一条更低优先级的关系，且胜者
+    // 不在最后——「不归并」会画 3 条边，「保留最后一条」会画成「朋友」，两种都能现形。
+    // 选中爸爸，边的标签才会渲染，于是「画的是哪条边」也进得了断言。
+    const { container } = mount(
+      {
+        ...base,
+        people: [dad, son],
+        relationships: [
+          relationRow(dad.id, "父亲", "儿子", son.id),
+          relationRow(son.id, "儿子", "父亲", dad.id),
+          relationRow(dad.id, "朋友", "朋友", son.id),
+        ],
+      },
+      `/?scope=album1&person=${dad.id}`,
+    );
+    await openGraph(container);
 
     await waitFor(() => {
-      // 关键在「1」而不是「2」——两行是同一段关系的两个方向。
-      expect(screen.getByText("8 人 · 1 条关系")).toBeTruthy();
+      expect(container.querySelectorAll("[data-node-id]")).toHaveLength(2);
     });
+    expect(container.querySelectorAll(".graph-edge")).toHaveLength(1);
+    expect(container.querySelectorAll(".graph-edge-label")).toHaveLength(1);
+    expect(container.querySelector(".graph-edge-label")?.textContent).toBe("父亲");
   });
-
 });

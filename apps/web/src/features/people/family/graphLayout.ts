@@ -197,3 +197,117 @@ export function layoutBounds(
   }
   return { minX, minY, maxX, maxY };
 }
+
+// ---- 视图变换（纯函数） -----------------------------------------------------------
+//
+// 这段数学原先埋在 `FamilyGraphView` 几个事件处理里，一行测试都没有：`fit` 的居中项
+// 漏写、滚轮的缩放不动点写反、屏幕↔世界的乘除颠倒，三种都只会让画面错位而不会报错。
+// 抽成纯函数是为了能定点变异地测它们——**公式与常量原样搬出，未改行为**。
+
+export interface Transform {
+  readonly k: number;
+  readonly x: number;
+  readonly y: number;
+}
+
+/** 节点渲染尺寸。视图画圈与 `fitTransform` 算包围盒共用同一份，不再两处各写一个数。 */
+export const NODE_RADIUS = 26;
+/** 名字画在节点下方，包围盒下沿要多留的高度。 */
+export const NODE_LABEL_HEIGHT = 34;
+/** 自适应时四周的留白。 */
+export const FIT_MARGIN = 20;
+export const FIT_MAX_SCALE = 1.4;
+export const FIT_MIN_SCALE = 0.15;
+export const ZOOM_MIN = 0.15;
+export const ZOOM_MAX = 4;
+
+export type Bounds = { readonly minX: number; readonly minY: number; readonly maxX: number; readonly maxY: number };
+
+/**
+ * 让包围盒刚好装进 `width × height` 并居中（加载即自适应）。
+ *
+ * 居中项 `(width - k*boxWidth)/2` 不能省：省掉之后全图会贴左边，画面仍然「能看」，
+ * 只有断言「中心点落在画布中心」才抓得到。空包围盒返回 null。
+ */
+export function fitTransform(bounds: Bounds | null, width: number, height: number): Transform | null {
+  if (bounds === null) return null;
+  const minX = bounds.minX - NODE_RADIUS - FIT_MARGIN;
+  const maxX = bounds.maxX + NODE_RADIUS + FIT_MARGIN;
+  const minY = bounds.minY - NODE_RADIUS - FIT_MARGIN;
+  const maxY = bounds.maxY + NODE_RADIUS + NODE_LABEL_HEIGHT + FIT_MARGIN;
+  const boxWidth = Math.max(maxX - minX, 1);
+  const boxHeight = Math.max(maxY - minY, 1);
+  const k = Math.max(Math.min(width / boxWidth, height / boxHeight, FIT_MAX_SCALE), FIT_MIN_SCALE);
+  return {
+    k,
+    x: (width - k * boxWidth) / 2 - k * minX,
+    y: (height - k * boxHeight) / 2 - k * minY,
+  };
+}
+
+/**
+ * 以 `(pointerX, pointerY)` 为不动点缩放。
+ *
+ * 「不动点」是这条公式的全部意义：光标下的那个人在缩放前后必须还在光标下，否则
+ * 每次滚轮图都会从手底下滑走。断言方式是缩放前后用 `screenToWorld` 取同一个屏幕点，
+ * 世界坐标必须相等。
+ */
+export function zoomAt(
+  current: Transform,
+  pointerX: number,
+  pointerY: number,
+  factor: number,
+): Transform {
+  const k = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, current.k * factor));
+  const ratio = k / current.k;
+  return {
+    k,
+    x: pointerX - (pointerX - current.x) * ratio,
+    y: pointerY - (pointerY - current.y) * ratio,
+  };
+}
+
+/** 屏幕坐标 → 世界坐标（`transform` 的逆）。`offsetX/offsetY` 是 SVG 在视口里的左上角。 */
+export function screenToWorld(
+  current: Transform,
+  offsetX: number,
+  offsetY: number,
+  clientX: number,
+  clientY: number,
+): LayoutPoint {
+  return {
+    x: (clientX - offsetX - current.x) / current.k,
+    y: (clientY - offsetY - current.y) / current.k,
+  };
+}
+
+/** 世界坐标 → 屏幕坐标。fit 的断言用它验「中心落在画布中心」。 */
+export function worldToScreen(
+  current: Transform,
+  world: LayoutPoint,
+): LayoutPoint {
+  return { x: current.x + current.k * world.x, y: current.y + current.k * world.y };
+}
+
+/**
+ * 拖拽落点判定：离 `point` 最近、且在 `radius` 内、且不是 `excludeId` 的节点。
+ * 命中就把两个人连起来，没命中就只当一次点击——半径写错会让「差一点没搭上」静默丢关系。
+ */
+export function nearestNodeId(
+  layout: ReadonlyMap<string, LayoutPoint>,
+  point: LayoutPoint,
+  excludeId: string,
+  radius: number,
+): string | null {
+  let found: string | null = null;
+  let best = radius;
+  for (const [id, candidate] of layout) {
+    if (id === excludeId) continue;
+    const distance = Math.hypot(candidate.x - point.x, candidate.y - point.y);
+    if (distance < best) {
+      best = distance;
+      found = id;
+    }
+  }
+  return found;
+}

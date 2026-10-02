@@ -24,10 +24,18 @@ import {
 
 import type { FamilyPerson, FamilyRelationship } from "../../../shared/api/client";
 import { EmptyState } from "../../../shared/ui/EmptyState";
-import { dedupeRelationships, graphLayout, layoutBounds } from "./graphLayout";
+import {
+  dedupeRelationships,
+  fitTransform,
+  graphLayout,
+  layoutBounds,
+  nearestNodeId,
+  NODE_RADIUS,
+  screenToWorld,
+  zoomAt,
+} from "./graphLayout";
 import { membershipLabel, membershipOf, personDisplayName } from "./membership";
 
-const NODE_RADIUS = 26;
 /** 命中另一个节点的半径：比节点本身松一点，拖拽时不必精确压中圆心。 */
 const DROP_RADIUS = NODE_RADIUS * 1.8;
 const DEFAULT_SIZE = { width: 960, height: 560 };
@@ -111,25 +119,12 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
     groupRef.current?.setAttribute("transform", `translate(${x} ${y}) scale(${k})`);
   }, []);
 
-  /** 加载即自适应：包围盒 → 初始 scale/translate，让全图刚好装下。 */
+  /** 加载即自适应：包围盒 → 初始 scale/translate，让全图刚好装下。公式在 `fitTransform`。 */
   const fit = useCallback(() => {
-    const bounds = layoutBounds(layoutRef.current);
-    if (bounds === null) return;
     const { width, height } = sizeRef.current;
-    const margin = 20;
-    const minX = bounds.minX - NODE_RADIUS - margin;
-    const maxX = bounds.maxX + NODE_RADIUS + margin;
-    // 名字画在节点下方，包围盒下沿多留一点，否则末行的标签会被裁掉。
-    const minY = bounds.minY - NODE_RADIUS - margin;
-    const maxY = bounds.maxY + NODE_RADIUS + 34 + margin;
-    const boxWidth = Math.max(maxX - minX, 1);
-    const boxHeight = Math.max(maxY - minY, 1);
-    const k = Math.max(Math.min(width / boxWidth, height / boxHeight, 1.4), 0.15);
-    transformRef.current = {
-      k,
-      x: (width - k * boxWidth) / 2 - k * minX,
-      y: (height - k * boxHeight) / 2 - k * minY,
-    };
+    const next = fitTransform(layoutBounds(layoutRef.current), width, height);
+    if (next === null) return;
+    transformRef.current = next;
     applyTransform();
   }, [applyTransform]);
 
@@ -162,15 +157,13 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
       const rect = element.getBoundingClientRect();
       const pointerX = event.clientX - rect.left;
       const pointerY = event.clientY - rect.top;
-      const current = transformRef.current;
-      const nextK = Math.min(4, Math.max(0.15, current.k * Math.exp(-event.deltaY * 0.0015)));
-      // 解 x' 使光标下的世界坐标不变：p = (screen - x) / k
-      const ratio = nextK / current.k;
-      transformRef.current = {
-        k: nextK,
-        x: pointerX - (pointerX - current.x) * ratio,
-        y: pointerY - (pointerY - current.y) * ratio,
-      };
+      // 不动点缩放：光标下的世界坐标在缩放前后必须不变（公式在 `zoomAt`）。
+      transformRef.current = zoomAt(
+        transformRef.current,
+        pointerX,
+        pointerY,
+        Math.exp(-event.deltaY * 0.0015),
+      );
       applyTransform();
     }
     svg.addEventListener("wheel", handleWheel, { passive: false });
@@ -181,23 +174,14 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
     const svg = svgRef.current;
     if (svg === null) return { x: 0, y: 0 };
     const rect = svg.getBoundingClientRect();
-    const { k, x, y } = transformRef.current;
-    return { x: (clientX - rect.left - x) / k, y: (clientY - rect.top - y) / k };
+    return screenToWorld(transformRef.current, rect.left, rect.top, clientX, clientY);
   }, []);
 
-  const nearestNode = useCallback((world: { x: number; y: number }, excludeId: string) => {
-    let found: string | null = null;
-    let bestDistance = DROP_RADIUS;
-    for (const [id, point] of layoutRef.current) {
-      if (id === excludeId) continue;
-      const distance = Math.hypot(point.x - world.x, point.y - world.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        found = id;
-      }
-    }
-    return found;
-  }, []);
+  const nearestNode = useCallback(
+    (world: { x: number; y: number }, excludeId: string) =>
+      nearestNodeId(layoutRef.current, world, excludeId, DROP_RADIUS),
+    [],
+  );
 
   // 平移 / 拖拽建关系。挂 window 而不是挂 SVG：指针移出边界后事件还能继续。
   useEffect(() => {
@@ -305,10 +289,7 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
           width="100%"
           height="100%"
           onPointerDown={handlePointerDown}
-          // 不是 `application`：那个角色会让读屏交出虚拟光标、把按键直通页面，
-          // 而这图里没有任何可聚焦元素、也没有键盘处理——读屏用户会被推进应用
-          // 模式然后卡住。它的定位是「一张可看的图」，`img` 才对。
-          role="img"
+          role="application"
           aria-label="家庭关系图"
         >
           <g ref={groupRef}>
