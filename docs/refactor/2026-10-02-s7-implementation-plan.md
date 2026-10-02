@@ -300,6 +300,14 @@ coverage **1868 passed / 1 failed / 29 skipped**（S6 时是 1836 passed）。
   `supersede_model_relationships`——它们的调用者都是上面那些；
 - `GET /family-graph` 响应里的 **`run` 键**（b1 没有任何东西会创建 run）。
 
+**S7b1 的终态验证**（2026-10-02，`make ci`）：静态门禁全绿（ruff / format /
+mypy 190 个文件 / arch 五契约 + 两条可达性 / check-docs 含 OpenAPI 契约），
+coverage **1953 passed / 1 failed**（S7a 时是 1868 passed，本段 +85 条用例）。
+
+**那一条 failed 与前两次是同一条**：`test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`
+——已知的模型侧 flaky，§8.1 记着「不要修」。`make ci` 因此停在 coverage、`web-check` 不跑，
+已单独补跑通过（tsc + oxlint + vitest + vite build）。
+
 ### 8.3 S7b2 的已知坑（动工前要复核）
 
 - `FamilyGraphService` 是**纯文本路径**（`images=None`），只有 person_insights 的
