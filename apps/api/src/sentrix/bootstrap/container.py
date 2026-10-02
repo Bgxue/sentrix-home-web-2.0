@@ -264,7 +264,7 @@ class Container:
             person_preview_renderer=PillowPersonPreviewRenderer(),
             moment_repository=SqliteMomentRepository(database),
             relationship_repository=SqliteRelationshipRepository(database),
-            family_graph_repository=SqliteFamilyGraphRepository(database),
+            family_graph_repository=SqliteFamilyGraphRepository(database, entities),
             portrait_repository=SqlitePortraitRepository(database),
             chat_model=OpenAIChatModel(
                 settings.vlm_base_url,

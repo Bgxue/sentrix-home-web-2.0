@@ -9,6 +9,7 @@ from sentrix.api.errors import domain_error_handler
 from sentrix.api.routes import (
     assistant,
     facts,
+    family,
     health,
     identity,
     insights,
@@ -49,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(facts.router)
     v1.include_router(knowledge.router)
     v1.include_router(relationships.router)
+    v1.include_router(family.router)
     app.include_router(v1)
     return app
 

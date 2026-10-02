@@ -68,12 +68,10 @@ PENDING_METHODS: dict[str, str] = {
     #
     # 与 S6 的 ``PhotoInspector.inspect`` 同一条路：端口与记录是**先落地、随后接线**
     # 的一件（计划 §8.2 的 T302→T305/T306），落地的那一刻必然没有生产调用者。
-    # 读的四个由 T305（``GET /family-graph``）接，写的五个由 T306（四条写路由）接。
+    # **读的四个已由 T305 接上并按反向规则删掉了。** 这条纪律在本切片内走完了两轮：
+    # T302 登记 → T303 接上白名单模块（模块级那条）→ T305 接上四个读方法。
+    # 写的五个由 T306 接。
     # **接线完成时反向规则会逐条要求删掉它们**——那正是这张表存在的形式。
-    "FamilyGraphRepository.get_effective_membership": "S7b1 · T305（GET /family-graph）",
-    "FamilyGraphRepository.list_effective_relationships": "S7b1 · T305（GET /family-graph）",
-    "FamilyGraphRepository.get_active_portrait": "S7b1 · T305（GET /family-graph）",
-    "FamilyGraphRepository.graph_scope_ids": "S7b1 · T305（GET /family-graph）",
     "FamilyGraphRepository.set_membership": "S7b1 · T306（PATCH membership）",
     "FamilyGraphRepository.set_relationship": "S7b1 · T306（PUT relationships）",
     "FamilyGraphRepository.retract_relationship": "S7b1 · T306（DELETE relationships）",

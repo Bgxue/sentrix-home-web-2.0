@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from sentrix.domain.identity.family import (
     FamilyMembershipRecord,
+    FamilyPersonProjection,
     FamilyPortraitRecord,
     FamilyRelationshipRecord,
 )
@@ -1018,6 +1019,25 @@ class FamilyGraphRepository(Protocol):
     ``family_relationship_blocks`` 里留一行挡着。**这三条「跳过」都不报错**——
     静默保留用户的选择就是它们要的效果，所以每一条都有用例钉。
     """
+
+    # ---- 读投影 ----------------------------------------------------------------
+
+    def family_graph_people(self, scope_ids: Sequence[str]) -> Sequence[FamilyPersonProjection]:
+        """这张图里**全部人物**的展示投影。1.0 ``db.py:5649-5688`` 的 ``family_graph_people``。
+
+        **三个派生字段各有自己的一套查询，与 ``EntityRepository.decorate_entities``
+        不是一回事**（三处都不同，别想着复用）：
+
+        - 头像的排序多一位 ``fi.quality DESC``（那边的头像不看 quality）；
+        - ``representative_media`` 走的是「这个人的脸出现在哪些照片」
+          （``face_instances⋈face_clusters⋈assets``）+ ``ORDER BY a.id DESC LIMIT 3``，
+          而那边的 ``preview_*`` 走的是「这个实体最新的观察」——**连接路径、条数、排序三处都不同**；
+        - ``appearance_count`` 数的是**人脸实例行数**，那边是 ``COUNT(DISTINCT a.id)``。
+
+        ``display_name`` 的占位是 **「待命名人物」**——1.0 这个函数里硬编码的就是这个词，
+        与 ``app.py`` 那处的「待命名成员」不是同一个串。
+        """
+        ...
 
     # ---- 成员归属 --------------------------------------------------------------
 

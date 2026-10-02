@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from sentrix.infrastructure.persistence.database import Database
+from sentrix.infrastructure.persistence.repositories.entities import SqliteEntityRepository
 from sentrix.infrastructure.persistence.repositories.family import (
     SqliteFamilyGraphRepository,
 )
@@ -50,7 +51,7 @@ def repo(migrations_ready_db: Database) -> dict[str, object]:
                 " VALUES (?, ?, ?, ?, 'confirmed', '', 0.0, ?, ?)",
                 (entity_id, scope_id, kind, name, NOW, NOW),
             )
-    return {"repo": SqliteFamilyGraphRepository(db), "db": db}
+    return {"repo": SqliteFamilyGraphRepository(db, SqliteEntityRepository(db)), "db": db}
 
 
 def _blocks(db: Database) -> list[dict[str, object]]:

@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 
 from sentrix.domain.identity.family import (
     FAMILY_MEMBERSHIPS,
+    FAMILY_PENDING_DISPLAY_NAME,
     FAMILY_SOURCES,
     SOURCE_MODEL,
     SOURCE_USER_OVERRIDE,
@@ -40,10 +41,13 @@ from sentrix.domain.identity.family import (
     STATE_RETRACTED,
     STATE_SUPERSEDED,
     FamilyMembershipRecord,
+    FamilyPersonProjection,
     FamilyPortraitRecord,
     FamilyRelationshipRecord,
 )
 from sentrix.domain.identity.family_graph import validate_relationship_pair
+from sentrix.domain.identity.models import ENTITY_STATUS_PENDING
+from sentrix.domain.identity.ports import EntityRepository
 from sentrix.infrastructure.persistence.database import Database
 
 # 运行（``family_analysis_runs``）的四个方法归 S7b2——它们的调用者是
@@ -160,8 +164,12 @@ def _row_to_portrait(row: sqlite3.Row) -> FamilyPortraitRecord:
 
 
 class SqliteFamilyGraphRepository:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, entities: EntityRepository) -> None:
         self._database = database
+        # ``family_graph_people`` 要按 ``list_entities`` 的口径列人物——那份口径
+        # （排除 ``include_in_people = 0`` 的空间、排除 rejected/superseded）
+        # 抄进这里就会漂。所以注入实体仓储复用它的规则，而不是复刻那条 WHERE。
+        self._entities = entities
 
     # ---- 校验 ----------------------------------------------------------------
 
@@ -248,6 +256,64 @@ class SqliteFamilyGraphRepository:
                 subject_entity_id,
             ),
         )
+
+    # ---- 读投影 ----------------------------------------------------------------
+
+    _AVATAR_SQL = (
+        "SELECT fi.id AS id FROM face_instances fi"
+        " JOIN face_clusters fc ON fc.id = fi.cluster_id"
+        " WHERE fc.entity_id = ? AND fc.status != 'rejected'"
+        " ORDER BY fi.quality DESC, fi.detection_confidence DESC, fi.created_at ASC LIMIT 1"
+    )
+    _MEDIA_SQL = (
+        "SELECT DISTINCT a.id AS id, a.media_type AS media_type, a.file_name AS file_name"
+        " FROM face_instances fi"
+        " JOIN face_clusters fc ON fc.id = fi.cluster_id"
+        " JOIN assets a ON a.id = fi.asset_id"
+        " WHERE fc.entity_id = ? AND fc.status != 'rejected'"
+        " ORDER BY a.id DESC LIMIT 3"
+    )
+    _APPEARANCE_SQL = (
+        "SELECT COUNT(*) AS count FROM face_instances fi"
+        " JOIN face_clusters fc ON fc.id = fi.cluster_id"
+        " WHERE fc.entity_id = ? AND fc.status != 'rejected'"
+    )
+
+    def family_graph_people(self, scope_ids: Sequence[str]) -> Sequence[FamilyPersonProjection]:
+        """1.0 ``db.py:5649-5688``：**逐个 scope、逐个人物**地现场拼。N+1 是照搬。
+
+        三套查询与 ``decorate_entities`` 的差别见端口 docstring。**这里的 N+1 与 1.0
+        同形**（那边也是循环里三条子查询），且这条路径只在打开家庭图谱页时走一次。
+        """
+        people: list[FamilyPersonProjection] = []
+        for scope_id in scope_ids:
+            for entity in self._entities.list_entities(scope_id=scope_id):
+                if entity.entity_type != "person":
+                    continue
+                with self._database.connect() as connection:
+                    avatar = connection.execute(self._AVATAR_SQL, (entity.id,)).fetchone()
+                    media = connection.execute(self._MEDIA_SQL, (entity.id,)).fetchall()
+                    count = connection.execute(self._APPEARANCE_SQL, (entity.id,)).fetchone()
+                    membership = self.get_effective_membership(scope_id, entity.id)
+                    portrait = self.get_active_portrait(scope_id, entity.id)
+                    pending = entity.status == ENTITY_STATUS_PENDING
+                    people.append(
+                        FamilyPersonProjection(
+                            id=entity.id,
+                            scope_id=scope_id,
+                            display_name=(
+                                FAMILY_PENDING_DISPLAY_NAME
+                                if pending or not entity.canonical_name
+                                else entity.canonical_name
+                            ),
+                            membership=membership,
+                            portrait=portrait,
+                            avatar_face_instance_id=avatar["id"] if avatar else None,
+                            appearance_count=int((count or {"count": 0})["count"] or 0),
+                            representative_media=tuple(dict(row) for row in media),
+                        )
+                    )
+        return people
 
     # ---- 成员归属 --------------------------------------------------------------
 

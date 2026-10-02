@@ -1718,6 +1718,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/family-graph:
+    get:
+      tags:
+      - family
+      summary: Family Graph
+      description: '一张家庭图谱。1.0 ``app.py:1648-1656``。
+
+
+        ``scope_id`` 是**必填**（1.0 的签名里没有默认值），合并过 scope 时它会顺着
+
+        ``family_scope_groups`` 展开成 ``scope_ids``。'
+      operationId: family_graph_api_v1_family_graph_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyGraphResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -3243,6 +3275,332 @@ components:
       - evidence_ids
       - revision
       title: FactPayload
+    FamilyGraphResponse:
+      properties:
+        scope_id:
+          type: string
+          title: Scope Id
+        people:
+          items:
+            $ref: '#/components/schemas/FamilyPersonPayload'
+          type: array
+          title: People
+        scope_ids:
+          items:
+            type: string
+          type: array
+          title: Scope Ids
+        relationships:
+          items:
+            $ref: '#/components/schemas/FamilyRelationshipPayload'
+          type: array
+          title: Relationships
+      type: object
+      required:
+      - scope_id
+      - people
+      - scope_ids
+      - relationships
+      title: FamilyGraphResponse
+      description: '``GET /family-graph`` 的响应。
+
+
+        **``relationships`` 是跨整张图的**：1.0 ``app.py:1655`` 是一个对 ``scope_ids``
+
+        的展平推导——``people`` 走合并后的全部 scope，关系也一样。这条容易看漏，
+
+        因为 ``scope_id`` 那个键仍然只是入参那一个。'
+    FamilyMembershipPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        entity_id:
+          type: string
+          title: Entity Id
+        membership:
+          type: string
+          title: Membership
+        source:
+          type: string
+          title: Source
+        confidence:
+          type: number
+          title: Confidence
+        evidence_refs:
+          items:
+            type: string
+          type: array
+          title: Evidence Refs
+        inference_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Inference Run Id
+        state:
+          type: string
+          title: State
+        locked:
+          type: boolean
+          title: Locked
+        revision:
+          type: integer
+          title: Revision
+        supersedes_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Supersedes Id
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - scope_id
+      - entity_id
+      - membership
+      - source
+      - confidence
+      - evidence_refs
+      - inference_run_id
+      - state
+      - locked
+      - revision
+      - supersedes_id
+      - created_at
+      - updated_at
+      title: FamilyMembershipPayload
+      description: '``family_person_memberships`` 一行。'
+    FamilyPersonPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        display_name:
+          type: string
+          title: Display Name
+        membership:
+          anyOf:
+          - $ref: '#/components/schemas/FamilyMembershipPayload'
+          - type: 'null'
+        portrait:
+          anyOf:
+          - $ref: '#/components/schemas/FamilyPortraitPayload'
+          - type: 'null'
+        avatar_face_instance_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Avatar Face Instance Id
+        appearance_count:
+          type: integer
+          title: Appearance Count
+        representative_media:
+          items:
+            $ref: '#/components/schemas/FamilyRepresentativeMedia'
+          type: array
+          title: Representative Media
+      type: object
+      required:
+      - id
+      - scope_id
+      - display_name
+      - membership
+      - portrait
+      - avatar_face_instance_id
+      - appearance_count
+      - representative_media
+      title: FamilyPersonPayload
+      description: '``people[]`` 的一项。``display_name`` 的占位是 **「待命名人物」**（1.0 这个端点
+
+        里的原词，与 ``app.py`` 那处的「待命名成员」不是一个串）。'
+    FamilyPortraitPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        entity_id:
+          type: string
+          title: Entity Id
+        portrait_text:
+          type: string
+          title: Portrait Text
+        evidence_refs:
+          items:
+            type: string
+          type: array
+          title: Evidence Refs
+        source:
+          type: string
+          title: Source
+        inference_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Inference Run Id
+        state:
+          type: string
+          title: State
+        locked:
+          type: boolean
+          title: Locked
+        revision:
+          type: integer
+          title: Revision
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - scope_id
+      - entity_id
+      - portrait_text
+      - evidence_refs
+      - source
+      - inference_run_id
+      - state
+      - locked
+      - revision
+      - created_at
+      - updated_at
+      title: FamilyPortraitPayload
+      description: '``family_person_portraits`` 一行。**与人物画像那套（``PersonPortrait*``）不是一张表。**'
+    FamilyRelationshipPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        family_graph_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Family Graph Id
+        subject_entity_id:
+          type: string
+          title: Subject Entity Id
+        predicate:
+          type: string
+          title: Predicate
+        object_entity_id:
+          type: string
+          title: Object Entity Id
+        inverse_predicate:
+          type: string
+          title: Inverse Predicate
+        source:
+          type: string
+          title: Source
+        confidence:
+          type: number
+          title: Confidence
+        evidence_refs:
+          items:
+            type: string
+          type: array
+          title: Evidence Refs
+        inference_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Inference Run Id
+        state:
+          type: string
+          title: State
+        locked:
+          type: boolean
+          title: Locked
+        revision:
+          type: integer
+          title: Revision
+        supersedes_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Supersedes Id
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - scope_id
+      - family_graph_id
+      - subject_entity_id
+      - predicate
+      - object_entity_id
+      - inverse_predicate
+      - source
+      - confidence
+      - evidence_refs
+      - inference_run_id
+      - state
+      - locked
+      - revision
+      - supersedes_id
+      - created_at
+      - updated_at
+      title: FamilyRelationshipPayload
+      description: '``family_relationships`` 一行。库里一条边是**两行**，所以这里也是两条。'
+    FamilyRepresentativeMedia:
+      properties:
+        id:
+          type: string
+          title: Id
+        media_type:
+          type: string
+          title: Media Type
+        file_name:
+          type: string
+          title: File Name
+      type: object
+      required:
+      - id
+      - media_type
+      - file_name
+      title: FamilyRepresentativeMedia
+      description: '``representative_media`` 的一项。**三个键**，1.0 ``db.py:5662-5669`` 逐字。
+
+
+        这是「**这个人的脸出现在哪些照片**」，不是「这个实体最新的观察」——两条查询的
+
+        连接路径都不同（``face_instances⋈face_clusters⋈assets`` 对
+
+        ``entity_observations⋈observations⋈assets``）。'
     HTTPValidationError:
       properties:
         detail:
