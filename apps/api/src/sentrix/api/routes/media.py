@@ -186,6 +186,7 @@ def _entity_extractor(container: Container) -> Callable[[Observation, str], tupl
         entities=container.entity_repository,
         events=container.event_participant_repository,
         assets=container.asset_repository,
+        relationships=container.relationship_repository,
     )
 
     def run(observation: Observation, event_id: str) -> tuple[str, ...]:

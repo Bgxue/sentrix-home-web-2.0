@@ -6,14 +6,15 @@
    子串匹配与类别顺序）——它们是产品行为，改一个数字就是改归类；
 2. **回退链**：1.0 首选语义词表，2.0 没有，所以走的是 1.0 自己的回退那一支
    （``observation.place`` / ``observation.objects`` / ``captured_at``）；
-3. **不建关系**（2026-09-30 的裁决）。1.0 那个函数最后会给每个实体建两条
-   （「出现在」/「记录于」），而 ``relationships`` 表的归属是 S7。**这一条必须有用例**：
-   它是这次唯一的收窄，没有门禁替它把关——哪天有人「顺手补全」，只会多出几行数据，
-   不会有任何东西报错。
+3. **建关系**（S7a · T204 把 S6 的收窄补回来了）。1.0 那个函数最后会给每个实体建两条
+   （「出现在」/「记录于」）。**这三条断言必须有**：S6 那次收窄没有门禁替它把关，
+   当时的原话是「哪天有人顺手补全，只会多出几行数据，不会有任何东西报错」——
+   T204 正是那个「顺手补全」，所以现在反过来由用例钉住补全后的形状。
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,6 +36,9 @@ from sentrix.infrastructure.persistence.repositories.assets import (
 from sentrix.infrastructure.persistence.repositories.entities import SqliteEntityRepository
 from sentrix.infrastructure.persistence.repositories.participants import (
     SqliteEventParticipantRepository,
+)
+from sentrix.infrastructure.persistence.repositories.relationships import (
+    SqliteRelationshipRepository,
 )
 
 SCOPE = "album-t127"
@@ -220,6 +224,7 @@ def bundle(migrations_ready_db):
         "assets": SqliteAssetRepository(migrations_ready_db),
         "entities": SqliteEntityRepository(migrations_ready_db),
         "events": SqliteEventParticipantRepository(migrations_ready_db),
+        "relationships": SqliteRelationshipRepository(migrations_ready_db),
     }
 
 
@@ -259,7 +264,10 @@ def seed_event(bundle, event_id: str = "event_1") -> str:
 
 def build(bundle) -> MaintainObservationEntities:
     return MaintainObservationEntities(
-        entities=bundle["entities"], events=bundle["events"], assets=bundle["assets"]
+        entities=bundle["entities"],
+        events=bundle["events"],
+        assets=bundle["assets"],
+        relationships=bundle["relationships"],
     )
 
 
@@ -390,19 +398,72 @@ def test_without_an_event_there_is_no_event_link(bundle) -> None:
     assert rows(bundle, "event_entities") == []
 
 
-def test_it_does_not_create_relationships(bundle) -> None:
-    """**这条钉的是 2026-09-30 的裁决：不建关系。**
+def _entity_id(bundle, name: str) -> str:
+    found = rows(bundle, "entities", "canonical_name = ?", (name,))
+    assert len(found) == 1, f"{name} 应该是唯一实体，实际 {len(found)} 行"
+    return str(found[0]["id"])
 
-    1.0 那个函数的最后一组循环会给每个实体建两条——``(entity, "出现在", place)`` 与
-    ``(entity, "记录于", time)``。而 ``relationships`` 表与 ``RelationshipRepository``
-    的归属是 **S7**（设计 §8 的 S7 = family graph + relationships）。
 
-    **它是这次唯一的收窄，而且没有任何门禁替它把关**：哪天有人「顺手补全」，
-    只会往表里多写几行，不会有任何东西报错。所以这条断言必须在这里。
+def test_it_links_every_entity_to_the_place_and_the_time(bundle) -> None:
+    """**S7a · T204 把 S6 的收窄补回来了。** 1.0 ``db.py:3943-3952``。
+
+    这次观察有 place（家中餐厅）、captured_at（2019-07-22）与两个物件，一共四个实体：
+    ``出现在`` 从每个非 place 的实体连到 place（三个：两个物件 + time），
+    ``记录于`` 从每个非 time 的实体连到 time（三个：place + 两个物件），合计六条。
+
+    **自环是这里挡的**：place 不连自己、time 不连自己——``create_relationship``
+    没有自环校验（1.0 也没有），漏掉那两行判断就会多出两条 ``出现在`` / ``记录于``
+    的自环，而且不会有任何东西报错。
     """
     build(bundle).execute(observation(), event_id=seed_event(bundle))
 
-    assert rows(bundle, "relationships") == [], "关系是 S7 的地界，T127 不建"
+    found = rows(bundle, "relationships")
+    by_predicate = {item["predicate"] for item in found}
+
+    assert by_predicate == {"出现在", "记录于"}
+    assert len([item for item in found if item["predicate"] == "出现在"]) == 3
+    assert len([item for item in found if item["predicate"] == "记录于"]) == 3
+    # **方向**也要钉：只数条数的话，把两个谓词对调不会被抓到（对调后两边还是 3 条）。
+    assert {item["object_entity_id"] for item in found if item["predicate"] == "出现在"} == {
+        _entity_id(bundle, "家中餐厅")
+    }
+    assert {item["object_entity_id"] for item in found if item["predicate"] == "记录于"} == {
+        _entity_id(bundle, "2019-07-22")
+    }
+    # 一条自环都没有。
+    assert all(item["subject_entity_id"] != item["object_entity_id"] for item in found)
+    # 两条边都是「机器看出来的」，status 走仓储默认值。
+    assert {item["status"] for item in found} == {"pending"}
+    assert {item["confidence"] for item in found} == {0.65}
+
+
+def test_the_relationship_evidence_includes_the_event_when_there_is_one(bundle) -> None:
+    """``evidence`` 是 ``[observation_id, event_id]``；**没有 event 时只挂观察**
+    （1.0 ``db.py:3944`` 的三元表达式）。这一行在写属性与挂事件那两处已经存在，
+    关系这两条复用它——所以两处的证据集必须一致。
+    """
+    build(bundle).execute(observation())  # 不给 event_id
+
+    found = rows(bundle, "relationships")
+
+    assert found
+    assert {tuple(json.loads(item["evidence_ids_json"])) for item in found} == {("obs_1",)}
+
+
+def test_a_rerun_merges_the_relationship_instead_of_adding_rows(bundle) -> None:
+    """重跑同一条观察：同三元组走 ``create`` 的合并分支——**行数不变、``revision + 1``**。
+
+    定点变异：把 ``evidence_ids`` 从每次调用改成常量、或给 ``create`` 换一个每次都不同的
+    ``predicate``，这条都会红（前者恒真，后者会变成十二条）。
+    """
+    event_id = seed_event(bundle)
+    build(bundle).execute(observation(), event_id=event_id)
+    build(bundle).execute(observation(), event_id=event_id)
+
+    found = rows(bundle, "relationships")
+
+    assert len(found) == 6
+    assert {item["revision"] for item in found} == {2}
 
 
 def test_a_rerun_raises_the_confidence_instead_of_adding_rows(bundle) -> None:

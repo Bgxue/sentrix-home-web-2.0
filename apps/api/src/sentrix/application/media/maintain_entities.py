@@ -5,14 +5,22 @@
 时间变成实体，并给它们挂上属性与「这条观察提到了它」。
 
 **只做决定的那一半在 domain**（``domain/identity/extraction.py``：词表、分类、
-日历标签、要建哪些实体）；这里做剩下三件：建、写属性、挂关联。
+日历标签、要建哪些实体）；这里做剩下四件：建、写属性、挂关联、建关系。
 
-**与 1.0 的一处有意收窄：不建关系。** 1.0 那个函数的最后一组循环会给每个实体建两条
-关系（``create_relationship(entity, "出现在", place_entity)`` 与
-``(entity, "记录于", time_entity)``）。``relationships`` 表与
-``RelationshipRepository`` 的归属是 **S7**（设计 §8 的 S7 = family graph + relationships），
-所以那两条按 2026-09-30 的裁决留到 S7——**实体本身不依赖关系就有用**
-（T128 的路由与 T131 的召回都只要实体）。这条收窄记在 S6 计划 §4 Task 127。
+**S6 时这里有一处有意收窄，S7a · T204 已补回。** 1.0 那个函数的最后一组循环会给每个
+实体建两条关系（``create_relationship(entity, "出现在", place_entity)`` 与
+``(entity, "记录于", time_entity)``，``db.py:3943-3952``）。S6 按 2026-09-30 的裁决
+把它们留到 S7，理由是「实体本身不依赖关系就有用」；T204 补上——现在 ``relationships``
+有读者了（T201 的实体详情、T202 的实体目录计数、T203 的关系图）。
+
+**三条照搬：**
+
+- **自环挡在调用点**（``entity.id != place_entity.id`` / ``!= time_entity.id``）——
+  ``create_relationship`` 自己**不做**自环校验，这两行判断是唯一的防线；
+- ``evidence`` 复用上面那个变量（``[observation_id, event_id] if event_id else
+  [observation_id]``），两处是同一个表达式；
+- ``status`` **不传**，走仓储默认的 ``pending``——这两条边是「机器看出来的」，
+  等用户确认（1.0 的两处调用同样没传）。
 
 **两处「1.0 也这样」的留白**（不是省略，见 ``domain/identity/extraction.py`` 的 docstring）：
 ``atmosphere`` 那一类不建（它的两个来源——语义词表与 ``emotions``——2.0 都没有，
@@ -32,7 +40,7 @@ from sentrix.domain.identity.extraction import (
     time_semantics,
 )
 from sentrix.domain.identity.models import EntityRecord
-from sentrix.domain.identity.ports import EntityRepository
+from sentrix.domain.identity.ports import EntityRepository, RelationshipRepository
 from sentrix.domain.media.models import GpsPoint, Observation
 from sentrix.domain.media.ports import AssetRepository
 from sentrix.domain.memories.ports import EventParticipantRepository
@@ -43,6 +51,11 @@ SOURCE_OBSERVATION = "observation_extraction"
 SOURCE_OBJECT_TAXONOMY = "object_taxonomy_v1"
 SOURCE_TIMESTAMP = "timestamp_derivation"
 SOURCE_ASSET_GPS = "asset_gps"
+
+# 1.0 ``db.py:3944`` / ``:3949`` 的两个谓词字面量。它们是**交付数据**不是日志：
+# 实体详情（T201）、关系图（T203）与以后的助手都按这两个串读。
+APPEARS_AT = "出现在"
+RECORDED_AT = "记录于"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,9 +74,11 @@ class MaintainObservationEntities:
         entities: EntityRepository,
         events: EventParticipantRepository,
         assets: AssetRepository,
+        relationships: RelationshipRepository,
     ) -> None:
         self._entities = entities
         self._events = events
+        self._relationships = relationships
         # 地点的 ``geo`` 属性来自 **asset 的 GPS**（1.0 ``db.py:3839-3844`` 的
         # ``gps_place = parse_gps_place(asset.get("captured_location"))``），
         # 而 GPS 在 asset 上不在 observation 上——所以这一件要读 asset。
@@ -109,6 +124,24 @@ class MaintainObservationEntities:
                     EVENT_RELATIONS.get(entity.entity_type, "关联实体"),
                     evidence,
                     observation.confidence,
+                )
+            # 1.0 ``db.py:3943-3952`` 的那两条。**自环只在这里挡**——
+            # ``create_relationship`` 没有自环校验（1.0 也没有）。
+            if place_entity is not None and entity.id != place_entity.id:
+                self._relationships.create(
+                    subject_entity_id=entity.id,
+                    predicate=APPEARS_AT,
+                    object_entity_id=place_entity.id,
+                    evidence_ids=evidence,
+                    confidence=observation.confidence,
+                )
+            if time_entity is not None and entity.id != time_entity.id:
+                self._relationships.create(
+                    subject_entity_id=entity.id,
+                    predicate=RECORDED_AT,
+                    object_entity_id=time_entity.id,
+                    evidence_ids=evidence,
+                    confidence=observation.confidence,
                 )
 
         return EntityExtraction(
