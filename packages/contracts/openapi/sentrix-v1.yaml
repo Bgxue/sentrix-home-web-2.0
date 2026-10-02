@@ -1915,6 +1915,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/family-graph/runs:
+    post:
+      tags:
+      - family
+      summary: Start Family Graph Run
+      description: '手工跑一趟家庭图谱推断。1.0 ``app.py:1711-1723``。
+
+
+        **1.0 的前端从不调它**（``api.js:110`` 全仓只有定义），所以这是运维与调试入口——
+
+        自动那条走批末触发（T314）。**照搬它，不为它编造消费场景。**'
+      operationId: start_family_graph_run_api_v1_family_graph_runs_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FamilyRunRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyRunResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     AssetListResponse:
@@ -3440,11 +3471,74 @@ components:
       - evidence_ids
       - revision
       title: FactPayload
+    FamilyAnalysisRunPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        status:
+          type: string
+          title: Status
+        current_stage:
+          type: string
+          title: Current Stage
+        config:
+          additionalProperties: true
+          type: object
+          title: Config
+        stats:
+          additionalProperties: true
+          type: object
+          title: Stats
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        completed_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Completed At
+      type: object
+      required:
+      - id
+      - scope_id
+      - status
+      - current_stage
+      - config
+      - stats
+      - error
+      - created_at
+      - updated_at
+      - completed_at
+      title: FamilyAnalysisRunPayload
+      description: '``family_analysis_runs`` 一行。**``stats`` 里的 ``event_watermark``
+        是触发去抖
+
+        的唯一依据**——完成时写入当时的事件数，下次触发时事件数没涨就不跑。'
     FamilyGraphResponse:
       properties:
         scope_id:
           type: string
           title: Scope Id
+        run:
+          anyOf:
+          - $ref: '#/components/schemas/FamilyAnalysisRunPayload'
+          - type: 'null'
         people:
           items:
             $ref: '#/components/schemas/FamilyPersonPayload'
@@ -3463,6 +3557,7 @@ components:
       type: object
       required:
       - scope_id
+      - run
       - people
       - scope_ids
       - relationships
@@ -3931,6 +4026,36 @@ components:
       - retracted
       title: FamilyRetractResponse
       description: '``{"ok": True, "retracted": [...]}``——返回的是**撤回之后**的行（``state=''retracted''``）。'
+    FamilyRunRequest:
+      properties:
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+      type: object
+      title: FamilyRunRequest
+      description: '``POST /family-graph/runs`` 的请求体。字段可省的理由同写路由那一组。'
+    FamilyRunResponse:
+      properties:
+        run:
+          $ref: '#/components/schemas/FamilyAnalysisRunPayload'
+      type: object
+      required:
+      - run
+      title: FamilyRunResponse
+      description: '``POST /family-graph/runs`` 的响应。
+
+
+        **与 1.0 的 ``{"status": 202, "run": ...}`` 不同**：1.0 起线程后立刻返回，
+
+        202「已受理」是对的；2.0 裁决成**同步**（与相邻的 ``_maybe_run_insights`` 同体例），
+
+        返回时那趟已经跑完，再报 202 就是假话。所以去掉 ``status`` 包装、直接给最终的 run。
+
+        读 ``response.run`` 的调用方两边都能用；读 ``response.status == 202`` 的调用方
+
+        在 2.0 本来也会因为「同步」而拿不到它想要的东西。'
     FamilyScopeMergeRequest:
       properties:
         scope_ids:

@@ -3,12 +3,13 @@
 字段与 1.0 ``app.py:1648-1656`` 那个响应逐一对齐：``membership`` / ``portrait`` /
 ``relationships`` 三处 1.0 直接返回**整行**（不像别处会裁），这里也照给全列。
 
-**``run`` 这个键 b1 不返回**（S7b2 补）。1.0 的响应里有它，但 b1 阶段**没有任何东西
-会创建 run**——自动触发归 b2、手动路由也归 b2。按「不留恒空的占位键」，返回一个恒
-``null`` 的 ``run`` 读起来像「确实没跑过」，而真相是「b1 还没有会跑的路径」。
+``run`` 在 **S7b2 · T313 补上了**（b1 时它不返回，因为那时没有任何东西会创建 run）。
+它是 ``latest_run(scope_id)``——**入参那个 scope 的**最近一次，不是整张图的。
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -107,6 +108,7 @@ class FamilyGraphResponse(BaseModel):
     """
 
     scope_id: str
+    run: FamilyAnalysisRunPayload | None
     people: list[FamilyPersonPayload]
     scope_ids: list[str]
     relationships: list[FamilyRelationshipPayload]
@@ -199,3 +201,41 @@ class FamilyScopeMergeResponse(BaseModel):
 
     graph_id: str
     scope_ids: list[str]
+
+
+# ---- 推断运行（S7b2 · T313） ------------------------------------------------------
+
+
+class FamilyAnalysisRunPayload(BaseModel):
+    """``family_analysis_runs`` 一行。**``stats`` 里的 ``event_watermark`` 是触发去抖
+    的唯一依据**——完成时写入当时的事件数，下次触发时事件数没涨就不跑。"""
+
+    id: str
+    scope_id: str
+    status: str
+    current_stage: str
+    config: dict[str, Any]
+    stats: dict[str, Any]
+    error: str | None
+    created_at: str | None
+    updated_at: str | None
+    completed_at: str | None
+
+
+class FamilyRunRequest(BaseModel):
+    """``POST /family-graph/runs`` 的请求体。字段可省的理由同写路由那一组。"""
+
+    scope_id: str | None = None
+
+
+class FamilyRunResponse(BaseModel):
+    """``POST /family-graph/runs`` 的响应。
+
+    **与 1.0 的 ``{"status": 202, "run": ...}`` 不同**：1.0 起线程后立刻返回，
+    202「已受理」是对的；2.0 裁决成**同步**（与相邻的 ``_maybe_run_insights`` 同体例），
+    返回时那趟已经跑完，再报 202 就是假话。所以去掉 ``status`` 包装、直接给最终的 run。
+    读 ``response.run`` 的调用方两边都能用；读 ``response.status == 202`` 的调用方
+    在 2.0 本来也会因为「同步」而拿不到它想要的东西。
+    """
+
+    run: FamilyAnalysisRunPayload

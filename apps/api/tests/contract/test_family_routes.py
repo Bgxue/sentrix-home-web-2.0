@@ -487,3 +487,99 @@ def test_a_relationship_built_over_http_shows_up_in_the_graph(family_client: Tes
 
     assert {item["predicate"] for item in body["relationships"]} == {"母亲", "儿子"}
     assert {item["id"] for item in body["people"]} == {"mom", "kid"}
+
+
+# ---- 推断运行（S7b2 · T313） ------------------------------------------------------
+
+
+def test_the_graph_returns_a_null_run_until_one_has_been_created(family_client: TestClient) -> None:
+    """没跑过就是 ``null``——**不是省略这个键**。
+
+    1.0 的响应里这个键一直在（值是 ``latest_family_analysis_run`` 的结果）。
+    b1 时 2.0 刻意不返回它（那时没有任何东西会创建 run），T313 补上。
+    """
+    body = family_client.get("/api/v1/family-graph", params={"scope_id": HOME}).json()
+
+    assert "run" in body
+    assert body["run"] is None
+
+
+def test_running_the_inference_is_synchronous_and_answers_with_the_final_run(
+    family_client: TestClient,
+) -> None:
+    """**同步**：POST 返回时那趟已经跑完——所以响应体是最终的 run，**没有 ``status`` 包装**。
+
+    1.0 是 ``{"status": 202, "run": ...}``，因为它起线程后立刻返回。2.0 裁决成同步
+    （与相邻的 ``_maybe_run_insights`` 同体例），再报 202「已受理」就是假话。
+
+    **这里不断言 ``completed`` 还是 ``failed``**：契约测试的容器里那个 chat 端点不保证
+    可达，而服务对模型失败的处理正是「把 run 标成 failed 而不抛」（T312 钉过）。
+    要钉的是**形状与同步性**——响应返回时 run 已经不是 ``queued``。
+    """
+    response = family_client.post("/api/v1/family-graph/runs", json={"scope_id": HOME})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"run"}  # 1.0 那个 status 键在 2.0 没有
+    assert body["run"]["status"] in {"completed", "failed"}
+    assert body["run"]["scope_id"] == HOME
+    # 跑完之后 GET 也看得到同一个 run。
+    graph = family_client.get("/api/v1/family-graph", params={"scope_id": HOME}).json()
+    assert graph["run"]["id"] == body["run"]["id"]
+
+
+def test_running_without_a_scope_is_a_400(family_client: TestClient) -> None:
+    response = family_client.post("/api/v1/family-graph/runs", json={})
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "scope_id is required"
+
+
+def test_a_run_already_in_progress_is_a_409(family_client: TestClient) -> None:
+    """1.0 ``app.py:1714-1716`` 的 409。
+
+    同步模式下 ``queued`` 不会停留，所以这条实际挡的是「上一次崩在半路、状态还写着
+    ``running``」的行——夹具就直接造那样一行。
+    """
+    with _db(family_client).connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO family_analysis_runs (id, scope_id, status, current_stage,"
+            " created_at, updated_at) VALUES ('run_stuck', ?, 'running', 'infer_graph', ?, ?)",
+            (HOME, NOW, NOW),
+        )
+
+    response = family_client.post("/api/v1/family-graph/runs", json={"scope_id": HOME})
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "family analysis run already in progress"
+
+
+def test_the_run_key_belongs_to_the_scope_in_the_request(family_client: TestClient) -> None:
+    """``run`` 取的是**入参那个 scope** 的最近一次，**不是整张图的**。
+
+    这条与 ``relationships`` 正好相反（那个跨整张图）——1.0 两处就是这么写的，
+    看漏的话合并过 scope 之后会拿到别的相册的 run。
+    """
+    with _db(family_client).connect() as connection, connection:
+        # **把两个 scope 并成一张图**——不并的话 ``scope_ids == [HOME]``，
+        # 「取入参的 scope」与「取图里的第一个」给出同一个答案。
+        for scope_id in (HOME, OTHER):
+            connection.execute(
+                "INSERT INTO family_scope_groups (scope_id, graph_id, created_at, updated_at)"
+                " VALUES (?, 'graph_run_scope', ?, ?)",
+                (scope_id, NOW, NOW),
+            )
+        for scope_id, run_id in ((HOME, "run_home"), (OTHER, "run_other")):
+            connection.execute(
+                "INSERT INTO family_analysis_runs (id, scope_id, status, current_stage,"
+                " created_at, updated_at) VALUES (?, ?, 'completed', 'done', ?, ?)",
+                (run_id, scope_id, NOW, NOW),
+            )
+
+    # **用 ``OTHER`` 发起请求**：合并后的 ``scope_ids`` 按 id 排序是 ``[album1, album2]``，
+    # 所以「取入参那个 scope」与「取图里的第一个」在这一步才给出不同的答案。
+    # 用 ``HOME`` 问的话两者都是 ``run_home``，这条用例就抓不到东西（第一版就是这样）。
+    body = family_client.get("/api/v1/family-graph", params={"scope_id": OTHER}).json()
+
+    assert body["scope_ids"] == [HOME, OTHER]
+    assert body["run"]["id"] == "run_other"

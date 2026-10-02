@@ -6,9 +6,12 @@
 「按 scope 取，再把记录搬进响应模型」，没有要落地的领域决定。真正带规则的
 ``family_graph_people``（1.0 那个函数就在 store 里）落在仓储层。
 
-**``run`` 这个键 b1 不返回。** 1.0 的响应里有它（``latest_family_analysis_run``），
-但 b1 阶段没有任何东西会创建 run，返回恒 ``null`` 的键读起来像「确实没跑过」。
-S7b2 补上它、同时补上会创建 run 的那两条路。
+``run`` 在 **S7b2 · T313 补上了**（b1 时它不返回，因为那时没有任何东西会创建 run）。
+它取 ``latest_run(scope_id)``——**入参那个 scope** 的最近一次，不是整张图的。
+
+**``POST /family-graph/runs`` 是同步的。** 1.0 起线程后立刻返回 202；2.0 裁决成同步
+（与相邻的 ``_maybe_run_insights`` 同体例），返回时那趟已经跑完，所以响应是**最终的
+run**，没有 ``status`` 包装。
 
 **``relationships`` 跨整张图。** 1.0 是一个对 ``scope_ids`` 的展平推导，所以合并过
 scope 之后关系也跟着铺开——而 ``scope_id`` 那个键仍然只是入参那一个。照搬。
@@ -21,8 +24,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 
 from sentrix.api.deps import get_container
-from sentrix.api.errors import InvalidRequestError
+from sentrix.api.errors import ConflictError, InvalidRequestError
 from sentrix.api.schemas.family import (
+    FamilyAnalysisRunPayload,
     FamilyGraphResponse,
     FamilyMembershipPayload,
     FamilyMembershipRequest,
@@ -37,11 +41,15 @@ from sentrix.api.schemas.family import (
     FamilyRepresentativeMedia,
     FamilyRetractRequest,
     FamilyRetractResponse,
+    FamilyRunRequest,
+    FamilyRunResponse,
     FamilyScopeMergeRequest,
     FamilyScopeMergeResponse,
 )
+from sentrix.application.identity.family_graph_service import FamilyGraphService
 from sentrix.bootstrap.container import Container
 from sentrix.domain.identity.family import (
+    FamilyAnalysisRunRecord,
     FamilyMembershipRecord,
     FamilyPersonProjection,
     FamilyPortraitRecord,
@@ -54,6 +62,12 @@ router = APIRouter(tags=["family"])
 # ``confidence=1.0`` 是「用户说的，没有不确定」；``source`` 决定落库行的 ``locked``。
 USER_SOURCE = "user_override"
 USER_CONFIDENCE = 1.0
+
+# 1.0 ``app.py:1715`` 的 409 判据——这两个状态下的 run 还在跑。
+PENDING_RUN_STATUSES = ("queued", "running")
+
+# 1.0 ``app.py:1719`` 的 ``config``。手工重跑与批末触发（T314）用不同的 trigger_type。
+INPUT_MODE = "semantic_text_only"
 
 
 def _optional_isoformat(value: datetime | None) -> str | None:
@@ -152,8 +166,10 @@ def family_graph(
     """
     repository = container.family_graph_repository
     scope_ids = repository.graph_scope_ids(scope_id)
+    latest = repository.latest_run(scope_id)
     return FamilyGraphResponse(
         scope_id=scope_id,
+        run=_run_payload(latest) if latest is not None else None,
         people=[_person_payload(item) for item in repository.family_graph_people(scope_ids)],
         scope_ids=list(scope_ids),
         relationships=[
@@ -305,3 +321,71 @@ def merge_family_graph_scopes(
     except ValueError as error:
         raise InvalidRequestError(str(error)) from error
     return FamilyScopeMergeResponse(graph_id=graph_id, scope_ids=list(scope_ids))
+
+
+# ---- 推断运行（S7b2 · T313） ------------------------------------------------------
+
+
+def _run_payload(record: FamilyAnalysisRunRecord) -> FamilyAnalysisRunPayload:
+    return FamilyAnalysisRunPayload(
+        id=record.id,
+        scope_id=record.scope_id,
+        status=record.status,
+        current_stage=record.current_stage,
+        config=dict(record.config),
+        stats=dict(record.stats),
+        error=record.error,
+        created_at=_optional_isoformat(record.created_at),
+        updated_at=_optional_isoformat(record.updated_at),
+        completed_at=_optional_isoformat(record.completed_at),
+    )
+
+
+def _family_graph_service(container: Container) -> FamilyGraphService:
+    """推断服务的装配。**只有这里知道它要哪几个协作者。**
+
+    ``model`` 传容器里那一个：没有配模型时它是 ``None``，服务会走那条「空结果、
+    照样 completed」的降级路径（见 ``FamilyGraphService`` 的 docstring）。
+    """
+    return FamilyGraphService(
+        family=container.family_graph_repository,
+        events=container.event_repository,
+        model=container.chat_model,
+    )
+
+
+def run_family_graph_for_scope(container: Container, scope_id: str) -> FamilyAnalysisRunRecord | None:
+    """跑一趟推断。**同步**——与 ``run_insights_for_scope`` 同体例。
+
+    ``POST /family-graph/runs`` 与批末触发（T314）共用这一处，与
+    ``api/routes/insights.py`` 把那两个入口收在一个模块级函数里是同一条理由。
+
+    返回 ``None`` 表示「已经有 queued/running 的 run，没开新的」（1.0 的 409 分支）；
+    其余情况返回那趟跑完之后的 run（``completed`` 或 ``failed``）。
+    """
+    repository = container.family_graph_repository
+    latest = repository.latest_run(scope_id)
+    # 1.0 ``app.py:1714-1716`` 的 409。同步模式下 ``queued`` 不会停留，所以这条实际
+    # 挡的是「上一次崩在半路、状态还写着 running」的行。
+    if latest is not None and latest.status in PENDING_RUN_STATUSES:
+        return None
+    run = repository.create_run(scope_id, {"trigger_type": "user_rerun", "input_mode": INPUT_MODE})
+    return _family_graph_service(container).run(run.id, scope_id)
+
+
+@router.post("/family-graph/runs")
+def start_family_graph_run(
+    payload: FamilyRunRequest,
+    container: Container = Depends(get_container),
+) -> FamilyRunResponse:
+    """手工跑一趟家庭图谱推断。1.0 ``app.py:1711-1723``。
+
+    **1.0 的前端从不调它**（``api.js:110`` 全仓只有定义），所以这是运维与调试入口——
+    自动那条走批末触发（T314）。**照搬它，不为它编造消费场景。**
+    """
+    scope_id = (payload.scope_id or "").strip()
+    _required("scope_id is required", scope_id)
+    run = run_family_graph_for_scope(container, scope_id)
+    if run is None:
+        raise ConflictError("family analysis run already in progress")
+    return FamilyRunResponse(run=_run_payload(run))
