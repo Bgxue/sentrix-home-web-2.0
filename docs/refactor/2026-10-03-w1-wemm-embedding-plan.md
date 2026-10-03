@@ -137,4 +137,38 @@ T401 的核查里一并确认没有别的消费方（人脸走 `buffalo_l`，与
 
 ## 6. 施工记录
 
-（施工时逐条填）
+### T401 依赖核查（2026-10-02 动工前）
+
+**结论：§2 那个假设成立，application 层确实一行不用改。** 核查逐条：
+
+| 查什么 | 结果 |
+|---|---|
+| `application/` 里有没有硬编码 `768` / `1024` | **零命中**（`grep -rn "\b768\b\|\b1024\b" apps/api/src/sentrix/application/`） |
+| 全 `src/` 里硬编码模型名的地方 | 只有三处**该改的**：`scheme.py`（常量本身）、两个旧适配器（要删）、`container.py`（装配 import）。其余是注释与 docstring |
+| `ChineseClipVisualEmbedder` / `BgeM3TextEmbedder` 的消费方 | **只有 `container.py:240,243` 与各自的测试**。没有第二个生产消费方，删得干净 |
+
+**所以 2.0 与 1.0 的关键差别坐实了**：1.0 有三处写入路径绕过方案直连具体类
+（`pipeline._text_embed` / `ClipAdapter` / `scope_finalize`），2.0 一处都没有——
+所有通道与写入用例都只认 domain 端口。
+
+**但核查带出一条计划里没写的东西：融合权重有实测出处，而那个出处是 chinese-clip 时代的。**
+
+`domain/retrieval/fusion.py:10` 的原文：
+
+> 权重不是拍脑袋：**R7 消融里 chinese-clip 视觉 r10=0.887**、词法 0.373、文本 0.158，
+> 平权 RRF 会让弱通道把强通道稀释掉，混合反而低于纯视觉。**改任何一个数字前先改基线。**
+
+也就是说 `visual_ann: 2.5 / lexical: 1.0 / text_ann: 0.5` 这组数**是针对 chinese-clip
+的视觉通道消融出来的**。换成 wemm 后视觉通道的强度变了，词法通道的相对位置（0.373 那个数）
+也就跟着失效了。
+
+**处置：照搬，并登记这一点。** 依据是——**1.0 自己也没重跑消融**：
+`backend/retrieval/fusion.py:33-42` 在开了 wemm 之后权重仍是同一组
+（`visual_ann: 2.5 / lexical: 1.0 / text_ann: 0.5 / metadata: 1.0 / entity: 1.0 / adjacency: 0.5`，
+连那句 "R7 ablation: Chinese-CLIP visual r10=0.887" 的注释都原样留着）。
+所以「照搬权重」= 1.0 的现状 = **用户验证过的那个配置**。
+
+**但这是一条继承来的未验证假设，不是被验证过的结论。** 真要让权重与 wemm 匹配，
+得重跑一次消融——那是独立的一件事，不在 W1 范围内。登记在 `behaviour-baseline.md`
+的同一段旁边，免得后来的人以为这组数在 wemm 下重新验过。
+
