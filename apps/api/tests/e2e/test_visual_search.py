@@ -1,6 +1,6 @@
 """端到端验收：导入照片 → 用内容词搜到它。
 
-这一层用**真 chinese-clip（进程内推理）+ 真 Qdrant + 真 SQLite**，走完整 HTTP 链路。
+这一层用**真 wemm（HTTP 侧车 8102）+ 真 Qdrant + 真 SQLite**，走完整 HTTP 链路。
 两条不循环的判据：
 
 1. **构造出的 ground truth**：纯色图的颜色由测试自己画出来，期望值来自画图那一侧，
@@ -59,7 +59,7 @@ def require_visual_embedder(client: TestClient) -> None:
     """
     embedder = client.app.state.container.visual_embedder
     if not embedder.available:
-        skip_or_fail_on_load_error(embedder.load_error, what="chinese-clip")
+        skip_or_fail_on_load_error(embedder.load_error, what="wemm")
 
 
 @pytest.fixture

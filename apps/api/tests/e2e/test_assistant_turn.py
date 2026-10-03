@@ -1,6 +1,6 @@
 """端到端验收：问一句「给我看看海边的照片」，拿回能打开的原图。
 
-这一层用**真 chinese-clip（进程内推理）+ 真 Qdrant + 真 SQLite + 8100 上真的 llama.cpp**，
+这一层用**真 wemm（HTTP 侧车 8102）+ 真 Qdrant + 真 SQLite + 8100 上真的 llama.cpp**，
 走完整 HTTP 链路（设计 §8 的 S3 验收）。
 
 判据里刻意不包含「模型说了什么」——那是模型质量的验收，按设计 §9.1 由使用者肉眼做。
@@ -95,7 +95,7 @@ def require_visual_embedder(client: TestClient) -> None:
     """
     embedder = client.app.state.container.visual_embedder
     if not embedder.available:
-        skip_or_fail_on_load_error(embedder.load_error, what="chinese-clip")
+        skip_or_fail_on_load_error(embedder.load_error, what="wemm")
 
 
 def import_photo(client: TestClient, name: str, payload: bytes) -> str:

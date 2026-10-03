@@ -77,9 +77,8 @@ from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.photo_inspector import OpenAIPhotoInspector
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
-from sentrix.infrastructure.models.bge_text import BgeM3TextEmbedder
-from sentrix.infrastructure.models.chinese_clip import ChineseClipVisualEmbedder
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
+from sentrix.infrastructure.models.wemm import WeMMSidecarEmbedder
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.appearance import SqliteAppearanceRepository
 from sentrix.infrastructure.persistence.repositories.asset_places import SqliteAssetPlaceRepository
@@ -223,6 +222,8 @@ class Container:
         # 对话与视觉是**同一个端点**（8100），所以共用同一个探测。分两个实例会让同一个
         # 进程里存两份可能不一致的答案，还要多探一轮。
         served_model = ServedModel(settings.vlm_base_url)
+        # 统一多模态嵌入侧车。写入与查询共用同一个实例，见下面 visual/text 两槽的注释。
+        wemm_embedder = WeMMSidecarEmbedder(settings.wemm_url)
         # 家庭图谱仓储被两个消费方用：容器自己的字段，以及人物目录——目录要靠它回答
         # 「这个人的归属与关系」（S7c）。拿在手上传两次，而不是就地 new 两个实例。
         family = SqliteFamilyGraphRepository(database, entities)
@@ -237,10 +238,11 @@ class Container:
             preview_encoder=PillowPreviewEncoder(),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
-            visual_embedder=ChineseClipVisualEmbedder(),
-            # 文本嵌入走 HTTP，模型在 .venv-text 里（设计 §2.1：2.0 不管理模型
-            # 进程生命周期）。地址来自 Settings，与 8100 的 vlm_base_url 同一口径。
-            text_embedder=BgeM3TextEmbedder(settings.text_embedder_url),
+            # **两个槽指向同一个实例**（W1 起方案是统一空间）。建两个实例不只是浪费
+            # ——1.0 ``router.py:57-63`` 记着理由：两个实例会让侧车那侧的显存翻倍，
+            # 而且两个实例的健康状态与熔断计数会各自漂移，同一个模型却有两种可用性。
+            visual_embedder=wemm_embedder,
+            text_embedder=wemm_embedder,
             place_resolver=OfflinePlaceResolver(
                 admin=PyGeoCNAdminResolver(),
                 nearest=GeoNamesNearestResolver(settings.geo_dir),

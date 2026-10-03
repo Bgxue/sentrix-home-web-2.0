@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.ports import VectorRecord
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
 
-MODEL = "chinese-clip-ViT-L-14"
+MODEL = scheme.IMAGE_MODEL
 
 
 @pytest.fixture

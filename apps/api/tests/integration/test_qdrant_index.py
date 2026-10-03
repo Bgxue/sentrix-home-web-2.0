@@ -12,10 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.ports import VectorIndexUnavailable, VectorRecord
 from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
 
-MODEL = "chinese-clip-ViT-L-14"
+MODEL = scheme.IMAGE_MODEL
 DIM = 4
 
 # 子进程：打开目录、拿走锁、告诉父进程「就绪」，然后一直握着。

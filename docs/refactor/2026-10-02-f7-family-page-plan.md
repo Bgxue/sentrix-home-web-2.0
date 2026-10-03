@@ -344,3 +344,9 @@ props `{ person, relationships, onClose, onChanged }`。
 8. 「改关系」只能删了重建（裁决⑤ 列的「改」没有独立路径）。
 9. 空画像无法清空——后端 `_required` 硬拒空串，前端只能挡住提交并说明。
 
+> **2026-10-03 更正（W1 期间发现）**：本段 §6.1 记的「`make web-check` 全绿（61 passed）」
+> **是无效的**——那条门禁当时跑的是不带 `--force` 的 `tsc -b`，而 **`tsc -b` 不会检查
+> 新增的源文件**，所以 `source-hygiene.test.ts` 从未被类型检查过，它带着三个 `TS2591`
+> 进了仓库。`Makefile` 已改成 `tsc -b --force`，该文件也已修好。
+> **教训不在「忘了跑门禁」，在「门禁自己有一类盲区」**：绿不等于查过。
+> 详见 `2026-10-03-w1-wemm-embedding-plan.md` §6。

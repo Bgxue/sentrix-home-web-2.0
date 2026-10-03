@@ -16,6 +16,7 @@ from sentrix.domain.places.models import (
     PlacePrecision,
     PlaceSource,
 )
+from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.ports import VectorRecord
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.asset_places import (
@@ -31,7 +32,7 @@ from sentrix.infrastructure.persistence.repositories.vectors import SqliteVector
 
 BASE = datetime(2017, 10, 5, 12, 0, 0, tzinfo=UTC)
 XIAOSHAN = GpsPoint(30.1839, 120.2642)
-MODEL = "chinese-clip-ViT-L-14"
+MODEL = scheme.IMAGE_MODEL
 
 
 @pytest.fixture

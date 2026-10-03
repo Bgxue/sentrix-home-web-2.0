@@ -98,6 +98,12 @@
 >   （`backend/evidence_retrieval.py:176-181`），融合前不按交付上限裁
 >   （理由写在 `:171-176`）。2.0 的等价物见 `s4-deviations.md` §8。
 
+> **2026-10-03 W1 追记（换 wemm 之后）**：上面这组通道权重（`visual_ann` 2.5 / `lexical` 1.0 / `text_ann` 0.5）来自 **chinese-clip 时代**的 R7 消融（当时视觉 r10=0.887、词法 0.373、文本 0.158）。**换成 wemm 后没有重跑那次消融**——1.0 自己也
+> 没重跑（`backend/retrieval/fusion.py:33-42` 开了 wemm 后权重一字未改，连 R7 的注释都
+> 原样留着）。所以这里照搬权重 = 1.0 现状 = **用户验证过的那个配置**；但要清楚它是
+> **继承来的未验证假设**，不是「在 wemm 下重新验过的结论」。真要让权重与 wemm 匹配，
+> 得单跑一次消融——那是独立的一件事，不在 W1 范围内。改任何一个数字前先改这里。
+
 ## 助手
 
 | 项 | 值 | 位置 |
@@ -203,8 +209,8 @@
 
 | 项 | 值 | 位置 |
 |---|---|---|
-| 视觉嵌入 | chinese-clip-ViT-L-14，768 维，进程内 GPU | `backend/embeddings/chinese_clip_visual.py` |
-| 文本嵌入 | BAAI/bge-m3，1024 维，HTTP sidecar `127.0.0.1:8101`（CPU） | `backend/embeddings/bge_text.py` |
+| 视觉嵌入 | tencent/WeMM-Embedding-2B，2048 维，HTTP sidecar `127.0.0.1:8102`（视觉 / 文本**统一空间**） | `backend/embeddings/wemm_sidecar.py` |
+| 文本嵌入 | 同上——同一个模型、同一个实例（统一空间，两个槽共用一份 client）；1.0 的 wemm 是**半接线**（只有查询侧跟随方案），2.0 由 W1 把写入侧一并接上 | `backend/embeddings/wemm_sidecar.py` |
 | 方案冻结 | `embeddings/scheme.py` 已钉死，不读 env | `backend/embeddings/scheme.py` |
 | VLM 端点 | `http://127.0.0.1:8100/v1`（llama.cpp，OpenAI 兼容） | `backend/model_clients.py:537` |
 

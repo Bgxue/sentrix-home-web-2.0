@@ -13,6 +13,14 @@
  * 逐次修没用（已经复发两次），所以订成规则让它在门禁上现形。
  */
 
+// 这个测试住在 `src/` 下，由 `tsconfig.app.json` 覆盖（`types: ["vite/client"]`），
+// 而它要读文件系统，所以需要 node 的类型。
+//
+// **这条 reference 的作用域是整个 program，不是一个文件**——实测过：加上它之后，
+// 同工程另一个新文件的 `node:fs` 也不再报错。所以它与「往 tsconfig.app.json 的
+// `types` 里加 "node"」等效。选前者只是因为意图离使用点最近：是**这个门禁**需要
+// node，不是应用代码需要。
+/// <reference types="node" />
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 

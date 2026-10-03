@@ -82,7 +82,12 @@ ci: lint format-check typecheck arch check-docs coverage web-check ## CI 门禁
 # 断言先拦下来，只说该做什么。
 web-check: ## 前端门禁：tsc -b + oxlint + vitest + vite build
 	@test -d apps/web/node_modules || { echo "缺少 apps/web/node_modules，请先跑 make install"; exit 1; }
-	cd apps/web && npx tsc -b
+	# **`--force` 不是保险丝，是必须的。** `tsc -b` 的增量检查只在「它已经知道的文件
+	# 被改动」时触发：**新加一个匹配 include 的源文件不会让它重建**，于是那个文件根本
+	# 不被类型检查。实测复现（2026-10-03）：干净构建 → 新增一个用 `node:fs` 的 .ts →
+	# 不带 --force 跑 `tsc -b` 退出码 0，带 --force 才报 TS2591。
+	# F7 那个 `source-hygiene.test.ts` 就是这么带着三个类型错误进仓库的。
+	cd apps/web && npx tsc -b --force
 	cd apps/web && npx oxlint
 	cd apps/web && npx vitest run
 	cd apps/web && npx vite build

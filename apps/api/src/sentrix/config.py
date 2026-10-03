@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # 2.0 reuses 1.0's already-running model services; it never manages them.
     vlm_base_url: str = "http://127.0.0.1:8100/v1"
     text_embedder_url: str = "http://127.0.0.1:8101"
+    # W1：检索用的统一多模态嵌入侧车（WeMM-Embedding-2B，2048 维）。与 8100 的 VLM、
+    # 8101 的 bge 同一条口径——2.0 不管理模型进程的生命周期，只连它。
+    wemm_url: str = "http://127.0.0.1:8102"
 
     # **模型名不在这里。** 8100 上跑 llama.cpp 还是 vLLM、名字叫什么，由部署方决定，而且
     # 会在 2.0 运行期间被换掉——2026-09-24 实测：8100 从 llama.cpp 换成 vLLM，2.0 配的

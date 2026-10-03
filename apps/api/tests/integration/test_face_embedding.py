@@ -589,7 +589,7 @@ def real_faces() -> list[tuple[str, list[Any]]]:
     ``REAL_RECOGNITION.is_file()``——文件在、显存不够时不跳过，用例在运行期报
     「前 10 张照片一张脸都没检出」，读起来像数据问题或实现 bug，实际是环境
     （2026-09-26 实测：8100 的 vLLM 占住 24 GB 里的 22 GB）。判据改成**真的加载
-    一次**，与 ``test_chinese_clip.py`` 一致。
+    一次**。
     """
     adapter = FaceAdapter()
     if not adapter.available:

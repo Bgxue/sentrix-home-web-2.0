@@ -53,7 +53,7 @@ def requires_a_loadable_detector() -> None:
     ``CUBLAS failure 3`` / ``bfc_arena`` 分配失败（2026-09-26 实测：8100 的 vLLM
     占住 24 GB 里的 22 GB）。报出来的失败读起来像实现坏了，实际是环境。
 
-    判据与 ``test_chinese_clip.py`` 一致：**真的加载一次**，加载不成就跳，并把真实
+    判据：**真的加载一次**，加载不成就跳，并把真实
     错因写进 reason。权重确实缺失仍是允许的部署形态，那条分支保留在前面。
     """
     instance = RetinaFaceTiledDetector()
