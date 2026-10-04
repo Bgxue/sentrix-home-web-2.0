@@ -1,8 +1,17 @@
 """PhotoBench 打向主 API 的 HTTP 客户端端口。
 
-对应 1.0 ``benchmark_orchestrator.py:731`` 的 ``request_json`` 与 ``:799`` 的
-``request_bytes``。1.0 直接用 stdlib ``urllib.request``；2.0 换 httpx（沿用
-``apps/photobench/pyproject.toml`` 已有的依赖，不新增）。
+对应 1.0 ``benchmark_orchestrator.py:731`` 的 ``request_json``、``:799`` 的
+``request_bytes`` 与 ``:884`` 的 ``upload_files``。1.0 直接用 stdlib
+``urllib.request``；2.0 换 httpx（沿用 ``apps/photobench/pyproject.toml`` 已有的依赖，
+不新增）。
+
+**``request_multipart`` 是 S9b-2 补的第三个方法。** 它的生产调用者是
+``infrastructure.sentrix.client`` 的 ``seed_person``：2.0 的
+``POST /people/seed`` 是 multipart 单人端点（1.0 的 ``seed-batch`` 也是 multipart，
+所以这不是新形状，只是从「一批」变成「一个」）。**1.0 的 ``upload_files`` 就是它的
+原型**——同样是把 fields 与 files 拼成 ``multipart/form-data`` 发出去、同样返回解析后的
+JSON。没有它，种身份那一步就得在适配器里自己拼一次 HTTP，那段行为（边界串、字段顺序、
+文件名与 mime 的取法）就会有两份实现。
 
 **接口在这里、实现在 infrastructure，理由与 runtime 那几个端口一样**：httpx 在
 ``domain-purity`` 的 forbidden 名单上（与 ``sentrix.domain`` 逐条对齐），而
@@ -24,7 +33,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -42,3 +51,17 @@ class JsonHttpClient(Protocol):
     ) -> Any: ...
 
     def request_bytes(self, url: str, timeout: int = 120) -> bytes: ...
+
+    def request_multipart(
+        self,
+        url: str,
+        fields: Mapping[str, str],
+        files: Sequence[tuple[str, str, bytes]],
+        timeout: int = 300,
+    ) -> Any:
+        """1.0 ``upload_files``（``:884``）。``files`` 是 ``(字段名, 文件名, 内容)`` 三元组。
+
+        字段名可以是同一个（1.0 的 ``seed-batch`` 与 ``/api/import`` 都用 ``"files"``
+        一次带多张）——**不要在这里去重或改名**，那是 1.0 的行为，2.0 的调用方按需决定。
+        """
+        ...

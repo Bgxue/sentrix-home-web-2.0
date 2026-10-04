@@ -50,3 +50,45 @@ def test_the_two_provider_factories_are_typed_by_the_domain_protocols() -> None:
     hints = typing.get_type_hints(Container)
     assert "LifecycleProvider" in str(hints["lifecycle_provider"])
     assert "InferenceProvider" in str(hints["inference_provider"])
+
+
+def test_a_run_execution_can_be_built_without_a_manager_or_an_endpoint(tmp_path):
+    """**没有管理器、没有端点也要能构造出主链**——「外部端点」是 2.0 的合法运行形态。
+
+    这条用例的来历不是推演：**真机验收时在这里连炸两次**。`run_execution` 的三个
+    provider 工厂是**无条件**构造的，而 1.0 的两条外部路线（云端模型 / 不带 Manager
+    的 llama.cpp）本来就不需要 Manager：
+
+    - `ManagerLifecycleProvider("")` 抛 `ValueError("manager URL is required")`；
+    - `OpenAICompatibleInferenceProvider("")` 抛 `ValueError("model base URL is required")`。
+
+    S9b-1 的调用方（`ModelProfiles._manager_profiles`）先自判 `if not manager_url` 再调，
+    所以没撞上；主链是按 run 构造的，撞上了。**一个只测「有端点时能构造」的用例对
+    这两种空串完全没有区分力。**
+    """
+    from photobench.config import APP_ROOT, Settings
+    from photobench.infrastructure.runtime.providers import (
+        ManagerLifecycleProvider,
+        UnavailableLifecycleProvider,
+        UnavailableTelemetryProvider,
+    )
+
+    container = Container.build(
+        Settings(config_root=APP_ROOT / "config", results_root=tmp_path, data_root=tmp_path)
+    )
+    without_endpoint = container.run_execution("", "")
+    assert isinstance(without_endpoint.lifecycle, UnavailableLifecycleProvider)
+    assert isinstance(without_endpoint.telemetry, UnavailableTelemetryProvider)
+    # 端点为空时退回配置里的那个（1.0 的 `self.vllm_model_base_url` 就是从配置读的）
+    assert without_endpoint.inference is not None
+
+    with_manager = container.run_execution("http://manager:8500", "")
+    assert isinstance(with_manager.lifecycle, ManagerLifecycleProvider)
+    assert not isinstance(with_manager.telemetry, UnavailableTelemetryProvider)
+
+
+def test_the_settings_dataclass_exposes_the_app_root():
+    """``APP_ROOT`` 是「配置在哪」的唯一答案；上面那条用例靠它找到仓库里的 config。"""
+    from photobench.config import APP_ROOT
+
+    assert (APP_ROOT / "config").is_dir()

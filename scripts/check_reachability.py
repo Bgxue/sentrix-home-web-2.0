@@ -70,12 +70,20 @@ PENDING_WIRING: dict[str, str] = {
     # （`bootstrap.container`）与 `application` 两层已经真的构造/调用了它们。
     # 与 S5c / S6 / S7b1 每次接线后走的是同一条反向规则。
     #
-    # 只剩 apple_telemetry：它的生产调用者是 1.0 的 `select_runtime_providers`
-    # （`benchmark_orchestrator.py:176` 的 Apple 分支），那是 S9b-2 的 provider 选择逻辑
-    # （与 660 行的 `jetson_telemetry.py` 同一批）。**本切片不搬它**——它由运行时的
-    # 主机形态决定，属 run-execution 那一块。
+    # 只剩 apple_telemetry，而 **S9b-2 做完之后它仍然是这一条**：
+    #
+    # S9b-2 建了 run-execution 主链，但**没有搬 provider 选择逻辑**
+    # （1.0 `select_runtime_providers` `benchmark_orchestrator.py:176`）。它要按主机形态
+    # 在 Apple / Jetson / Orin / 宿主 nvidia-smi 四路里选，其中 Jetson 那一路还要连
+    # 660 行的 `backend/jetson_telemetry.py` 一起搬——那是独立的一块，S9a 已裁决归 S9b，
+    # 但 S9b 切三段时没有把它分进任何一段。
+    #
+    # 因此 S9b-2 的 container 只按「有没有 manager_url」装配遥测
+    # （`create_runtime_providers` 那一支：ManagerTelemetryProvider / Unavailable），
+    # 这台机器上跑的 llama-server 那一路根本没有被选中的路径。
+    # **本切片的盲区清单要如实记上这一条**：apple_telemetry 至今无人调用。
     "photobench.infrastructure.runtime.apple_telemetry": (
-        "S9b-2（select_runtime_providers 在 Apple 主机上构造它）"
+        "未分配切片：provider 选择逻辑（select_runtime_providers + 660 行 jetson_telemetry）尚未搬"
     ),
 }
 

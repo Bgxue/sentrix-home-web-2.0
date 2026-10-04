@@ -29,22 +29,27 @@ from dataclasses import dataclass
 
 from photobench.application.config.service import ConfigService
 from photobench.application.model_profiles.service import ModelProfiles
+from photobench.application.run_execution.service import RunExecution
 from photobench.application.runs.index import RunIndex
 from photobench.application.runs.read_runs import ReadRuns
 from photobench.config import Settings
 from photobench.domain.config.ports import ConfigStore
-from photobench.domain.datasets.ports import QaMetadataSource
+from photobench.domain.datasets.ports import AlbumSource, QaMetadataSource
 from photobench.domain.http.ports import JsonHttpClient
-from photobench.domain.results.ports import RunStore
-from photobench.domain.runtime.ports import InferenceProvider, LifecycleProvider
+from photobench.domain.results.ports import RunResultWriter, RunStore
+from photobench.domain.runtime.ports import InferenceProvider, LifecycleProvider, TelemetryProvider
+from photobench.domain.sentrix.ports import SentrixClient
 from photobench.infrastructure.config.files import JsonConfigStore
+from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
 from photobench.infrastructure.http.client import HttpxJsonClient
-from photobench.infrastructure.results.store import FileRunStore
+from photobench.infrastructure.results.store import FileResultWriter, FileRunStore
 from photobench.infrastructure.runtime.providers import (
-    ManagerLifecycleProvider,
     create_runtime_providers,
+    manager_lifecycle,
+    manager_telemetry,
 )
+from photobench.infrastructure.sentrix.client import HttpxSentrixClient
 
 #: 1.0 建 provider 时用的超时：``query_current_model`` 里是 15 秒（``:5095``）。
 #: ``query_profiles`` 那一路由 provider 自己的默认值管（1.0 也没传）。
@@ -56,14 +61,19 @@ class Container:
     settings: Settings
     config_store: ConfigStore
     run_store: RunStore
+    result_writer: RunResultWriter
     qa_metadata: QaMetadataSource
+    albums: AlbumSource
     http: JsonHttpClient
+    sentrix: SentrixClient
     lifecycle_provider: Callable[[str], LifecycleProvider]
     inference_provider: Callable[[str, str], InferenceProvider]
+    telemetry_provider: Callable[[str], TelemetryProvider]
     config: ConfigService
     run_index: RunIndex
     runs: ReadRuns
     model_profiles: ModelProfiles
+    run_execution: Callable[[str, str], RunExecution]
 
     @staticmethod
     def build(settings: Settings) -> Container:
@@ -71,13 +81,25 @@ class Container:
         config = ConfigService(config_store)
         run_store: RunStore = FileRunStore(settings.results_root)
         run_index = RunIndex()
-        http: JsonHttpClient = HttpxJsonClient()
         qa_metadata: QaMetadataSource = JsonQaMetadataSource(
             settings.data_root, settings.config_root / "qa_task_actions.json"
         )
 
         def lifecycle_provider(manager_url: str) -> LifecycleProvider:
-            return ManagerLifecycleProvider(manager_url)
+            """有 Manager 就是 ``ManagerLifecycleProvider``，没有就是 ``Unavailable``。
+
+            **不能直接 ``ManagerLifecycleProvider(manager_url)``**：那个类的构造器在
+            空串上抛 ``ValueError("manager URL is required")``（``providers.py:576``）。
+            S9b-1 的调用方（``ModelProfiles._manager_profiles``）先自判 ``if not manager_url``
+            再调，所以没撞上；S9b-2 的 ``run_execution`` 是**无条件**构造三件套的
+            （「没有管理器」本身就是一种合法的运行形态——1.0 的
+            ``use_cloud_model`` / 外部端点两条路都不需要 Manager）。
+
+            实现走 ``manager_lifecycle``（S9b-2 从 ``create_runtime_providers`` 里拆出来的
+            那一支）：空 URL 判 ``Unavailable`` 的口径**只有那一处**，工厂与这里共用它，
+            两份默认行为不会各自漂移。
+            """
+            return manager_lifecycle(manager_url)
 
         def inference_provider(model_base_url: str, manager_url: str) -> InferenceProvider:
             return create_runtime_providers(
@@ -86,6 +108,43 @@ class Container:
                 api_mode="generic",
                 timeout=_CURRENT_MODEL_TIMEOUT,
             ).inference
+
+        def telemetry_provider(manager_url: str) -> TelemetryProvider:
+            """遥测也按端口工厂声明，理由与另外两个相同。
+
+            **实现是 ``manager_telemetry``**：有 Manager 就用 ``ManagerTelemetryProvider``，
+            没有就用 ``UnavailableTelemetryProvider``。**这不是 1.0 的完整选择逻辑**——
+            1.0 的 ``select_runtime_providers``（``:176``）还会按主机形态选
+            Apple / Jetson / Orin / 宿主 nvidia-smi 四路，那一份要连 660 行的
+            ``jetson_telemetry.py`` 一起搬，是独立的一块（见 S9b-2 施工记录）。
+            """
+            return manager_telemetry(manager_url)
+
+        album_source: AlbumSource = JsonAlbumSource(
+            settings.data_root, settings.config_root / "qa_task_actions.json"
+        )
+        http: JsonHttpClient = HttpxJsonClient()
+        sentrix: SentrixClient = HttpxSentrixClient(http, lambda: config.sentrix_url)
+        result_writer: RunResultWriter = FileResultWriter(settings.results_root)
+
+        def run_execution(manager_url: str, model_base_url: str) -> RunExecution:
+            """一 run 一个 ``RunExecution``：它是**有状态**的（跑一轮带一份 item 表），
+            所以是工厂不是常驻字段——与三个 provider 工厂同一个理由。
+
+            端点为空时退回配置里的那个：1.0 的 ``self.vllm_model_base_url`` 本来就是
+            ``_configured_url`` 读出来的，不由调用方每次传。**不退的话
+            ``OpenAICompatibleInferenceProvider`` 会在空串上抛 ``ValueError``**
+            （``providers.py:453``）——那是把「配置缺失」报成「参数缺失」。
+            """
+            resolved_base_url = model_base_url or config.model_base_url
+            return RunExecution(
+                client=sentrix,
+                albums=album_source,
+                writer=result_writer,
+                lifecycle=lifecycle_provider(manager_url),
+                inference=inference_provider(resolved_base_url, manager_url),
+                telemetry=telemetry_provider(manager_url),
+            )
 
         runs = ReadRuns(
             store=run_store,
@@ -106,12 +165,17 @@ class Container:
             settings=settings,
             config_store=config_store,
             run_store=run_store,
+            result_writer=result_writer,
             qa_metadata=qa_metadata,
+            albums=album_source,
             http=http,
+            sentrix=sentrix,
             lifecycle_provider=lifecycle_provider,
             inference_provider=inference_provider,
+            telemetry_provider=telemetry_provider,
             config=config,
             run_index=run_index,
             runs=runs,
             model_profiles=model_profiles,
+            run_execution=run_execution,
         )

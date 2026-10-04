@@ -1,0 +1,790 @@
+"""run-execution 主链的用例：建空间 → 种身份 → 导入 → 处理 → 问答。
+
+**这一份钉的是「主链真的按 2.0 的接口走完了」**，不是「跑得通」：每一相位都断言
+**具体的调用形状**（调了谁、带什么参数、几次），因为一个只断言「状态是 completed」的
+用例对下面这些错误全都没有区分力——少调一次 seed、把 limit 填错、把 partial 回合
+当成失败、把停滞判据退化成轮询计数。
+
+``sleep`` 一律注入 ``lambda _: None``：主链里有冷却、退避、轮询三处等待，**真睡一秒
+都会让这一份用例从秒级变成分钟级**，而它们与任何断言都无关。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from fakes_execution import (
+    FakeAlbums,
+    FakeInference,
+    FakeLifecycle,
+    FakeResultWriter,
+    FakeSentrixClient,
+    FakeTelemetry,
+)
+
+from photobench.application.run_execution.service import RunExecution, RunRequest
+
+ALBUM = "album-x"
+QA_SET = "qa-1"
+
+
+def _manifest() -> dict[str, Any]:
+    return {
+        "album_id": ALBUM,
+        "album_name": "测试相册",
+        "photos": ["photos/a.jpg", "photos/b.jpg"],
+        "videos": [],
+        "faces": [
+            {"canonical_name": "明明", "family_role": "大宝", "aliases": ["小明"], "ref_image": "faces/1.jpg"}
+        ],
+        "family_relationships": [{"subject": "我", "predicate": "妻子", "object": "芳芳"}],
+    }
+
+
+def _rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "qa_id": "q1",
+            "question": "在海边的照片有哪些？",
+            "answer": "a.jpg",
+            "retrieval_image_ids": ["a.jpg"],
+            "answerability": "answerable",
+        }
+    ]
+
+
+def _assets() -> list[dict[str, Any]]:
+    return [
+        {"id": "asset_a", "file_name": "a.jpg", "media_type": "image", "status": "processed"},
+        {"id": "asset_b", "file_name": "b.jpg", "media_type": "image", "status": "processed"},
+    ]
+
+
+def _completed_turn(
+    turn_id: str = "turn_1", *, attachments: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    return {
+        "turn_id": turn_id,
+        "status": "complete",
+        "public_progress": [
+            {
+                "text": "已确认需要哪些证据。",
+                "status": "complete",
+                "stage": "planning",
+                "step_index": 1,
+                "timestamp": "t",
+                "kind": "plan",
+                "payload": {"requirements": [{"id": "req_1"}]},
+            },
+            {
+                "text": "正在执行 search_memories…",
+                "status": "running",
+                "stage": "action",
+                "step_index": 2,
+                "timestamp": "t",
+                "kind": "model_action",
+                "payload": {"tool": "search_memories", "tool_call_id": "c1"},
+            },
+            {
+                "text": "工具执行完成。",
+                "status": "ok",
+                "stage": "tool_result",
+                "step_index": 3,
+                "timestamp": "t",
+                "kind": "tool_result",
+                "payload": {"tool": "search_memories", "tool_call_id": "c1"},
+            },
+            {
+                "text": "完成。",
+                "status": "complete",
+                "stage": "terminal",
+                "step_index": 4,
+                "timestamp": "t",
+                "kind": "terminal",
+                "payload": {"status": "complete", "termination_reason": "answered"},
+            },
+        ],
+        "result": {
+            "type": "complete",
+            "turn_id": turn_id,
+            "status": "complete",
+            "termination_reason": "answered",
+            "answer": "海边的是 a.jpg",
+            "attachments": attachments
+            if attachments is not None
+            else [{"handle": "h1", "asset_id": "asset_a", "file_name": "a.jpg"}],
+            "requirements": [{"id": "req_1"}],
+            "error": "",
+        },
+        "error": "",
+    }
+
+
+def _polls(*snapshots: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """给「连续两次零待处理才收工」留足轮次：最后一张快照会被重复返回。"""
+    return [*snapshots, snapshots[-1], snapshots[-1]]
+
+
+def _execution(
+    *,
+    client: FakeSentrixClient | None = None,
+    albums: FakeAlbums | None = None,
+    telemetry: FakeTelemetry | None = None,
+    lifecycle: FakeLifecycle | None = None,
+    inference: FakeInference | None = None,
+    writer: FakeResultWriter | None = None,
+) -> tuple[RunExecution, FakeSentrixClient, FakeResultWriter, FakeLifecycle, FakeLifecycle]:
+    albums = (
+        albums
+        if albums is not None
+        else FakeAlbums(
+            manifest=_manifest(),
+            qa_rows=_rows(),
+            files={"faces/1.jpg": b"J"},
+            directory_entries={"photos": 2},
+        )
+    )
+    client = (
+        client
+        if client is not None
+        else FakeSentrixClient(
+            asset_polls=_polls(_assets()),
+            turns={"turn_1": [_completed_turn()]},
+            import_result={"imported": 2, "deduplicated": 0, "events": 1, "summarized": 1, "failures": []},
+        )
+    )
+    writer = writer if writer is not None else FakeResultWriter()
+    lifecycle = lifecycle if lifecycle is not None else FakeLifecycle()
+    execution = RunExecution(
+        client=client,
+        albums=albums,
+        writer=writer,
+        lifecycle=lifecycle,
+        inference=inference if inference is not None else FakeInference(),
+        telemetry=telemetry if telemetry is not None else FakeTelemetry(),
+        sleep=lambda _seconds: None,
+    )
+    return execution, client, writer, lifecycle, albums  # type: ignore[return-value]
+
+
+def _request(**overrides: Any) -> RunRequest:
+    base: dict[str, Any] = {
+        "album_id": ALBUM,
+        "qa_set": QA_SET,
+        "model_profile": "qwen",
+        "sentrix_url": "http://sentrix:8191",
+        "run_id": "run_test",
+    }
+    base.update(overrides)
+    return RunRequest(**base)
+
+
+def test_the_chain_runs_every_phase_in_order_and_completes():
+    execution, _client, writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    phases = state["phases"]
+    assert list(phases) == [
+        "model_deploy",
+        "scope_setup",
+        "identity_seed",
+        "photo_import",
+        "pipeline_processing",
+        "qa_eval",
+    ]
+    assert {name: bucket["status"] for name, bucket in phases.items()} == {
+        "model_deploy": "done",
+        "scope_setup": "done",
+        "identity_seed": "done",
+        "photo_import": "done",
+        "pipeline_processing": "done",
+        "qa_eval": "done",
+    }
+    assert state["status"] == "completed"
+    assert writer.last_state()["run_id"] == "run_test"
+
+
+def test_the_scope_is_named_after_the_run_and_never_created_by_its_own_endpoint():
+    """2.0 **没有** ``POST /api/memory-spaces``：空间由导入路径内部的 ``ensure`` 建。
+
+    这条断言必须是「没有那个调用」而不是「scope_id 非空」——后者在一个仍然偷偷
+    建了空间的实现里同样成立（那个实现会让 2.0 多出一个没人用的空间）。
+    """
+    execution, client, _writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    assert not any("memory-space" in str(kwargs) for _name, kwargs in client.calls)
+    assert state["scope_id"].startswith("PhotoBench-")
+    assert state["scope_id"] == state["scope_name"]
+    assert state["scope_source"] == "created_by_import"
+    assert state["phases"]["scope_setup"]["created_by"] == "import_ensure_space"
+
+
+def test_identity_seed_sends_each_face_and_the_declared_relationships():
+    execution, client, _writer, _lifecycle, _albums = _execution()
+    execution.execute(_request())
+    seeds = [kwargs for name, kwargs in client.calls if name == "seed_person"]
+    assert len(seeds) == 1
+    assert seeds[0]["name"] == "明明"
+    assert seeds[0]["aliases"] == ["小明"]
+    assert seeds[0]["file_name"] == "1.jpg"
+    assert seeds[0]["content"] == b"J"
+    assert seeds[0]["scope_id"] == "PhotoBench-" + _scope_suffix(client)
+    relationships = [kwargs for name, kwargs in client.calls if name == "import_relationships"]
+    assert len(relationships) == 1
+    assert relationships[0]["entity_by_name"] == {"明明": "ent_明明"}
+
+
+def _scope_suffix(client: FakeSentrixClient) -> str:
+    seed = next(kwargs for name, kwargs in client.calls if name == "seed_person")
+    return str(seed["scope_id"])[len("PhotoBench-") :]
+
+
+def test_one_unseedable_face_does_not_abort_the_run_but_is_recorded():
+    """1.0 的 ``seed-batch`` 会从结果里滤掉带 ``error`` 的条目、整段不抛——照搬这条
+    语义意味着**一个人种不上不该让整轮评测没有结果**，但那条错误必须留在 run.json 里。
+    """
+    albums = FakeAlbums(
+        manifest={
+            **_manifest(),
+            "faces": [
+                {"canonical_name": "明明", "ref_image": "faces/1.jpg"},
+                {"canonical_name": "芳芳", "ref_image": "faces/2.jpg"},
+            ],
+        },
+        qa_rows=_rows(),
+        # 两张参考图都在盘上（读得到字节），失败的是 2.0 那一端——这才对得上
+        # 「一个人种不上」这句话。文件读不到是另一种失败，它同样被接住，
+        # 但那不是这条用例要钉的东西。
+        files={"faces/1.jpg": b"J", "faces/2.jpg": b"F"},
+        directory_entries={"photos": 2},
+    )
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [_completed_turn()]},
+        seed_error={"芳芳": RuntimeError("HTTP 422: 图里没有人脸")},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client, albums=albums)
+    state = execution.execute(_request())
+    phase = state["phases"]["identity_seed"]
+    assert phase["status"] == "done"
+    assert phase["seeded_count"] == 1
+    assert phase["failed_count"] == 1
+    failed = [item for item in phase["details"] if item.get("error")]
+    assert failed[0]["name"] == "芳芳"
+    assert "422" in failed[0]["error"]
+
+
+def test_photo_import_hands_the_server_side_directory_and_the_real_entry_count_as_limit():
+    """2.0 的 ``POST /api/v1/imports`` 收**服务端目录**，而 ``limit`` 填小了会**静默**
+    少导几张（``ImportAlbum.execute`` 的 ``paths[:limit]``）。
+
+    所以这条要同时钉住路径与那个数字：只钉路径的话，``limit`` 写死 1 也能过，
+    而那个实现的后果是整册只导进第一张、没有任何报错。
+    """
+    execution, client, _writer, _lifecycle, albums = _execution()
+    state = execution.execute(_request())
+    imports = [kwargs for name, kwargs in client.calls if name == "import_album"]
+    assert imports == [
+        {
+            "scope_id": state["scope_id"],
+            "directory": f"/srv/albums/{ALBUM}/photos",
+            "limit": 2,
+            "timeout": 7200,
+        }
+    ]
+    assert state["phases"]["photo_import"]["accepted_count"] == 2
+    assert state["phases"]["photo_import"]["event_count"] == 1
+    # manifest 里两个文件落在同一个目录 → 只导一次（``import_directories`` 去重）
+    assert ("import_target", "photos") in albums.calls
+
+
+def test_a_directory_that_loses_files_is_not_silently_ignored():
+    """导入返回的 ``failures`` 必须一路走到相位的 ``error_details`` 并把相位压成 partial。
+
+    没有这条，一个「导了但失败了两张」的 run 与一个全成功的 run 在 run.json 里
+    完全一样——那正是 1.0 的 ``_phase_partial``（``:2299``）存在的理由。
+    """
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [_completed_turn()]},
+        import_result={
+            "imported": 1,
+            "deduplicated": 0,
+            "events": 1,
+            "summarized": 1,
+            "failures": [{"file_name": "b.jpg", "reason": "不支持的编码"}],
+        },
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request())
+    phase = state["phases"]["photo_import"]
+    assert phase["status"] == "partial"
+    assert phase["failed_count"] == 1
+    assert phase["error_details"][0]["sample_id"] == "b.jpg"
+    assert state["status"] == "completed_with_errors"
+
+
+def test_processing_requires_two_consecutive_zero_pending_snapshots():
+    """1.0 ``:3010`` 的注释：资产状态行可能晚于批次翻转落地。
+
+    这里**第一个快照就已经是零待处理**——一个只等一次的实现会当场收工，而正确的
+    实现会再问一次。夹具让第 2、3 次返回同一份数据，所以「等两次」与「等一次」在
+    调用次数上可区分。
+    """
+    client = FakeSentrixClient(
+        asset_polls=[[], []],
+        turns={"turn_1": [_completed_turn()]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    execution.execute(_request())
+    polls = [name for name in client.call_names() if name == "list_assets"]
+    # 2 次是收工判据，1 次是 qa_eval 取资产表
+    assert len(polls) == 3
+
+
+class _TickingTime:
+    """每次 ``monotonic()`` 前进一秒：让 1200 秒的停滞阈值在一个用例里跑得完。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        self.now += 1.0
+        return self.now
+
+    def perf_counter(self) -> float:
+        return self.now
+
+    def strftime(self, _format: str) -> str:
+        return "20260101-000000"
+
+
+def test_a_scope_with_no_assets_is_partial_not_a_silent_success():
+    """导入之后 scope 里没有资产 → 相位压 partial，而不是「处理完了，0 张」。
+
+    1.0 的判据是「这一轮一张都没收进来」（``:2913``）；2.0 的导入会报 ``deduplicated``，
+    所以换成本条更准的判据（scope 里到底有没有资产）——**它同时覆盖了 1.0 那条的用场**：
+    在空相册上把题全问一遍，产出的是一份全错的 run.json，而那正是这条要拦的事。
+    """
+    client = FakeSentrixClient(
+        asset_polls=[[]],
+        turns={"turn_1": [_completed_turn()]},
+        import_result={"imported": 0, "deduplicated": 2, "events": 0, "summarized": 0, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request())
+    phase = state["phases"]["pipeline_processing"]
+    assert phase["status"] == "partial"
+    assert phase["progress"]["total"] == 0
+    assert phase["error_details"][0]["error_type"] == "empty_import"
+    assert state["status"] == "completed_with_errors"
+
+
+def test_the_stall_detector_ignores_status_flapping_inside_the_pending_set(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """停滞判据用**稳定签名**（聚合计数 + 已离开待处理集合的 (id, 终态) 对）。
+
+    夹具让唯一一个资产在 ``queued`` 与 ``processing`` 之间来回——**状态字符串每次都
+    在变，但它从没离开过待处理集合**。按状态字符串判进展的实现会把这个抖动当成
+    持续进展，于是永远不触发停滞检测，轮询一直打到夹具的 ``poll_limit`` 上炸掉
+    （用例红，且不会挂起）；按稳定签名判的实现会看到「零进展」，到阈值就收工并把
+    相位压成 partial。
+
+    这正是 1.0 ``:2988-2996`` 那段注释点名的坑，不是这里发明的新判据。
+    """
+    # 同一个资产在两种**待处理**状态之间来回：状态字符串每次都变，
+    # 但它从没离开 ``PIPELINE_PENDING_STATUSES``。
+    flapping = [
+        [{"id": "asset_a", "file_name": "a.jpg", "media_type": "image", "status": "queued"}],
+        [{"id": "asset_a", "file_name": "a.jpg", "media_type": "image", "status": "processing"}],
+    ]
+    client = FakeSentrixClient(
+        asset_cycle=flapping,
+        turns={"turn_1": [_completed_turn()]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+        poll_limit=400,
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    import photobench.application.run_execution.service as service
+
+    monkeypatch.setattr(service, "time", _TickingTime())
+    monkeypatch.setenv("PHOTOBENCH_PIPELINE_STALL_TIMEOUT_SECONDS", "300")
+    state = execution.execute(_request())
+    phase = state["phases"]["pipeline_processing"]
+    assert phase["status"] == "partial"
+    # ``stalled`` 这个 status 会被随后的 ``phase_partial`` 覆盖成 ``partial``
+    # （1.0 亦然：那里的 ``_record_phase(..., "status", "stalled")`` 也只活到收尾前）。
+    # 留在 run.json 里的是 ``stalled_at`` 与那句 error——一个不做停滞检测的实现
+    # 两样都没有。
+    assert phase["stalled_at"]
+    assert "没有资产状态变化" in str(phase["error"])
+    assert phase["skipped_asset_count"] == 1
+    # 301 次 = 阈值 300 秒 + 第 1 次建立基线。**用相位自己的计数**而不是假件的
+    # 总调用数：后者还包含 ``qa_eval`` 取资产表的那一次，两者混起来会让这条断言
+    # 在无关改动下变红。
+    assert phase["poll_iterations"] == 301
+
+
+def test_a_partial_turn_is_a_completed_item_not_a_failure():
+    """2.0 把 ``partial`` 做成了**终态**（``TurnStatus.is_terminal``）。
+
+    1.0 的判据是列举成功值（``{"complete","completed","done","success"}``），照搬它
+    会让每一个业务上「答不全」的回合都变成一次轮询超时——而那正是 2.0 用显式终态
+    修掉的东西。夹具给的就是 ``partial``，且 ``result`` 里有一句完整的答案。
+    """
+    partial = _completed_turn()
+    partial["status"] = "partial"
+    partial["result"]["status"] = "partial"
+    partial["result"]["termination_reason"] = "answered_with_gap"
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [partial]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    # ``turn_timeout=0``：**判据必须是「看到终态就收」，不能是「轮询到超时」。** 夹具
+    # 对同一个 turn 永远回同一份 ``partial``，所以一个把 ``partial`` 当非终态的实现
+    # 会在超时上炸掉（红），而不是把这条用例挂死。正确的实现根本进不了那个循环。
+    state = execution.execute(_request(turn_timeout=0))
+    item = state["items"][0]
+    assert item["execution_status"] == "completed"
+    assert item["answer"] == "海边的是 a.jpg"
+    assert item["termination_reason"] == "answered_with_gap"
+    assert len([name for name in client.call_names() if name == "get_turn"]) == 1
+
+
+def test_the_delivery_set_is_the_attachments_and_is_scored_against_the_ground_truth():
+    """交付集 = ``result.attachments[].asset_id``，GT = 题面里的 ``retrieval_image_ids``。
+
+    这条同时钉住三件事：附件被当成交付集（不是候选集）、asset_id 被解成文件名、
+    以及指标确实按这个交集算。改坏任何一环，``image_retrieval_recall`` 就不再是 1.0。
+    """
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    item = state["items"][0]
+    assert item["selected_asset_ids"] == ["asset_a"]
+    assert item["predicted_file_names"] == ["a.jpg"]
+    assert item["image_retrieval_recall"] == 1.0
+    assert item["image_retrieval_precision"] == 1.0
+    assert item["delivery_matched_file_names"] == ["a.jpg"]
+    assert item["gt_media"] == [
+        {
+            "media_type": "image",
+            "media_id": "a.jpg",
+            "image_id": "a.jpg",
+            "video_id": None,
+            "file_name": "a.jpg",
+            "asset_id": "asset_a",
+            "matched": True,
+            "mapping_status": "ok",
+        }
+    ]
+
+
+def test_a_question_without_an_answer_in_the_library_costs_recall():
+    """反面口径：交付集为空时召回必须是 0 而不是 1。
+
+    **没有这条，上面那条「召回 == 1.0」对一个恒返回 1.0 的实现也成立。**
+    """
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [_completed_turn(attachments=[])]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request())
+    item = state["items"][0]
+    assert item["selected_asset_ids"] == []
+    assert item["image_retrieval_recall"] == 0.0
+    assert item["image_retrieval_counts"] == {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "matched": 0,
+        "predicted": 0,
+        "gt": 1,
+    }
+
+
+def test_the_trace_is_persisted_verbatim_and_digested():
+    """轨迹是 2.0 的 ``public_progress`` 逐条原样，外加一份只做计数的摘要。
+
+    2.0 的 payload 里**只有工具名与 tool_call_id**——没有入参、没有结果、没有 asset_id。
+    所以摘要里不该出现 ``tool_trace`` 那种名字：那是 1.0 才有的东西，编一个出来
+    会让读侧以为拿得到结果。
+    """
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    item = state["items"][0]
+    turn = item["runtime_turns"][0]
+    assert [event["kind"] for event in turn["trace"]] == [
+        "plan",
+        "model_action",
+        "tool_result",
+        "terminal",
+    ]
+    assert turn["trace"][1]["payload"] == {"tool": "search_memories", "tool_call_id": "c1"}
+    assert turn["trace_summary"] == {
+        "steps": 4,
+        "stages": {"planning": 1, "action": 1, "tool_result": 1, "terminal": 1},
+        "kinds": {"plan": 1, "model_action": 1, "tool_result": 1, "terminal": 1},
+        "tools": {"search_memories": 2},
+        "executed_tools": {"search_memories": 1},
+        "error_codes": {},
+    }
+    assert "tool_trace" not in item
+
+
+def test_a_multi_turn_question_reuses_one_conversation():
+    """多轮题的每一轮都进同一个会话（1.0 ``:3406`` 每题一个 conversation_id）。
+
+    错误实现（每题每轮各建一个会话）会让第二轮的追问失去上下文，**而在指标上完全
+    看不出来**——所以只能靠调用形状钉。
+    """
+    row = _rows()[0]
+    row["conversation"] = [{"message": "第一轮"}, {"message": "第二轮"}]
+    albums = FakeAlbums(
+        manifest=_manifest(),
+        qa_rows=[row],
+        files={"faces/1.jpg": b"J"},
+        directory_entries={"photos": 2},
+    )
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [_completed_turn("turn_1")], "turn_2": [_completed_turn("turn_2")]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client, albums=albums)
+    state = execution.execute(_request())
+    conversations = [kwargs for name, kwargs in client.calls if name == "start_conversation"]
+    turns = [kwargs for name, kwargs in client.calls if name == "start_turn"]
+    assert len(conversations) == 1
+    assert [turn["conversation_id"] for turn in turns] == ["conv_1", "conv_1"]
+    assert [turn["message"] for turn in turns] == ["第一轮", "第二轮"]
+    item = state["items"][0]
+    assert item["question"] == "第二轮"
+    assert item["conversation_context_mode"] == "shared_conversation_id"
+    assert item["conversation_turn_count"] == 2
+    assert item["wall_clock_ms"] is not None
+
+
+def test_a_turn_that_never_reaches_a_terminal_state_fails_its_item():
+    """非终态一直轮询下去必须收在一个可判定的失败上，而不是把答案写成空串。"""
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [{"turn_id": "turn_1", "status": "running", "public_progress": []}]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request(turn_timeout=0))
+    item = state["items"][0]
+    assert item["execution_status"] == "timeout"
+    assert "did not complete" in item["error"]
+    assert state["run_valid"] is False
+
+
+def test_a_failed_item_is_skipped_for_the_judge_and_a_good_one_is_pending():
+    """「没有答案可打分」与「还没打分」是两件事（1.0 ``:3220``）。
+
+    本切片没有 judge，但这条区分必须现在就写对：S9b-3 接上 judge 时，
+    ``pending`` 是「去打分」的队列，``skipped`` 是「别碰」。
+    """
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [{"turn_id": "turn_1", "status": "running", "public_progress": []}]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request(turn_timeout=0))
+    assert state["items"][0]["judge_status"] == "skipped"
+
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    assert state["items"][0]["judge_status"] == "pending"
+    assert state["items"][0]["judge"] == {"score": None, "reason": "pending_judge"}
+
+
+def test_run_valid_requires_every_question_to_complete():
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    assert state["run_valid"] is True
+    assert state["qa_count"] == 1
+
+
+def test_a_failing_phase_stops_the_chain_and_records_where_it_died():
+    """1.0 ``:2404``：任何相位异常都收成 ``failed`` + ``failed_phase``。
+
+    导入炸了就不该再往下跑问答——在空相册上问 100 道题只会产出一份全错的 run.json。
+    """
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [_completed_turn()]},
+    )
+
+    def boom(**kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("HTTP 500: 导入服务炸了")
+
+    client.import_album = boom  # type: ignore[method-assign]
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request())
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "photo_import"
+    assert "导入服务炸了" in state["fatal_error"]
+    assert state["phases"]["photo_import"]["status"] == "failed"
+    assert "qa_eval" not in state["phases"]
+    assert state["finished_at"] is not None
+
+
+# ---- 模型起停（LifecycleProvider.start / .stop 的接线证据） -------------------
+
+
+def test_without_a_manager_the_model_is_never_started_or_stopped():
+    """管理器没配时**一次都不能调** start/stop——那是 1.0 的 ``use_cloud_model`` 分支。
+
+    ``lifecycle.state()`` 仍会被调（``_hardware_snapshot`` 用它记 run 元数据），
+    所以这条断言的是「start/stop 不在调用表里」，不是「lifecycle 没被碰过」。
+    """
+    execution, _client, _writer, lifecycle, _albums = _execution()
+    state = execution.execute(_request())
+    assert "start" not in lifecycle.call_names()
+    assert "stop" not in lifecycle.call_names()
+    assert state["phases"]["model_deploy"]["manager_status"] == "not_applicable"
+
+
+def test_with_a_manager_the_model_is_stopped_then_started_then_probed():
+    """**这是 ``LifecycleProvider.start`` / ``.stop`` 的唯一生产调用者。**
+
+    三件事一起钉：先停后起（顺序反了会在显存没释放时装载）、``wait_ready=False``
+    （1.0 ``:2567``：fire-and-poll，否则一个取消请求要等完整次装载）、以及起完之后
+    真的去探了端点（``chat``）与测了一次吞吐（``chat_stream``）。
+    """
+    execution, _client, _writer, lifecycle, _albums = _execution()
+    execution.execute(_request(manager_url="http://manager:8500", model_base_url="http://m:8100"))
+    names = lifecycle.call_names()
+    # 顺序：先 stop 再 start。反过来的实现在显存没释放时装载，而那正是 1.0 ``:2544``
+    # 先卸载的理由。start/stop 各恰好一次——重试是给 start 失败准备的，不是常态。
+    assert names.index("stop") < names.index("start")
+    assert names.count("stop") == 1
+    assert names.count("start") == 1
+    stopped = next(kwargs for name, kwargs in lifecycle.calls if name == "stop")
+    started = next(kwargs for name, kwargs in lifecycle.calls if name == "start")
+    assert stopped == {"timeout": 60}
+    assert started == {"profile": "qwen", "wait_ready": False}
+    # 两次 ``chat`` 都是 1.0 的流程：等待就绪时探一次（``:2484``）、装载完健康检查
+    # 再探一次（``:2593``）；``chat_stream`` 是随后的吞吐探测（``model_probe``）。
+    # **不是一次多余的调用**——把它们合成一次的实现会让「端点到底通没通」少一个证据。
+    assert execution.inference.calls == ["chat", "chat", "chat_stream"]
+
+
+def test_a_transient_start_failure_is_retried_before_giving_up():
+    """1.0 ``:2560`` 的退避重试：第一次 502 是常态（显存还没释放完）。"""
+    lifecycle = FakeLifecycle(start_failures=1)
+    execution, _client, _writer, _lifecycle, _albums = _execution(lifecycle=lifecycle)
+    state = execution.execute(_request(manager_url="http://manager:8500"))
+    assert lifecycle.call_names().count("start") == 2
+    assert state["phases"]["model_deploy"]["status"] == "done"
+
+
+def test_a_model_that_never_becomes_ready_fails_the_phase():
+    """反面：起不来就必须红在这一相位，而不是带着一个没装载的模型继续跑完整轮。"""
+    lifecycle = FakeLifecycle(state={"profile": "other", "served_model_name": "other"})
+    execution, _client, _writer, _lifecycle, _albums = _execution(lifecycle=lifecycle)
+    import photobench.application.run_execution.service as service
+
+    original_backoff = service.MODEL_START_BACKOFF_SECONDS
+    original_ready = service.MODEL_READY_TIMEOUT_SECONDS
+    # 就绪等待是**真实等待**（``time.monotonic`` 不走假表），跑满 600 秒要十分钟。
+    # 这是它作为模块常量存在的唯一理由。
+    service.MODEL_START_BACKOFF_SECONDS = (0,)
+    service.MODEL_READY_TIMEOUT_SECONDS = 0
+    try:
+        state = execution.execute(_request(manager_url="http://manager:8500"))
+    finally:
+        service.MODEL_START_BACKOFF_SECONDS = original_backoff
+        service.MODEL_READY_TIMEOUT_SECONDS = original_ready
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "model_deploy"
+    assert "not ready" in state["fatal_error"]
+
+
+# ---- GPU 采样 --------------------------------------------------------------
+
+
+def test_sampling_writes_labelled_samples_and_is_stopped_at_the_end():
+    """采样器是 ``TelemetryProvider`` 三个方法的唯一调用者。
+
+    ``on_sample`` 是本片唯一入口，所以这里用一个**同步假件**（真实采样线程要跑 0.5s
+    才出第一个点，用例等不起）：把 ``GpuSampler.start`` 换成「立刻采一次」。
+    """
+    telemetry = FakeTelemetry(
+        gpus=[{"index": 0, "temperature_c": 60.0}],
+        process_memory={"process_memory_used_mib": 1234, "processes": [{"pid": 1}]},
+        system_memory={"system_memory_used_mib": 4096},
+    )
+    execution, _client, writer, _lifecycle, _albums = _execution(telemetry=telemetry)
+    import photobench.application.run_execution.gpu_sampler as sampler_module
+
+    original = sampler_module.GpuSampler.start
+
+    def start_and_sample(self: Any) -> None:
+        self._thread = None
+        self.sample_once()
+
+    sampler_module.GpuSampler.start = start_and_sample  # type: ignore[method-assign]
+    try:
+        execution.execute(_request())
+    finally:
+        sampler_module.GpuSampler.start = original  # type: ignore[method-assign]
+    assert writer.resets == ["run_test"]
+    assert len(writer.gpu_samples) == 1
+    _run_id, sample = writer.gpu_samples[0]
+    assert sample["temperature_c"] == 60.0
+    assert sample["model_process_memory_used_mib"] == 1234
+    assert sample["system_memory_used_mib"] == 4096
+    # 这个假件的采样发生在相位循环开始之前（真的采样器跑在线程里），所以走的是
+    # 「还没有当前相位」那条兜底——相位标签本身在下面那条用例里单独钉。
+    assert sample["phase"] == "unassigned"
+    assert sample["phase_label"] == "未分配阶段"
+    assert telemetry.calls.count("gpu_stats") >= 2  # 采样一次 + 起止硬件快照
+
+
+def test_a_sample_carries_the_label_of_the_phase_that_was_running():
+    """相位标签是采样行的一部分（1.0 ``:2113``），读侧靠它把曲线切成段。
+
+    直接调 ``_sample_writer`` 是因为标签取自 ``state["current_phase"]``，
+    而起止硬件快照与相位循环的时序关系让「在某相位中间采样」这件事只有这里能摆出来。
+    """
+    from photobench.application.run_execution.state import RunState
+
+    execution, _client, writer, _lifecycle, _albums = _execution()
+    state = RunState({"current_phase": "qa_eval"})
+    execution._sample_writer("run_test", state)({"index": 0, "temperature_c": 50.0})
+    assert writer.gpu_samples == [
+        ("run_test", {"index": 0, "temperature_c": 50.0, "phase": "qa_eval", "phase_label": "QA 测评"})
+    ]
+
+
+def test_sampling_can_be_disabled_for_an_environment_without_telemetry(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("PHOTOBENCH_DISABLE_GPU_SAMPLING", "1")
+    execution, _client, writer, _lifecycle, _albums = _execution()
+    execution.execute(_request())
+    assert writer.resets == []
+    assert writer.gpu_samples == []
+
+
+def test_hardware_snapshots_are_written_at_both_ends():
+    """``hardware_snapshots`` 是 1.0 run.json 的形状（``:2345`` / ``:2455``）。
+
+    遥测探不到时必须是 ``status`` 而不是 0——0 是一个合法的测量结果，缺失不是
+    （``domain/runtime/ports.py`` 的口径）。
+    """
+    telemetry = FakeTelemetry(gpu_status="unavailable")
+    execution, _client, _writer, _lifecycle, _albums = _execution(telemetry=telemetry)
+    state = execution.execute(_request())
+    snapshots = state["hardware_snapshots"]
+    assert snapshots["start"]["captured_at"]
+    assert snapshots["end"]["captured_at"]
+    assert snapshots["end"]["gpu"] == []
+    assert snapshots["end"]["gpu_status"]["status"] == "unavailable"

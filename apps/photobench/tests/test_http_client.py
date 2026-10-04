@@ -12,7 +12,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from photobench.infrastructure.http.client import HttpxJsonClient
+from photobench.infrastructure.http.client import HttpxJsonClient, build_multipart
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -134,3 +134,75 @@ def test_redirects_are_followed_like_urllib():
         return httpx.Response(200, json={"followed": True})
 
     assert _client(handler).request_json("http://sentrix/api/old") == {"followed": True}
+
+
+def test_build_multipart_matches_the_1_0_envelope():
+    """1.0 ``build_multipart``（``:864``）：字段在文件之前、字段与文件各自一段、
+    文件名与 mime 写进 ``Content-Disposition``、边界串带 ``----BenchmarkOrch`` 前缀。
+
+    **这条断言钉的不是「能发出去」而是「发出去的是 1.0 那个信封」**：字段与文件的
+    顺序、每段之间的空行、结尾的 ``--`` 都是服务端解析的依据，任何一处走样都会让
+    一个 2.0 的 multipart 解析器读到不同的字段。钉成整段字节是为了让变异无处可藏
+    ——只断言「含 name=\"name\"」的话，字段顺序换了、缺了结尾边界都不会红。
+    """
+    body, content_type = build_multipart(
+        {"name": "明明", "scope_id": "s1"}, [("files", "ref.jpg", b"\xff\xd8JPEG")]
+    )
+    assert content_type.startswith("multipart/form-data; boundary=----BenchmarkOrch")
+    boundary = content_type.split("boundary=")[1].encode()
+    assert body == (
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="name"\r\n\r\n' + "明明".encode() + b"\r\n"
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="scope_id"\r\n\r\n'
+        b"s1\r\n"
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="files"; filename="ref.jpg"\r\n'
+        b"Content-Type: image/jpeg\r\n\r\n"
+        b"\xff\xd8JPEG\r\n"
+        b"--" + boundary + b"--\r\n"
+    )
+
+
+def test_build_multipart_uses_a_fresh_boundary_per_call():
+    """边界串是要在正文里排除的字符串，两次调用共用一个是自找的解析错误。"""
+    _, first = build_multipart({}, [])
+    _, second = build_multipart({}, [])
+    assert first != second
+
+
+def test_build_multipart_falls_back_to_octet_stream_for_unknown_suffixes():
+    """1.0 ``:875``：``mimetypes.guess_type`` 猜不出时用 ``application/octet-stream``。"""
+    body, _ = build_multipart({}, [("files", "face.bin", b"x")])
+    assert b"Content-Type: application/octet-stream" in body
+
+
+def test_request_multipart_posts_the_envelope_and_parses_the_body():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["content_type"] = request.headers.get("content-type")
+        seen["body"] = request.content
+        return httpx.Response(201, json={"entity_id": "e1"})
+
+    result = _client(handler).request_multipart(
+        "http://sentrix/api/v1/people/seed", {"name": "明明"}, [("files", "a.jpg", b"J")]
+    )
+    assert result == {"entity_id": "e1"}
+    assert seen["content_type"].startswith("multipart/form-data; boundary=")
+    assert b'name="name"' in seen["body"]
+
+
+def test_request_multipart_rewrites_a_non_2xx_into_the_shared_message():
+    """**这条与 1.0 的 ``upload_files`` 不同，是刻意选的**：1.0 的 ``upload_files``
+    没有 except，``HTTPError`` 原样冒（调用方只看到一句 ``str(exc)``）。S9b-2 的调用方
+    ``seed_person`` 要从 2.0 的 ``400 {"detail": ...}`` 里读出「是哪一步拒绝了」，
+    所以走 ``request_json`` 那条转换。**没有这条用例，两种行为在测试里完全等价。**
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"detail": "文件里没有检测到人脸"})
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _client(handler).request_multipart("http://sentrix/api/v1/people/seed", {}, [])
+    assert str(excinfo.value).endswith(": 文件里没有检测到人脸")

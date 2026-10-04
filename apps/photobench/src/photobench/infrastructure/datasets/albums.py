@@ -1,0 +1,166 @@
+"""``AlbumSource`` 的文件实现：``<data_root>/<album_id>/`` 下的 manifest / qa / 参考图。
+
+1.0 的对应物散在 ``benchmark_orchestrator.py`` 的三处：
+``BenchmarkRun.__init__``（``:1966-1969`` 读 manifest 与 qa 行）、``load_jsonl``
+（``:1600``）、``dataset_integrity``（``:1655``）。2.0 把后两个连
+``apply_task_action_defaults``（``:1629``）一起收进这一个类。
+
+**一个刻意的差别：文件缺了抛 ``KeyError``，不抛 ``FileNotFoundError``。**
+1.0 那边缺文件是「跑到一半炸」，2.0 的 api 层把 ``KeyError`` 映射成 404
+（``photobench.api.errors``），所以「这个 album 不存在」「这个 qa_set 不存在」
+「这张参考图没了」在 HTTP 上是同一类回答——**它们对调用方是同一件事**：
+这次请求指的东西不在盘上。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+from photobench.infrastructure.datasets.qa_metadata import (
+    apply_task_action_defaults,
+    load_jsonl,
+    load_task_action_policy,
+)
+
+#: 2.0 ``application/media/import_album.py`` 的 ``SCAN_SUFFIXES``（图片 ∪ 视频 ∪ 音频）
+#: 逐条对齐。**这份清单会漂**——它是 2.0 端点行为的镜像，改了 2.0 就得改这里；
+#: 之所以复制而不是 import，是因为 ``photobench-isolation`` 契约禁止读 ``sentrix.*``。
+MEDIA_SUFFIXES = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".heic",
+        ".heif",
+        ".webp",
+        ".mp4",
+        ".mov",
+        ".m4v",
+        ".avi",
+        ".mkv",
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".aac",
+        ".flac",
+        ".ogg",
+    }
+)
+
+
+def sha256_file(path: Path) -> str:
+    """1.0 ``:1646``：分块哈希，不把文件读进内存（参考图之外还有几十 MB 的视频）。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class JsonAlbumSource:
+    """数据根下每个 album 一个目录，目录里是 ``manifest.json`` 与它指向的 qa ``.jsonl``。"""
+
+    def __init__(self, data_root: Path, task_action_policy: Path) -> None:
+        self._data_root = data_root
+        self._policy_path = task_action_policy
+        # 策略文件一次读一次即可（1.0 在模块导入时读进 TASK_ACTION_DEFAULTS ``:1634``）。
+        # 与 1.0 的差别是**读失败不炸**（``load_task_action_policy`` 里那条 except），
+        # 1.0 同样如此。
+        self._policy = load_task_action_policy(task_action_policy)
+
+    def _album_dir(self, album_id: str) -> Path:
+        """挡住 ``album_id`` 里的路径穿越。
+
+        ``album_id`` 来自请求体（1.0 的 ``POST /api/runs``），与 ``FileRunStore``
+        拦 ``run_id`` 是同一条理由：不加这一层，``../../etc`` 就能让``read_file``
+        读到数据根之外的东西。
+        """
+        if not album_id or "/" in album_id or "\\" in album_id or album_id in {".", ".."}:
+            raise KeyError(album_id)
+        return self._data_root / album_id
+
+    def manifest(self, album_id: str) -> dict[str, Any]:
+        path = self._album_dir(album_id) / "manifest.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise KeyError(album_id) from exc
+        if not isinstance(value, dict):
+            raise KeyError(album_id)
+        return value
+
+    def qa_rows(self, album_id: str, qa_set: str) -> list[dict[str, Any]]:
+        manifest = self.manifest(album_id)
+        relative = (manifest.get("qa_sets") or {}).get(qa_set)
+        if not relative:
+            raise KeyError(f"{album_id}/{qa_set}")
+        path = self._album_dir(album_id) / str(relative)
+        try:
+            rows = load_jsonl(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise KeyError(f"{album_id}/{qa_set}") from exc
+        return apply_task_action_defaults(
+            rows, str(manifest.get("album_id") or album_id), qa_set, self._policy
+        )
+
+    def read_file(self, album_id: str, relative: str) -> bytes:
+        path = self._album_dir(album_id) / relative
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise KeyError(relative) from exc
+
+    def import_target(self, album_id: str, relative: str) -> tuple[str, int]:
+        directory = (self._album_dir(album_id) / relative).resolve()
+        try:
+            count = sum(
+                1 for path in directory.iterdir() if path.is_file() and path.suffix.lower() in MEDIA_SUFFIXES
+            )
+        except OSError:
+            count = 0
+        return str(directory), count
+
+    def integrity(self, album_id: str, manifest: dict[str, Any], qa_set: str) -> dict[str, Any]:
+        """1.0 ``:1655`` 逐行照搬，只把数据根的来源换成这个类的。
+
+        ``task_action_policy_sha256`` 在文件缺失时给 ``None`` 而不是报错——1.0 就是
+        这么写的（那里用 ``is_file()`` 兜了一下），因为策略文件是**可选**的：
+        没有它时题目按自己的 ``expected_action`` 走，那也是一份合法的输入。
+        """
+        album_dir = self._album_dir(album_id)
+        relative_qa = str((manifest.get("qa_sets") or {})[qa_set])
+        entries = ["manifest.json", relative_qa]
+        entries.extend(
+            str(item).strip()
+            for key in ("photos", "videos")
+            for item in (manifest.get(key) or [])
+            if str(item).strip()
+        )
+        entries.extend(
+            str(face.get("ref_image")) for face in manifest.get("faces") or [] if face.get("ref_image")
+        )
+        missing: list[str] = []
+        file_digests: list[dict[str, Any]] = []
+        for relative in sorted(set(entries)):
+            path = album_dir / relative
+            if not path.is_file():
+                missing.append(relative)
+                continue
+            file_digests.append({"path": relative, "sha256": sha256_file(path), "bytes": path.stat().st_size})
+        combined = hashlib.sha256(
+            "\n".join(f"{entry['path']}:{entry['sha256']}" for entry in file_digests).encode()
+        ).hexdigest()
+        return {
+            "algorithm": "sha256",
+            "manifest_sha256": sha256_file(album_dir / "manifest.json"),
+            "qa_sha256": sha256_file(album_dir / relative_qa),
+            "task_action_policy_sha256": sha256_file(self._policy_path)
+            if self._policy_path.is_file()
+            else None,
+            "dataset_sha256": combined,
+            "files_checked": len(file_digests),
+            "missing_files": missing,
+        }

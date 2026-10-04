@@ -615,3 +615,81 @@ S9b-1 把 1.0 `benchmark_orchestrator.py` 的 **HTTP 层、配置域与结果读
 | `GET /api/current-model` | 回 **405** + `{"error": "current-model requires POST"}`，不是 FastAPI 的 405 形状 | 1.0 `:7530-7532` |
 | 启动扫描成本（实测） | 267 个 `run.json` / 11.07 GB：**只读字节 2.9 s，`json.loads` 75.0 s**；单个最大 447 MB（解析 2.03 s） | 2026-10-04 在 153 上实测 |
 | 「跳过 items 只读元信息」的代价（实测） | 对那个 447 MB 的文件：`json.loads` **2.03 s**，纯 Python 逐字节跳过 `items` 要 **24.8 s**——C 解析器比 Python 循环快一个数量级，**跳过反而更贵**。所以 2.0 照常解析、只是丢掉 items | 同上 |
+
+## PhotoBench run-execution 主链（S9b-2，2026-10-04）
+
+S9b-2 把 1.0 `BenchmarkRun`（`benchmark_orchestrator.py:1895`）的六个相位搬进
+`apps/photobench/src/photobench/application/run_execution/`，并**直接按 2.0 的接口写**
+（用户 2026-10-04 的范围调整：端点适配不再留给 S9c 做第二遍）。这份表记的是那些
+「不写下来就会做错」的数值与形状差异；2.0 侧实现见对应文件。
+
+### 端点对照（1.0 → 2.0）
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 全局前缀 | **2.0 = `/api/v1`**（1.0 = `/api`）。本切片一次到位，S9c 的 T924 只剩收口 | `infrastructure/sentrix/client.py` 的 `API_PREFIX` |
+| 建空间 | 2.0 **没有** `POST /api/memory-spaces`。空间由导入路径内部的 `_ensure_space` 建（`import_assets.py:249` / `:495`），`people/seed` 那条路也先 `spaces.ensure`（`identity.py:963`）。**`id` 与 `name` 都是同一个 `scope_id`**（`ensure(id, id)`），而 1.0 的服务端返回 `id` 与 `name` 两个值 | `application/run_execution/service.py::_phase_scope_setup` |
+| 导入的单位 | **一个服务端扁平目录**（`{directory, scope_id, limit}`），`ImportAlbum.execute` 用 `root.iterdir()` **非递归**扫后缀（`import_album.py:100`）。1.0 是逐文件 multipart 上传到 `/api/import`。所以「导了哪些文件」的权威从 manifest 变成目录内容 | `_phase_photo_import` |
+| 导入的 `limit` | 默认 **200**、上限 **1000**，**超出静默截断**（`paths[:limit]`）。1.0 没有这个参数。主链按目录里的**媒体后缀文件数**填它（填小了没有任何报错） | `infrastructure/datasets/albums.py::import_target` |
+| 导入是否同步 | **同步长请求**：一个请求串行走完落盘→EXIF→地理→视觉向量→观察→人物→事件→事实→词法，再跑批末总结（`timeline.py:130-142`）。1.0 是「上传 + 轮询 ingest-batch 两段」 | 同上 |
+| 导入的收尾 | 2.0 **没有** `POST /api/ingest-batches/{id}/complete` 与 `/cancel`——语义并入 imports | — |
+| 种身份 | `POST /api/v1/people/seed` 是**单人 multipart**；`aliases` 是**顿号或逗号分隔的一个字符串**（`identity.py:895`），不是数组。1.0 是 `seed-batch` 一次 N 人 N 图 | `client.py::seed_person` |
+| 资产列表 | 2.0 的信封是 **`{"items": [...]}`**（1.0 是 `{"assets": [...]}`）；**没有 offset、没有分页元数据**；条目**没有 `created_at`**（只有可空的 `captured_at`，字段名是 `file_name`） | `api/schemas/media.py:125-137` |
+| 资产列表的 limit | 路由里做 `min(limit, 1000)`。1.0 用 `limit=2000`，所以 2.0 侧超过 1000 会被**静默截断** | `api/routes/media.py:290` |
+| 资产状态 | 2.0 只有 **四态**：`queued` / `processing` / `processed` / `failed`（`domain/media/models.py:46`）。1.0 那张表里的 `semantic_enriching` / `video-keyframe-extracting` 等**一个都没有**，所以主链的「待处理集合」= `{queued, processing}`、失败集合 = `{failed}` | `service.py::PIPELINE_PENDING_STATUSES` |
+| 问答 | **两段式**：先 `POST /api/v1/assistant/conversations`（拿 `id`），再 `POST .../{cid}/turns`（202，返回 `turn_id`）。1.0 一次 `POST /api/assistant/turn` 自带 `conversation_id`（本地 `uuid4()`，`:3406`） | `client.py::start_conversation` / `start_turn` |
+| 回合的 scope | **不在请求体里**——`StartTurnRequest` 只有 `message`，scope 继承会话（`assistant.py:213`）。请求体里的 `conversation_id` 字段存在但**被路由忽略** | 同上 |
+| 回合的终态 | `TurnStatus.is_terminal = not in {pending, running}`，即 `complete` / `partial` / `failed` / `blocked` / `cancelled` **都是终态**。1.0 的判据是列举成功值 `{complete, completed, done, success}`——照搬它会把每一个业务失败都变成一次轮询超时 | `domain/assistant/models.py:40`；`service.py::_await_turn` |
+| 回合轮询路径 | **复数** `/api/v1/assistant/turns/{turn_id}`（1.0 是单数 `/api/assistant/turn/{id}`） | `client.py::get_turn` |
+| 轮询间隔 | **0.5 s**（1.0 `:931` 同值） | `service.py::_await_turn` |
+
+### 2.0 不再暴露的轨迹（本切片留空并说明原因）
+
+| 1.0 的字段 | 2.0 的状况 |
+|---|---|
+| `model_call_metrics`（每次调用的 ttft / token） | **没有**。`run_turn` 从不读 `ModelReply` 的 token 数，也不落任何表 |
+| `debug_trace` / `retrieval_trace` / `execution_trace` | **没有**。`ProgressEvent` 的 payload 里只有 `tool` 与 `tool_call_id`，**没有入参、没有结果** |
+| `tool_trace`（含 `debug_asset_ids` / observation） | **没有**。工具结果只进 `agent_turns.attachments_json`（且只有交付那几张） |
+| `answer_grounding` / `tool_perf` / `agent2_trace` | **不存在** |
+| `retrieved_candidate_media` / `evidence_source_media` / `image_ranking` | **拿不到候选集**。2.0 只给**交付集**（`result.attachments[].asset_id`），所以主链只算交付口径的召回/精确率，**不编候选集指标** |
+| 交付集的媒体类型 | `AttachmentSummary` 只有 `handle` / `asset_id` / `file_name`，**没有 media_type**——类型由 `assets` 表回查 |
+| `agent_turn_events` 表 | 存在的，但**唯一读取者**是轮询与 SSE 两个端点，没有别的指标端点 |
+
+### 参数与常量
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 模型冷却 | `stop` 之后等 **5 s** 再 `start`（1.0 `:2557`） | `service.py::MODEL_COOLDOWN_SECONDS` |
+| 装载退避 | **[10, 30, 60, 180] s**，最多 4 次尝试（1.0 `:2559`） | `MODEL_START_BACKOFF_SECONDS` |
+| 等模型就绪 | **600 s**（1.0 `_wait_model_ready` 的默认值） | `MODEL_READY_TIMEOUT_SECONDS` |
+| `start` 的参数 | `{"profile": <model>, "wait_ready": False}`，超时 120（1.0 `:2567`，fire-and-poll） | `_phase_model_deploy` |
+| `stop` 的参数 | `{"timeout": 60}`，超时 90（1.0 `:2546`） | 同上 |
+| 管道轮询间隔 | **3 s**（1.0 `:3031`） | `PIPELINE_POLL_SECONDS` |
+| 管道停滞阈值 | `PHOTOBENCH_PIPELINE_STALL_TIMEOUT_SECONDS`，默认 **1200 s**；非数字退回默认值 | `_stall_timeout` |
+| 停滞判据 | **稳定签名**：`(待处理数, 已处理数, 失败数, 已离开待处理集合的 (id, 终态) 对)`。待处理集合**内部**的状态抖动不算进展——否则重试环里的状态翻转会永久击败停滞检测（1.0 `:2988-2996`） | `_phase_processing` |
+| 收工判据 | 连续 **2** 次零待处理（1.0 `:3010`：状态行可能晚于批次翻转落地） | 同上 |
+| 导入超时 | **7200 s**（2.0 的导入是一个同步长请求） | `RunRequest.import_timeout` |
+| 回合超时 | **900 s**（1.0 `wait_for_assistant_turn` 的默认值 `:909`） | `RunRequest.turn_timeout` |
+| QA 并发 | `PHOTOBENCH_QA_CONCURRENCY`，**默认 1**。1.0 默认读被服务模型的 `max_num_seqs`，2.0 没有那个快照可读——读不到时 1.0 也退回 1（`:3338`） | `_resolve_qa_concurrency` |
+| `execution_status` 的分类 | `timeout` / `failed` / `completed`。**判据比 1.0 多一条 `isinstance(exc, TimeoutError)`**：1.0 只按文案里的 `timed out`/`timeout` 判，而它自己的 `TimeoutError` 文案是 "did not complete within Ns"——**里面没有那个词**，于是每次超时都被记成 `failed` | `_evaluate_one` |
+| 三个 judge 占位 | `judge` / `task_judge` / `evidence_judge` 都写 `{"score": None, "reason": "pending_judge"}`（1.0 同一位置 `:3555-3557`）。**不打分时不能用 0**——0 是一个合法分数，会污染读侧算出的分布 | 同上 |
+| `judge_status` | 成功的题 `pending`、失败的题 **`skipped`**（1.0 `:3220`）。S9b-3 接上 judge 时，前者是「去打分」的队列，后者是「别碰」 | `_phase_qa_eval` |
+| 采样相位标签 | 每个采样点带 `phase` 与 `phase_label`（中文，1.0 `:2113` 那张表逐字照搬） | `gpu_sampler.py::PHASE_LABELS` |
+| 采样间隔 | **0.5 s**（1.0 `:1691`）；`PHOTOBENCH_DISABLE_GPU_SAMPLING=1` 可整段关掉（2.0 新增，给没有遥测的机器） | `GpuSampler(interval=...)` |
+| 样本字段映射 | 逐字段照搬 1.0 `:1717-1775`，含 `processes` → `model_processes` 的**改名**、`vllm_metrics` / `memory_profile` 的**两层展开**、以及那六个进程列表的 ``or []`` 兜底 | `gpu_sampler.py::sample_once` |
+| 探不到时不产出样本 | `gpu_stats().status != "available"` → 该轮**不产出样本**，不是产一条全 0 的（0 是合法测量值） | 同上 |
+| 结果文件 | `results/<run_id>/{run.json, results.jsonl, gpu_samples.jsonl}`，**形状与 1.0 逐字节兼容**（2.0 仍要能读 1.0 那 19 GB 的 results/） | `infrastructure/results/store.py` |
+| `run.json` 的写 | **原子**（临时文件 + `replace`，1.0 `atomic_json` `:576`）：写到一半被读到的 run.json 就是「整个 run 损坏」 | `FileResultWriter.write_snapshot` |
+| `results.jsonl` | 每次快照**重写**（不是追加），一行一题 | 同上 |
+| `gpu_samples.jsonl` | run 开始时**截空**（1.0 `:2105`），之后**追加**且立即落盘 | `reset_gpu_samples` / `append_gpu_sample` |
+| `run_valid` | `len(items) == qa_count` 且**每题** `execution_status == "completed"`（1.0 `:3318`） | `_phase_qa_eval` |
+| 相位失败 | 任一相位抛异常 → `status=failed` + `failed_phase` + `fatal_error`，**后续相位不再跑**（1.0 `:2404`） | `execute` |
+| 有 partial 相位 | 跑完但存在 `status == "partial"` 的相位 → `completed_with_errors`（1.0 `:2389`） | 同上 |
+
+### 本切片偏离 1.0 的三处（都刻意，且都有用例钉）
+
+| 项 | 1.0 | 2.0 | 为什么 |
+|---|---|---|---|
+| id 的 URL 转义 | `GET /api/assets?scope_id={scope_id}` **完全不转义**（`:2952` / `:3111`）；`:1439` / `:2456` 用默认的 `quote`（把 `/` 当安全字符） | 一律 `quote(value, safe="")` | 查询串里斜杠合法，但**路径**里会把 `/assistant/turns/a/b` 切成两段。一次收紧，让两种位置只有一种编码 |
+| `upload_files` 的非 2xx | 没有 `except`，`HTTPError` 原样冒（调用方只看到 `str(exc)`） | 转成与 `request_json` 同一条 `RuntimeError` 文案 | S9b-2 的调用方是 `seed_person`，它要从 2.0 的 `400 {"detail": ...}` 里读出「哪一步拒绝了」。1.0 的两个上传端点（`seed-batch` / `import`）在 2.0 都不再由这个方法服务，所以不改变任何既有失败语义的观测 |
+| `execution_status` 的超时分类 | 只按文案 | 多一条 `isinstance(exc, TimeoutError)` | 见上表——1.0 自己的超时文案里没有那个词 |

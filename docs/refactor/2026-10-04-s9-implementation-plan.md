@@ -369,3 +369,228 @@ lint 与 format 加 photobench 路径、新 `photobench-check` 段并挂上 ci �
 
 `make ci`：`1 failed / 2234 passed / 6 skipped`，唯一失败是那条已知的模型侧 flaky；
 coverage 94.35%；`web-check` 单独补跑绿；photobench 自己的 160 条用例 0.39 s。
+
+### S9b-2 run-execution 主链（2026-10-04）
+
+**交付点**：能对一个跑着的 2.0 跑完一轮「建空间 → 种身份 → 导入 → 处理 → 问答」，
+把每题的问答与轨迹落进 run 目录。**真机达成**（见下「真机验收」）。
+
+#### 一条范围调整（用户 2026-10-04 定）
+
+计划书把「对 2.0 的端点适配」放在 S9c（T921）。但主链本来就要调主 API，先照 1.0 的
+端点写一遍再在 S9c 改一遍是白费。**本切片直接按 2.0 的接口写**，S9c 相应收窄为
+「两个死端点 + 换模型重启 + 收口」。
+
+#### 与 1.0 的相位对照
+
+| 相位 | 2.0 的落地 |
+|---|---|
+| `model_deploy` | 保留。**`LifecycleProvider.start` / `.stop` 的唯一生产调用者**；`InferenceProvider.chat` / `chat_stream` 也在这里（探活 + 吞吐探测） |
+| `scope_setup` | **没有 HTTP 调用**：2.0 的空间由导入路径内部的 `_ensure_space` 建（`import_assets.py:249`） |
+| `scope_attach` | 删。reuse 模式的入口，依赖写侧路由（S9b-3） |
+| `identity_seed` | 逐个 `POST /people/seed`（2.0 没有 `seed-batch`）+ `POST /relationships/batch` |
+| `photo_import` | 按媒体目录逐个 `POST /api/v1/imports`（**服务端目录**，非递归） |
+| `pipeline_processing` | 轮询 `GET /api/v1/assets`（2.0 的导入是同步的，通常一两次收敛） |
+| `qa_eval` | 每题一个会话：建会话 → 逐条消息发起回合 → 轮询到终态 |
+| `gpu_metrics` / `aggregate` | **不搬**（S9b-3） |
+
+#### 五盲区复查（S9a 登记、S9b-1 部分偿还的那笔账）
+
+| 方法 | 本切片之前 | **本切片之后** |
+|---|---|---|
+| `InferenceProvider.list_models` | S9b-1 已接线 | 不变 |
+| `LifecycleProvider.start` | **盲区，零调用者** | **真接线**：`_phase_model_deploy` 调它（`{"profile": …, "wait_ready": False}`），用例钉住「start 被调了几次、带的什么参数」 |
+| `LifecycleProvider.stop` | **盲区，零调用者** | **真接线**：`_phase_model_deploy` 在 start 之前调它，用例钉住「stop 的下标 < start 的下标」 |
+| `TelemetryProvider.gpu_stats` | **盲区，零调用者** | **真接线**：`GpuSampler.sample_once` |
+| `TelemetryProvider.process_memory` | **盲区，零调用者** | **真接线**：同上 |
+| （顺带）`TelemetryProvider.system_memory` | S9b-1 登记在 `PENDING_METHODS` | **真接线**：同上，条目已由反向规则删掉 |
+
+**但这五个名字仍然不在 `check_method_reachability` 的表里，也不在它的检查范围内**
+——门禁的判据是「这个名字在别处被属性访问过」，而 photobench 自己的 provider 实现里
+就有 `self.start()` / `self.gpu_stats()` 之类的调用，于是它们被判成「已接线」。
+**盲区本身没有修**（修它要换判据，不在本切片）。所以「可达」这件事现在的证据是
+**用例里假件的 `calls` 记录**：`tests/test_run_execution.py` 与 `tests/test_gpu_sampler.py`
+改坏这五个方法名会红。
+
+另外两条同一族的账：
+
+- `InferenceProvider.chat` / `chat_stream` 从 `PENDING_METHODS` 删除（真的接上了）。
+- `InferenceProvider.health` / `token_count`、`TelemetryProvider.kv_cache` **仍无调用者**
+  （主链的探活走 `chat`），登记保留、改注明「S9b-2 余项」。
+
+#### 真机验收（153，对跑着的 8191）
+
+夹具：`/tmp/pb-smoke/album-smoke/` —— 2 张真照片（从 `album3-14` 拷来）+ 1 张参考脸 +
+2 道题（从 `compact-10q` 精简），**不进仓库**。
+
+**结果：`status=completed`、`run_valid=true`、主链 12.9 s。**
+
+```
+model_deploy         done  0.0s
+scope_setup          done  0.0s
+identity_seed        done  0.185s   seeded 1（entity_8aa8826981d1）
+photo_import         done  0.0s     deduplicated 2
+pipeline_processing  done  3.0s     total 3 / processed 3 / pending 0 / failed 0
+qa_eval              done  9.7s
+```
+
+两道题都走真模型（8100 的 llama-server）：
+
+| 题 | turn 终态 | 交付 | 图片召回 |
+|---|---|---|---|
+| smoke-q1（地点事实题） | `partial` / `answered_with_gap` | 无附件 | `0.0`（GT 2 张，一张没交付） |
+| smoke-q2（找合影） | `complete` / `answered` | `IMG_8653.JPG` + `IMG_8654.JPG` | **`1.0`** |
+
+轨迹逐条落了盘（每秒 5–6 s 的墙钟）：q1 是 12 步（plan → 4×status → 3×model_action →
+3×tool_result → terminal），`executed_tools = {search_memories: 1, inspect_photo: 1,
+query_memory_facts: 1}`。落盘：`run.json` 21 KB、`results.jsonl` 2 行、`gpu_samples.jsonl`
+**0 字节**——采样器真的起了，但这个 scope 的遥测提供者是 `UnavailableTelemetryProvider`
+（没配 manager），它按端口口径回 `unavailable`，于是不产出样本。**provider 选择逻辑
+没搬**（见下「偏离」），所以这条在真机上没有可用的遥测来源。
+
+| 段 | 真跑 / 假件 |
+|---|---|
+| 种身份 `POST /api/v1/people/seed` | **真跑**：seeded 1 人（`entity_a0eac5e13278`），带参考图 multipart |
+| 导入 `POST /api/v1/imports` | **真跑**（但见下「一个 2.0 缺陷」） |
+| 流水线（VLM 观察 / 事件 / 总结） | **真跑**：`imported=2, events=2, summarized=1` |
+| 处理 `GET /api/v1/assets` | **真跑** |
+| 问答（建会话 → 发起回合 → 轮询） | **真跑**：走真模型（8100 的 llama-server），每轮 1–2 s |
+| judge 打分 | **不在本切片**（占位 `pending_judge`） |
+| GPU 采样 | 真跑（`gpu_samples.jsonl`），但**聚合**不在本切片 |
+| 单元用例 | **全假件**（233→243 条），不碰网络 |
+
+#### 一个 2.0 缺陷（本切片撞出来的，不在本切片修）
+
+`POST /api/v1/imports` 在**先种过身份**的 scope 上必然 500：
+
+```
+application/identity/extract_moments.py:162 → repositories/moments.py:127
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+```
+
+链路：`timeline.py:155` 的 `_maybe_run_insights` → `run_insights` → `extract_moments`
+→ `strategy_moments.upsert`，`person_moments` 的 `event_id` / `cluster_id` 是
+`NOT NULL REFERENCES`，而从**参考图**（不属于任何事件）来的那个人脸簇带不出 event。
+
+两条独立的证据：
+
+1. 同一个相册、**不种身份**、在全新 scope 上导入 → `201 Created`（`imported=2, events=2`）；
+   种过身份的 scope → 同样的请求 500。差别只在参考图那张 asset 上。
+2. 完整去重的重复导入（`imported=0`）→ `201`：`_maybe_run_insights` 只在
+   `imported > 0` 时跑，所以它一跳过，500 就没了。
+
+**而且 `_extract_asset` 只接住 `(OSError, ValueError)`**（`extract_moments.py:84-96`），
+`IntegrityError` 一路冒到路由变成 500——那段代码自己的注释写的是「一张坏图不该让
+其余的都不落库」，但它的 except 名单拦不住这一类。
+
+**本切片的处置**：不动 `apps/api`（不在本切片范围，且改了要重新裁决）。真机验收用
+「先把 scope 预热一次，让导入全程去重」绕过；**这条缺陷已登记给 S9b-3/S9c 定夺**。
+
+#### 定点变异（19/19 被杀）
+
+每条都先核过锚点在文件里唯一（`count == 1`）。**头一轮有 3 条存活，其中 2 条查明是
+夹具没有区分力**——本仓库第六次同一个教训，记在这里：
+
+| # | 变异 | 结果 | 谁杀的 |
+|---|---|---|---|
+| 1 | `photo_import` 的 `limit` 写死 1 | KILLED | `test_photo_import_hands_the_server_side_directory_…` |
+| 2 | 收工只等一次零待处理（`>= 2` → `>= 1`） | KILLED | `test_processing_requires_two_consecutive_zero_pending_snapshots` |
+| 3 | 超时分类退回按文案判（去掉 `isinstance`） | KILLED | `test_a_turn_that_never_reaches_a_terminal_state_fails_its_item` |
+| 4 | `model_deploy` 不先卸载（去掉 `stop`） | KILLED | `test_with_a_manager_the_model_is_stopped_then_started_then_probed` |
+| 5 | 采样无视关闭开关 | KILLED | `test_sampling_can_be_disabled_for_an_environment_without_telemetry` |
+| 6 | 终态判据退回 1.0 的列举成功值 | KILLED | `test_a_partial_turn_is_a_completed_item_not_a_failure` |
+| 7 | 进程列表不给 `or []` 兜底 | KILLED | `test_process_lists_default_to_empty_lists_not_none` |
+| 8 | **探不到也产出样本**（判据换成 `== "never"`） | KILLED（第二轮） | `test_an_unavailable_gpu_probe_produces_no_sample_at_all` |
+| 9 | CPU 温度无条件覆盖每张卡 | KILLED | `test_the_gpu_row_supplies_the_cpu_temperature_when_it_lacks_one` |
+| 10 | **`executed_tools` 数发出而不是数回执** | KILLED（第二轮） | `test_summarize_progress_counts_tools_by_their_result_not_their_request` |
+| 11 | 交付集不去重 | KILLED | `test_selected_asset_ids_keeps_delivery_order_and_dedupes` |
+| 12 | 关键帧不回落到父视频 | KILLED | `test_resolve_predicted_media_falls_back_from_a_keyframe_to_its_parent_video` |
+| 13 | id 不转义斜杠（`safe=""` → 默认） | KILLED | `test_list_assets_quotes_the_scope_id` |
+| 14 | multipart 把文件排在字段之前 | KILLED | `test_build_multipart_matches_the_1_0_envelope` |
+| 15 | `results.jsonl` 写空 | KILLED | `test_write_snapshot_round_trips_and_splits_items_into_jsonl` |
+| 16 | 采样不截空 | KILLED | `test_reset_then_append_leaves_exactly_one_sample` |
+| 17 | `limit` 数全部文件（不只看媒体后缀） | KILLED | `test_import_target_counts_media_files_only` |
+| 18 | `album_id` 不挡路径穿越 | KILLED | `test_an_album_id_with_a_path_separator_is_not_found` |
+| 19 | 端点为空时不退回配置 | KILLED | `test_a_run_execution_can_be_built_without_a_manager_or_an_endpoint` |
+
+**两条存活暴露的夹具缺陷（已修）**：
+
+1. **第 8 条**：夹具用的是 `FakeTelemetry(gpu_status="unavailable")`，而那个假件在
+   `status != available` 时**不返回 gpus**——于是「按状态跳过」与「按 data 空跳过」
+   都得到零个样本，用例对判据没有区分力。改成专用假件
+   `_UnavailableWithStaleData`（报 `unavailable` 但 `data.gpus` 里留着上次的读数），
+   这才是真的判据所在：**按状态跳过，不是按 data 恰好空**。
+2. **第 10 条**：夹具里每个工具恰好「一次发起 + 一次回来」，于是「数发起」与
+   「数回执」的输出完全一样。加了一个 `inspect`（**发起两次、只回来一次**，第二次
+   被 guard 拦在工具里），两种口径才分得开。
+3. 第 3 条第一轮 `count == 0`（`ruff format` 把那个表达式折成了一行），锚点改对后
+   被杀——**这条不是存活，是打错靶子**，按纪律记下来。
+
+**每条断言「能区分正确与错误两种实现」的自问**，逐条写在各用例的 docstring 里；
+最典型的是 `test_resolve_gt_media_reports_why_a_reference_could_not_be_mapped`
+（三态 `ok`/`missing`/`ambiguous`，其中两态的 `asset_id` 都是 `None`，**只断言
+`asset_id` 的用例对它们没有区分力**）与 `test_a_question_without_an_answer_in_the_library_costs_recall`
+（没有它，「召回 == 1.0」对一个恒返回 1.0 的实现同样成立）。
+
+#### 门禁
+
+`make ci`：**`1 failed, 2311 passed, 14 skipped`（27 分 35 秒）**，唯一失败是那条
+**已知的模型侧 flaky**——`apps/api/tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`
+（断言在 `:189`，比的是模型的输出里有没有内部标识符；S9a 与 S9b-1 两次全量跑红的
+是同一条）。**是不是唯一失败：是**——单独重跑它仍然红，而其余 2311 条全绿。
+因为 pytest 非零退出，`coverage` 之后的 `web-check` 没有跑；单独补跑 `make web-check`
+通过（vite build 94 ms）。
+
+覆盖率 **94.45%**（门槛 85%）。本切片新增的两层：`application/run_execution/` 的
+`service.py` 92% / `gpu_sampler.py` 100% / `state.py` 100%，`domain/runs/execution.py` 98%。
+
+`photobench-check` 三件全绿：`check_reachability` 0 问题、
+`check_method_reachability` 0 问题（原 3 条被反向规则要求删除——`chat` /
+`chat_stream` / `system_memory` 真的接上了）、`check_module_map` 0 问题。
+`lint-imports` 11 条契约全 KEPT（没有新增契约，`photobench-isolation` 未破）。
+`check_capability_map` 0 问题。
+
+#### 偏离与待裁决
+
+1. **provider 选择逻辑没搬，`apple_telemetry` 至今零调用者。**
+   1.0 `select_runtime_providers`（`benchmark_orchestrator.py:176`）要按主机形态在
+   Apple / Jetson / Orin / 宿主 nvidia-smi 四路里选遥测，其中 Jetson 那一路还要连
+   660 行的 `backend/jetson_telemetry.py` 一起搬。S9a 已裁决「归 S9b」，但 S9b 切三段时
+   **没有把它分进任何一段**。后果有两层：(a) `check_reachability` 里那条登记改注成
+   「未分配切片」；(b) **真机上遥测没有可用来源**——container 只按「有没有
+   `manager_url`」装配遥测，153 上跑的 llama-server（8100）那一路
+   `LlamaCppTelemetryProvider` 根本没有被选中的路径，所以真机验收的
+   `gpu_samples.jsonl` 是 0 字节。**请裁决它归哪一段。**
+2. **`_phase_processing` 的「空导入」判据换了**：1.0 是 `import_accepted_count == 0`
+   （`:2913`），2.0 是「这个 scope 里有没有资产」。理由：2.0 的导入会报
+   `deduplicated`，「一张都没收」有两种成因（全去重 / 什么都没导），而其中一种是正常的。
+   新判据覆盖 1.0 那条的用场（不在空相册上问完整套题），且不会把「重复导入同一个相册」
+   误判成失败。
+3. **没有后台 persist 写线程**（1.0 `_persist_loop` `:2056`）：本切片同步写快照。
+   那个线程存在的理由是「不让磁盘 IO 污染墙钟」+「让 API 的实时视图保持新鲜」，
+   而写侧路由属 S9b-3，现在没有实时视图要喂。
+4. **没有取消**：`RunCancelledError` / `self._cancel` / 取消路由都属写侧（S9b-3）。
+   代价如实记：`_wait_model_ready` 与 `_await_turn` 里的等待**不是取消感知的**，
+   1.0 那两处的 `self._cancel.wait(...)` 现在是固定 `sleep`。
+5. **`InferenceProvider.health` / `token_count`、`TelemetryProvider.kv_cache` 仍无调用者**
+   （主链的探活走 `chat`），登记保留、注明「S9b-2 余项」。
+6. **1.0 `backend/hardware.py` 的另外四个函数没有归属**：S9a 的模块地图注记说它们
+   「服务 run meta，归 S9b-2」，但**实测它们只被 1.0 的 `backend/app.py` 调用**，
+   `benchmark_orchestrator.py` 一次都没调。模块地图那行已按实情改写；它们至今无人认领。
+7. **三处刻意偏离 1.0 的行为**（id 一律 `quote(safe="")`、multipart 的非 2xx 转文案、
+   超时分类多一条 `isinstance`），逐条记在 `behaviour-baseline.md` 的新一节里。
+8. **真机验收绕过了一个 2.0 缺陷**（见上）——验收的 `photo_import` 走的是
+   「预热一次让导入全程去重」那条路。**导入链本身（VLM 观察 / 事件 / 总结）是预热那一次
+   真跑的**；主链那一次真跑的是「去重 + 处理 + 问答」。
+9. **`model_deploy` 的第 4 步（1.0 的 `bind-runtime` 同步）留空**：2.0 的
+   `vlm_base_url` 启动时读死，换模型要重启（裁决③），那是 S9c 的 T923。相位记录里
+   如实写了 `gamma_sync.ok = false` 与原因。
+
+#### 没做 / 做不了
+
+- judge 打分与重判、遥测聚合（`_phase_gpu_metrics` / `_phase_aggregate`）、
+  写侧路由（建 run / 取消 / 重跑 / 评审写入）——S9b-3。
+- 两个死端点、换模型重启、收口——S9c。
+- 前端一行没动。
+- 真机验收的 GPU 采样**没有拿到样本**（原因见偏离 1）。
+- `results/` 的 447 MB 单文件问题本切片没有碰（本切片的 run 只有 21 KB）。

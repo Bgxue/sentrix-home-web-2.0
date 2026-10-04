@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -17,6 +17,9 @@ class FakeJsonHttpClient:
     def __init__(self, responses: dict[str, Any] | None = None) -> None:
         self.responses = responses or {}
         self.calls: list[tuple[str, Mapping[str, Any] | None, str, int]] = []
+        #: multipart 那次调用单独记：它的第二格是 fields 而不是 payload，混进 ``calls``
+        #: 会让「按 URL 找那次调用」的断言在读的时候要分两种情况。
+        self.multipart_calls: list[tuple[str, dict[str, str], list[tuple[str, str, bytes]]]] = []
         self.fail_with: Exception | None = None
 
     def _answer(self, url: str) -> Any:
@@ -41,6 +44,18 @@ class FakeJsonHttpClient:
     def request_bytes(self, url: str, timeout: int = 120) -> bytes:
         self.calls.append((url, None, "GET", timeout))
         return bytes(self._answer(url))
+
+    def request_multipart(
+        self,
+        url: str,
+        fields: Mapping[str, str],
+        files: Sequence[tuple[str, str, bytes]],
+        timeout: int = 300,
+    ) -> Any:
+        """S9b-2 补的第三个方法：``seed_person`` 走它，所以假件必须也实现它——
+        不实现的话那条路径会以 ``AttributeError`` 的形式红，而那与协议本身无关。"""
+        self.multipart_calls.append((url, dict(fields), list(files)))
+        return self._answer(url)
 
 
 class FakeLifecycleProvider:

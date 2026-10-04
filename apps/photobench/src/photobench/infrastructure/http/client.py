@@ -32,10 +32,38 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import mimetypes
+import uuid
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import httpx
+
+
+def build_multipart(fields: Mapping[str, str], files: Sequence[tuple[str, str, bytes]]) -> tuple[bytes, str]:
+    """1.0 ``build_multipart``（``:864``）逐行照搬。
+
+    保留手工拼接而不是交给 httpx 的 ``files=``，理由是**可差分**：这条函数的输出
+    （边界串的构造、字段在文件之前、``guessed mime or application/octet-stream``）
+    能与 1.0 的同一函数逐字节比对，而 httpx 的编码器给不出同一份字节。
+    边界串的前缀也照搬 1.0（``----BenchmarkOrch``），便于在服务端日志里认出是谁发的。
+    """
+    boundary = f"----BenchmarkOrch{uuid.uuid4().hex[:16]}"
+    parts = []
+    for name, value in fields.items():
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        parts.append(f"{value}\r\n".encode())
+    for name, filename, content in files:
+        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode())
+        parts.append(f"Content-Type: {mime}\r\n\r\n".encode())
+        parts.append(content)
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    return body, f"multipart/form-data; boundary={boundary}"
 
 
 def _error_detail(response: httpx.Response) -> str:
@@ -96,3 +124,34 @@ class HttpxJsonClient:
         response = self._client.get(url, timeout=timeout)
         response.raise_for_status()
         return response.content
+
+    def request_multipart(
+        self,
+        url: str,
+        fields: Mapping[str, str],
+        files: Sequence[tuple[str, str, bytes]],
+        timeout: int = 300,
+    ) -> Any:
+        """1.0 ``upload_files``（``:884``）。
+
+        **非 2xx 的结局与 1.0 不同，这里刻意选了 ``request_json`` 那一支**：1.0 的
+        ``upload_files`` 没有 except，``HTTPError`` 原样冒（那句 ``str(exc)`` 会被
+        ``_phase_photo_import`` 写进失败明细）。而 S9b-2 的调用方是 ``seed_person``，
+        它要的是**能读懂的原因**（2.0 的 ``400 {"detail": "..."}`` 说了是哪一步拒绝了）
+        ——所以这里转成与 ``request_json`` 同一条 RuntimeError 文案。这条差异登记在
+        行为基线里：**1.0 的两个上传端点（``seed-batch`` / ``import``）在 2.0 都不再由
+        这个方法服务**（前者是单人 seed、后者是服务端目录导入），所以不会改变任何
+        1.0 已有失败语义的观测。
+        """
+        body, content_type = build_multipart(fields, files)
+        try:
+            response = self._client.post(
+                url, content=body, headers={"Content-Type": content_type}, timeout=timeout
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            raise RuntimeError(
+                f"HTTP {response.status_code} {response.reason_phrase}: {_error_detail(response)}"
+            ) from exc
+        return response.json()

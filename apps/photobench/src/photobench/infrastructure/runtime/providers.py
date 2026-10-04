@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from photobench.domain.runtime.ports import RuntimeProviders
+from photobench.domain.runtime.ports import LifecycleProvider, RuntimeProviders, TelemetryProvider
 from photobench.infrastructure.runtime.hardware import read_cpu_temperature_c
 
 
@@ -1065,6 +1065,34 @@ class OrinLlamaCppTelemetryProvider:
         }
 
 
+def manager_lifecycle(manager_url: str) -> LifecycleProvider:
+    """有 Manager → ``ManagerLifecycleProvider``；没有 → ``UnavailableLifecycleProvider``。
+
+    **S9b-2 把这一支从 ``create_runtime_providers`` 里拆出来，只因为主链要单独用它。**
+    run-execution 的三件套是**按 run 构造**的，而「这一轮没有模型管理器」是一种合法的
+    运行形态（1.0 的外部端点与云端模型两条路都不需要 Manager）。原来那个工厂必须连
+    ``InferenceProvider`` 一起构造，而后者在空 base URL 上抛
+    ``ValueError("model base URL is required")``（``:453``）——于是「没有管理器」这个
+    正常情形反而起不来。
+
+    空 URL 判 `Unavailable` 的那条口径**只有这一处**：``create_runtime_providers``
+    现在也走它，两份默认行为不会各自漂移。
+    """
+    normalized = normalize_service_url(manager_url)
+    return ManagerLifecycleProvider(normalized) if normalized else UnavailableLifecycleProvider()
+
+
+def manager_telemetry(manager_url: str) -> TelemetryProvider:
+    """与 ``manager_lifecycle`` 同形的那一半。
+
+    没有 Manager 时是 ``UnavailableTelemetryProvider`` 而**不是**宿主 nvidia-smi
+    那一路——按主机形态选 telemetry 是 1.0 ``select_runtime_providers``
+    （``benchmark_orchestrator.py:176``）的活，尚未搬（见 S9b-2 施工记录的偏离登记）。
+    """
+    normalized = normalize_service_url(manager_url)
+    return ManagerTelemetryProvider(normalized) if normalized else UnavailableTelemetryProvider()
+
+
 def create_runtime_providers(
     model_base_url: str,
     *,
@@ -1086,15 +1114,8 @@ def create_runtime_providers(
         manager_url=manager_url,
         timeout=timeout,
     )
-    manager_url = normalize_service_url(manager_url)
-    if manager_url:
-        return RuntimeProviders(
-            inference=inference,
-            lifecycle=ManagerLifecycleProvider(manager_url),
-            telemetry=ManagerTelemetryProvider(manager_url),
-        )
     return RuntimeProviders(
         inference=inference,
-        lifecycle=UnavailableLifecycleProvider(),
-        telemetry=UnavailableTelemetryProvider(),
+        lifecycle=manager_lifecycle(manager_url),
+        telemetry=manager_telemetry(manager_url),
     )

@@ -138,13 +138,26 @@ PENDING_METHODS: dict[str, str] = {
     #     属 S9b-2。本门禁对它们**依然漏报**：改坏这两组方法的名字不会有任何用例变红。
     #     这一条如实登记，别读成「已接线」。
     #
+    # —— S9b-2（2026-10-04）：五个盲区里三个不再是盲区 ——
+    #
+    # S9b-2 的 run-execution 主链接上了 `LifecycleProvider.start` / `.stop`
+    # （`_phase_model_deploy`）与 `TelemetryProvider.gpu_stats` / `.process_memory` /
+    # `.system_memory`（`GpuSampler`）。**但那五个名字仍然不在下面这张表里**——
+    # 它们是被本门禁的盲区放过的，本切片接上它们**不会**产生任何删除动作。
+    # 证据在 `apps/photobench/tests/test_run_execution.py` 与 `test_gpu_sampler.py`：
+    # 改坏 `start` / `stop` / `gpu_stats` / `process_memory` / `system_memory`
+    # 的名字或签名，那些用例会红。**盲区本身没有修**（判据仍是「名字被属性访问过」，
+    # 而 photobench 自己的实现里有 `self.start()` 之类），修它要换判据，不在本切片。
+    #
+    # 下面这三条是**被反向规则要求删掉的**：它们真的接上了生产。
+    #   - `InferenceProvider.chat` —— `_probe_model_endpoint`（模型就绪与健康检查）
+    #   - `InferenceProvider.chat_stream` —— `_model_probe`（TTFT / 吞吐探测）
+    #   - `TelemetryProvider.system_memory` —— `GpuSampler.sample_once`
+    #
     # —— S9b-1 新落的读写端口 ——
-    "InferenceProvider.health": "S9b-2（run-execution 的端点探活与模型 ready 等待）",
-    "InferenceProvider.chat": "S9b-2（评测里的模型调用）",
-    "InferenceProvider.chat_stream": "S9b-2（流式调用）",
-    "InferenceProvider.token_count": "S9b-2（提示词预算）",
-    "TelemetryProvider.kv_cache": "S9b-2（KV cache 指标）",
-    "TelemetryProvider.system_memory": "S9b-2（宿主/远端内存）",
+    "InferenceProvider.health": "S9b-2 余项（端点探活走的是 `chat`，`health` 仍无调用者）",
+    "InferenceProvider.token_count": "S9b-2 余项（提示词预算，主链未用到）",
+    "TelemetryProvider.kv_cache": "S9b-2 余项（KV cache 指标，采样器从 process_memory 里取）",
     # `InferenceProvider.capabilities` / `LifecycleProvider.profiles` / `.state` 三条
     # **已被本门禁的反向规则自己删掉**：S9b-1 的 `/api/profiles` 与 `/api/current-model`
     # 真的调了它们（`application/model_profiles/service.py`），登记随即被报红要求删除。

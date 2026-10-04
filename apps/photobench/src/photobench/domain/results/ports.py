@@ -59,3 +59,39 @@ class RunStore(Protocol):
         解析放在一起，不能拆到 IO 层。run 不存在时抛 ``KeyError``。
         """
         ...
+
+
+@runtime_checkable
+class RunResultWriter(Protocol):
+    """结果目录的**写**面：run-execution 主链把一次评测落盘的那三件文件。
+
+    对应 1.0 ``BenchmarkRun`` 的持久化：``_write_persisted_snapshot``（``:2049``）写
+    ``run.json`` + ``results.jsonl``，``_reset_gpu_samples_file``（``:2105``）与
+    ``_persist_gpu_sample``（``:2110``）写 ``gpu_samples.jsonl``。
+
+    **为什么与 ``RunStore``（读面）分开**：读面被 api 层的只读路由依赖，而写面只有主链
+    依赖。合成一个协议会让 ``ReadRuns`` 的测试假件也被迫实现三个写方法——那三个方法
+    在只读用例里只会是「不许被调用」的噪声。1.0 是同一个仓储类既读又写，2.0 按用途
+    拆开；**目录形状一个字没改**，所以指到 1.0 的 ``results/`` 仍然两边都能读。
+    """
+
+    def write_snapshot(self, run_id: str, state: dict[str, Any]) -> None:
+        """把状态写成 ``run.json`` 与 ``results.jsonl``（1.0 ``:2049``）。
+
+        ``results.jsonl`` 是 ``state["items"]`` 的逐行 JSON，**不是**另一份数据——
+        它存在的理由是 447 MB 的 ``run.json`` 无法被下游逐行消费。
+        """
+        ...
+
+    def reset_gpu_samples(self, run_id: str) -> None:
+        """把 ``gpu_samples.jsonl`` 截空并建出目录（1.0 ``:2105``）。
+
+        采样在 run 开始时调用一次：追加式的文件必须从零开始，否则上一次同名 run
+        的曲线会与本轮混在一起。
+        """
+        ...
+
+    def append_gpu_sample(self, run_id: str, sample: dict[str, Any]) -> None:
+        """追加一条采样（1.0 ``:2110``）。**立即落盘**：取消或崩溃时内存里的采样全丢，
+        而这个文件是完整曲线的唯一权威来源。"""
+        ...
