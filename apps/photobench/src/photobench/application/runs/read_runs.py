@@ -1,0 +1,305 @@
+"""run 读侧用例：列表 / 详情 / 题目分页 / 单题 / 评审。
+
+对应 1.0 ``OrchestratorRepository`` 的 ``list_runs``（``:5343``）、``get_run``（``:5354``）、
+``get_run_items``（``:6441``）、``get_run_item``（``:6528``）、``get_reviews``（``:4976``），
+以及它们用到的 ``_hydrate_legacy_gt_images``（``:6851``）。
+
+**写侧一条都没有**：``cancel_run`` / ``resume_run`` / ``delete_run`` / ``save_reviews`` /
+``start_suite`` / ``start_rejudge`` 属 S9b-2 / S9b-3。所以这一层对状态是**只读**的，
+唯一的例外是 1.0 启动时会改写「脏状态」（``_load_existing`` ``:5013-5043`` 把 ``running``
+改成 ``interrupted`` 并把整份 ``run.json`` 落盘）——**那不搬**：让读侧去写盘，与「读侧」
+这个边界不符。代价是重启后 ``/api/runs`` 会把上次被杀掉的 run 仍标成 ``running``
+（``active_count`` 偏高）——这是本切片**已知的行为差异**，S9b-2 的写侧接上时一并收。
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+from photobench.application.runs.index import RunIndex
+from photobench.domain.datasets.ports import QaMetadataSource
+from photobench.domain.http.ports import JsonHttpClient
+from photobench.domain.results.ports import RunStore
+from photobench.domain.runs import analysis
+
+#: 详情/题目两条路径会各解析一次同一个 run.json。最大的一个 447 MB、解析 2.03 s，
+#: 前端翻页会把同一份反复解析成几十次。1.0 靠「全部常驻内存」绕过这件事（代价是
+#: 11 GB）；2.0 只留最近两个——翻页是顺序的，两条足够覆盖「一边看详情一边翻题目」。
+_STATE_CACHE_SIZE = 2
+
+
+class ReadRuns:
+    """读侧用例。依赖四个端口，全部由装配点注入（``bootstrap.container``）。"""
+
+    def __init__(
+        self,
+        store: RunStore,
+        index: RunIndex,
+        qa_metadata: QaMetadataSource,
+        http: JsonHttpClient,
+        sentrix_url: Callable[[], str],
+    ) -> None:
+        self._store = store
+        self._index = index
+        self._qa_source = qa_metadata
+        self._http = http
+        self._sentrix_url = sentrix_url
+        self._lock = threading.RLock()
+        self._states: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._qa_metadata: dict[str, dict[str, Any]] | None = None
+
+    # -- 内部 ---------------------------------------------------------------
+
+    def _state(self, run_id: str) -> dict[str, Any]:
+        """按需解析一个 run 的完整状态（含 items），缓存最近两个。"""
+        with self._lock:
+            cached = self._states.get(run_id)
+            if cached is not None:
+                self._states.move_to_end(run_id)
+                return cached
+        state = self._store.load_state(run_id)  # 不存在 -> KeyError，HTTP 层映射成 404
+        with self._lock:
+            self._states[run_id] = state
+            self._states.move_to_end(run_id)
+            while len(self._states) > _STATE_CACHE_SIZE:
+                self._states.popitem(last=False)
+        return state
+
+    def _qa_index(self) -> dict[str, dict[str, Any]]:
+        """数据集侧元信息，进程内建一次（1.0 ``:4884`` 的 ``self.qa_metadata``）。
+
+        **惰性而不是装配时建**：只有「题目」那几条路由用得上它，而它要扫一遍数据集
+        目录。列表页不该为此付一次全库扫描。
+        """
+        with self._lock:
+            if self._qa_metadata is None:
+                self._qa_metadata = self._qa_source.metadata_by_qa_id()
+            return self._qa_metadata
+
+    def _hydrate_legacy_gt_images(self, state: dict[str, Any]) -> None:
+        """1.0 ``:6851``：给早于 ``gt_images`` 字段的结果补展示用的 GT 资产映射。
+
+        **它会打一次主 API。** 1.0 的口径是「补不上就算了」——整段 ``except Exception:
+        return``，因为这是展示增强，不是读 run 的前提。2.0 照搬这条分工，并且它是
+        本切片里 ``JsonHttpClient.request_json`` 的**唯一生产调用者**。
+        """
+        items = state.get("items") or []
+        missing = [item for item in items if "gt_images" not in item]
+        scope_id = state.get("scope_id")
+        if not missing or not scope_id:
+            return
+        try:
+            data = self._http.request_json(
+                f"{self._sentrix_url().rstrip('/')}/api/assets?scope_id={quote(str(scope_id))}&limit=2000",
+                timeout=15,
+            )
+            assets_by_name: dict[str, list[dict[str, Any]]] = {}
+            for asset in (data or {}).get("assets", []):
+                assets_by_name.setdefault(Path(str(asset.get("file_name") or "")).name, []).append(asset)
+        except Exception:  # noqa: BLE001 —— 1.0 如此：GT 图片只是展示增强，补不上不影响读 run
+            return
+        for item in missing:
+            gt_images = []
+            for image_id in item.get("retrieval_image_ids") or []:
+                file_name = Path(str(image_id)).name
+                candidates = assets_by_name.get(file_name, [])
+                gt_images.append(
+                    {
+                        "image_id": image_id,
+                        "file_name": file_name,
+                        "asset_id": candidates[0].get("id") if len(candidates) == 1 else None,
+                        "matched": file_name in set(item.get("matched_file_names") or []),
+                        "mapping_status": "ok"
+                        if len(candidates) == 1
+                        else "missing"
+                        if not candidates
+                        else "ambiguous",
+                    }
+                )
+            item["gt_images"] = gt_images
+
+    # -- 用例 ---------------------------------------------------------------
+
+    def list_runs(self, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        """``GET /api/runs``（1.0 ``:7648`` 的分支 + ``list_runs`` ``:5343``）。"""
+        rows = sorted(
+            self._index.entries(),
+            key=lambda run: str(run.get("started_at") or run.get("created_at") or ""),
+            reverse=True,
+        )
+        response = analysis.paginate_rows(rows, page, page_size)
+        response["active_count"] = sum(
+            1
+            for run in rows
+            if run.get("status") in RunIndex._ACTIVE_STATUSES
+            or (run.get("rejudge") or {}).get("status") == "running"
+        )
+        # 1.0 没有这个字段：它扫完才肯回答，没有「答案是残缺的」这种状态可说。
+        # 后台扫描是 2.0 的取舍，这个字段让取舍可观测（见 ``RunIndex.status``）。
+        response["scan"] = self._index.status()
+        return response
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        """``GET /api/runs/{id}``（1.0 ``get_run`` ``:5354``）。"""
+        state = self._state(run_id)
+        result = {key: value for key, value in state.items() if key != "items"}
+        result["item_count"] = len(state.get("items") or [])
+        result["summary"] = analysis.effective_summary(state)
+        live = result.get("telemetry_live")
+        if isinstance(live, dict):
+            # ``_public_run`` 故意不做深拷贝，而下面要把 JSONL 采样并进 live；
+            # 直接改会把内存里那份运行状态改脏（1.0 的注释就是这个意思，``:5370``）。
+            result["telemetry_live"] = copy.deepcopy(live)
+        live = result.get("telemetry_live")
+        if isinstance(live, dict):
+            analysis.attach_gpu_sample_history(live, self._store.read_gpu_sample_lines(run_id))
+            analysis.publish_full_sample_phase_stats(result, live)
+        return result
+
+    def get_reviews(self, run_id: str) -> dict[str, Any]:
+        """``GET /api/runs/{id}/reviews``（1.0 ``get_reviews`` ``:4976``）。"""
+        return self._store.read_reviews(run_id)
+
+    def get_run_items(
+        self,
+        run_id: str,
+        page: int = 1,
+        page_size: int = 20,
+        search: str = "",
+        score: str = "",
+        task_type: str = "",
+        tag: str = "",
+        agent_status: str = "",
+        angle: str = "",
+        difficulty: str = "",
+        answerability: str = "",
+        primary: str = "",
+    ) -> dict[str, Any]:
+        """``GET /api/runs/{id}/items``（1.0 ``get_run_items`` ``:6441``）。"""
+        with self._lock:
+            state = self._state(run_id)
+            self._hydrate_legacy_gt_images(state)
+            qa_metadata = self._qa_index()
+            all_items = [
+                analysis.hydrate_qa_metadata(item, qa_metadata) for item in (state.get("items") or [])
+            ]
+            search = str(search or "").strip().lower()
+            task_type = str(task_type or "").strip()
+            tag = str(tag or "").strip()
+            agent_status = str(agent_status or "").strip()
+            angle = str(angle or "").strip()
+            difficulty = str(difficulty or "").strip()
+            answerability = str(answerability or "").strip()
+            primary = str(primary or "").strip().upper()
+            score_filter = None
+            if str(score).strip() in {"0", "1", "2"}:
+                score_filter = int(score)
+            items = []
+            source_indexes = []
+            facets = {
+                "task_types": sorted(
+                    {str(item.get("task_type")) for item in all_items if item.get("task_type")}
+                ),
+                "tags": sorted(
+                    {str(tag) for item in all_items for tag in (item.get("tags") or []) if str(tag).strip()}
+                ),
+                "agent_statuses": sorted(
+                    {str(item.get("agent_status")) for item in all_items if item.get("agent_status")}
+                ),
+                "angles": sorted({str(item.get("angle")) for item in all_items if item.get("angle")}),
+                "difficulties": sorted(
+                    {str(item.get("difficulty")) for item in all_items if item.get("difficulty")}
+                ),
+                "answerabilities": sorted(
+                    {str(item.get("answerability")) for item in all_items if item.get("answerability")}
+                ),
+                "attribution_layers": sorted(
+                    {
+                        str((item.get("attribution") or {}).get("primary"))
+                        for item in all_items
+                        if (item.get("attribution") or {}).get("primary")
+                    }
+                ),
+            }
+            for source_index, item in enumerate(all_items):
+                if (
+                    search
+                    and search not in str(item.get("question") or "").lower()
+                    and search not in str(item.get("qa_id") or "").lower()
+                ):
+                    continue
+                if score_filter is not None and (item.get("judge") or {}).get("score") != score_filter:
+                    continue
+                if task_type and item.get("task_type") != task_type:
+                    continue
+                if tag and tag not in (item.get("tags") or []):
+                    continue
+                if agent_status and item.get("agent_status") != agent_status:
+                    continue
+                if angle and item.get("angle") != angle:
+                    continue
+                if difficulty and item.get("difficulty") != difficulty:
+                    continue
+                if answerability and item.get("answerability") != answerability:
+                    continue
+                if primary and str((item.get("attribution") or {}).get("primary") or "").upper() != primary:
+                    continue
+                items.append(item)
+                source_indexes.append(source_index)
+            page_size = max(1, min(int(page_size), 100))
+            total = len(items)
+            pages = max(1, math.ceil(total / page_size))
+            page = max(1, min(int(page), pages))
+            start = (page - 1) * page_size
+            reviews = self.get_reviews(run_id).get("reviews") or {}
+            # 两个切片等长（source_indexes 与 items 一一对应），strict=False 与 1.0 的
+            # 隐式截断语义相同；写成 strict=True 只会在将来真的错位时换一种报错。
+            summaries = [
+                analysis.item_summary(item, source_index, reviews.get(str(item.get("qa_id"))))
+                for item, source_index in zip(
+                    items[start : start + page_size],
+                    source_indexes[start : start + page_size],
+                    strict=False,
+                )
+            ]
+            return {
+                "items": summaries,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": pages,
+                "has_previous": page > 1,
+                "has_next": page < pages,
+                "unfiltered_total": len(all_items),
+                "filters": {
+                    "search": search,
+                    "score": score_filter,
+                    "task_type": task_type,
+                    "tag": tag,
+                    "agent_status": agent_status,
+                    "angle": angle,
+                    "difficulty": difficulty,
+                    "answerability": answerability,
+                    "primary": primary,
+                },
+                "facets": facets,
+            }
+
+    def get_run_item(self, run_id: str, item_index: int) -> dict[str, Any]:
+        """``GET /api/runs/{id}/items/{index}``（1.0 ``get_run_item`` ``:6528``）。"""
+        with self._lock:
+            state = self._state(run_id)
+            self._hydrate_legacy_gt_images(state)
+            items = state.get("items") or []
+            if item_index < 0 or item_index >= len(items):
+                raise KeyError(f"item index out of range: {item_index}")
+            item = analysis.hydrate_qa_metadata(items[item_index], self._qa_index())
+            item["review"] = (self.get_reviews(run_id).get("reviews") or {}).get(str(item.get("qa_id")))
+            return {"index": item_index, "item": item}

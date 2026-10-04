@@ -204,7 +204,9 @@ def test_apple_keyword_set_stays_the_1_0_one() -> None:
     """
     assert "mlx" in apple.SYSTEM_PROCESS_KEYWORDS
     assert "mlx" not in providers.SYSTEM_PROCESS_KEYWORDS
-    assert {"8771", "8091", "8500", "8501", "8100", "8101", "6333"} == apple.SYSTEM_PROCESS_PORTS
+    # 端口默认值在 S9b-1 跟着 2.0 的端口表改了（8771 → 8772、8091 → 8191）；
+    # 这一条改的是数字，不是「不与 providers 共用」那条差别（差别在关键词上）。
+    assert {"8772", "8191", "8500", "8501", "8100", "8101", "6333"} == apple.SYSTEM_PROCESS_PORTS
 
 
 # ---- 提供者 -----------------------------------------------------------------------

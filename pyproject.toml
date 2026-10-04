@@ -52,8 +52,9 @@ testpaths = ["apps/api/tests", "apps/photobench/tests"]
 addopts = "-q"
 
 [tool.coverage.run]
-# photobench.application 要等 S9b 把那一层建出来。
-source = ["sentrix.domain", "sentrix.application", "photobench.domain"]
+# photobench.application 在 S9b-1 建出来了，按 sentrix 的口径加进覆盖率门禁
+# （domain + application 是「规则与用例」两层，infrastructure / api 不在其中）。
+source = ["sentrix.domain", "sentrix.application", "photobench.domain", "photobench.application"]
 
 [tool.coverage.report]
 fail_under = 85
@@ -155,6 +156,48 @@ id = "photobench-infrastructure-purity"
 type = "forbidden"
 source_modules = ["photobench.infrastructure"]
 forbidden_modules = ["photobench.api", "photobench.application"]
+
+# S9b-1 建出 application / api 两层时补的三条（S9a 施工记录第 9 条点名要补 application
+# 与 layers 两条）：`forbidden` 与 `layers` 契约引用一个还不存在的源模块会**加载失败**，
+# 所以 S9a 只能等这一层真的存在。三条与 sentrix 那三条逐条对齐——用户裁决 §3.5 要的是
+# 「同一套门禁」，少一条就等于这层比 sentrix 的同名层松。
+[[tool.importlinter.contracts]]
+name = "photobench-application-purity"
+id = "photobench-application-purity"
+type = "forbidden"
+source_modules = ["photobench.application"]
+forbidden_modules = [
+    "fastapi",
+    "sqlite3",
+    "PIL",
+    "httpx",
+    "photobench.infrastructure",
+    "photobench.api",
+    "photobench.main",
+]
+
+[[tool.importlinter.contracts]]
+name = "photobench-api-transport-only"
+id = "photobench-api-transport-only"
+type = "forbidden"
+# 同 sentrix 的 api-transport-only：只查直接 import——api 经 bootstrap.container 取依赖，
+# 而 container 必然间接摸到 httpx/pathlib，不关掉传递检查这条契约永远红。
+allow_indirect_imports = true
+source_modules = ["photobench.api"]
+forbidden_modules = ["sqlite3", "PIL", "photobench.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "photobench-layers"
+id = "photobench-layers"
+type = "layers"
+# photobench.main 是进程入口，只该向下调用；infrastructure 与 bootstrap 刻意不在链上
+# （与 sentrix 的 layers 一致）——它们由各自那两条 forbidden 契约管。
+layers = [
+    "photobench.main",
+    "photobench.api",
+    "photobench.application",
+    "photobench.domain",
+]
 
 # 设计文档 §145 的「PhotoBench 不得读取主产品 Python 内部模块」在这里变成一条可
 # 机械判定的东西。没有它，那句话只是一句注释——而两个包都在同一个 venv 里，

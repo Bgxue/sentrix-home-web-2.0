@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration coverage check-docs web-check ci dev web-dev
+.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration coverage check-docs web-check ci dev photobench-dev web-dev
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -110,6 +110,11 @@ web-check: ## 前端门禁：tsc -b + oxlint + vitest + vite build
 
 dev: ## 起 2.0 API（8191）
 	$(PY) -m uvicorn --factory sentrix.main:create_app --host 0.0.0.0 --port 8191 --app-dir apps/api/src
+
+# PhotoBench 的入口也是工厂（`photobench.main` 没有模块级 app：那会让任何 import 带上
+# 建目录与起后台扫描线程的副作用）。端口 8772 出自设计文档 §5.1 的端口表；1.0 跑 8771。
+photobench-dev: ## 起 2.0 PhotoBench（8772）
+	$(PY) -m uvicorn --factory photobench.main:create_app --host 0.0.0.0 --port 8772 --app-dir apps/photobench/src
 
 web-dev: ## 起 2.0 Web（4274）
 	cd apps/web && npm run dev -- --port 4274

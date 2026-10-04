@@ -7,5 +7,8 @@
 
 包结构与 ``apps/api/src/sentrix`` 同构（domain / application / infrastructure / api）
 ——用户 2026-10-04 裁决 §3.5：PhotoBench 受与 ``apps/api`` **同一套门禁**，
-所以分层也必须一样。S9a 只落了 domain 与 infrastructure 两层。
+所以分层也必须一样。S9a 落了 domain 与 infrastructure，S9b-1 补上 application、
+api、bootstrap 与进程入口 ``main.py``。
 """
+
+__version__ = "0.1.0"

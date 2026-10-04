@@ -122,17 +122,41 @@ PENDING_METHODS: dict[str, str] = {
     # 这五个名字**不在下面**——不是它们已经接线了，而是本门禁的判据是「这个名字在别处
     # 被属性访问过」，而 photobench 自己的实现里就有 `self.start()` / `self.stop()` /
     # `self.list_models()` / `self.gpu_stats()` / `self.process_memory()`。也就是说这五条
-    # 是本门禁文档里写明的**盲区**（漏报可接受），不是被接线了。接线时它们由 S9b 一并
-    # 接上，不会有人来删这几条登记。
-    "InferenceProvider.health": "S9b · T911–T913（模型端点探活）",
-    "InferenceProvider.chat": "S9b · T911–T913（评测里的模型调用）",
-    "InferenceProvider.chat_stream": "S9b · T911–T913（流式调用）",
-    "InferenceProvider.token_count": "S9b · T911–T913（提示词预算）",
-    "InferenceProvider.capabilities": "S9b · T911–T913（查询当前模型能力）",
-    "LifecycleProvider.profiles": "S9b · T911–T913（Manager 的 profile 列表）",
-    "LifecycleProvider.state": "S9b · T911–T913（Manager 状态轮询）",
-    "TelemetryProvider.kv_cache": "S9b · T911–T913（KV cache 指标）",
-    "TelemetryProvider.system_memory": "S9b · T911–T913（宿主/远端内存）",
+    # 是本门禁文档里写明的**盲区**（漏报可接受），不是被接线了。
+    #
+    # —— S9b-1（2026-10-04）：复查那五个盲区 ——
+    #
+    # 计划书要求「接上真调用者后要复查这五个是否真的可达」。逐条复查的结果：
+    #
+    #   - `InferenceProvider.list_models` —— **现在真可达了**：`ModelProfiles._query_current_model`
+    #     调它（`application/model_profiles/service.py`）。它不在下面，是因为它**已经**
+    #     被接线，不是因为盲区。本切片新加的用例 `test_current_model_reads_the_served_model_
+    #     off_the_endpoint` 用假件把它钉住了（断言假件的 `calls` 里有 `list_models`）。
+    #   - `LifecycleProvider.start` / `.stop`、`TelemetryProvider.gpu_stats` /
+    #     `.process_memory` —— **仍然是盲区，一个真调用者都没有**。它们的生产调用者是
+    #     1.0 的 run-execution 主链（`_phase_model_deploy` 起停模型、`GpuSampler` 采样），
+    #     属 S9b-2。本门禁对它们**依然漏报**：改坏这两组方法的名字不会有任何用例变红。
+    #     这一条如实登记，别读成「已接线」。
+    #
+    # —— S9b-1 新落的读写端口 ——
+    "InferenceProvider.health": "S9b-2（run-execution 的端点探活与模型 ready 等待）",
+    "InferenceProvider.chat": "S9b-2（评测里的模型调用）",
+    "InferenceProvider.chat_stream": "S9b-2（流式调用）",
+    "InferenceProvider.token_count": "S9b-2（提示词预算）",
+    "TelemetryProvider.kv_cache": "S9b-2（KV cache 指标）",
+    "TelemetryProvider.system_memory": "S9b-2（宿主/远端内存）",
+    # `InferenceProvider.capabilities` / `LifecycleProvider.profiles` / `.state` 三条
+    # **已被本门禁的反向规则自己删掉**：S9b-1 的 `/api/profiles` 与 `/api/current-model`
+    # 真的调了它们（`application/model_profiles/service.py`），登记随即被报红要求删除。
+    # 与 `PortraitRepository.list_for_person` 那些条目走的是同一条路。
+    #
+    # `read_json` / `write_json` / `path_for` / `iter_entries` / `load_state` /
+    # `read_reviews` / `read_gpu_sample_lines` / `metadata_by_qa_id` 同理，落地即接线，
+    # 从不进这张表。
+    #
+    # `request_bytes` 是另一半：端口落地了、调用者还没到（资产代理那条路由要改成 2.0 的
+    # `/api/v1/assets`，属 S9c 的端点适配）。照纪律登记，等 S9c 接上时由反向规则删。
+    "JsonHttpClient.request_bytes": "S9c · T921（资产代理改走 2.0 /api/v1/assets）",
 }
 
 

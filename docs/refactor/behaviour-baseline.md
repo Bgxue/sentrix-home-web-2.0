@@ -576,3 +576,42 @@
 | 子进程超时（Apple） | `_run_text` 默认 **3 秒**；`sysctl` **2 秒**、`lsof` **4 秒** | `apple_telemetry.py:227-285` |
 | 子进程超时（Linux 本机） | `nvidia-smi` **5 秒**（`check=True`，非零退出走 `unavailable`） | `runtime_providers.py:176-180, :598-601` |
 | 工厂的两条装配路 | 有 `manager_url` → Manager 生命周期 + Manager 遥测；没有 → 两个 `Unavailable*` 占位。**别的 host 形态（Ollama / llama.cpp / Jetson / Apple / Orin）不在工厂里** | `:852-869`（分支逻辑在编排侧 `benchmark_orchestrator.py:176` 的 `select_runtime_providers`，归 S9b） |
+
+## PhotoBench HTTP 层与结果读侧（S9b-1，2026-10-04）
+
+S9b-1 把 1.0 `benchmark_orchestrator.py` 的 **HTTP 层、配置域与结果读侧**搬进
+`apps/photobench`（`application` / `api` 两层 + 进程入口）。这份表记的是那些
+「不写下来就会做错」的数值与形状；2.0 侧实现见
+`apps/photobench/src/photobench/{application,api,infrastructure}/`。
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| PhotoBench 端口 | **2.0 = 8772**（1.0 = 8771）；主 API **2.0 = 8191**（1.0 = 8091） | 设计文档 §5.1；`SYSTEM_PROCESS_PORTS` 默认值在 S9b-1 改为 `8772, 8191, 8500, 8501, 8100, 8101, 6333` |
+| Apple 侧同一组端口 | 同步改为 `8772, 8191, ...`（数字变了，「多一个 mlx、不读 env」那条差别**不变**） | `apple_telemetry.py` |
+| API 前缀 | 本切片仍是 `/api`（与 1.0 相同）；改 `/api/v1` 是 S9c · T924 | `photobench/main.py` |
+| HTTP 客户端超时 | 按调用传；1.0 的默认 120 s，老 run 的资产查询用 15 s | 1.0 `:731`, `:6870` |
+| 非 2xx 的失败形状 | `RuntimeError("HTTP {code} {reason}: {detail}")`；`detail` 依次取 `detail` / `error` / `message` / 整个对象，正文先截 2000 字符、还原后截 1000 | 1.0 `:744-760` |
+| HTTP 重试 | **没有**（judge 自己的重试是另一套，属 S9b-3） | 1.0 `:731-760` |
+| TLS 校验 | `request_json` / `request_bytes` **不校验证书**（`check_hostname=False`、`CERT_NONE`）；`request_text` 那一路不这么做，但它不在本切片 | 1.0 `:742-743`, `:802-803` |
+| 重定向 | 跟随（`urllib` 默认跟随；httpx 默认不跟，2.0 显式开） | 1.0 默认行为 |
+| 请求体编码 | `json.dumps(..., ensure_ascii=False)`（中文原样进 body，不是 `\uXXXX`） | 1.0 `:732` |
+| 配置取值优先级 | 环境变量 > `config/runtime_connection.json` > 兜底；**环境变量被显式设为空串 = 未配置**，不再落回文件 | 1.0 `:101-111` |
+| 配置加载顺序 | 先读 runtime connection，再读 judge provider（其中 `judge_provider_id` 若在表内则盖过文件的 `default_provider_id`），再读 vLLM target | 1.0 `:288-299` |
+| `model_base_url` 的兜底 | 环境与配置文件都没有时，取默认 target 的 `model_base_url` 并去尾斜杠 | 1.0 `:345-350` |
+| 缺 `judge_providers.json` | 退回 `judge_providers.example.json`；都没有 / 坏 JSON / 默认 id 不在表里 → **报错**（服务起不来） | 1.0 `:239-252` |
+| 缺 `runtime_connection.json` | 当空配置，**不报错**（坏 JSON 同样当空） | 1.0 `:71-76` |
+| 缺 `vllm_targets.json` | 与 judge provider 同：退回 `.example.json`，都没有则报错 | 1.0 `:333-345` |
+| 模型端点归一化 | 无协议头补 `http://`；无 `/vN` 后缀补 `/v1`；服务 URL 只去尾斜杠、不补路径 | 1.0 `:368-385` |
+| judge 密钥遮蔽 | 首 2 位 + 最多 8 个 `*` + 末 2 位；长度 ≤4 时全是 `*` | 1.0 `:308-315` |
+| `POST /api/config` 的必填 | `judge_model` 非空、`judge_provider_id` 命中已登记 provider；**只落非密钥参数** | 1.0 `:419-455` |
+| 列表分页 | `page` ≥ 1；`page_size` 夹在 1..100；`pages = max(1, ceil(total/page_size))`；`page` 再夹到 `pages` | 1.0 `:779-792` |
+| 列表排序 | `started_at`（缺则 `created_at`）降序，缺失按空串 | 1.0 `:5352` |
+| `active_count` | `status ∈ {running, pending, cancelling}` **或** `rejudge.status == "running"` 的条数 | 1.0 `:7650-7654` |
+| 列表条目带的字段 | 20 个顶层标量里**非 None** 的那些 + `item_count` + 8 项 summary + `phases.qa_eval.{status,progress}` + `rejudge` 五项 | 1.0 `:5309-5341` |
+| `GET /api/runs/{id}` | 去掉 `items`、补 `item_count` 与**重算**的 `summary`；`telemetry_live` 深拷贝后并入 `gpu_samples.jsonl` 的采样 | 1.0 `:5354-5385` |
+| 题目分页 | `page_size` 夹 1..100；筛选 search（问题或 qa_id 子串，小写）/score/task_type/tag/agent_status/angle/difficulty/answerability/primary；`unfiltered_total` 是筛选前的条数 | 1.0 `:6441-6526` |
+| 采样降采样 | 上限 **240** 点，**必保首尾与所有阶段切换点** | 1.0 `:5378-5393` |
+| 错误响应形状 | `{"error": <str>}`；`KeyError` → **404**（`str(KeyError("x"))` 是 `'x'`，带引号）；其余异常 → **400** | 1.0 `:7757-7762` |
+| `GET /api/current-model` | 回 **405** + `{"error": "current-model requires POST"}`，不是 FastAPI 的 405 形状 | 1.0 `:7530-7532` |
+| 启动扫描成本（实测） | 267 个 `run.json` / 11.07 GB：**只读字节 2.9 s，`json.loads` 75.0 s**；单个最大 447 MB（解析 2.03 s） | 2026-10-04 在 153 上实测 |
+| 「跳过 items 只读元信息」的代价（实测） | 对那个 447 MB 的文件：`json.loads` **2.03 s**，纯 Python 逐字节跳过 `items` 要 **24.8 s**——C 解析器比 Python 循环快一个数量级，**跳过反而更贵**。所以 2.0 照常解析、只是丢掉 items | 同上 |

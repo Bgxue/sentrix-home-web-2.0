@@ -30,7 +30,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SRC = REPO_ROOT / "apps" / "api" / "src"
-ROOTS = ("sentrix.main", "sentrix.bootstrap")
+# ``photobench.main`` 是 S9b-1 建的 PhotoBench 入口。**它必须在这里**：跑本脚本时
+# `--src apps/photobench/src` 的根如果只有 sentrix 那两个（都找不到），从根出发的可达集
+# 为空，于是每个 photobench 模块都「没有调用者」，PENDING_WIRING 那张表会因为
+# 「根找不到」而永远合法——那正是 S9a 施工记录第 10 条点名要守的不变量。
+# 对 sentrix 那一轮没有影响：它的 by_module 里没有 photobench.main，frontier 直接跳过。
+ROOTS = ("sentrix.main", "sentrix.bootstrap", "photobench.main")
 
 # 模块 -> 会把它接上生产的任务。**每个条目都必须写明任务，否则它就是一个说不出
 # 理由的例外**——而说不出理由的例外名单会把这条不变量重新变成摆设。
@@ -58,25 +63,20 @@ PENDING_WIRING: dict[str, str] = {
     #
     # —— S9a（2026-10-04）：PhotoBench 的运行时提供者与 Apple 遥测 ——
     #
-    # 这四个模块是新包 `apps/photobench` 在 S9a 里的全部源码，**它们这一轮天然是
-    # 孤儿**：真正构造它们的是 PhotoBench 自己的编排链（1.0 的
-    # `select_runtime_providers` 与 FastAPI 装配点），而那一层要 S9b 的 T911–T913
-    # 才建出来。用户 2026-10-04 裁决把 S9 切成「S9a 遥测 → S9b 主链 → S9c 适配」，
-    # 所以「先落地、后接线」是计划本身，不是托词；接线任务写在每条的右值里。
+    # S9a 在这里登记过四条（`domain.runtime.ports` / `infrastructure.runtime.hardware` /
+    # `infrastructure.runtime.providers` / `infrastructure.runtime.apple_telemetry`），
+    # 理由是「本切片先落地、S9b 才接线」。**S9b-1 建出 `photobench.main` 并把它扩进
+    # ROOTS 之后，前三条立刻被这条检查自己报红要求删掉**——装配点
+    # （`bootstrap.container`）与 `application` 两层已经真的构造/调用了它们。
+    # 与 S5c / S6 / S7b1 每次接线后走的是同一条反向规则。
     #
-    # **另注本脚本跑 photobench 时的一个已知形态**：ROOTS 是 `sentrix.main` /
-    # `sentrix.bootstrap`，两个根在 `apps/photobench/src` 里都不存在，于是从根出发
-    # 的可达集为空、四个模块无一例外全落进这张表。这不是误报——PhotoBench 这一轮
-    # 确实一个生产入口都没有；但**等 S9b 建出 `photobench.main` 之后，要记得把
-    # ROOTS 也扩到它**，否则这张表会因为「根找不到」而永远合法。
-    "photobench.domain.runtime.ports": ("S9b · T911–T913（编排侧按 port 装配 RuntimeProviders）"),
+    # 只剩 apple_telemetry：它的生产调用者是 1.0 的 `select_runtime_providers`
+    # （`benchmark_orchestrator.py:176` 的 Apple 分支），那是 S9b-2 的 provider 选择逻辑
+    # （与 660 行的 `jetson_telemetry.py` 同一批）。**本切片不搬它**——它由运行时的
+    # 主机形态决定，属 run-execution 那一块。
     "photobench.infrastructure.runtime.apple_telemetry": (
-        "S9b · T911（select_runtime_providers 在 Apple 主机上构造它）"
+        "S9b-2（select_runtime_providers 在 Apple 主机上构造它）"
     ),
-    "photobench.infrastructure.runtime.hardware": (
-        "S9b · T911（HostNvidiaTelemetryProvider.gpu_stats 读 CPU 温度）"
-    ),
-    "photobench.infrastructure.runtime.providers": ("S9b · T911–T913（编排链与工厂装配全部 provider）"),
 }
 
 

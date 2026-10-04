@@ -1,0 +1,1689 @@
+"""run 读侧的纯计算：列表条目 / 汇总 / item 投影。
+
+**这一层为什么在 domain 而不是 application。** 它要被两边调用：infrastructure 的
+``FileRunStore.iter_entries`` 在扫描 ``results/`` 时就要把每个 run 压成瘦条目（否则
+11 GB 的结果解析完只能整个丢掉），而 infrastructure **不能** import application
+（``photobench-infrastructure-purity``）。这些函数全是纯的——不碰文件、不碰网络、
+不碰时间以外的环境——所以它们落在 domain 不违反 ``domain-purity``（唯一的
+``datetime``/``json``/``re`` 都不是 forbidden 名单上的东西）。
+
+**与 1.0 的关系：逐个函数照搬，只做两处形式改动。**
+- 1.0 挂在 ``BenchmarkRun`` / ``OrchestratorRepository`` 上的 ``@staticmethod``
+  ``@classmethod`` 变成模块级函数（去掉 ``cls`` 那一层，``cls._percentile`` 变成
+  ``percentile``）。**计算过程一行没改**。
+- ``hydrate_qa_metadata`` 从读 ``self.qa_metadata`` 改成收一个参数，让它保持纯；
+  1.0 的 ``self.qa_metadata`` 就是 ``OrchestratorRepository._load_qa_metadata()``
+  在 ``__init__`` 里建的同一张表（``:4884``）。
+- ``attach_gpu_sample_history`` 从读文件改成收**原始行**，解析口径（坏行跳过）照搬。
+
+行号注释一律指 1.0 ``services/photobench/backend/benchmark_orchestrator.py``。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import time
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+# 1.0 ``:933`` / ``:1261``。
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+RANKING_KS = (1, 5, 10)
+
+
+def now_iso() -> str:
+    """1.0 ``:572``。带时区偏移的本地时间，写进评审文件与列表条目。"""
+    return datetime.now().astimezone().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Judge 一致性（1.0 ``:701-728``）
+# ---------------------------------------------------------------------------
+
+
+def judge_score_consistency(score: int | None, reason: str) -> bool:
+    """拒绝「文字夸奖、分数判死」的 judge 输出。1.0 ``:701``。"""
+    if score != 0:
+        return True
+    text = str(reason or "")
+    # 先把否定式褒义短语剥掉，免得「不符合预期」/「回答不正确」被当成褒义命中。
+    cleaned = re.sub(r"(?:未|不|没有|并非).{0,10}(?:正确|准确|一致|完整|符合|预期)", "", text)
+    positive_patterns = (
+        r"(?:回答|模型回答).{0,12}(?:正确|准确)",
+        r"与.{0,24}(?:参考答案|标准答案).{0,12}一致",
+        r"(?:参考答案|标准答案).{0,24}(?:回答|结论).{0,12}一致",
+        r"符合.{0,8}预期",
+        r"核心信息.{0,12}(?:一致|完整|正确)",
+    )
+    return not any(re.search(pattern, cleaned) for pattern in positive_patterns)
+
+
+def judge_consistency_status(judge: dict[str, Any] | None) -> str | None:
+    """1.0 ``:718``。"""
+    judge = judge or {}
+    if not judge_score_consistency(judge.get("score"), str(judge.get("reason") or "")):
+        return "inconsistent"
+    value = judge.get("consistency_status")
+    return str(value) if value is not None else None
+
+
+def judge_score_for_summary(judge: dict[str, Any] | None) -> int | None:
+    """1.0 ``:725``：只有 0/1/2 且不自相矛盾的分数才进汇总。"""
+    judge = judge or {}
+    score = judge.get("score")
+    return score if score in {0, 1, 2} and judge_consistency_status(judge) != "inconsistent" else None
+
+
+# ---------------------------------------------------------------------------
+# 分位数
+# ---------------------------------------------------------------------------
+
+
+def percentile(values: Sequence[float], p: float) -> float | None:
+    """1.0 ``:6609`` 的 ``_percentile``：向上取整的最近秩分位数。"""
+    ordered = sorted(float(value) for value in values if isinstance(value, (int, float)))
+    if not ordered:
+        return None
+    return ordered[max(0, min(len(ordered) - 1, math.ceil(len(ordered) * p) - 1))]
+
+
+def nearest_rank_percentile(values: Sequence[int | float], p: float) -> int | float | None:
+    """1.0 ``:1637``。与 ``percentile`` 的区别是**不转 float**，保持原值的类型。"""
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * p) - 1))
+    return ordered[index]
+
+
+def numeric_ms(value: Any) -> float | None:
+    """1.0 ``:3707`` 的 ``_numeric_ms``：非负数才要，负数当成「没测到」。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+# ---------------------------------------------------------------------------
+# 媒体键（1.0 ``:936-952``）
+# ---------------------------------------------------------------------------
+
+
+def infer_media_type(value: object, explicit: object = None) -> str:
+    """1.0 ``:936``。"""
+    media_type = str(explicit or "").strip().lower()
+    if media_type in {"image", "video"}:
+        return media_type
+    text = str(value or "").strip()
+    suffix = Path(text.split("?", 1)[0].split("#", 1)[0]).suffix.lower()
+    if suffix in VIDEO_EXTENSIONS or re.fullmatch(r"video-\d+", Path(text).name, re.I):
+        return "video"
+    return "image"
+
+
+def media_key(media_type: object, media_id: object) -> tuple[str, str]:
+    """1.0 ``:947``。GT 与召回结果比对的稳定键。"""
+    kind = infer_media_type(media_id, media_type)
+    name = Path(str(media_id or "").split("?", 1)[0].split("#", 1)[0]).name
+    canonical = Path(name).stem if kind == "video" else name
+    return kind, canonical.casefold()
+
+
+# ---------------------------------------------------------------------------
+# 检索指标（1.0 ``:1189-1362``）
+# ---------------------------------------------------------------------------
+
+
+def metric_triplet(gt_keys: set[tuple[str, str]], predicted_keys: set[tuple[str, str]]) -> dict[str, Any]:
+    """1.0 ``:1189``。"""
+    matched = gt_keys & predicted_keys
+    recall = len(matched) / len(gt_keys) if gt_keys else None
+    precision = len(matched) / len(predicted_keys) if predicted_keys else (0.0 if gt_keys else None)
+    f1 = (
+        (2 * precision * recall / (precision + recall))
+        if precision is not None and recall is not None and precision + recall
+        else (0.0 if gt_keys else None)
+    )
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "matched": len(matched),
+        "predicted": len(predicted_keys),
+        "gt": len(gt_keys),
+    }
+
+
+def micro_metrics_from_counts(items: Sequence[dict[str, Any]], field: str) -> dict[str, Any]:
+    """1.0 ``:1221``。"""
+    rows: list[dict[str, Any]] = [
+        row for item in items if isinstance((row := item.get(field)), dict) and int(row.get("gt") or 0) > 0
+    ]
+    gt = sum(int(row.get("gt") or 0) for row in rows)
+    predicted = sum(int(row.get("predicted") or 0) for row in rows)
+    matched = sum(int(row.get("matched") or 0) for row in rows)
+    precision = matched / predicted if predicted else (0.0 if gt else None)
+    recall = matched / gt if gt else None
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision is not None and recall is not None and precision + recall
+        else (0.0 if gt else None)
+    )
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "metric_count": len(rows),
+        "matched": matched,
+        "predicted": predicted,
+        "gt": gt,
+    }
+
+
+def macro_metrics_from_counts(items: Sequence[dict[str, Any]], field: str) -> dict[str, Any]:
+    """1.0 ``:1243``。"""
+    rows: list[dict[str, Any]] = [
+        row for item in items if isinstance((row := item.get(field)), dict) and int(row.get("gt") or 0) > 0
+    ]
+    values: dict[str, list[float]] = {"precision": [], "recall": [], "f1": []}
+    for row in rows:
+        gt = int(row.get("gt") or 0)
+        predicted = int(row.get("predicted") or 0)
+        matched = int(row.get("matched") or 0)
+        precision = matched / predicted if predicted else 0.0
+        recall = matched / gt
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        values["precision"].append(precision)
+        values["recall"].append(recall)
+        values["f1"].append(f1)
+    return {
+        metric: sum(samples) / len(samples) if samples else None for metric, samples in values.items()
+    } | {"metric_count": len(rows)}
+
+
+def ranking_metrics(ranked_keys: Sequence[tuple[str, str]], gt_keys: set[tuple[str, str]]) -> dict[str, Any]:
+    """1.0 ``:1264``。"""
+    if not gt_keys:
+        return {}
+    ranked = list(ranked_keys)
+    data: dict[str, Any] = {"ranked_count": len(ranked), "gt_count": len(gt_keys)}
+    for k in RANKING_KS:
+        found = len(gt_keys & set(ranked[:k]))
+        data[f"r_at_{k}"] = round(found / len(gt_keys), 4)
+        data[f"hit_at_{k}"] = 1.0 if found else 0.0
+    first = next((index for index, key in enumerate(ranked, 1) if key in gt_keys), None)
+    data["mrr"] = round(1.0 / first, 4) if first else 0.0
+    hits = 0
+    total = 0.0
+    for index, key in enumerate(ranked, 1):
+        if key in gt_keys:
+            hits += 1
+            total += hits / index
+    data["average_precision"] = round(total / len(gt_keys), 4)
+    data["p_at_5"] = round(len(gt_keys & set(ranked[:5])) / min(5, len(ranked)), 4) if ranked else 0.0
+    return data
+
+
+def mean_ranking_metrics(items: Sequence[dict[str, Any]], field: str = "image_ranking") -> dict[str, Any]:
+    """1.0 ``:1294``。"""
+    rows = [
+        item[field]
+        for item in items
+        if isinstance(item.get(field), dict) and int(item[field].get("gt_count") or 0) > 0
+    ]
+    if not rows:
+        return {}
+    data: dict[str, Any] = {}
+    for k in RANKING_KS:
+        subset = [row for row in rows if int(row.get("gt_count") or 0) <= k]
+        data[f"r_at_{k}_question_count"] = len(subset)
+        if subset:
+            data[f"r_at_{k}"] = round(sum(row[f"r_at_{k}"] for row in subset) / len(subset), 4)
+            data[f"hit_at_{k}"] = round(sum(row[f"hit_at_{k}"] for row in subset) / len(subset), 4)
+        else:
+            data[f"r_at_{k}"] = None
+            data[f"hit_at_{k}"] = None
+    r5_rows = [row for row in rows if int(row.get("gt_count") or 0) <= 5]
+    data["coverage_short_count"] = sum(
+        1 for row in r5_rows if int(row.get("ranked_count") or 0) < int(row.get("gt_count") or 0)
+    )
+    data["no_candidate_count"] = sum(1 for row in r5_rows if int(row.get("ranked_count") or 0) == 0)
+    data["mrr"] = round(sum(row["mrr"] for row in rows) / len(rows), 4)
+    data["average_precision"] = round(sum(row["average_precision"] for row in rows) / len(rows), 4)
+    p5 = [row for row in rows if int(row.get("gt_count") or 0) <= 5]
+    data["p_at_5"] = round(sum(row["p_at_5"] for row in p5) / len(p5), 4) if p5 else None
+    data["p_at_5_question_count"] = len(p5)
+    data["question_count"] = len(rows)
+    data["multi_positive_count"] = sum(1 for row in rows if int(row.get("gt_count") or 0) > 1)
+    data["short_candidate_count"] = sum(1 for row in rows if int(row.get("ranked_count") or 0) < 10)
+    return data
+
+
+def ranking_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    """1.0 ``:1338``。"""
+    recorded = item.get("image_ranking")
+    if isinstance(recorded, dict):
+        return recorded
+    gt_media = [entry for entry in (item.get("gt_images") or []) if entry.get("media_type") == "image"]
+    if not gt_media:
+        return {}
+    candidates = item.get("retrieved_candidate_media") or item.get("retrieved_candidate_images") or []
+    return ranking_metrics(
+        [
+            media_key(value.get("media_type"), value.get("media_id") or value.get("file_name"))
+            for value in candidates
+            if value.get("media_type") == "image"
+        ],
+        {media_key(entry.get("media_type"), entry.get("media_id")) for entry in gt_media},
+    )
+
+
+def retrieval_metric_eligible(item: dict[str, Any]) -> bool:
+    """1.0 ``:1360``。不可回答的题目不进检索指标的分母。"""
+    return str(item.get("answerability") or "").strip().lower() != "unanswerable"
+
+
+# ---------------------------------------------------------------------------
+# 归因 / 轨迹（1.0 ``:3838-4566``）
+# ---------------------------------------------------------------------------
+
+
+def parse_action_payload(value: object) -> dict[str, Any] | None:
+    """1.0 ``:3908``。从 trace 载荷里取出结构化 Agent 动作。"""
+    if isinstance(value, dict):
+        return value if value.get("action") else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        body = text.split("\n", 1)[-1]
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+        text = body.strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and parsed.get("action"):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        decoded, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) and decoded.get("action") else None
+
+
+def trace_action(step: dict[str, Any]) -> dict[str, Any] | None:
+    """1.0 ``:3940``。"""
+    for key in ("detail", "raw", "raw_full"):
+        parsed = parse_action_payload(step.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def agent_stability(item: dict[str, Any]) -> dict[str, Any]:
+    """1.0 ``:4532``。"""
+    trace = [step for step in item.get("execution_trace") or [] if isinstance(step, dict)]
+    model_steps = [
+        step
+        for step in trace
+        if str(step.get("stage") or step.get("type") or "") == "model"
+        and str(step.get("call_type") or "agent") in {"agent", "recovery"}
+        and str(step.get("status") or "complete").lower() != "error"
+    ]
+    parse_total = len(model_steps)
+
+    def parsed_success(step: dict[str, Any]) -> bool:
+        parse_status = step.get("parse_status")
+        if parse_status is not None:
+            return str(parse_status).lower() == "success" and trace_action(step) is not None
+        return trace_action(step) is not None
+
+    parse_success = sum(1 for step in model_steps if parsed_success(step))
+    failed_statuses = {"partial", "error", "timeout", "failed", "cancelled", "canceled"}
+    status = str(item.get("agent_status") or "").lower()
+    termination = str(item.get("termination_reason") or "").lower()
+    turn_outcome = item.get("turn_outcome") or (
+        (item.get("conversation") or [{}])[-1].get("turn_outcome") if item.get("conversation") else None
+    )
+    complete = (
+        turn_outcome == "final_answer"
+        and bool(item.get("answer"))
+        and status not in failed_statuses
+        and not any(marker in termination for marker in ("step", "budget", "timeout", "error", "failure"))
+    )
+    return {
+        "json_parse_total": parse_total or None,
+        "json_parse_success": parse_success if parse_total else None,
+        "json_parse_rate": round(parse_success / parse_total, 3) if parse_total else None,
+        "completed_within_steps": complete if trace or item.get("agent_status") else None,
+        "final_turn_outcome": turn_outcome,
+    }
+
+
+def derive_attribution(item: dict[str, Any]) -> dict[str, Any]:
+    """1.0 ``:4202``。从已存的 turn 字段里判定失败层。"""
+    judge_score = (item.get("judge") or {}).get("score")
+    recall = item.get("retrieval_recall")
+    tools = item.get("tool_trace") or []
+    calls = item.get("model_call_metrics") or []
+    guard = item.get("guard_debug") or {}
+    layers = {key: "na" for key in ("R", "V", "O", "T", "S", "G", "J")}
+    details = {}
+    if isinstance(recall, (int, float)):
+        layers["R"] = "pass" if recall >= 1 else "fail"
+        details["R"] = f"图片召回率 {recall:.1%}"
+    if (
+        item.get("angle") in {"scene_visual", "food_or_object"}
+        or item.get("task_type") == "T1_retrieve_media"
+    ):
+        layers["V"] = "pass" if item.get("predicted_file_names") else "fail"
+        details["V"] = "已返回图片" if item.get("predicted_file_names") else "未返回可识别图片"
+    if any(
+        str(trace.get("tool") or "").lower() in {"read_photo_text", "ocr", "inspect_photo"} for trace in tools
+    ):
+        ok = any(
+            str(trace.get("status") or "").lower() in {"ok", "complete", "completed", "success"}
+            for trace in tools
+        )
+        layers["O"] = "pass" if ok else "fail"
+        details["O"] = "检测到 OCR/图片复核工具轨迹"
+    if tools:
+        failed_tools = [
+            trace
+            for trace in tools
+            if str(trace.get("status") or "").lower() not in {"ok", "complete", "completed", "success"}
+        ]
+        layers["T"] = "fail" if failed_tools else "pass"
+        details["T"] = f"工具 {len(tools)} 次，失败 {len(failed_tools)} 次"
+    if calls:
+        layers["S"] = "pass" if item.get("answer") else "fail"
+        details["S"] = "已生成回答" if item.get("answer") else "无回答"
+    if guard or item.get("termination_reason") or item.get("agent_status"):
+        blocked = str(item.get("agent_status") or "").lower() in {"blocked", "blocked_by_guard", "error"}
+        layers["G"] = "fail" if blocked else "pass"
+        details["G"] = item.get("termination_reason") or item.get("agent_status") or "已记录 Guard"
+    if judge_score in {0, 1, 2}:
+        layers["J"] = "pass" if judge_score == 2 else "fail"
+        details["J"] = f"Judge {judge_score} 分"
+    primary = next((key for key in ("G", "R", "V", "O", "T", "S", "J") if layers[key] == "fail"), "PASS")
+    return {"primary": primary, "layers": layers, "detail": details, "source": "derived_from_turn_result"}
+
+
+def annotate_model_calls(model_calls: Sequence[Any], execution_trace: Sequence[Any]) -> list[dict[str, Any]]:
+    """1.0 ``:3948``。给历史 run 的模型调用补上可读的用途说明。"""
+    calls = [dict(call) for call in model_calls if isinstance(call, dict)]
+    if not calls:
+        return calls
+    if all(call.get("call_observation") for call in calls):
+        return calls
+    if any(call.get("call_type") for call in calls):
+        return calls
+    trace = [step for step in execution_trace if isinstance(step, dict)]
+    if not trace:
+        for call in calls:
+            call["call_observation"] = {
+                "kind": "unknown",
+                "label": "历史模型调用",
+                "purpose": "旧记录未保存调用用途",
+                "trigger": "未记录",
+                "outcome": "仅保留原始模型性能指标",
+                "source": "historical_unresolved",
+            }
+        return calls
+
+    assignments: list[tuple[int, str, dict[str, Any], Any, int]] = []
+    call_index = 0
+    recovery_pending = None
+    for trace_index, step in enumerate(trace):
+        stage = str(step.get("stage") or step.get("type") or "")
+        if stage in {"model", "writer", "judge"}:
+            if call_index >= len(calls) or str(calls[call_index].get("role") or "") in {"inspect", "ocr"}:
+                assignments = []
+                break
+            assignments.append((call_index, stage, step, recovery_pending, trace_index))
+            call_index += 1
+            recovery_pending = None
+            if stage == "model":
+                next_stage = next(
+                    (
+                        str(candidate.get("stage") or candidate.get("type") or "")
+                        for candidate in trace[trace_index + 1 :]
+                        if str(candidate.get("stage") or candidate.get("type") or "")
+                        in {"model", "tool", "writer", "guard", "judge"}
+                    ),
+                    "",
+                )
+                if next_stage == "model":
+                    recovery_pending = "format"
+        elif stage == "tool":
+            tool = step.get("tool") or (step.get("detail") if isinstance(step.get("detail"), str) else "")
+            expected_role = (
+                "inspect" if tool == "inspect_photo" else "ocr" if tool == "read_photo_text" else None
+            )
+            if expected_role:
+                while call_index < len(calls) and str(calls[call_index].get("role") or "") == expected_role:
+                    assignments.append((call_index, "tool_internal", step, False, trace_index))
+                    call_index += 1
+        elif stage == "guard" and str(step.get("status") or "").lower() == "fail":
+            recovery_pending = "guard"
+        if stage == "judge":
+            detail = step.get("detail") or {}
+            if isinstance(detail, dict) and detail.get("faithful") is False:
+                recovery_pending = "guard"
+    if call_index != len(calls) or len(assignments) != len(calls):
+        for call in calls:
+            call["call_observation"] = {
+                "kind": "unknown",
+                "label": "历史模型调用",
+                "purpose": "旧记录没有足够信息完成可靠对齐",
+                "trigger": "未记录",
+                "outcome": "仅保留原始模型性能指标",
+                "source": "historical_unresolved",
+            }
+        return calls
+
+    for index, stage, step, recovery_reason, trace_index in assignments:
+        call = calls[index]
+        action = trace_action(step)
+        if stage == "tool_internal":
+            tool = step.get("tool") or (step.get("detail") if isinstance(step.get("detail"), str) else "")
+            observation = {
+                "kind": "tool_internal",
+                "label": "工具内部模型调用（历史对齐）",
+                "purpose": "读取照片文字" if tool == "read_photo_text" else "识别照片视觉细节",
+                "trigger": f"工具 {tool} 执行内部模型推理",
+                "outcome": f"完成 {tool} 的模型处理",
+                "source": "historical_trace_aligned",
+                "related_tool": tool,
+            }
+        elif stage == "judge":
+            detail = step.get("detail") or {}
+            faithful = detail.get("faithful") if isinstance(detail, dict) else None
+            observation = {
+                "kind": "faithfulness_judge",
+                "label": "L2 事实一致性检查（历史对齐）",
+                "purpose": "检查候选回答是否与工具事实一致",
+                "trigger": "L1 Guard 通过且回答使用了工具事实",
+                "outcome": "判定通过"
+                if faithful is True
+                else "判定未通过"
+                if faithful is False
+                else "完成检查",
+                "source": "historical_trace_aligned",
+            }
+        elif stage == "writer":
+            observation = {
+                "kind": "writer",
+                "label": "最终回答重写（历史对齐）",
+                "purpose": "基于受控事实调整最终回答的结构和措辞",
+                "trigger": "候选回答触发 Final Writer",
+                "outcome": f"重写状态：{step.get('status') or '完成'}",
+                "source": "historical_trace_aligned",
+            }
+        else:
+            tool = str((action or {}).get("tool") or "")
+            is_final = (action or {}).get("action") == "final"
+            next_step = next(
+                (
+                    candidate
+                    for candidate in trace[trace_index + 1 :]
+                    if str(candidate.get("stage") or candidate.get("type") or "")
+                    in {"model", "tool", "writer", "guard", "judge"}
+                ),
+                {},
+            )
+            next_stage = str(next_step.get("stage") or next_step.get("type") or "")
+            if not tool and next_stage == "tool":
+                tool = str(
+                    next_step.get("tool")
+                    or (next_step.get("detail") if isinstance(next_step.get("detail"), str) else "")
+                )
+            generated_candidate = is_final or next_stage in {"writer", "guard", "judge"}
+            parse_recovery = next_stage == "model"
+            is_recovery = recovery_reason in {"format", "guard"}
+            observation = {
+                "kind": "recovery" if is_recovery else "agent",
+                "label": (
+                    "Agent 格式恢复调用（历史对齐）"
+                    if recovery_reason == "format"
+                    else "Agent 校验恢复调用（历史对齐）"
+                    if recovery_reason == "guard"
+                    else "Agent 决策 / 回答（历史对齐）"
+                ),
+                "purpose": (
+                    "按格式纠正要求重新生成合法动作"
+                    if recovery_reason == "format"
+                    else "根据 Guard 或 L2 校验反馈修正回答"
+                    if recovery_reason == "guard"
+                    else "选择下一步工具或生成候选回答"
+                ),
+                "trigger": (
+                    "上一轮模型输出无法解析"
+                    if recovery_reason == "format"
+                    else "上一轮 Guard 或 L2 事实一致性检查未通过"
+                    if recovery_reason == "guard"
+                    else "上一工具返回结果"
+                    if index
+                    else "用户问题"
+                ),
+                "outcome": (
+                    f"决定调用工具 {tool}"
+                    if tool
+                    else "输出未形成合法动作，触发格式恢复"
+                    if parse_recovery
+                    else "生成候选回答"
+                    if generated_candidate
+                    else "完成 Agent 推理"
+                ),
+                "source": "historical_trace_aligned",
+                "related_tool": tool or None,
+            }
+        call["call_observation"] = observation
+    return calls
+
+
+def bind_tool_calls_to_model_rounds(
+    tool_trace: Sequence[Any], retrieval_trace: Sequence[Any], model_calls: Any = None
+) -> list[dict[str, Any]]:
+    """1.0 ``:3838``。按 step ID 优先、历史 run 退回按顺序对齐工具与模型轮次。"""
+    bound = [dict(trace) for trace in tool_trace if isinstance(trace, dict)]
+    if not bound:
+        return bound
+    calls = [call for call in model_calls if isinstance(call, dict)] if isinstance(model_calls, list) else []
+    model_call_count = len(calls) if calls else int(model_calls or 0)
+    call_index_by_step: dict[tuple[Any, str], int] = {}
+    for index, call in enumerate(calls):
+        if not call.get("step_id"):
+            continue
+        key = (call.get("conversation_turn"), str(call.get("step_id")))
+        call_index_by_step[key] = index
+        call_index_by_step[("any", str(call.get("step_id")))] = index
+    for trace in bound:
+        parent_step_id = trace.get("parent_step_id")
+        key = (trace.get("conversation_turn"), str(parent_step_id))
+        if parent_step_id is not None and key in call_index_by_step:
+            trace["model_call_index"] = call_index_by_step[key]
+            trace["round_binding_source"] = "step_id"
+    if not isinstance(retrieval_trace, list) or not retrieval_trace:
+        if model_call_count == 1:
+            for trace in bound:
+                if trace.get("model_call_index") is None:
+                    trace["model_call_index"] = 0
+                    trace["round_binding_source"] = "inferred_single_model_call"
+        return bound
+    model_index = None
+    ordered_call_index = 0
+    tool_index = 0
+    for step in retrieval_trace:
+        if not isinstance(step, dict):
+            continue
+        stage = step.get("stage") or step.get("type")
+        step_id = step.get("step_id")
+        step_key = (step.get("conversation_turn"), str(step_id))
+        mapped_index = call_index_by_step.get(step_key)
+        if mapped_index is None:
+            mapped_index = call_index_by_step.get(("any", str(step_id)))
+        if stage in {"planner", "model", "writer", "judge"}:
+            if mapped_index is not None:
+                model_index = mapped_index
+                ordered_call_index = max(ordered_call_index, mapped_index + 1)
+            elif ordered_call_index < model_call_count:
+                model_index = ordered_call_index
+                ordered_call_index += 1
+        elif stage == "tool" and tool_index < len(bound):
+            if (
+                model_index is not None
+                and model_index >= 0
+                and bound[tool_index].get("model_call_index") is None
+            ):
+                bound[tool_index]["model_call_index"] = model_index
+                bound[tool_index]["round_binding_source"] = "retrieval_trace"
+                if step.get("parent_step_id") is not None:
+                    bound[tool_index]["parent_step_id"] = step.get("parent_step_id")
+            elif model_index is not None and model_index >= 0 and step.get("parent_step_id") is not None:
+                bound[tool_index]["model_call_index"] = model_index
+                bound[tool_index]["round_binding_source"] = "retrieval_trace_parent"
+                bound[tool_index]["parent_step_id"] = step.get("parent_step_id")
+            tool_index += 1
+    if model_call_count == 1:
+        for trace in bound:
+            if trace.get("model_call_index") is None:
+                trace["model_call_index"] = 0
+                trace["round_binding_source"] = "inferred_single_model_call"
+    return bound
+
+
+def summarize_agent2_trace(runtime_turns: Sequence[Any]) -> dict[str, Any]:
+    """1.0 ``:583``。"""
+    decisions: list[dict[str, Any]] = []
+    statuses: dict[str, int] = {}
+    terminal_reasons: dict[str, int] = {}
+    budget_outcomes: list[dict[str, Any]] = []
+    entries = 0
+    partial_entries = 0
+    available = False
+    last_task_declaration = None
+    last_task_state = None
+    last_evidence_ledger = None
+
+    for turn in runtime_turns or []:
+        trace = turn.get("agent2_trace") if isinstance(turn, dict) else None
+        if not isinstance(trace, dict) or not trace:
+            continue
+        available = True
+        decisions.extend(item for item in trace.get("planner_decisions") or [] if isinstance(item, dict))
+        if trace.get("task_declaration"):
+            last_task_declaration = trace.get("task_declaration")
+        if trace.get("task_state"):
+            last_task_state = trace.get("task_state")
+        if trace.get("evidence_ledger"):
+            last_evidence_ledger = trace.get("evidence_ledger")
+
+        status_counts = trace.get("requirement_status_counts") or {}
+        if not status_counts:
+            for requirement in (trace.get("task_state") or {}).get("requirements") or []:
+                if isinstance(requirement, dict) and requirement.get("status"):
+                    status = str(requirement["status"])
+                    status_counts[status] = status_counts.get(status, 0) + 1
+        for status, count in status_counts.items():
+            try:
+                statuses[str(status)] = statuses.get(str(status), 0) + int(count)
+            except (TypeError, ValueError):
+                continue
+        coverage = trace.get("evidence_coverage") or {}
+        if not coverage:
+            ledger_entries = (trace.get("evidence_ledger") or {}).get("entries") or []
+            coverage = {
+                "entries": len(ledger_entries),
+                "partial_entries": sum(
+                    1
+                    for entry in ledger_entries
+                    if isinstance(entry, dict)
+                    and int((entry.get("coverage") or {}).get("processed") or 0)
+                    < int((entry.get("coverage") or {}).get("requested") or 0)
+                ),
+            }
+        entries += int(coverage.get("entries") or 0)
+        partial_entries += int(coverage.get("partial_entries") or 0)
+        reason = str(trace.get("terminal_reason") or "")
+        if reason:
+            terminal_reasons[reason] = terminal_reasons.get(reason, 0) + 1
+        budget = trace.get("budget_outcome")
+        if isinstance(budget, dict):
+            budget_outcomes.append(dict(budget))
+    res: dict[str, Any] = {
+        "available": available,
+        "planner_decision_count": len(decisions),
+        "planner_fallback_count": sum(1 for item in decisions if item.get("status") == "fallback"),
+        "requirement_status_counts": statuses,
+        "evidence_coverage": {"entries": entries, "partial_entries": partial_entries},
+        "terminal_reasons": terminal_reasons,
+        "budget_outcomes": budget_outcomes,
+    }
+    if last_task_declaration:
+        res["task_declaration"] = last_task_declaration
+    if last_task_state:
+        res["task_state"] = last_task_state
+    if last_evidence_ledger:
+        res["evidence_ledger"] = last_evidence_ledger
+    if decisions:
+        res["planner_decisions"] = decisions
+    return res
+
+
+def aggregate_tool_performance(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """1.0 ``:6743``。"""
+    per_tool: dict[str, dict[str, Any]] = {}
+    for item in items:
+        for trace in item.get("tool_trace") or []:
+            if not isinstance(trace, dict) or not trace.get("tool"):
+                continue
+            slot = per_tool.setdefault(
+                str(trace["tool"]),
+                {
+                    "calls": 0,
+                    "ok": 0,
+                    "latencies": [],
+                    "providers": set(),
+                    "tiles": set(),
+                    "cache_hits": 0,
+                    "vlm_calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "token_samples": 0,
+                    "cache_samples": 0,
+                    "vlm_samples": 0,
+                },
+            )
+            slot["calls"] += 1
+            if trace.get("provider"):
+                slot["providers"].add(str(trace["provider"]))
+            if trace.get("fallback_used"):
+                slot["fallback_count"] = slot.get("fallback_count", 0) + 1
+            if str(trace.get("status") or "").lower() in {"ok", "complete", "completed", "success"}:
+                slot["ok"] += 1
+            latency_s = trace.get("latency_s")
+            if isinstance(latency_s, (int, float)) and latency_s >= 0:
+                slot["latencies"].append(float(latency_s) * 1000)
+        for name, metrics in (item.get("tool_perf") or {}).items():
+            if not isinstance(metrics, dict):
+                continue
+            slot = per_tool.setdefault(
+                str(name),
+                {
+                    "calls": 0,
+                    "ok": 0,
+                    "latencies": [],
+                    "providers": set(),
+                    "tiles": set(),
+                    "cache_hits": 0,
+                    "vlm_calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "token_samples": 0,
+                    "cache_samples": 0,
+                    "vlm_samples": 0,
+                },
+            )
+            slot["providers"].update(str(value) for value in metrics.get("providers") or [])
+            slot["tiles"].update(str(value) for value in metrics.get("tiles") or [])
+            for field in (
+                "cache_hits",
+                "vlm_calls",
+                "prompt_tokens",
+                "completion_tokens",
+                "token_samples",
+                "cache_samples",
+                "vlm_samples",
+            ):
+                if isinstance(metrics.get(field), (int, float)):
+                    slot[field] += metrics[field]
+    result: dict[str, Any] = {}
+    for name, slot in per_tool.items():
+        latencies = slot.pop("latencies")
+        ok = slot.pop("ok")
+        calls = slot["calls"]
+        result[name] = {
+            **slot,
+            "ok_rate": round(ok / calls, 3) if calls else None,
+            "p50_ms": percentile(latencies, 0.5),
+            "p95_ms": percentile(latencies, 0.95),
+            "max_ms": max(latencies) if latencies else None,
+            "providers": sorted(slot["providers"]),
+            "tiles": sorted(slot["tiles"]),
+        }
+    return result
+
+
+def aggregate_delivery(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """1.0 ``:6799``。"""
+    det_count = 0
+    det_kinds: dict[str, int] = {}
+    ocr_partial_count = 0
+    ocr_partial_reasons: dict[str, int] = {}
+    for item in items:
+        guard = item.get("guard_debug") or {}
+        det = guard.get("deterministic_delivery") or {}
+        if det.get("rendered"):
+            det_count += 1
+            kind = str(det.get("kind") or "unknown")
+            det_kinds[kind] = det_kinds.get(kind, 0) + 1
+        delivery = item.get("delivery_status") or {}
+        if delivery.get("ocr_partial"):
+            ocr_partial_count += 1
+            reason = str(delivery.get("ocr_partial_reason") or "unknown")
+            ocr_partial_reasons[reason] = ocr_partial_reasons.get(reason, 0) + 1
+    return {
+        "deterministic_delivery_count": det_count,
+        "deterministic_delivery_kinds": det_kinds,
+        "ocr_partial_count": ocr_partial_count,
+        "ocr_partial_reasons": ocr_partial_reasons,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 汇总（1.0 ``:4639-4872`` / ``:6662`` / ``:6825``）
+# ---------------------------------------------------------------------------
+
+
+def capability_summary(
+    items: Sequence[dict[str, Any]], phases: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """1.0 ``:4639`` 的 ``BenchmarkRun._capability_summary``。"""
+    answer_judges = [item.get("judge") or {} for item in items]
+    answer_scores = [
+        score for judge in answer_judges if (score := judge_score_for_summary(judge)) is not None
+    ]
+    answer_dist = {str(score): answer_scores.count(score) for score in (0, 1, 2)}
+    metric_items = [item for item in items if retrieval_metric_eligible(item)]
+    excluded_unanswerable_count = len(items) - len(metric_items)
+    typed_retrieval_items = [item for item in metric_items if "retrieval_media_refs" in item]
+    media_metrics: dict[str, Any] | None
+    image_metrics: dict[str, Any]
+    video_metrics: dict[str, Any] | None
+    media_macro: dict[str, Any]
+    image_macro: dict[str, Any]
+    video_macro: dict[str, Any] | None
+    precision: float | None
+    recall: float | None
+    f1: float | None
+    if typed_retrieval_items:
+        media_metrics = micro_metrics_from_counts(typed_retrieval_items, "media_retrieval_counts")
+        image_metrics = micro_metrics_from_counts(typed_retrieval_items, "image_retrieval_counts")
+        video_metrics = micro_metrics_from_counts(typed_retrieval_items, "video_retrieval_counts")
+        media_macro = macro_metrics_from_counts(typed_retrieval_items, "media_retrieval_counts")
+        image_macro = macro_metrics_from_counts(typed_retrieval_items, "image_retrieval_counts")
+        video_macro = macro_metrics_from_counts(typed_retrieval_items, "video_retrieval_counts")
+        image_ranking = mean_ranking_metrics(typed_retrieval_items)
+        precision, recall, f1 = (media_metrics["precision"], media_metrics["recall"], media_metrics["f1"])
+        retrieval_metric_count = media_metrics["metric_count"]
+    else:
+        # 历史结果早于「带类型的媒体引用」，那些 run 只有图片。
+        retrieval_items = [item for item in metric_items if item.get("retrieval_image_ids")]
+        tp = sum(
+            len(item.get("retrieved_matched_file_names") or item.get("matched_file_names") or [])
+            for item in retrieval_items
+        )
+        predicted = sum(
+            len(item.get("retrieved_file_names") or item.get("predicted_file_names") or [])
+            for item in retrieval_items
+        )
+        gt = sum(len(item.get("retrieval_image_ids") or []) for item in retrieval_items)
+        precision = tp / predicted if predicted else (0.0 if gt else None)
+        recall = tp / gt if gt else None
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if precision is not None and recall is not None and precision + recall
+            else (0.0 if gt else None)
+        )
+        retrieval_metric_count = len(retrieval_items)
+        media_metrics = None
+        image_metrics = {
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "metric_count": retrieval_metric_count,
+        }
+        video_metrics = None
+        # 这些 run 从没存过候选顺序，编一个出来只会把 R@K 变成假数。宁可报空。
+        image_ranking = mean_ranking_metrics(metric_items)
+        legacy_values: dict[str, list[float]] = {
+            metric: [
+                float(value)
+                for item in retrieval_items
+                if isinstance((value := item.get(f"retrieval_{metric}")), (int, float))
+            ]
+            for metric in ("precision", "recall", "f1")
+        }
+        image_macro = {
+            metric: sum(values) / len(values) if values else None for metric, values in legacy_values.items()
+        } | {"metric_count": len(legacy_values["recall"])}
+        media_macro = image_macro
+        video_macro = None
+    evidence_judges = [item.get("evidence_judge") or {} for item in items]
+    evidence_scores = [
+        score
+        for judge in evidence_judges
+        if isinstance((score := judge.get("score")), (int, float)) and score in {0, 1, 2}
+    ]
+    evidence_dist = {str(score): evidence_scores.count(score) for score in (0, 1, 2)}
+    action_judges = [
+        judge
+        for item in items
+        for judge in (item.get("task_judges") or [item.get("task_judge") or {}])
+        if judge.get("expected_action") in {"answer", "refuse", "clarify"}
+    ]
+    action_valid = [value for value in action_judges if value.get("correct") in {True, False}]
+    parse_totals = [item.get("agent_stability", {}).get("json_parse_total") for item in items]
+    parse_successes = [item.get("agent_stability", {}).get("json_parse_success") for item in items]
+    parse_total = sum(value for value in parse_totals if isinstance(value, int))
+    parse_success = sum(value for value in parse_successes if isinstance(value, int))
+    completion = [item.get("agent_stability", {}).get("completed_within_steps") for item in items]
+    completion_valid = [value for value in completion if isinstance(value, bool)]
+    wall_times = [
+        float(item["wall_clock_ms"]) for item in items if isinstance(item.get("wall_clock_ms"), (int, float))
+    ]
+    judge_times = [
+        float(value)
+        for item in items
+        if isinstance((value := (item.get("timing_breakdown") or {}).get("judge_ms")), (int, float))
+    ]
+    judge_exclusive_ms = None
+    agent_throughput_ms = None
+    agent_throughput_mode = "historical_interval_estimate"
+    agent_phase_wall_ms = numeric_ms((phases or {}).get("qa_eval", {}).get("agent_phase_wall_ms"))
+    agent_phase_count = (phases or {}).get("qa_eval", {}).get("agent_completed")
+    if not isinstance(agent_phase_count, int) or agent_phase_count <= 0:
+        agent_phase_count = len(items)
+    timelines = [(item.get("timing_breakdown") or {}).get("timeline") or {} for item in items]
+    spans = [
+        (tl.get("started_at_epoch"), tl.get("judge_started_at_epoch"), tl.get("judge_finished_at_epoch"))
+        for tl in timelines
+    ]
+    ends: list[float] = []
+    for s, item in zip(spans, items, strict=False):
+        wall_ms = (item.get("timing_breakdown") or {}).get("wall_clock_ms")
+        if isinstance(s[0], (int, float)) and isinstance(wall_ms, (int, float)):
+            ends.append(float(s[0]) + float(wall_ms) / 1000)
+    phase = (phases or {}).get("qa_eval") or {}
+    try:
+        phase_start: float | None = datetime.fromisoformat(str(phase.get("started_at"))).timestamp()
+        phase_end: float | None = datetime.fromisoformat(str(phase.get("finished_at"))).timestamp()
+    except (TypeError, ValueError, OSError):
+        phase_start = phase_end = None
+    valid_item_spans = [value for s in spans if isinstance((value := s[0]), (int, float))]
+    wall_start: float | None = None
+    wall_end: float | None = None
+    if phase_end is not None and phase_start is not None and phase_end > phase_start:
+        wall_start, wall_end = phase_start, phase_end
+    elif valid_item_spans and ends:
+        wall_start = min(valid_item_spans)
+        wall_end = max(ends)
+    else:
+        wall_start = wall_end = None
+    judge_spans = sorted(
+        (s[1], s[2])
+        for s in spans
+        if isinstance(s[1], (int, float)) and isinstance(s[2], (int, float)) and s[2] > s[1]
+    )
+    if wall_start is not None and wall_end is not None and judge_spans:
+        merged: list[list[float]] = []
+        for a, b in judge_spans:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        judge_exclusive_ms = round(sum(b - a for a, b in merged) * 1000, 1)
+    if agent_phase_wall_ms is not None and agent_phase_wall_ms > 0 and agent_phase_count > 0:
+        agent_throughput_ms = round(agent_phase_wall_ms / agent_phase_count, 1)
+        agent_throughput_mode = "measured_agent_phase"
+    elif wall_start is not None and wall_end is not None and judge_spans and items:
+        agent_throughput_ms = round(
+            max(0.0, (wall_end - wall_start) * 1000 - (judge_exclusive_ms or 0)) / len(items), 1
+        )
+    judge_phase = (phases or {}).get("qa_eval") or {}
+    judge_phase_wall_ms = numeric_ms(judge_phase.get("judge_phase_wall_ms"))
+    agent_wall_times = [
+        float(value)
+        for item in items
+        if isinstance((value := (item.get("timing_breakdown") or {}).get("agent_wall_ms")), (int, float))
+    ]
+    agent_loop_counts = [
+        sum(
+            1
+            for call in item.get("model_call_metrics") or []
+            if str(call.get("call_type") or "") in {"agent", "recovery"}
+        )
+        for item in items
+        if isinstance(item.get("model_call_metrics"), list)
+        and item.get("model_call_metrics")
+        and any(call.get("call_type") for call in item["model_call_metrics"])
+    ]
+    return {
+        "judge_distribution": answer_dist,
+        "judge_valid_count": len(answer_scores),
+        "answer_quality_mean": round(sum(answer_scores) / len(answer_scores), 3) if answer_scores else None,
+        "exact_accuracy": round(answer_dist["2"] / len(answer_scores), 3) if answer_scores else None,
+        "core_accuracy": round((answer_dist["1"] + answer_dist["2"]) / len(answer_scores), 3)
+        if answer_scores
+        else None,
+        "retrieval_precision_micro": round(precision, 3) if precision is not None else None,
+        "retrieval_recall_micro": round(recall, 3) if recall is not None else None,
+        "retrieval_f1_micro": round(f1, 3) if f1 is not None else None,
+        "retrieval_precision_macro": round(media_macro["precision"], 3)
+        if media_macro["precision"] is not None
+        else None,
+        "retrieval_recall_macro": round(media_macro["recall"], 3)
+        if media_macro["recall"] is not None
+        else None,
+        "retrieval_f1_macro": round(media_macro["f1"], 3) if media_macro["f1"] is not None else None,
+        "retrieval_recall_mean": round(media_macro["recall"], 3)
+        if media_macro["recall"] is not None
+        else None,
+        "retrieval_metric_count": retrieval_metric_count,
+        "retrieval_metric_scope": "all_media" if typed_retrieval_items else "legacy_image_only",
+        "retrieval_excluded_unanswerable_count": excluded_unanswerable_count,
+        "media_retrieval_precision_micro": round(media_metrics["precision"], 3)
+        if media_metrics and media_metrics["precision"] is not None
+        else None,
+        "media_retrieval_recall_micro": round(media_metrics["recall"], 3)
+        if media_metrics and media_metrics["recall"] is not None
+        else None,
+        "media_retrieval_f1_micro": round(media_metrics["f1"], 3)
+        if media_metrics and media_metrics["f1"] is not None
+        else None,
+        "media_retrieval_precision_macro": round(media_macro["precision"], 3)
+        if media_macro["precision"] is not None
+        else None,
+        "media_retrieval_recall_macro": round(media_macro["recall"], 3)
+        if media_macro["recall"] is not None
+        else None,
+        "media_retrieval_f1_macro": round(media_macro["f1"], 3) if media_macro["f1"] is not None else None,
+        "media_retrieval_metric_count": media_metrics["metric_count"] if media_metrics else None,
+        "image_retrieval_precision_micro": round(image_metrics["precision"], 3)
+        if image_metrics and image_metrics["precision"] is not None
+        else None,
+        "image_retrieval_recall_micro": round(image_metrics["recall"], 3)
+        if image_metrics and image_metrics["recall"] is not None
+        else None,
+        "image_retrieval_f1_micro": round(image_metrics["f1"], 3)
+        if image_metrics and image_metrics["f1"] is not None
+        else None,
+        "image_retrieval_precision_macro": round(image_macro["precision"], 3)
+        if image_macro["precision"] is not None
+        else None,
+        "image_retrieval_recall_macro": round(image_macro["recall"], 3)
+        if image_macro["recall"] is not None
+        else None,
+        "image_retrieval_f1_macro": round(image_macro["f1"], 3) if image_macro["f1"] is not None else None,
+        "image_retrieval_metric_count": image_metrics["metric_count"] if image_metrics else None,
+        "image_ranking": image_ranking or None,
+        "video_retrieval_precision_micro": round(video_metrics["precision"], 3)
+        if video_metrics and video_metrics["precision"] is not None
+        else None,
+        "video_retrieval_recall_micro": round(video_metrics["recall"], 3)
+        if video_metrics and video_metrics["recall"] is not None
+        else None,
+        "video_retrieval_f1_micro": round(video_metrics["f1"], 3)
+        if video_metrics and video_metrics["f1"] is not None
+        else None,
+        "video_retrieval_precision_macro": round(video_macro["precision"], 3)
+        if video_macro and video_macro["precision"] is not None
+        else None,
+        "video_retrieval_recall_macro": round(video_macro["recall"], 3)
+        if video_macro and video_macro["recall"] is not None
+        else None,
+        "video_retrieval_f1_macro": round(video_macro["f1"], 3)
+        if video_macro and video_macro["f1"] is not None
+        else None,
+        "video_retrieval_metric_count": video_metrics["metric_count"] if video_metrics else None,
+        "evidence_distribution": evidence_dist,
+        "evidence_valid_count": len(evidence_scores),
+        "evidence_mean": round(sum(evidence_scores) / len(evidence_scores), 3) if evidence_scores else None,
+        "evidence_fully_supported_rate": round(evidence_dist["2"] / len(evidence_scores), 3)
+        if evidence_scores
+        else None,
+        "evidence_basically_supported_rate": round(
+            (evidence_dist["1"] + evidence_dist["2"]) / len(evidence_scores), 3
+        )
+        if evidence_scores
+        else None,
+        "task_decision_labeled_count": len(action_judges),
+        "task_decision_valid_count": len(action_valid),
+        "task_decision_accuracy": round(
+            sum(bool(value.get("correct")) for value in action_valid) / len(action_valid), 3
+        )
+        if action_valid
+        else None,
+        "json_parse_total": parse_total or None,
+        "json_parse_success": parse_success if parse_total else None,
+        "json_parse_success_rate": round(parse_success / parse_total, 3) if parse_total else None,
+        "qa_completion_valid_count": len(completion_valid),
+        "qa_completion_within_steps_rate": round(sum(completion_valid) / len(completion_valid), 3)
+        if completion_valid
+        else None,
+        "e2e_latency_mean_ms": round(sum(wall_times) / len(wall_times), 1) if wall_times else None,
+        "e2e_latency_p50_ms": nearest_rank_percentile(wall_times, 0.5),
+        "e2e_latency_p95_ms": nearest_rank_percentile(wall_times, 0.95),
+        "e2e_latency_max_ms": max(wall_times) if wall_times else None,
+        "agent_task_latency_mean_ms": round(sum(agent_wall_times) / len(agent_wall_times), 1)
+        if agent_wall_times
+        else None,
+        "judge_llm_latency_mean_ms": round(sum(judge_times) / len(judge_times), 1) if judge_times else None,
+        "judge_exclusive_wall_ms": judge_exclusive_ms,
+        "judge_phase_wall_ms": judge_phase_wall_ms,
+        "judge_concurrency": judge_phase.get("judge_concurrency"),
+        "agent_throughput_latency_ms": agent_throughput_ms,
+        "agent_throughput_latency_mode": agent_throughput_mode,
+        "agent_phase_wall_ms": agent_phase_wall_ms,
+        "agent_phase_completed_count": agent_phase_count if agent_phase_wall_ms is not None else None,
+        "agent_throughput_qa_per_s": round(1000 * agent_phase_count / agent_phase_wall_ms, 3)
+        if agent_phase_wall_ms and agent_phase_count
+        else None,
+        "agent_throughput_latency_sample_count": agent_phase_count
+        if agent_phase_wall_ms is not None
+        else len(judge_spans),
+        "agent_throughput_latency_total_count": len(items),
+        "agent_loop_calls_mean": round(sum(agent_loop_counts) / len(agent_loop_counts), 3)
+        if agent_loop_counts
+        else None,
+        "agent2_trace": summarize_agent2_trace(
+            [turn for item in items for turn in (item.get("runtime_turns") or [item])]
+        ),
+    }
+
+
+def benchmark_e2e_latency_excluding_judge_ms(
+    phases: dict[str, Any], items: Sequence[dict[str, Any]]
+) -> float | None:
+    """1.0 ``:4844``。"""
+    started_at = (phases.get("identity_seed") or {}).get("started_at")
+    qa_phase = phases.get("qa_eval") or {}
+    finished_at = qa_phase.get("agent_phase_finished_at") or qa_phase.get("finished_at")
+    if not started_at or not finished_at:
+        return None
+    try:
+        wall_ms = (
+            datetime.fromisoformat(str(finished_at)) - datetime.fromisoformat(str(started_at))
+        ).total_seconds() * 1000
+    except (TypeError, ValueError):
+        return None
+    if qa_phase.get("agent_phase_finished_at"):
+        return round(max(0.0, wall_ms), 1)
+    judge_values = [(item.get("timing_breakdown") or {}).get("judge_ms") for item in items]
+    if items and not all(isinstance(value, (int, float)) for value in judge_values):
+        return None
+    judge_ms = sum(float(value) for value in judge_values if isinstance(value, (int, float)))
+    return round(max(0.0, wall_ms - judge_ms), 1)
+
+
+def list_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """1.0 ``:6825`` 的 ``OrchestratorRepository._list_summary``。"""
+    saved = dict(state.get("summary") or {})
+    items = state.get("items") or []
+    recalls = [
+        item.get("retrieval_recall")
+        for item in items
+        if isinstance(item.get("retrieval_recall"), (int, float))
+    ]
+    scores = [score for item in items if (score := judge_score_for_summary(item.get("judge"))) is not None]
+    distribution = {str(score): scores.count(score) for score in (0, 1, 2)}
+    saved.update(
+        {
+            "total": saved.get("total") or state.get("qa_count") or len(items),
+            "completed": len(items),
+            "judge_valid_count": len(scores),
+            "judge_distribution": distribution,
+            "retrieval_recall_mean": saved.get("retrieval_recall_mean")
+            if saved.get("retrieval_recall_mean") is not None
+            else (round(sum(recalls) / len(recalls), 3) if recalls else None),
+            "answer_quality_mean": round(sum(scores) / len(scores), 3) if scores else None,
+        }
+    )
+    for key, value in capability_summary(items, state.get("phases") or {}).items():
+        if (
+            key == "retrieval_recall_mean"
+            or key.startswith(("retrieval_", "media_retrieval_", "image_retrieval_", "video_retrieval_"))
+            or saved.get(key) is None
+        ):
+            saved[key] = value
+    return saved
+
+
+def effective_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """1.0 ``:6662`` 的 ``OrchestratorRepository._effective_summary``。
+
+    **会就地改写 ``items``**（给每个 item 补 ``agent_stability``）——1.0 如此，
+    而之后的 ``get_run_items`` 又要用这份补过的数据，所以照搬。
+    """
+    saved = dict(state.get("summary") or {})
+    items = state.get("items") or []
+    if not saved.get("image_ranking"):
+        saved["image_ranking"] = (
+            mean_ranking_metrics(
+                [
+                    {"image_ranking": ranking_from_item(item)}
+                    for item in items
+                    if isinstance(item, dict) and retrieval_metric_eligible(item)
+                ]
+            )
+            or None
+        )
+    for item in items:
+        if isinstance(item, dict) and item.get("execution_trace"):
+            item["agent_stability"] = agent_stability(item)
+    recalls = [
+        float(value) for item in items if isinstance((value := item.get("retrieval_recall")), (int, float))
+    ]
+    scores = [score for item in items if (score := judge_score_for_summary(item.get("judge"))) is not None]
+    calls = [
+        call for item in items for call in (item.get("model_call_metrics") or []) if isinstance(call, dict)
+    ]
+    prompts = [
+        float(value)
+        for call in calls
+        if isinstance((value := call.get("preflight_prompt_tokens", call.get("prompt_tokens"))), (int, float))
+    ]
+    completions = [
+        float(value) for call in calls if isinstance((value := call.get("completion_tokens")), (int, float))
+    ]
+    contexts = [
+        float(prompt) + float(completion)
+        for call in calls
+        if isinstance(
+            (prompt := call.get("preflight_prompt_tokens", call.get("prompt_tokens"))), (int, float)
+        )
+        and isinstance((completion := call.get("completion_tokens")), (int, float))
+    ]
+    ttfts = [float(value) for call in calls if isinstance((value := call.get("ttft_ms")), (int, float))]
+    rates = [
+        float(value) for call in calls if isinstance((value := call.get("tokens_per_second")), (int, float))
+    ]
+    distribution = {str(score): scores.count(score) for score in (0, 1, 2)}
+    attributions = [item.get("attribution") or derive_attribution(item) for item in items]
+    attribution_primary: dict[str, int] = {}
+    attribution_layers: dict[str, int] = {}
+    for attribution in attributions:
+        primary = attribution.get("primary")
+        if primary:
+            attribution_primary[str(primary)] = attribution_primary.get(str(primary), 0) + 1
+        for key, value in (attribution.get("layers") or {}).items():
+            if value == "fail":
+                attribution_layers[str(key)] = attribution_layers.get(str(key), 0) + 1
+    saved.update(
+        {
+            "total": saved.get("total", state.get("qa_count") or len(items)),
+            "completed": sum(
+                1 for item in items if item.get("judge_status") in {"completed", "failed", "skipped"}
+            ),
+            "judge_valid_count": len(scores),
+            "judge_distribution": distribution,
+            "retrieval_recall_mean": saved.get(
+                "retrieval_recall_mean", round(sum(recalls) / len(recalls), 3) if recalls else None
+            ),
+            "answer_quality_mean": round(sum(scores) / len(scores), 3) if scores else None,
+            "exact_accuracy": round(distribution["2"] / len(scores), 3) if scores else None,
+            "core_accuracy": round((distribution["1"] + distribution["2"]) / len(scores), 3)
+            if scores
+            else None,
+            "llm_ttft_ms_mean": saved.get(
+                "llm_ttft_ms_mean", round(sum(ttfts) / len(ttfts), 1) if ttfts else None
+            ),
+            "llm_tokens_per_second_mean": saved.get(
+                "llm_tokens_per_second_mean", round(sum(rates) / len(rates), 1) if rates else None
+            ),
+            "prompt_tokens_total": (
+                saved.get("prompt_tokens_total")
+                if saved.get("prompt_tokens_total") is not None
+                else sum(prompts)
+            )
+            if calls
+            else None,
+            "completion_tokens_total": (
+                saved.get("completion_tokens_total")
+                if saved.get("completion_tokens_total") is not None
+                else sum(completions)
+            )
+            if calls
+            else None,
+            "llm_prompt_tokens_max": saved.get("llm_prompt_tokens_max", max(prompts) if prompts else None),
+            "llm_prompt_tokens_p95": saved.get("llm_prompt_tokens_p95", percentile(prompts, 0.95)),
+            "llm_completion_tokens_max": saved.get(
+                "llm_completion_tokens_max", max(completions) if completions else None
+            ),
+            "llm_completion_tokens_p95": saved.get(
+                "llm_completion_tokens_p95", percentile(completions, 0.95)
+            ),
+            "llm_context_tokens_max": saved.get(
+                "llm_context_tokens_max", max(contexts) if contexts else None
+            ),
+            "llm_context_tokens_p95": saved.get("llm_context_tokens_p95", percentile(contexts, 0.95)),
+            "llm_context_samples_count": saved.get("llm_context_samples_count", len(contexts)),
+            "tool_performance": aggregate_tool_performance(items),
+            "attribution": {"primary": attribution_primary, "layer_failures": attribution_layers},
+            "delivery_breakdown": saved.get("delivery_breakdown", aggregate_delivery(items)),
+        }
+    )
+    for key, value in capability_summary(items, state.get("phases") or {}).items():
+        if (
+            key == "retrieval_recall_mean"
+            or key.startswith(("retrieval_", "media_retrieval_", "image_retrieval_", "video_retrieval_"))
+            or key.startswith("json_parse_")
+            or saved.get(key) is None
+        ):
+            saved[key] = value
+    if saved.get("benchmark_e2e_latency_excluding_judge_ms") is None:
+        saved["benchmark_e2e_latency_excluding_judge_ms"] = benchmark_e2e_latency_excluding_judge_ms(
+            state.get("phases") or {},
+            items,
+        )
+    return saved
+
+
+# ---------------------------------------------------------------------------
+# 列表条目与 item 投影（1.0 ``:5309`` / ``:6559`` / ``:4919``）
+# ---------------------------------------------------------------------------
+
+
+def run_list_entry(state: dict[str, Any]) -> dict[str, Any]:
+    """1.0 ``:5309`` 的 ``OrchestratorRepository._run_list_entry``。"""
+    summary = list_summary(state)
+    summary_keys = {
+        "total",
+        "completed",
+        "judge_valid_count",
+        "judge_distribution",
+        "retrieval_recall_mean",
+        "retrieval_recall_macro",
+        "media_retrieval_recall_macro",
+        "answer_quality_mean",
+    }
+    result: dict[str, Any] = {
+        key: state.get(key)
+        for key in (
+            "run_id",
+            "mode",
+            "scope_source",
+            "scope_id",
+            "scope_name",
+            "album_id",
+            "model_profile",
+            "model_name",
+            "model_source",
+            "model_backend",
+            "qa_set",
+            "qa_count",
+            "status",
+            "created_at",
+            "started_at",
+            "finished_at",
+            "failed_phase",
+            "fatal_error",
+            "telemetry_source",
+            "runtime_framework",
+        )
+        if state.get(key) is not None
+    }
+    result["item_count"] = len(state.get("items") or [])
+    result["summary"] = {key: summary.get(key) for key in summary_keys if summary.get(key) is not None}
+    qa_phase: dict[str, Any] = (state.get("phases") or {}).get("qa_eval") or {}
+    if qa_phase:
+        result["phases"] = {
+            "qa_eval": {
+                key: qa_phase.get(key) for key in ("status", "progress") if qa_phase.get(key) is not None
+            }
+        }
+    rejudge: dict[str, Any] = state.get("rejudge") or {}
+    if rejudge:
+        result["rejudge"] = {
+            key: rejudge.get(key)
+            for key in (
+                "status",
+                "completed",
+                "total",
+                "failed",
+                "rejudge_id",
+            )
+            if rejudge.get(key) is not None
+        }
+    return result
+
+
+def item_summary(item: dict[str, Any], index: int, review: dict[str, Any] | None = None) -> dict[str, Any]:
+    """1.0 ``:6559`` 的 ``_item_summary``。"""
+    judge = item.get("judge") or {}
+    return {
+        "index": index,
+        "qa_id": item.get("qa_id"),
+        "question": item.get("question"),
+        "task_type": item.get("task_type"),
+        "question_type": item.get("question_type"),
+        "tags": item.get("tags") or [],
+        "angle": item.get("angle"),
+        "difficulty": item.get("difficulty"),
+        "answerability": item.get("answerability"),
+        "retrieval_recall": item.get("retrieval_recall"),
+        "retrieval_precision": item.get("retrieval_precision"),
+        "retrieval_f1": item.get("retrieval_f1"),
+        "media_retrieval_recall": item.get("media_retrieval_recall"),
+        "media_retrieval_precision": item.get("media_retrieval_precision"),
+        "media_retrieval_f1": item.get("media_retrieval_f1"),
+        "image_retrieval_recall": item.get("image_retrieval_recall"),
+        "image_retrieval_precision": item.get("image_retrieval_precision"),
+        "image_retrieval_f1": item.get("image_retrieval_f1"),
+        "video_retrieval_recall": item.get("video_retrieval_recall"),
+        "video_retrieval_precision": item.get("video_retrieval_precision"),
+        "video_retrieval_f1": item.get("video_retrieval_f1"),
+        "matched_count": len(item.get("matched_file_names") or []),
+        "ground_truth_count": len(item.get("retrieval_media_refs") or item.get("retrieval_image_ids") or []),
+        "ground_truth_image_count": len(item.get("retrieval_image_ids") or []),
+        "ground_truth_video_count": len(item.get("retrieval_video_ids") or []),
+        "judge": {
+            "score": judge.get("score"),
+            "status": judge.get("status"),
+            "rejudge_id": judge.get("rejudge_id"),
+            "consistency_status": judge_consistency_status(judge),
+        },
+        "task_judge": item.get("task_judge") or {},
+        "task_judges": item.get("task_judges") or [],
+        "evidence_judge": item.get("evidence_judge") or {},
+        "agent_stability": item.get("agent_stability") or {},
+        "agent_status": item.get("agent_status"),
+        "termination_reason": item.get("termination_reason"),
+        "has_error": bool(item.get("error")),
+        "deterministic_delivery": ((item.get("guard_debug") or {}).get("deterministic_delivery") or {}),
+        "delivery_status": item.get("delivery_status") or {},
+        "model_call_count": len(item.get("model_call_metrics") or []),
+        "tool_call_count": len(item.get("tool_trace") or []),
+        "attribution": item.get("attribution") or {},
+        "review": review,
+    }
+
+
+def hydrate_qa_metadata(item: dict[str, Any], qa_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """1.0 ``:4919`` 的 ``_hydrate_qa_metadata``；``qa_metadata`` 从 ``self`` 变成入参。"""
+    metadata = qa_metadata.get(str(item.get("qa_id") or "")) or {}
+    hydrated = {**metadata, **item}
+    tag_fields = {
+        "task_type": "task",
+        "question_type": "question",
+        "angle": "angle",
+        "difficulty": "difficulty",
+        "answerability": "answerability",
+        "expected_action": "action",
+    }
+    tags = [str(tag).strip() for tag in (hydrated.get("tags") or []) if str(tag).strip()]
+    for field, prefix in tag_fields.items():
+        value = str(hydrated.get(field) or "").strip()
+        if value:
+            tags.append(f"{prefix}:{value}")
+    hydrated["tags"] = list(dict.fromkeys(tags))
+    judge = hydrated.get("judge") or {}
+    consistency_status = judge_consistency_status(judge)
+    if consistency_status:
+        hydrated["judge"] = {**judge, "consistency_status": consistency_status}
+    # P/R/F1 是确定性的：老 run 只有在 GT 与实际召回的文件名都留下时才重算。
+    gt_names = {Path(str(value)).name for value in hydrated.get("retrieval_image_ids") or []}
+    predicted_names = {Path(str(value)).name for value in hydrated.get("predicted_file_names") or []}
+    if gt_names and "predicted_file_names" in hydrated:
+        matched = gt_names & predicted_names
+        precision = len(matched) / len(predicted_names) if predicted_names else 0.0
+        recall = len(matched) / len(gt_names)
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        if hydrated.get("retrieval_precision") is None:
+            hydrated["retrieval_precision"] = precision
+        if hydrated.get("retrieval_recall") is None:
+            hydrated["retrieval_recall"] = recall
+        if hydrated.get("retrieval_f1") is None:
+            hydrated["retrieval_f1"] = f1
+    if not hydrated.get("attribution"):
+        hydrated["attribution"] = derive_attribution(hydrated)
+    hydrated["tool_trace"] = bind_tool_calls_to_model_rounds(
+        hydrated.get("tool_trace") or [],
+        hydrated.get("execution_trace") or [],
+        hydrated.get("model_call_metrics") or [],
+    )
+    hydrated["model_call_metrics"] = annotate_model_calls(
+        hydrated.get("model_call_metrics") or [], hydrated.get("execution_trace") or []
+    )
+    agent_steps = [
+        step
+        for step in hydrated.get("execution_trace") or []
+        if isinstance(step, dict)
+        and str(step.get("stage") or step.get("type") or "") == "model"
+        and str(step.get("call_type") or "agent") in {"agent", "recovery"}
+    ]
+    if agent_steps:
+        hydrated["agent_stability"] = agent_stability(hydrated)
+    return hydrated
+
+
+# ---------------------------------------------------------------------------
+# 遥测采样历史（1.0 ``:5364-5488``）
+# ---------------------------------------------------------------------------
+
+GPU_SAMPLE_FIELDS = (
+    "temperature_c",
+    "cpu_temperature_c",
+    "gpu_utilization_pct",
+    "memory_used_mib",
+    "gpu_allocated_unified_memory_mib",
+    "gpu_in_use_unified_memory_mib",
+    "model_process_memory_used_mib",
+    "kv_cache_usage_pct",
+    "model_process_system_memory_used_mib",
+    "benchmark_process_memory_used_mib",
+    "benchmark_process_gpu_memory_mib",
+    "kv_cache_used_tokens",
+    "power_draw_w",
+    "sm_clock_mhz",
+    "other_processes_memory_mib",
+    "all_processes_memory_mib",
+    "system_memory_used_mib",
+    "system_memory_total_mib",
+    "system_memory_delta_mib",
+    "sentrix_stack_pss_mib",
+    "product_stack_memory_mib",
+)
+
+
+def series_stats(history: Sequence[dict[str, Any]], key: str) -> dict[str, Any]:
+    """1.0 ``:5364`` 的 ``_series_stats``。"""
+    values = [float(point[key]) for point in history if isinstance(point.get(key), (int, float))]
+    if not values:
+        return {}
+    ordered = sorted(values)
+    count = len(ordered)
+    return {
+        "peak": ordered[-1],
+        "mean": round(sum(values) / count, 1),
+        "p50": ordered[count // 2],
+        "p95": ordered[min(count - 1, int(count * 0.95))],
+    }
+
+
+def downsample_history(history: Sequence[dict[str, Any]], limit: int = 240) -> list[dict[str, Any]]:
+    """1.0 ``:5378`` 的 ``_downsample_history``：阶段切换点必须保留。"""
+    count = len(history)
+    if count <= limit:
+        return list(history)
+    chosen = {0, count - 1}
+    previous = history[0].get("phase")
+    for index, point in enumerate(history):
+        phase = point.get("phase")
+        if phase != previous:
+            chosen.add(index)
+            previous = phase
+    step = (count - 1) / (limit - 1)
+    for index in range(limit):
+        chosen.add(min(count - 1, int(round(index * step))))
+    if len(chosen) > limit:
+        chosen = {min(count - 1, int(round(index * step))) for index in range(limit)}
+        chosen.add(count - 1)
+    return [history[index] for index in sorted(chosen)]
+
+
+def publish_full_sample_phase_stats(result: dict[str, Any], live: dict[str, Any]) -> None:
+    """1.0 ``:5395`` 的 ``_publish_full_sample_phase_stats``。"""
+    stats = live.pop("_full_sample_stats", None) or {}
+    phases = result.get("phases")
+    if not isinstance(phases, dict) or not stats:
+        return
+    gpu = phases.get("gpu_metrics")
+    if not isinstance(gpu, dict):
+        return
+    phases = dict(phases)
+    gpu = dict(gpu)
+    for key, value in stats.items():
+        if value:
+            gpu[key] = value
+    phases["gpu_metrics"] = gpu
+    result["phases"] = phases
+
+
+def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> None:
+    """1.0 ``:5411`` 的 ``_attach_gpu_sample_history``；入参从文件路径换成原始行。
+
+    坏行跳过、整段异常兜底成空表——1.0 的 ``except Exception`` 口径照搬：遥测是增强，
+    它读坏了不该让整个 run 打不开。
+    """
+    history: list[dict[str, Any]] = []
+    latest: dict[str, Any] = {}
+    peak: dict[str, Any] = {}
+    try:
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(item, dict):
+                continue
+            point = {k: item[k] for k in GPU_SAMPLE_FIELDS if item.get(k) is not None}
+            if point:
+                history.append(
+                    {
+                        "t": item.get("_t", time.time()),
+                        "phase": item.get("phase", "unassigned"),
+                        "phase_label": item.get("phase_label", "未分配阶段"),
+                        **point,
+                    }
+                )
+                latest = point
+                for key, value in point.items():
+                    if isinstance(value, (int, float)):
+                        peak[key] = max(float(peak.get(key, value)), float(value))
+        if history:
+            raw_scopes = live.get("scopes")
+            scopes: dict[str, Any] = raw_scopes if isinstance(raw_scopes, dict) else {}
+            if scopes.get("system_memory"):
+                latest.setdefault("system_memory_scope", scopes["system_memory"])
+                peak.setdefault("system_memory_scope", scopes["system_memory"])
+            if scopes.get("benchmark_process_ram"):
+                latest.setdefault("benchmark_process_memory_scope", scopes["benchmark_process_ram"])
+                peak.setdefault("benchmark_process_memory_scope", scopes["benchmark_process_ram"])
+            live["_full_sample_stats"] = {
+                "model_process_system_memory_used_mib": series_stats(
+                    history, "model_process_system_memory_used_mib"
+                ),
+                "system_memory_delta_mib": series_stats(history, "system_memory_delta_mib"),
+                "cpu_temperature_c": series_stats(history, "cpu_temperature_c"),
+                "temperature_c": series_stats(history, "temperature_c"),
+            }
+            live["history"] = downsample_history(history, limit=240)
+            live["latest"] = latest
+            live["peak"] = peak
+            live["samples_count"] = max(int(live.get("samples_count") or 0), len(history))
+        elif not isinstance(live.get("history"), list):
+            live["history"] = []
+    except Exception:  # noqa: BLE001 —— 1.0 如此：遥测读坏了不能拖垮整个 run 详情
+        if not isinstance(live.get("history"), list):
+            live["history"] = []
+
+
+def paginate_rows(rows: list[Any], page: int, page_size: int, *, max_page_size: int = 100) -> dict[str, Any]:
+    """1.0 ``:779``。``GET /api/runs`` 的分页形状。"""
+    page = max(1, int(page))
+    page_size = max(1, min(max_page_size, int(page_size)))
+    total = len(rows)
+    pages = max(1, math.ceil(total / page_size))
+    page = min(page, pages)
+    start = (page - 1) * page_size
+    return {
+        "runs": rows[start : start + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": pages,
+        "has_previous": page > 1,
+        "has_next": page < pages,
+    }
