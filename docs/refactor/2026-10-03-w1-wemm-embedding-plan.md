@@ -189,6 +189,80 @@ episodic   BAAI/bge-m3                 1024  observation     46   （旧，不�
 semantic   BAAI/bge-m3                 1024  observation     46   （旧，不动）
 ```
 
+### 补做：把方案漂移接进查询侧（用户 2026-10-03 裁决）
+
+上面那节「反面验证未达标」之后，用户裁决**补上**。做法与依据：
+
+**判据只有一条，不查资产数**：某个 space 里**有**向量，却**没有一条属于当前方案**。
+两个数都从现成的 `VectorRepository.count` 拿——`model_name=None` 是不按模型过滤，
+所以两个数一比就知道是漂移。
+
+```
+count(space=X, model_name=<当前方案>)  == 0
+count(space=X)                          >  0     ← 有别人的向量
+```
+
+**为什么不用「本该有多少」**（查资产数/观察数再比对）：那要多两次查询，还得区分
+「这个 scope 本来就没资产」与「有资产但没嵌」；而上面这条判据在两个数都是 0 时
+**自然不报**，正好把「刚建、还没导入过东西的 scope」放过去——不需要额外的特例。
+
+| 文件 | 改动 |
+|---|---|
+| `application/retrieval/scheme_drift.py` | **新增**：`scheme_drift_reason(vectors, *, space, model_name) -> str`，没问题时返回空串 |
+| `application/retrieval/retrieve_visual.py` | 漂移时**覆盖** `degraded` / `reason`（它比索引健康度更根本：索引再健康，库里没有当前方案的向量，召回就是错的） |
+| `application/retrieval/retrieve_text_ann.py` | 两个 space 各查一次，任一漂移即报。**这条通道原先写着「没有降级档」**——那句话仍然对（它不依赖索引），但不再等于「它永远不会降级」，注释已改 |
+
+**没有新增端口**：`VectorRepository.count` 本来就接受可选的 `model_name`，
+这个接口当初就是为「同一个口径去和 Qdrant 的 collection 计数比对」而设计的，
+这里只是把同一个口径用在另一个方向。
+
+**测试**：`test_retrieve_visual.py` +2、`test_retrieve_text_ann.py` +3。
+两边的假仓储都加了可控的「外来向量」入口（**默认空，既有用例语义不变**）。
+
+**夹具刻意造了两种状态**，因为只造一种的话两种坏实现都能过：
+
+- **空 space**（两个数都是 0）→ 不许报。防的是「恒定报警」；
+- **漂移**（不带过滤数得到、带过滤数不到）→ 必须报。防的是「永远不报」。
+
+**定点变异 5/5 被杀**：视觉不报 · 去掉 `stored == 0` 的判据 · 文本不报 ·
+文本只查 semantic 漏掉 episodic · 判据写反。
+
+**一处值得记的写法问题**：空 store 那条我一开始断言的是 `result.degraded is False`，
+红了——因为那个夹具没配索引，`_recall` 先置了 `no_index_configured`。
+**`degraded` 是多个来源共用的一个字段，拿它做断言等于把别的原因也算进来。**
+改成断言「**报的不是漂移**」（`"scheme_out_of_sync" not in reason`），那才是两个夹具
+真正的差别所在。
+
+### 真实数据复验（153）——从「看不出」到「说清楚」
+
+同一个反面场景重跑（删掉 145 行当前方案的向量，检索，再恢复）：
+
+```
+修之前
+  命中 2 | degraded False | reason '' | auth 0
+  visual_ann ok 0 · text_ann ok 0 · lexical ok 2
+
+修之后
+  命中 2 | degraded True | auth 0
+  visual_ann degraded 0 | scheme_out_of_sync:visual 里有 170 条向量，没有一条属于
+                          当前方案 tencent/WeMM-Embedding-2B；先重建再检索（scripts/…）
+  text_ann   degraded 0 | scheme_out_of_sync:semantic 里有 46 条向量，…同上
+  lexical    ok         2
+
+恢复后
+  命中 3 | degraded False | auth 53
+```
+
+**通道状态从 `ok` 变成 `degraded`，响应级 `degraded` 置起来，消息里带着补救动作**
+——不是只说「不匹配」，是告诉你跑哪个脚本。这正是 1.0 `consistency.py` 的
+`ConsistencyError` 想做而没接上的事。
+
+**一处已知的不精确**（不修，记在这里）：`visual` 那句报的是 **170** 条，而其中 117 条是
+`buffalo_l` 的人脸向量——它们与嵌入方案无关，永远不会变成 wemm。数字因此比「53 张图的
+旧向量」大。判据本身不受影响（`authoritative == 0 && stored > 0` 仍然只在真漂移时成立），
+补救动作也不受影响；要让数字精确得给 `count` 加 `source_type` 过滤，那是接口变更，
+与这条判据的价值不成比例。
+
 ### 顺带修掉一条前端门禁的漏洞（F7 留下的，W1 期间发现）
 
 **W1 的测试 agent 报告 `make web-check` 是红的**，报在 F7 加的

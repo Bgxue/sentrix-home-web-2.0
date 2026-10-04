@@ -43,9 +43,18 @@ class FakeEmbedder:
 
 
 class FakeVectors:
-    def __init__(self, hits: list[VectorHit] | None = None, total: int | None = None) -> None:
+    def __init__(
+        self,
+        hits: list[VectorHit] | None = None,
+        total: int | None = None,
+        scheme_total: int | None = None,
+    ) -> None:
         self.hits = hits or []
         self.total = len(self.hits) if total is None else total
+        # **带当前 model 过滤**数出来的条数。默认与 ``total`` 相同——既有用例里
+        # 「这个 space 有 7 条」与「有 7 条属于当前方案」本来就是同一件事。
+        # 只有漂移用例需要让它为 0 而 ``total`` 不为 0。
+        self.scheme_total = self.total if scheme_total is None else scheme_total
         self.searches: list[dict] = []
 
     def upsert(self, record):
@@ -55,7 +64,7 @@ class FakeVectors:
         return False
 
     def count(self, *, space: str, model_name: str | None = None) -> int:
-        return self.total
+        return self.total if model_name is None else self.scheme_total
 
     def search_exact(self, *, space, vector, limit, scope_id=None, model_name=None):
         self.searches.append({"space": space, "limit": limit, "scope_id": scope_id, "model_name": model_name})
@@ -299,3 +308,36 @@ def test_request_is_immutable():
     base = request()
 
     assert replace(base, limit=1).limit == 1
+
+
+def test_vectors_from_another_scheme_are_reported_as_scheme_drift():
+    """**库里有向量，却没有一条属于当前方案** = 换了方案没重建。
+
+    2026-10-03 实测：这种状态下这条通道原本报 `status=ok / candidate_count=0`，
+    响应里 `degraded` 是 `False`、`reason` 是空串，检索静默少给结果。
+
+    定点变异：去掉 `execute` 里那段 `scheme_drift_reason`，这条红。
+    """
+    vectors = FakeVectors(hits=[hit("asset_a", 0.31)], total=53, scheme_total=0)
+
+    result = build(vectors=vectors).execute(request())
+
+    assert result.degraded is True
+    assert "scheme_out_of_sync" in result.degraded_reason
+    assert "53" in result.degraded_reason
+
+
+def test_an_empty_store_is_not_scheme_drift():
+    """**空 space 不是漂移。** 两个数都是 0 时必须安静——否则一个刚建、还没导入过东西的
+    scope 每次检索都挂一条假警报，真出了漂移反而没人看。
+
+    定点变异：把判据写成只看「当前方案的条数是 0」，这条红。
+    """
+    vectors = FakeVectors(hits=[hit("asset_a", 0.31)], total=0, scheme_total=0)
+
+    result = build(vectors=vectors).execute(request())
+
+    # **断言的判据是「报的不是漂移」，不是「degraded 为假」。** 这个夹具没配索引，
+    # `_recall` 会先置 `no_index_configured`——拿 degraded 做断言等于把别的原因
+    # 也算进来，那样这条用例就测不到漂移判据本身了。
+    assert "scheme_out_of_sync" not in result.degraded_reason

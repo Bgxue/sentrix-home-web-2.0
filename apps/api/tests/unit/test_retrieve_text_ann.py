@@ -43,8 +43,17 @@ class FakeTextEmbedder:
 class FakeVectors:
     """按 space 返回预设命中；记录每次查询的 space，好断言「两个空间都查了」。"""
 
-    def __init__(self, by_space: dict[str, list[VectorHit]] | None = None) -> None:
+    def __init__(
+        self,
+        by_space: dict[str, list[VectorHit]] | None = None,
+        *,
+        foreign: dict[str, int] | None = None,
+    ) -> None:
         self.by_space = by_space or {}
+        # 「这个 space 里有 N 条向量，但**都属于别的方案**」：不带 model 过滤数得到，
+        # 带当前 model 数不到，``search_exact`` 也查不出东西——漂移的真实形状。
+        # 默认空，既有用例语义不变。
+        self.foreign = foreign or {}
         self.queried: list[str] = []
 
     def search_exact(self, *, space, vector, limit, scope_id=None, model_name=None):
@@ -52,6 +61,8 @@ class FakeVectors:
         return list(self.by_space.get(space, []))[:limit]
 
     def count(self, *, space: str, model_name=None) -> int:
+        if model_name is None:
+            return len(self.by_space.get(space, [])) + self.foreign.get(space, 0)
         return len(self.by_space.get(space, []))
 
 
@@ -184,3 +195,45 @@ def test_backend_is_exact_not_a_degraded_index():
     assert result.backend == "sqlite_exact"
     assert result.degraded is False
     assert result.authoritative_vectors == 1
+
+
+def test_vectors_from_another_scheme_are_reported_as_scheme_drift():
+    """文本通道写两个 space，任一漂移都要报。
+
+    定点变异：去掉 `execute` 里那段 `drift` 计算，这条红；
+    只查 `semantic` 不查 `episodic`，下面第二条红。
+    """
+    vectors = FakeVectors(foreign={scheme.SEMANTIC_SPACE: 46})
+
+    result = RetrieveTextAnn(embedder=FakeTextEmbedder(), vectors=vectors).execute(
+        TextSearchRequest(text="海边", scope_id=SCOPE)
+    )
+
+    assert result.degraded is True
+    assert "scheme_out_of_sync" in result.degraded_reason
+
+
+def test_drift_in_the_episodic_space_alone_is_still_reported():
+    """**只漂了 episodic 也要报。** 只查 semantic 的实现会漏掉这一种——
+    两个 space 各自独立，一个干净不代表另一个干净。
+    """
+    vectors = FakeVectors(foreign={scheme.EPISODIC_SPACE: 46})
+
+    result = RetrieveTextAnn(embedder=FakeTextEmbedder(), vectors=vectors).execute(
+        TextSearchRequest(text="海边", scope_id=SCOPE)
+    )
+
+    assert result.degraded is True
+    assert scheme.EPISODIC_SPACE in result.degraded_reason
+
+
+def test_an_empty_store_is_not_scheme_drift():
+    """空 store 两个数都是 0 → 安静。理由同视觉通道那条。"""
+    vectors = FakeVectors()
+
+    result = RetrieveTextAnn(embedder=FakeTextEmbedder(), vectors=vectors).execute(
+        TextSearchRequest(text="海边", scope_id=SCOPE)
+    )
+
+    assert result.degraded is False
+    assert result.degraded_reason == ""

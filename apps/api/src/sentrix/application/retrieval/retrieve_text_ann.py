@@ -31,6 +31,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from sentrix.application.retrieval.scheme_drift import scheme_drift_reason
 from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.fusion import fuse
 from sentrix.domain.retrieval.models import CandidateHit
@@ -112,6 +113,19 @@ class RetrieveTextAnn:
         fetch = max(limit * OVERSAMPLE_FACTOR, limit)
         candidates = self._recall(request.scope_id, query, fetch)
         authoritative = self._vectors.count(space=scheme.SEMANTIC_SPACE, model_name=self._embedder.model_id)
+        # 文本通道写**两个** space，所以两个都要看：只查 semantic 的话，episodic 侧
+        # 单独漂移会漏过去。
+        drift = next(
+            (
+                found
+                for found in (
+                    scheme_drift_reason(self._vectors, space=space, model_name=self._embedder.model_id)
+                    for space in SPACES
+                )
+                if found
+            ),
+            "",
+        )
 
         hits = [
             CandidateHit(asset_id=asset_id, channel=CHANNEL, rank=rank, raw_score=score)
@@ -130,11 +144,12 @@ class RetrieveTextAnn:
                 for candidate in fused[:limit]
             ),
             backend=BACKEND_EXACT,
-            # 与视觉通道不同，**文本通道没有降级档**：它本来就只查权威存储。
-            # 置 ``degraded=False`` 不是「索引健康」，是「这条通道不依赖索引」——
-            # 两者的区别写在这里，免得读的人以为它比视觉通道更可信。
-            degraded=False,
-            degraded_reason="",
+            # 与视觉通道不同，**文本通道不依赖索引**：它本来就只查权威存储，所以
+            # 「索引落后」这一类降级在这里不存在。但这不等于它永远不会降级——
+            # **方案漂移**（库里有向量、没有一条属于当前方案）对它是同样致命的，
+            # 那条判据就在上面。两者的区别写在这里，免得读的人以为它比视觉通道更可信。
+            degraded=bool(drift),
+            degraded_reason=drift,
             authoritative_vectors=authoritative,
         )
 

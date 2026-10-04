@@ -22,6 +22,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from sentrix.application.retrieval.scheme_drift import scheme_drift_reason
 from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.fusion import fuse
 from sentrix.domain.retrieval.models import CandidateHit
@@ -103,6 +104,14 @@ class RetrieveVisual:
         limit = max(1, request.limit)
         candidates, backend, degraded, reason = self._recall(request, query, limit)
         authoritative = self._vectors.count(space=scheme.VISUAL_SPACE, model_name=self._embedder.model_id)
+        # **方案漂移盖过索引健康度。** 索引再健康，只要库里没有一条当前方案的向量，
+        # 召回出来的东西就是错的——所以这里不看 ``_recall`` 有没有已经置过 degraded，
+        # 直接覆盖。详见 ``scheme_drift`` 模块注释里那次实测。
+        drift = scheme_drift_reason(
+            self._vectors, space=scheme.VISUAL_SPACE, model_name=self._embedder.model_id
+        )
+        if drift:
+            degraded, reason = True, drift
 
         hits = [
             CandidateHit(
