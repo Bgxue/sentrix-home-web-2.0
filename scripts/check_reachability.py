@@ -55,6 +55,28 @@ PENDING_WIRING: dict[str, str] = {
     # 判据是「有没有被 import 过」。模块内那几个**规则函数**（``derive_filter`` /
     # ``hard_conditions`` / ``normalize_group_by``）至今没有生产调用者，而只要模块里
     # 有一个类型被端口引用，整个模块就算接上了。T121c 的工具是它们的第一个真调用者。
+    #
+    # —— S9a（2026-10-04）：PhotoBench 的运行时提供者与 Apple 遥测 ——
+    #
+    # 这四个模块是新包 `apps/photobench` 在 S9a 里的全部源码，**它们这一轮天然是
+    # 孤儿**：真正构造它们的是 PhotoBench 自己的编排链（1.0 的
+    # `select_runtime_providers` 与 FastAPI 装配点），而那一层要 S9b 的 T911–T913
+    # 才建出来。用户 2026-10-04 裁决把 S9 切成「S9a 遥测 → S9b 主链 → S9c 适配」，
+    # 所以「先落地、后接线」是计划本身，不是托词；接线任务写在每条的右值里。
+    #
+    # **另注本脚本跑 photobench 时的一个已知形态**：ROOTS 是 `sentrix.main` /
+    # `sentrix.bootstrap`，两个根在 `apps/photobench/src` 里都不存在，于是从根出发
+    # 的可达集为空、四个模块无一例外全落进这张表。这不是误报——PhotoBench 这一轮
+    # 确实一个生产入口都没有；但**等 S9b 建出 `photobench.main` 之后，要记得把
+    # ROOTS 也扩到它**，否则这张表会因为「根找不到」而永远合法。
+    "photobench.domain.runtime.ports": ("S9b · T911–T913（编排侧按 port 装配 RuntimeProviders）"),
+    "photobench.infrastructure.runtime.apple_telemetry": (
+        "S9b · T911（select_runtime_providers 在 Apple 主机上构造它）"
+    ),
+    "photobench.infrastructure.runtime.hardware": (
+        "S9b · T911（HostNvidiaTelemetryProvider.gpu_stats 读 CPU 温度）"
+    ),
+    "photobench.infrastructure.runtime.providers": ("S9b · T911–T913（编排链与工厂装配全部 provider）"),
 }
 
 

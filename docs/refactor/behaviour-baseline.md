@@ -538,3 +538,41 @@
 
 **转写不在本切片**（用户裁决②「不要 FunASR」）：音频的交付面只有「能导入、能读元数据、
 能播、能按元数据/文件名检索」。理由与代价逐条登记在 `docs/refactor/s8-deviations.md` §1.1。
+
+## PhotoBench 运行时提供者与遥测（S9a · T901–T904，2026-10-04）
+
+1.0 的 `backend/runtime_providers.py`（869 行）与 `backend/apple_telemetry.py`（418 行）
+**没有自己的行为文档**——口径只存在于代码里。S9a 把它们搬进 `apps/photobench`，这张表
+是逐行读出来的那份口径，2.0 侧实现见
+`apps/photobench/src/photobench/infrastructure/runtime/`。
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 系统进程判定·端口 | `8771, 8091, 8500, 8501, 8100, 8101, 6333` | `runtime_providers.py:45-48` |
+| 系统进程判定·关键词 | `photobench, benchmark_orchestrator.py, sentrix, vllm, llama-server, ollama, qdrant` | `runtime_providers.py:49-55` |
+| 上面两条的 env 覆盖 | `PHOTOBENCH_SYSTEM_PROCESS_PORTS` / `PHOTOBENCH_SYSTEM_PROCESS_KEYWORDS`；**空串与没设同义**（都回到默认值，不是「关掉判据」） | `runtime_providers.py:38-42` |
+| Apple 侧的同一组常量 | **独立一份**：多一个 `mlx`，且**不读**上面两个 env | `apple_telemetry.py:35-39` |
+| 端点归一化 | `host:port` → `http://host:port`；无 `/vN` 后缀则补 `/v1` | `runtime_providers.py:24-35` |
+| 推理探活回退链 | `/v1/models` → `/health` → `/api/health`；全失败报 `unavailable` 并带 `/models` 那次的错因 | `:417-431` |
+| 推理超时 | `list_models` `min(15, timeout)`；`health` 的 `/models` 用同一个、回退探活用 `min(10, timeout)`；`chat` = 传入值或构造时的 `timeout`（工厂默认 **180**）；`token_count` `min(15, timeout)` 且不超过构造时的 timeout | `:434, :425, :443-453, :465-472` |
+| token 预算的合法性 | `prompt_tokens < 1` 或 `max_model_len < 1` → 抛 `ValueError`（不接受「成功但为空」的预算） | `:475-476` |
+| Manager 生命周期 | `_request` 默认超时 **30**；`/profiles` `/state` **15**；`/start` **120**；`/stop` **90** | `:501-518` |
+| `/stop` 的默认体 | 调用方不给 payload 时发 `{"timeout": 60}` | `:515` |
+| `/profiles` 两种响应形状 | 顶层数组或 `{"profiles": [...]}`，都认 | `:507-509` |
+| Manager 遥测超时 | `/gpu-stats` `/process-memory` 各 **10 秒**，失败落 `unavailable` + `error`，**不抛** | `:527-534` |
+| 进程内存归属的 PID 规则 | 给了 `model_pids` 就**只认这批 PID**（另吸收 `root_pid` / `tracked_pids` / `processes[].pid`），否则才用 `process_hint` / `endpoint_port` 去命令行模糊匹配 | `:275-296` |
+| 产品内存总量（Linux） | 只有「每个相关进程 PSS 都在」且模型的 VmRSS 与 smaps-Rss 两个补偿输入都在时才写；值 = 相关进程 PSS 和 + `max(0, 模型VmRSS − 模型smapsRss)`（UMA 补偿） | `:329-338` |
+| 产品内存总量（Apple） | 相关进程 footprint 之和（含模型），**不做** UMA 补偿；仅当**恰好一个**模型进程且它的 footprint 读得到时才写 `root_pid` / 模型内存那几位 | `apple_telemetry.py:352-381` |
+| 缺失值的口径 | 一律**缺席或 `unavailable`**，绝不用 0 / RSS 顶替（0 是合法测量值） | 两文件的注释与 `:329`、`:365` |
+| 状态词 | `available` / `unavailable`（探了但没探到）/ `not_applicable`（这台机器上不适用，如无 Manager、UMA 无独立 KV 池） | `:570-583, :832-842`，`apple_telemetry.py:417` |
+| Apple 设备采样缓存 TTL | **1.0 秒** | `apple_telemetry.py:319-322` |
+| Apple 端口扫描缓存 TTL | **2.0 秒** | `apple_telemetry.py:331-336` |
+| Orin PSS 采样 TTL | **5 秒**（ssh 比 `/metrics` 贵得多） | `runtime_providers.py:742-745` |
+| Orin 端点的绑定 | 写死 `http://192.168.0.118:8100` + `orin@192.168.0.118` + PID 文件 `/home/orin/VLM/gemma4/results/orin/server_photobench_8100.pid`；端点对不上直接 `ValueError` | `:708-715` |
+| Orin 的 ssh 口径 | `BatchMode=yes`、`ConnectTimeout=3`、`ConnectionAttempts=1`、子进程超时 **5 秒** | `:758-762, :797-801` |
+| Orin 的远端闸门 | PID 文件非空且为数字 → comm 必须是 `llama-server` → 命令行必须含 `--port 8100` → PSS 必须读得到；任一不过即撤掉 `process_memory_used_mib` 并写 `pss_error` | `:746-778` |
+| macmon 口径 | `macmon pipe -i 1000` 一个长命 pipe（`-s` 是有限探测，取不到后续样本）；`gpu_active_ratio` → 利用率，`sys_power`/`cpu_power`/`gpu_power` → 功耗 | `apple_telemetry.py:101-159, :75-98` |
+| vm_stat 已用内存 | `pages active + pages wired down + pages occupied by compressor`，scope `apple_app_wired_compressed`；三项缺一返回 `None` | `apple_telemetry.py:46-72` |
+| 子进程超时（Apple） | `_run_text` 默认 **3 秒**；`sysctl` **2 秒**、`lsof` **4 秒** | `apple_telemetry.py:227-285` |
+| 子进程超时（Linux 本机） | `nvidia-smi` **5 秒**（`check=True`，非零退出走 `unavailable`） | `runtime_providers.py:176-180, :598-601` |
+| 工厂的两条装配路 | 有 `manager_url` → Manager 生命周期 + Manager 遥测；没有 → 两个 `Unavailable*` 占位。**别的 host 形态（Ollama / llama.cpp / Jetson / Apple / Orin）不在工厂里** | `:852-869`（分支逻辑在编排侧 `benchmark_orchestrator.py:176` 的 `select_runtime_providers`，归 S9b） |

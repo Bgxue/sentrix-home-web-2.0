@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch test test-unit test-contract test-integration coverage check-docs web-check ci dev web-dev
+.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration coverage check-docs web-check ci dev web-dev
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -16,17 +16,21 @@ install: ## 建 venv 并安装全部依赖
 	uv python install 3.11
 	uv venv --python 3.11 --python-preference only-managed --clear --seed .venv
 	$(PIP) install -q -e "apps/api[dev]"
+	# PhotoBench 是**第二个发行包**（apps/photobench）。不装它，`photobench.*` 就
+	# 解析不到——mypy（files 里含 apps/photobench/src）、pytest（testpaths 含它的
+	# tests）与三个 arch 脚本会一起报「模块不存在」，而那种红指向的是环境而不是代码。
+	$(PIP) install -q -e apps/photobench
 	cd apps/web && npm ci
 
 lint: ## ruff 检查
-	.venv/bin/ruff check apps/api/src apps/api/tests scripts
+	.venv/bin/ruff check apps/api/src apps/api/tests apps/photobench/src apps/photobench/tests scripts
 
 format: ## ruff 自动修复
-	.venv/bin/ruff check --fix apps/api/src apps/api/tests scripts
-	.venv/bin/ruff format apps/api/src apps/api/tests scripts
+	.venv/bin/ruff check --fix apps/api/src apps/api/tests apps/photobench/src apps/photobench/tests scripts
+	.venv/bin/ruff format apps/api/src apps/api/tests apps/photobench/src apps/photobench/tests scripts
 
 format-check: ## ruff 格式检查（只读）
-	.venv/bin/ruff format --check apps/api/src apps/api/tests scripts
+	.venv/bin/ruff format --check apps/api/src apps/api/tests apps/photobench/src apps/photobench/tests scripts
 
 typecheck: ## mypy strict（全包 + scripts）
 	.venv/bin/mypy
@@ -41,6 +45,18 @@ arch: ## 分层契约检查 + 生产可达性（已在 ci 链上）
 	.venv/bin/lint-imports
 	$(PY) scripts/check_reachability.py
 	$(PY) scripts/check_method_reachability.py
+
+# PhotoBench 的三个 arch 检查要单独跑一遍并显式传 `--src`：那三个脚本的默认根是
+# `apps/api/src`，而 PhotoBench 是**另一个包、另一个 src 根**（`apps/photobench/src`）。
+# 不显式传就等于它完全不在门禁里——用户 2026-10-04 裁决 §3.5 要的正是「不给它开飞地」。
+# 模块映射与文档校验同理：`--doc` 指到 photobench 自己的模块地图。
+#
+# 这里不重复跑 pytest / ruff：测试已在 `coverage` 那一步的默认收集里（testpaths 含
+# `apps/photobench/tests`），ruff 已在 lint / format-check 里。
+photobench-check: ## PhotoBench 门禁：可达性 + 端口可达性 + 模块地图（已在 ci 链上）
+	$(PY) scripts/check_reachability.py --src apps/photobench/src
+	$(PY) scripts/check_method_reachability.py --src apps/photobench/src
+	$(PY) scripts/check_module_map.py --src apps/photobench/src --doc docs/architecture/photobench-module-map.md
 
 test-unit: ## 单元测试
 	.venv/bin/pytest apps/api/tests/unit -q
@@ -67,7 +83,7 @@ check-docs: ## 文档防腐校验
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
 # coverage 本身跑的就是全量测试，所以链上不再单列 test——同一套测试不必跑两遍。
 # web-check 排在链尾：后端检查更快、失败信息更直接，前端构建最慢也最该放在最后。
-ci: lint format-check typecheck arch check-docs coverage web-check ## CI 门禁
+ci: lint format-check typecheck arch photobench-check check-docs coverage web-check ## CI 门禁
 	@echo "ci: 全部通过"
 
 # 前端门禁。类型检查必须用 `tsc -b`，不能用 `tsc --noEmit`：apps/web/tsconfig.json 是

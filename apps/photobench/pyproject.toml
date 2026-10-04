@@ -1,0 +1,19 @@
+[project]
+name = "photobench"
+version = "0.1.0"
+description = "Sentrix Home 2.0 PhotoBench 评测应用"
+requires-python = ">=3.11"
+# httpx 是**沿用** 1.0 ``backend/runtime_providers.py`` 的 HTTP 客户端，不是新依赖：
+# 仓库里 apps/api 的四个适配器（chat_client / model_endpoint / vlm_observer / wemm）
+# 用的同一个包、同一个大版本。测试工具（pytest / ruff / mypy / import-linter）由
+# ``apps/api[dev]`` 提供，这里不再声明一遍——两个 extras 各写一份迟早会漂。
+dependencies = [
+    "httpx>=0.28,<1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

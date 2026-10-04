@@ -186,4 +186,122 @@ PhotoBench / model-manager 独立启停」，这里的重启逻辑到 S11 可能
 
 ## 5. 施工记录
 
-（施工时逐条填）
+### S9a 运行时提供者与遥测（T901–T904，2026-10-04）
+
+**落位结论（§4 那个「动工前要定的第一个问题」）**：PhotoBench 的 Python 代码放在
+**`apps/photobench/src/photobench/`**，与 `apps/api/src/sentrix` 同构（
+`domain / infrastructure`，S9b 再补 `application / api`），并**新起一个发行包**
+`apps/photobench/pyproject.toml`。依据三条：实施设计 §145 定死「PhotoBench 不得读取
+主产品 Python 内部模块」——同一个包里就没有隔墙；用户 2026-10-04 裁决 §3.5 要求它与
+`apps/api` 同一套门禁，而门禁（mypy `files` / import-linter `root_packages` /
+三个 arch 脚本的 `--src`）都按「包」为单位配置；`apps/api` 自己就是
+`apps/api/pyproject.toml` + `src/` 布局，照它的体例不需要发明新东西。
+
+**新增**
+
+| 文件 | 一句话 |
+|---|---|
+| `apps/photobench/pyproject.toml` | 第二个发行包；依赖只有 httpx（1.0 原本就用它） |
+| `apps/photobench/src/photobench/__init__.py` | 包标记 + 隔离约束的说明 |
+| `apps/photobench/src/photobench/domain/runtime/ports.py` | `InferenceProvider` / `LifecycleProvider` / `TelemetryProvider` 三个 Protocol + `RuntimeProviders` |
+| `apps/photobench/src/photobench/infrastructure/runtime/providers.py` | 1.0 `backend/runtime_providers.py` 的重建（全部 provider + 工厂） |
+| `apps/photobench/src/photobench/infrastructure/runtime/apple_telemetry.py` | 1.0 `backend/apple_telemetry.py` 的重建 |
+| `apps/photobench/src/photobench/infrastructure/runtime/hardware.py` | 只搬 1.0 `backend/hardware.py` 的 `read_cpu_temperature_c` |
+| `apps/photobench/tests/{fakes,test_runtime_providers,test_apple_telemetry}.py` | 假件 + 66 条用例（HTTP / 子进程 / `/proc` / `sysfs` 全假） |
+| `docs/architecture/photobench-module-map.md` | PhotoBench 自己的模块地图（与 `module-map.md` 同一个校验脚本、另一个 `--src`） |
+
+**修改**：`pyproject.toml`（ruff isort / mypy files / pytest testpaths / coverage source /
+import-linter 加 `photobench` 四条契约）、`Makefile`（install 加第二个 editable 包、
+lint 与 format 加 photobench 路径、新 `photobench-check` 段并挂上 ci 链）、
+`scripts/check_reachability.py` 的 `PENDING_WIRING`（4 条）、
+`scripts/check_method_reachability.py` 的 `PENDING_METHODS`（9 条）、
+`docs/refactor/capability-map.jsonl`（4 条）、`docs/refactor/behaviour-baseline.md`
+（新增一节）、`apps/api/tests/unit/test_architecture_rules.py`（它把契约**条数**
+写死成 5，加契约后必须改成 8——见下第 12 条）。
+
+**「行为一致」的证据方式**：除用例之外，另跑了一遍**差分对照**——把 1.0 的
+`backend.runtime_providers` / `backend.apple_telemetry` 当预言机，用同一批假件
+（子进程、`/proc`、HTTP 全不打）同时喂两个版本，比对返回的字典：纯函数
+（`parse_vm_stat` / `parse_macmon_sample` / `parse_agx_performance` /
+`_is_related` / `_is_model_process` / 两个 URL 归一化 / 四组常量）、
+`_augment_host_process_memory` 的四种情形、Apple 提供者的四个方法，**逐字段一致**。
+脚本是一次性的（依赖 1.0 仓库在盘上），**没有进仓库**——进仓库会在没有 1.0 检出的
+机器上红。
+
+**偏离与待裁决**
+
+1. **1.0 这两个模块其实有测试**（`backend/tests/test_runtime_providers.py` /
+   `test_runtime_provider_system_memory.py` / `test_apple_telemetry.py`），§2 的
+   「它们没有测试」不准确。2.0 的用例是**重写**（改用假件对象而不是 `unittest.mock`
+   的 patch 目标），不是照搬。
+2. **`backend/jetson_telemetry.py`（660 行）不在 S9a**。它是第三个模块：1.0 的
+   `runtime_providers.py` **import 了它的两个名字却从未使用**（ruff F401），真正
+   构造 Jetson 那路提供者的是编排侧的 `select_runtime_providers`。按「照搬全量」
+   的口径它该搬，但它属于 S9b 的 provider 选择逻辑；**本切片只搬了被真正用到的两条**
+   （`runtime_providers` + `apple_telemetry`）。**请裁决**：Jetson 那 660 行是进 S9b，
+   还是单独切片。
+3. **`backend/hardware.py` 只搬了一个函数**（`read_cpu_temperature_c`）。另外四个
+   （`collect_gpu` / `collect_cpu` / `collect_memory` / `collect_hardware`）服务
+   `run_qa_benchmark` 写 run meta，归 S9b。
+4. **只服务 1.0 部署形态的两处，照搬但登记**：(a) `OrinLlamaCppTelemetryProvider`
+   把远端写死成 `orin@192.168.0.118` + 固定 PID 文件路径——它只对 153 上跑、
+   模型在 118 上这一种部署成立；(b) `LocalAppleUnifiedTelemetryProvider` 只对
+   Mac mini M4 成立（`macmon` / `ioreg` / `vm_stat` / `libproc`）。两者都是 1.0 的
+   真实部署，按裁决①照搬；**若 2.0 只跑 153，这两条是候选的裁剪对象**。
+5. **`chat` / `chat_stream` 的返回类型改了**：1.0 返回 `httpx.Response` 与 httpx 的
+   stream 上下文管理器，端口不能把 httpx 摆到 domain 上，改成「解析后的 JSON」与
+   「逐行的迭代器」。**失败行为不变**（非 2xx 仍抛异常，只是由适配器抛）。
+6. **1.0 的 ABC 基类不搬**（换成 Protocol，实现类不继承），基类上的
+   `raise NotImplementedError` 与 `token_count` 的默认实现随之消失——后者落在唯一的
+   实现 `OpenAICompatibleInferenceProvider` 上。
+7. **`_process_smaps_field_mib` 结尾那行不可达的 `return None` 没搬**（1.0
+   `runtime_providers.py:244`）。行为等价。
+8. **门禁登记**：`photobench-*` 四个模块进 `PENDING_WIRING`、九个端口方法进
+   `PENDING_METHODS`，接线任务写的是 S9b 的 T911–T913。另记一条**本门禁的已知盲区**：
+   `start` / `stop` / `list_models` / `gpu_stats` / `process_memory` 五个方法名因为
+   photobench 自己的实现里就有 `self.*()` 调用，被判成「已接线」而**不在登记表里**——
+   它们是漏报，不是接线。
+9. **import-linter 只加了 `photobench` 的四条契约**（`domain-purity` /
+   `infrastructure-purity` / `isolation` / 加进 `root_packages`）：`forbidden` 契约
+   引用不存在的源模块会加载失败，而 `photobench.application` / `api` / `main` 要 S9b
+   才建。S9b 建层时补 `photobench-application-purity` 与 `photobench-layers`。
+10. **`check_reachability.py` 的 ROOTS 还没扩到 `photobench.main`**：S9a 没有入口，
+    四个模块本来就该登记；**S9b 建出 `photobench.main` 时必须把 ROOTS 扩过去**，
+    否则那张 PENDING 表会因为「根找不到」而永远合法。这条不变量现在无人守。
+11. **`check_module_map.py` 的依赖边只统计包内 import**，所以 `photobench-isolation`
+    契约（禁止 `sentrix.*`）是这条隔离的**唯一**机械保障——它不在模块地图里体现。
+12. **`apps/api/tests/unit/test_architecture_rules.py` 的 `CONTRACT_COUNT` 从 5 改成 8**。
+    这是 S9a 唯一改动的 sentrix 侧文件，理由是那个常量写死的是**仓库全部契约**的条数，
+    而 `lint-imports` 一次跑两个包。**它同时暴露了一个反过来的缺口**：以后任何切片加
+    契约都会红在一个与契约本身无关的地方——这次是 S9a 撞上的。
+13. **`make ci` 的结果**：`1 failed, 2147 passed`，唯一失败是已知的模型侧 flaky
+    `apps/api/tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers`
+    （两次全量跑都在同一个位置红）。因为 pytest 非零退出，`coverage` 那一步之后的
+    目标没有跑；另外单独跑了一遍「去掉这条 flaky」的同一条链确认覆盖率和前端门禁。
+
+### S9a 带出来的待定项与处置（2026-10-04）
+
+实施者做完后提了五个「只服务 1.0 特有部署形态」的疑点。逐条处置：
+
+| # | 疑点 | 处置 |
+|---|---|---|
+| 1 | `OrinLlamaCppTelemetryProvider`（端点/ssh 用户/PID 路径全写死成「模型在 118、PhotoBench 在 153」） | **保留**（用户裁决①「照搬全量」）。2.0 若两者同机它确实是死重量，但那是**部署决定**，不是迁移时该替用户做的决定 |
+| 2 | `LocalAppleUnifiedTelemetryProvider`（只对 Mac M4 成立） | **保留**，同上。2.0 的目标机是 153，但 provider 可被替换——这正是把它做成端口的意义 |
+| 3 | **`SYSTEM_PROCESS_PORTS` 默认值是 1.0 的部署**（8771 / 8091 / 8500） | **S9b 必须改**（2.0 是 8772 / 8191，model-manager 归 S11）。不改的话 PhotoBench 自己的端口判据是过期的——进程名关键词还能兜住，端口那条已经失效。可由 env 覆盖，所以是「改默认值」不是「能不能改」 |
+| 4 | Apple 那份的 `SYSTEM_PROCESS_KEYWORDS` 是**独立一份**（多 `mlx`、不读 env） | **不合并**。1.0 如此；合并会悄悄改变 Apple 主机上的归属结果 |
+| 5 | `backend/jetson_telemetry.py`（660 行）：1.0 的 `runtime_providers.py` **import 了它两个名字却从未使用**（F401），真正构造 Jetson provider 的是编排侧的 `select_runtime_providers` | **归 S9b**，与 `select_runtime_providers` 一起搬。它属于「provider 选择逻辑」那一块，不是 provider 本体 |
+
+**另外两条实施者报上来的、我确认为需要跟进的：**
+
+1. **`check_reachability.py` 的 ROOTS 还没扩到 `photobench.main`**——S9a 没有入口，四个模块
+   本来就该登记（已在 `PENDING_WIRING` 里注明接线任务是 S9b 的 T911–T913）。
+   **但 S9b 建出入口时必须把 ROOTS 也扩过去**，否则那张表会因为「根找不到」而永远合法。
+   **这条不变量现在无人守**，已登记在此。
+2. **一个门禁盲区（实施者如实报的）**：`LifecycleProvider.start/.stop`、
+   `InferenceProvider.list_models`、`TelemetryProvider.gpu_stats/.process_memory`
+   五个方法名，因为 photobench 自己的实现里就有 `self.*()` 调用，
+   被 method-reachability 判成「已接线」而**不在登记表里**。**那是漏报，不是接线。**
+   S9b 接上真调用者后要复查这五个是否真的可达。
+3. **`test_architecture_rules.py` 的 `CONTRACT_COUNT` 5→8** 暴露一个反向缺口：
+   它写死的其实是**全仓契约条数**，所以**以后任何切片加契约都会红在一个与契约无关的地方**。
+   本轮照实改了；要不要把它做成动态的（读 `pyproject.toml`）留待后续。

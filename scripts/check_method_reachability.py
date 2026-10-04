@@ -110,6 +110,29 @@ PENDING_METHODS: dict[str, str] = {
     "LexicalIndex.rebuild_scope": "S6 · 依赖核查（词法索引重建，归属未定）",
     # AssetRepository.update_status 在 S8a · T504 接线（POST /videos/{id}/reprocess
     # 重置状态），按反向规则删掉——**又是被门禁自己删掉的一条**。
+    #
+    # —— S9a（2026-10-04）：PhotoBench 的模型运行时端口 ——
+    #
+    # `photobench/domain/runtime/ports.py` 的三个协议是 S9a 新落的，它们的生产调用者
+    # 是 S9b 的编排链（T911–T913）。与 `PhotoInspector.inspect` 是同一个来历：计划
+    # 要求先落地端口、后接线。
+    #
+    # **十四减五等于九，这个差额本身要记下来**：`LifecycleProvider.start` / `.stop`、
+    # `InferenceProvider.list_models`、`TelemetryProvider.gpu_stats` / `.process_memory`
+    # 这五个名字**不在下面**——不是它们已经接线了，而是本门禁的判据是「这个名字在别处
+    # 被属性访问过」，而 photobench 自己的实现里就有 `self.start()` / `self.stop()` /
+    # `self.list_models()` / `self.gpu_stats()` / `self.process_memory()`。也就是说这五条
+    # 是本门禁文档里写明的**盲区**（漏报可接受），不是被接线了。接线时它们由 S9b 一并
+    # 接上，不会有人来删这几条登记。
+    "InferenceProvider.health": "S9b · T911–T913（模型端点探活）",
+    "InferenceProvider.chat": "S9b · T911–T913（评测里的模型调用）",
+    "InferenceProvider.chat_stream": "S9b · T911–T913（流式调用）",
+    "InferenceProvider.token_count": "S9b · T911–T913（提示词预算）",
+    "InferenceProvider.capabilities": "S9b · T911–T913（查询当前模型能力）",
+    "LifecycleProvider.profiles": "S9b · T911–T913（Manager 的 profile 列表）",
+    "LifecycleProvider.state": "S9b · T911–T913（Manager 状态轮询）",
+    "TelemetryProvider.kv_cache": "S9b · T911–T913（KV cache 指标）",
+    "TelemetryProvider.system_memory": "S9b · T911–T913（宿主/远端内存）",
 }
 
 

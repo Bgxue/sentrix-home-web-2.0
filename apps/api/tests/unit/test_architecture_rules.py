@@ -2,7 +2,12 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-CONTRACT_COUNT = 5
+# `lint-imports` 跑的是仓库根 pyproject 里的**全部**契约，不只 sentrix 那几条。
+# S9a（2026-10-04）给 PhotoBench 加了三条（photobench-domain-purity /
+# photobench-infrastructure-purity / photobench-isolation）：用户裁决 §3.5 要求
+# PhotoBench 与 apps/api 受同一套分层门禁，而 `forbidden` 契约必须逐包各写一份。
+# 加契约要同步改这里——5 → 8。
+CONTRACT_COUNT = 8
 
 
 def test_layering_contracts_all_hold():
