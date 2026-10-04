@@ -161,13 +161,25 @@ PhotoBench / model-manager 独立启停」，这里的重启逻辑到 S11 可能
 
 ---
 
-## 4. 动工前要定的
+## 3.5 工程标准（用户 2026-10-04 裁决）
 
-1. **PhotoBench 在 2.0 里怎么纳入工程标准**：它是个独立的 app（对照 `apps/api` / `apps/web`）。
-   `make ci` 现在有两段（后端 + `web-check`），PhotoBench 要加第三段吗？
-   它要不要受同一套分层契约管？**先定这个，再动手。**
-2. **1.0 那 8 个测试文件（约 71 KB）怎么处理**：重写、适配、还是先不搬。
-3. **`results/` 的 270 个 run 要不要迁进 2.0**：它们按 `DATASET.md` 声明是「本地数据，
+**PhotoBench 受与 `apps/api` 同一套门禁**：`ruff` + `mypy strict` + 同样的
+`domain / application / infrastructure / api` 分层契约，并在 `Makefile` 的 `ci` 链上
+加一段 photobench 检查。
+
+理由：**它不会是仓库里唯一无人看守的代码**。仓库全部价值都压在这几道门上，
+一个 9,300 行的服务豁免于它们，等于在仓库里开一块飞地。而 FastAPI 拆分本来
+就该有分层——设计文档把它叫「重构」也是这个意思。
+
+**代价如实承担**：~9,300 行都要过 strict 类型检查，且分层契约会约束 provider
+那批代码的落位（它们碰子进程/系统调用/HTTP，只能进 `infrastructure`）。
+
+---
+
+## 3.6 动工前还要定的两件
+
+1. **1.0 那 8 个测试文件（约 71 KB）怎么处理**：重写、适配、还是先不搬。
+2. **`results/` 的 270 个 run 要不要迁进 2.0**：它们按 `DATASET.md` 声明是「本地数据，
    不入 Git」。2.0 的 `apps/photobench/datasets/` 已有 1.4 GB 数据集，`results/` 是另一回事。
 
 ---
