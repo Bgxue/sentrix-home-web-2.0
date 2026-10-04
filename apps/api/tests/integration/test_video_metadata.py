@@ -68,7 +68,7 @@ def completed(payload: dict, *, returncode: int = 0, stderr: str = "") -> Mock:
 
 def probe(payload: dict, *, path: str = "movie.mov"):
     with patch(
-        "sentrix.infrastructure.media.video_metadata.subprocess.run",
+        "sentrix.infrastructure.media.ffprobe.subprocess.run",
         return_value=completed(payload),
     ):
         return FfprobeVideoMetadataReader().read(Path(path))
@@ -76,7 +76,7 @@ def probe(payload: dict, *, path: str = "movie.mov"):
 
 def test_calls_ffprobe_with_the_same_flags_as_1_0():
     with patch(
-        "sentrix.infrastructure.media.video_metadata.subprocess.run",
+        "sentrix.infrastructure.media.ffprobe.subprocess.run",
         return_value=completed(QUICKTIME_PAYLOAD),
     ) as run:
         FfprobeVideoMetadataReader().read(Path("movie.mov"))
@@ -171,7 +171,7 @@ def test_ffprobe_failure_raises_value_error():
     """端口契约：读不出来抛 ``ValueError``，由用例接住记进 metadata_json。"""
     with (
         patch(
-            "sentrix.infrastructure.media.video_metadata.subprocess.run",
+            "sentrix.infrastructure.media.ffprobe.subprocess.run",
             return_value=completed({}, returncode=1, stderr="No such file or directory"),
         ),
         pytest.raises(ValueError, match="ffprobe failed"),

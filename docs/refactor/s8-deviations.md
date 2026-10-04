@@ -155,3 +155,70 @@ S8a 交付「元数据 + 血缘列能用 + 能播 + 路由通」，不建场景�
 | **为什么** | 那几行是 S8b 的 T513（派生帧送进图片流水线）造出来的，而 T514 才是「幂等与清理」。照着还没写的写侧去猜表结构、多删一张表都可能是错的。**S8a 里这些行根本不存在**，所以不做不会漏 |
 | **可逆性** | 高。S8b 的 T514 在同一个方法里往下接 |
 | **证据强度** | 计划书 §2 的 S8b 任务表（T513 落派生物、T514 幂等与清理） |
+
+---
+
+## 5. 施工中的新增偏离（S8c · T521–T523，2026-10-04）
+
+S8c 交付「音频能导入、能读元数据、能播」，**不转写**（§1.1）。下面每条都指到具体的一处
+代码或一件 1.0 没有的东西，**没有一条是凭喜好**。
+
+### 5.1 音频元数据是 **NEW-2.0**，1.0 没有对应物
+
+| 项 | 内容 |
+|---|---|
+| **1.0 怎么做** | 对音频只有一个动作：FunASR 转写（`pipeline.py:880` 的 `_audio_observation`）。它的 `probe_video_metadata` 遇到没有视频流的文件直接抛 `ValueError("ffprobe found no video stream")`（`video/metadata.py:52`），**音频永远走不到元数据那条路**，时长/编码/采样率从没落过库 |
+| **2.0 改成什么** | 单列 `AudioMetadataReader` + `AudioMetadata`（时长/编码/采样率/声道/码率 + 拍摄时间/GPS），ffprobe 子进程与容器标签解析与视频**共用 `infrastructure/media/ffprobe.py`** |
+| **为什么单列而不是复用 `VideoMetadataReader`** | 形状不同：音频要采样率/声道/码率，视频要帧率/宽高/旋转角；硬塞进同一个类型会让两边各背一半恒空字段，而类型上看不出哪几个字段对这类媒体有意义。与 S8a 单列 `VideoMetadataReader`（不复用 EXIF 的 `MetadataReader` 三元组）是同一条理由 |
+| **可逆性** | 高。不加列、不引依赖，元数据全在 `assets.metadata_json` 的 `audio_metadata` 键里 |
+| **证据强度** | 用户 2026-10-04 裁决「音频只做入库与播放」里「能读元数据（时长等）」那一句；1.0 源码（`video/metadata.py:52`）证明它没有这条能力 |
+
+### 5.2 音频交付的 content-type 由后端按后缀定（**1.0 是照抄上传方**）
+
+| 项 | 1.0 | 2.0 |
+|---|---|---|
+| `asset_file` | `media_type = value.get("mime_type") or "application/octet-stream"`（`app.py:2463`），原样交出去 | 音频（且上传方没给具体 `audio/*`）时按后缀定：mp3→`audio/mpeg`、m4a→`audio/mp4`…… |
+
+**为什么。** S8a 的独立验收观察到 `?original=1` 会回 `application/octet-stream`，根因就是
+这一句——预览那条路有转码件兜底（错的类型只在逃生口上），而**音频不转码、交出去的就是
+原文件，类型错了浏览器没有第二次机会**。判定收在后端（后缀是权威），不指望上传方
+（curl / 整册导入给的正是 `application/octet-stream`）。
+`docs/refactor/behaviour-baseline.md` 的音频段写明了这六个后缀的映射。
+
+### 5.3 音频的落库只写一半（**没有读方法**）
+
+`AudioRepository` 只有 `save_probe`，**刻意没有 `probe()`**。视频那边的读写成对是因为
+`GET /videos/{id}` 与 `deliver_media` 要读回预览件路径；音频没有读侧消费者（元数据随
+`/assets/{id}` 的行在库里，检索侧读的是 `asset.media_type`）。**预留一个没有调用者的读
+方法就是死代码**，`scripts/check_method_reachability.py` 会当场报红。
+
+### 5.4 `/preview` 对音频回落原文件（与视频同一个 500 的修法）
+
+2.0 的 `/preview` 原先无条件走 `PillowPreviewEncoder`；S8a 给视频开了分流，S8c 把音频
+挂进同一条路（`_self_served_or_none` 认 video ∪ audio）。音频的「预览」就是它自己。
+顺带把原片分支补上 `path.exists()` 检查——两条路交付同一个文件时，缺失文件应当是同一个
+404（此前视频那条会变成 500）。
+
+### 5.5 T522 的核查结论：计划书 §2 引的 `fact_query.py` 那一行**引错了**，且**不改**
+
+计划书 T515/T522 写「`query_contracts.py:321-324`、`fact_query.py:47` 的媒体过滤已含
+audio」。实测：
+
+- `query_contracts.py` 的 `parse_media_type` **确实**认「音频 / audio / 录音」→ `"audio"`
+  （:323-324）；
+- `application/retrieval/retrieve_metadata.py:97` 直接按 `asset.media_type` 过滤，
+  `api/routes/search.py:131` 用 `MediaType(media_type)`，两处对音频**都通**；
+- `infrastructure/persistence/repositories/structured.py` 的媒体 SQL 是通用的
+  `a.media_type IN (...)`，值域由约束决定，**也通**；
+- **但 `domain/retrieval/fact_query.py:47` 的 `MEDIA_VALUES` 是
+  `frozenset({"image", "video"})`——不含 audio**，`filters.media="audio"` 会被判
+  `unsupported_media`。
+
+这个不含**是 1.0 的行为、且有既有用例钉住**：`tests/unit/test_fact_query.py` 的
+`test_unsupported_media_is_rejected` 的 docstring 写着「1.0 的 `_STRUCTURED_FACT_FILTERS`
+只放 image / video，2.0 照旧」，参数化里 `audio` 与 `text` / `pdf` 并列。
+**按 T522 的纪律不改**：这不是本切片的缺口，而是一条被测试钉住的 1.0 兼容决定；为了让
+「音频也能被结构化统计」去改它，等于替 1.0 做一个它没做过的产品决定。记在这里备查。
+音频的检索面（词法文件名锚点 + `media_type=audio` 结构化条件）在
+`tests/contract/test_audio_routes.py::test_audio_is_reachable_by_file_name_and_media_type`
+里钉住。

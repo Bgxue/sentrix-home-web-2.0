@@ -46,8 +46,13 @@ IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp"})
 # 「导入了一整册，视频一个都不在」与「这一册真的没有视频」是同一个输出。
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".avi", ".mkv"})
 
-# 扫描的实际判据 = 图片 ∪ 视频。
-SCAN_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
+# 音频后缀，与 ``MediaType.from_file_name`` 认得的音频那一组逐字一致（S8c T521）。
+# 与 T506 放行视频是同一条理由，只是这次轮到音频：目录里的录音被静默跳过时，
+# 「导了一整册，录音一个都不在」与「这一册真的没有录音」是同一个输出。
+AUDIO_SUFFIXES = frozenset({".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"})
+
+# 扫描的实际判据 = 图片 ∪ 视频 ∪ 音频。
+SCAN_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES | AUDIO_SUFFIXES
 
 DEFAULT_ALBUM_LIMIT = 200
 

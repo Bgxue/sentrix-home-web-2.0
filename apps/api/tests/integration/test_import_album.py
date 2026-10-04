@@ -213,3 +213,27 @@ def test_videos_are_scanned_alongside_photos(tmp_path: Path):
 
     assert importer.calls == ["a.jpg", "b.mov", "c.MP4", "d.mkv"]
     assert result.imported == 4
+
+
+# ---- S8c T521：整册导入放行音频 ------------------------------------------------------
+
+
+def test_audio_is_scanned_alongside_photos_and_videos(tmp_path: Path):
+    """与放行视频（T506）同一条理由，这次轮到音频：目录里的录音被静默跳过时，
+    「导了一整册，录音一个都不在」与「这一册真的没有录音」是同一个输出。
+
+    这一条钉的是 `SCAN_SUFFIXES` 里 `AUDIO_SUFFIXES` 那一半：删掉它，
+    `b.m4a` / `c.MP3` / `d.flac` 立刻从 `calls` 里消失（大小写不敏感一起钉住）。
+    """
+    root = tmp_path / "album"
+    root.mkdir()
+    for name in ("a.jpg", "b.m4a", "c.MP3", "d.flac", "notes.txt"):
+        (root / name).write_bytes(b"content-" + name.encode())
+
+    importer = StubImporter()
+    result = ImportAlbum(importer=importer).execute(
+        AlbumImportRequest(scope_id="album1", directory=str(root))
+    )
+
+    assert importer.calls == ["a.jpg", "b.m4a", "c.MP3", "d.flac"]
+    assert result.imported == 4

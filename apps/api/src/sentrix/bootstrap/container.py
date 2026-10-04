@@ -40,6 +40,8 @@ from sentrix.domain.identity.ports import (
 )
 from sentrix.domain.media.ports import (
     AssetRepository,
+    AudioMetadataReader,
+    AudioRepository,
     MediaStorage,
     MetadataReader,
     ObservationRepository,
@@ -71,6 +73,7 @@ from sentrix.domain.spaces.ports import SpaceRepository
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
+from sentrix.infrastructure.media.audio_metadata import FfprobeAudioMetadataReader
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.person_vision import (
@@ -93,6 +96,7 @@ from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
     SqliteObservationRepository,
 )
+from sentrix.infrastructure.persistence.repositories.audio import SqliteAudioRepository
 from sentrix.infrastructure.persistence.repositories.conversations import (
     SqliteConversationRepository,
 )
@@ -155,6 +159,10 @@ class Container:
     # 适配器里——子进程只能落 infrastructure（purity 契约）。
     video_keyframe_extractor: VideoKeyframeExtractor
     video_repository: VideoRepository
+    # 音频两件（S8c T521）：ffprobe 探测 + 探测结果落库。**没有转码器**——音频不转码
+    # （用户裁决②），浏览器原生放 mp3/wav/m4a/aac/flac/ogg。
+    audio_metadata_reader: AudioMetadataReader
+    audio_repository: AudioRepository
     vector_repository: VectorRepository
     vector_index: VectorIndex
     visual_embedder: VisualEmbedder
@@ -258,6 +266,8 @@ class Container:
             video_transcoder=FfmpegVideoTranscoder(settings.media_dir),
             video_keyframe_extractor=FfmpegVideoKeyframeExtractor(settings.media_dir),
             video_repository=SqliteVideoRepository(database),
+            audio_metadata_reader=FfprobeAudioMetadataReader(),
+            audio_repository=SqliteAudioRepository(database),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
             # **两个槽指向同一个实例**（W1 起方案是统一空间）。建两个实例不只是浪费

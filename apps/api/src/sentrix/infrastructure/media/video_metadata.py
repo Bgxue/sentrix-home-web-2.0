@@ -17,20 +17,23 @@ domain/application 碰子进程那类东西。端口声明在 ``domain/media/por
 
 与 1.0 的唯一区别是失败形态：1.0 抛 ``RuntimeError``/``ValueError``，本适配器抛
 ``ValueError``（端口契约里写了），由 ``ImportAssets`` 接住写进 metadata_json。
+
+子进程与容器标签解析在 ``infrastructure/media/ffprobe.py``：音频适配器走的是同一条
+命令、同一批标签，两处各写一遍迟早会分叉。本文件只留「视频流特有的那几位」
+（帧率 / 宽高 / 旋转角）。
 """
 
 from __future__ import annotations
 
-import json
-import re
-import subprocess
 from pathlib import Path
 
 from sentrix.domain.media.models import VideoMetadata
-
-# 1.0 ``metadata.py:9-10`` 的两条正则，逐字照抄。
-ISO6709_RE = re.compile(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)?/?$")
-COMPACT_TZ_RE = re.compile(r"([+-]\d{2})(\d{2})$")
+from sentrix.infrastructure.media.ffprobe import (
+    DEFAULT_PROBE_TIMEOUT_S,
+    capture_time,
+    iso6709_location,
+    run_ffprobe,
+)
 
 
 def _rate(value: object) -> float:
@@ -42,54 +45,14 @@ def _rate(value: object) -> float:
         return 0.0
 
 
-def _location(tags: dict[str, object]) -> tuple[float | None, float | None]:
-    raw = str(tags.get("com.apple.quicktime.location.ISO6709") or tags.get("location") or "").strip()
-    match = ISO6709_RE.match(raw)
-    if not match:
-        return None, None
-    return float(match.group(1)), float(match.group(2))
-
-
-def _normalized_datetime(value: object) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    text = COMPACT_TZ_RE.sub(r"\1:\2", text)
-    return text[:-1] + "+00:00" if text.endswith("Z") else text
-
-
 class FfprobeVideoMetadataReader:
     """domain ``VideoMetadataReader`` 的 ffprobe 实现。"""
 
-    def __init__(self, *, timeout_s: int = 60) -> None:
-        # 1.0 的 timeout 是 60 秒（``metadata.py:43``）。读元数据只解容器头，
-        # 与转码（可能几分钟）不是一件事，不该共用一个上限。
+    def __init__(self, *, timeout_s: int = DEFAULT_PROBE_TIMEOUT_S) -> None:
         self._timeout_s = timeout_s
 
     def read(self, path: Path) -> VideoMetadata:
-        path = Path(path).resolve()
-        process = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
-                str(path),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_s,
-        )
-        if process.returncode:
-            raise ValueError(f"ffprobe failed: {process.stderr.strip()[-1000:]}")
-        try:
-            payload = json.loads(process.stdout)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"ffprobe output is not JSON: {error}") from error
+        payload = run_ffprobe(Path(path), timeout_s=self._timeout_s)
         format_info = payload.get("format") or {}
         format_tags = format_info.get("tags") or {}
         video = next(
@@ -99,20 +62,9 @@ class FfprobeVideoMetadataReader:
         if not video:
             raise ValueError("ffprobe found no video stream")
         stream_tags = video.get("tags") or {}
-        captured_at = (
-            format_tags.get("com.apple.quicktime.creationdate")
-            or format_tags.get("creation_time")
-            or stream_tags.get("creation_time")
-        )
-        creation_source = (
-            "com.apple.quicktime.creationdate"
-            if format_tags.get("com.apple.quicktime.creationdate")
-            else "format.creation_time"
-            if format_tags.get("creation_time")
-            else "stream.creation_time"
-        )
+        captured_at, creation_source = capture_time(format_tags, stream_tags)
         # 流标签覆盖格式标签：流上的定位比容器上的更具体（1.0 同一个写法）。
-        latitude, longitude = _location({**stream_tags, **format_tags})
+        latitude, longitude = iso6709_location({**stream_tags, **format_tags})
         rotation = 0
         for item in video.get("side_data_list") or []:
             if "rotation" in item:
@@ -135,7 +87,7 @@ class FfprobeVideoMetadataReader:
             )
         ).strip()
         return VideoMetadata(
-            captured_at=_normalized_datetime(captured_at),
+            captured_at=captured_at,
             latitude=latitude,
             longitude=longitude,
             captured_location=f"{latitude:.6f},{longitude:.6f}" if latitude is not None else None,

@@ -112,11 +112,13 @@ paths:
       description: '``?original=1`` 拿原片；不传时**视频**给浏览器预览件（1.0 ``app.py:2448-2478``）。
 
 
-        图片这条路上 ``original`` 是空操作：2.0 的 ``/file`` 一直是原文件（契约测试钉着
+        音频与图片这条路上 ``original`` 是空操作：音频本来就只有原片可交
 
-        「交出去的字节与传上来的一模一样」），预览在 ``/preview``。不为了对称去改它——
+        （``deliver_media`` 对音频恒回落原文件），图片的 ``/file`` 一直是原文件
 
-        改了会让 HEIC 从「原图直出」变成「转码件直出」，那是另一个决定。'
+        （契约测试钉着「交出去的字节与传上来的一模一样」），预览在 ``/preview``。
+
+        不为了对称去改图片——改了会让 HEIC 从「原图直出」变成「转码件直出」，那是另一个决定。'
       operationId: get_asset_file_api_v1_assets__asset_id__file_get
       parameters:
       - name: asset_id
@@ -4361,6 +4363,10 @@ components:
           type: integer
           title: Video Scenes
           default: 0
+        audio_probed:
+          type: boolean
+          title: Audio Probed
+          default: false
       type: object
       required:
       - asset_id

@@ -510,3 +510,31 @@
 **帧数就是 VLM 调用数**；10 分钟视频 ≈ 10 次，不封顶的话长视频会把 GPU 打满。
 
 **音频/视频的转写不在 S8b**（用户裁决②「不要 FunASR」）。音频属 S8c。
+
+## 音频（S8c · T521–T523，2026-10-04）
+
+**这一段的值大多是 2.0 新定的。** 1.0 对音频只有一个动作——FunASR 转写
+（`pipeline.py:880` 的 `_audio_observation`），元数据与交付类型都不管：它的
+`probe_video_metadata` 遇到没有视频流的文件直接抛 `ValueError`
+（`video/metadata.py:52`），音频永远走不到元数据那条路。用户 2026-10-04 裁决
+「音频不转写，只做入库与播放」，于是下面每一项都是**新的交付面**，而转写那一项是
+**明确不做**。
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| **转写** | **不做**。`observations` 不加 `transcript` 列，`compose_text` 保持七字段 | 用户裁决②；`s8-deviations.md` §1.1 |
+| 音频元数据字段 | 时长 / 编码 / 采样率 / 声道 / 码率（另带拍摄时间、GPS、`creation_source`） | **不是 1.0 的值**（1.0 的 ffprobe 遇到音频直接抛错，音频元数据从没落过库） |
+| 时长与码率的取法 | 优先容器（`format`），退回流（`streams`） | **不是 1.0 的值**（与视频适配器同一个取法） |
+| 拍摄时间优先级 | `com.apple.quicktime.creationdate` → `format.creation_time` → `stream.creation_time` | 与视频共用 `ffprobe.py`；1.0 `video/metadata.py:60-63` |
+| GPS 来源 | `com.apple.quicktime.location.ISO6709`，退 `location`（ISO6709 格式） | 同上；1.0 `video/metadata.py:9,31-36` |
+| ffprobe 超时 | 60 秒（与视频同一个常量 `DEFAULT_PROBE_TIMEOUT_S`） | 1.0 `video/metadata.py:43` |
+| 探测结果的落库键 | `assets.metadata_json` 的 `audio_metadata` / `audio_probe_error` | **不是 1.0 的值**（键名照视频 `video_metadata` / `video_probe_error` 的体例起） |
+| 探测失败 | **不阻断导入**，原因写进 `audio_probe_error`（`audio_metadata` 键则不写） | 与 EXIF / 视频同一条既有口径 |
+| 交付的 content-type | 上传方给了具体的 `audio/*` 就用它；否则按后缀定：mp3→`audio/mpeg`、wav→`audio/wav`、m4a→`audio/mp4`、aac→`audio/aac`、flac→`audio/flac`、ogg→`audio/ogg` | **2.0 变更**：1.0 直接交 `mime_type or application/octet-stream`（`app.py:2463`），上传方不给类型时 `<audio>` 拿不到可播的类型 |
+| 音频转码 | **不做**。浏览器原生放得了这六种容器 | 用户裁决②（与视频 H.264 直出同一条思路） |
+| `/assets/{id}/file` | 音频交原文件（与 `?original=1` 同一条路）；`content-type` 同上 | 1.0 的 `asset_file` 没有音频分支（`app.py:2458` 只判 video） |
+| `/assets/{id}/preview` | 音频交原文件（**不是 500**）——音频没有服务端预览件 | **S8c 修**：原先无条件走 `PillowPreviewEncoder`，而 PIL 打不开录音 |
+| 整册导入认的音频后缀 | `.wav` / `.mp3` / `.m4a` / `.aac` / `.flac` / `.ogg`（与 `MediaType.from_file_name` 同一组） | 与 T506 放行视频同一条理由 |
+
+**转写不在本切片**（用户裁决②「不要 FunASR」）：音频的交付面只有「能导入、能读元数据、
+能播、能按元数据/文件名检索」。理由与代价逐条登记在 `docs/refactor/s8-deviations.md` §1.1。

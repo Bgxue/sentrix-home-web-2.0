@@ -76,6 +76,7 @@ async def import_media(
         event_id=result.event_id,
         video_probed=result.video_probed,
         video_scenes=result.video_scenes,
+        audio_probed=result.audio_probed,
     )
 
 
@@ -191,6 +192,10 @@ def _build_importer(
         video_metadata=container.video_metadata_reader,
         video_transcoder=container.video_transcoder,
         video_repository=container.video_repository,
+        # 音频探测链（S8c T521）。**同样接在这一处**：单张上传与整册导入共用它，
+        # 分开接会让「整册导入的音频不读元数据」以「单张能读到、批量读不到」的形式出现。
+        audio_metadata=container.audio_metadata_reader,
+        audio_repository=container.audio_repository,
         # 抽帧链（S8b T511–T513）。只有导入那条实例拿得到它；关键帧那条实例传 None，
         # 从根上杜绝「关键帧再去抽一层关键帧」的递归。
         video_scene_extractor=video_scene_extractor,
@@ -325,17 +330,22 @@ def deliver_asset(asset_id: str, *, original: bool, container: Container) -> Res
     return Response(content=payload, media_type="image/jpeg")
 
 
-def deliver_video(asset: Asset, container: Container) -> Response:
-    """视频的浏览器交付：**能转就交转码件，转不了交原片**。
+def deliver_media(asset: Asset, container: Container) -> Response:
+    """视频/音频的浏览器交付：**视频能转就交转码件，转不了与原片一律回落原文件**。
 
     1.0 ``app.py:2452-2458`` 的分流只有一句判据（``media_type == 'video' and not original
     and preview_path.is_file()``），其余一律回落原片。2.0 照搬，但把「转码件在哪」
     的读法收在 ``VideoRepository.probe`` 上——它与写入侧成对，是唯一知道
     ``metadata_json`` 里怎么放的地方。
 
-    **这条路同时修掉了 ``GET /assets/{id}/preview`` 对视频的 500**：原先它无条件走
-    ``PillowPreviewEncoder``，而 PIL 打不开视频。视频的「预览」就是那个 mp4，
-    与 1.0 的 ``preview.mp4`` 是同一件东西。
+    **音频走这里是因为它也没有服务端预览件**（S8c T521）：不转码（用户裁决②），
+    交付的就是原文件，而 ``probe`` 对音频恒为 ``None``，所以自然落到最后的原片分支。
+    把音频挂在这条路上，修掉的是与视频同一个 500——原先 ``/preview`` 无条件走
+    ``PillowPreviewEncoder``，而 PIL 既打不开视频也打不开录音。
+
+    **原片分支补了 ``path.exists()`` 检查**（``deliver_asset`` 一直有）：两条路
+    交付同一个文件时，缺失文件应当是同一个 404。少了它，音频 ``/file``（走的正是这条
+    路）会把「文件不在磁盘上」变成一个 500。
     """
     probe = container.video_repository.probe(asset.id)
     preview_path = Path(probe.browser_preview_path) if probe and probe.browser_preview_path else None
@@ -346,18 +356,27 @@ def deliver_video(asset: Asset, container: Container) -> Response:
             filename=f"{Path(asset.file_name).stem}-preview.mp4",
             headers={"Cache-Control": "private, max-age=86400", "X-Sentrix-Source": "browser-preview"},
         )
-    # 没有转码件（H.264 不用转 / 转码失败 / 还没探测过）一律交原片：
+    # 没有转码件（H.264 不用转 / 转码失败 / 还没探测过 / 音频）一律交原片：
     # 浏览器放不放得了是它的事，服务端不做第二次判断。
+    path = Path(asset.path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="media file missing on disk")
     return FileResponse(
-        Path(asset.path),
+        path,
         media_type=asset.mime_type or "application/octet-stream",
         filename=asset.file_name,
     )
 
 
-def _video_or_none(asset_id: str, container: Container) -> Asset | None:
+def _self_served_or_none(asset_id: str, container: Container) -> Asset | None:
+    """交付物**就是文件本身**的资产：视频（有转码件时给转码件）与音频（永远给原片）。
+
+    图片不在内——它有服务端渲染的 JPEG 预览，走 ``PillowPreviewEncoder``。
+    """
     asset = container.asset_repository.get(asset_id)
-    return asset if asset is not None and asset.media_type is MediaType.VIDEO else None
+    if asset is None or asset.media_type not in (MediaType.VIDEO, MediaType.AUDIO):
+        return None
+    return asset
 
 
 @router.get("/assets/{asset_id}/file")
@@ -368,19 +387,20 @@ def get_asset_file(
 ) -> Response:
     """``?original=1`` 拿原片；不传时**视频**给浏览器预览件（1.0 ``app.py:2448-2478``）。
 
-    图片这条路上 ``original`` 是空操作：2.0 的 ``/file`` 一直是原文件（契约测试钉着
-    「交出去的字节与传上来的一模一样」），预览在 ``/preview``。不为了对称去改它——
-    改了会让 HEIC 从「原图直出」变成「转码件直出」，那是另一个决定。
+    音频与图片这条路上 ``original`` 是空操作：音频本来就只有原片可交
+    （``deliver_media`` 对音频恒回落原文件），图片的 ``/file`` 一直是原文件
+    （契约测试钉着「交出去的字节与传上来的一模一样」），预览在 ``/preview``。
+    不为了对称去改图片——改了会让 HEIC 从「原图直出」变成「转码件直出」，那是另一个决定。
     """
-    asset = _video_or_none(asset_id, container)
+    asset = _self_served_or_none(asset_id, container)
     if asset is not None and not original:
-        return deliver_video(asset, container)
+        return deliver_media(asset, container)
     return deliver_asset(asset_id, original=True, container=container)
 
 
 @router.get("/assets/{asset_id}/preview")
 def get_asset_preview(asset_id: str, container: Container = Depends(get_container)) -> Response:
-    asset = _video_or_none(asset_id, container)
+    asset = _self_served_or_none(asset_id, container)
     if asset is not None:
-        return deliver_video(asset, container)
+        return deliver_media(asset, container)
     return deliver_asset(asset_id, original=False, container=container)

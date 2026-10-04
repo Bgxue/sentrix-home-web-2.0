@@ -82,6 +82,30 @@ class GpsPoint:
         return 6371.0088 * 2 * math.asin(math.sqrt(a))
 
 
+def _gps_point(latitude: float | None, longitude: float | None) -> GpsPoint | None:
+    """经纬度 -> ``GpsPoint``。**两个都解析出来才算**——与 ``PillowMetadataReader``
+    同一口径：EXIF/容器标签都允许只标一半，那半边不该冒充一个完整坐标。
+
+    视频与音频两处元数据各要一份，抽成模块级函数而不是各写一遍。
+    """
+    if latitude is None or longitude is None:
+        return None
+    try:
+        return GpsPoint(latitude, longitude)
+    except ValueError:
+        return None
+
+
+def _captured_datetime(text: str | None) -> datetime | None:
+    """适配器已把拍摄时间规整成 ISO-8601（含 ``+08:00`` 这类偏移），这里只负责解析。"""
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 # 视频拍摄时间/GPS 的抽取结果。字段逐个照抄 1.0 ``backend/video/contracts.py`` 的
 # ``VideoMetadata``（``probe_video_metadata`` 的返回形状），只有 ``raw`` 不搬——
 # 那是整包 ffprobe JSON，1.0 写进 ``metadata_json.video_metadata`` 之后没有任何读侧用过，
@@ -105,23 +129,42 @@ class VideoMetadata:
     creation_source: str = ""
 
     def gps(self) -> GpsPoint | None:
-        """经纬度 -> ``GpsPoint``。两个都解析出来才算——与 ``PillowMetadataReader``
-        同一口径：EXIF 也允许只标一半，那半边不该冒充一个完整坐标。"""
-        if self.latitude is None or self.longitude is None:
-            return None
-        try:
-            return GpsPoint(self.latitude, self.longitude)
-        except ValueError:
-            return None
+        """经纬度 -> ``GpsPoint``，两个都解析出来才算。"""
+        return _gps_point(self.latitude, self.longitude)
 
     def captured_datetime(self) -> datetime | None:
-        """``captured_at`` 已被适配器规整成 ISO-8601（含 ``+08:00`` 这类偏移）。"""
-        if not self.captured_at:
-            return None
-        try:
-            return datetime.fromisoformat(self.captured_at)
-        except ValueError:
-            return None
+        return _captured_datetime(self.captured_at)
+
+
+# 音频拍摄时间/GPS + 时长/编码/采样率/声道/码率的抽取结果。
+#
+# **它单列而不是复用 ``VideoMetadata``**：形状不同——硬塞进同一个类型会让两边各背
+# 一半恒空字段（音频恒没有 width/height/fps/rotation，视频恒没有
+# sample_rate/channels/bit_rate）。与 S8a 单列 ``VideoMetadataReader``（而不是扩展
+# EXIF 的 ``MetadataReader`` 三元组）是同一条理由。
+#
+# **1.0 没有对应物**：1.0 的 ``probe_video_metadata`` 遇到没有视频流的文件直接抛
+# ``ValueError``（``video/metadata.py:52``），音频的时长/编码从来没落过库。
+# 2.0 这一份是用户 2026-10-04 裁决「音频只做入库与播放」里「能读元数据（时长等）」的落地。
+@dataclass(frozen=True, slots=True)
+class AudioMetadata:
+    captured_at: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    captured_location: str | None = None
+    duration_sec: float = 0.0
+    codec: str = ""
+    sample_rate: int = 0
+    channels: int = 0
+    bit_rate: int = 0
+    creation_source: str = ""
+
+    def gps(self) -> GpsPoint | None:
+        """经纬度 -> ``GpsPoint``，两个都解析出来才算（与 ``VideoMetadata`` 共用同一条规则）。"""
+        return _gps_point(self.latitude, self.longitude)
+
+    def captured_datetime(self) -> datetime | None:
+        return _captured_datetime(self.captured_at)
 
 
 # 一条派生物的血缘切片。派生物**本来就是 ``media_type='image'`` 的普通资产**

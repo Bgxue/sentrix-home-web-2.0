@@ -6,6 +6,9 @@
 >
 > 前置：S0–S7 全部完成；W1（检索换 wemm 统一嵌入）完成。
 
+> **状态（2026-10-04）：S8 已收口。** S8a（T501–T506）· S8b（T511–T514）· S8c（T521–T523）
+> 三段全部落地，迁移 `0010_video.sql` 一个字未改、全程零新依赖。S8c 的施工记录在 §4.7。
+
 ---
 
 ## 0. 动工前双侧核查（2026-10-04）
@@ -252,3 +255,38 @@ PRAGMA foreign_key_check: 干净 ✓    残留视频 0 · 残留派生 0
 清理前先核过「这 4 个测试视频各自建了自己的事件、每个只挂自己那一条观察」，
 所以删它们碰不到真实事件——脚本里也留了这道安全闸（发现事件上还有非测试观察就拒绝删）。
 引用方清单来自 `PRAGMA foreign_key_list`，不是靠猜。
+
+### 4.7 S8c 完成（2026-10-04）
+
+T521–T523 落地。新增 6 个文件（`infrastructure/media/ffprobe.py` 视频/音频共用的 ffprobe
+子进程与标签解析、`infrastructure/media/audio_metadata.py` 音频元数据适配器、
+`infrastructure/persistence/repositories/audio.py` 探测结果落库、3 个测试文件），修改 14 个
+（含 module-map / capability-map / behaviour-baseline / `s8-deviations.md` §5 / 重跑 openapi）。
+**迁移零改动、零新依赖。**
+
+**音频只做入库与播放，不转写**（用户裁决②）：`observations` 不加 `transcript` 列，
+`compose_text` 保持七字段。元数据（时长/编码/采样率/声道/码率）走 ffprobe，拍摄时间/GPS
+接到与 EXIF/视频同一条路，结果写进 `assets.metadata_json` 的 `audio_metadata`。交付不转码
+（浏览器原生放 mp3/wav/m4a/aac/flac/ogg），**content-type 由后端按后缀定**——音频没有转码件
+这条退路，不能重复 S8a 观察到的 `application/octet-stream` 问题。
+
+**定点变异 8/8 被杀**（清单见 §4.8）。**`make ci` 全绿**（那条已知的模型侧 flaky 除外）。
+
+### 4.8 S8c 的定点变异
+
+| # | 改坏什么 | 红了哪条 |
+|---|---|---|
+| 1 | 删掉 `execute` 里的 `audio_probed` 赋值 | `test_importing_audio_reports_that_it_was_probed` |
+| 2 | `_probe_audio` 的异常改成往上抛（阻断导入） | `test_audio_probe_failure_is_recorded_not_swallowed` |
+| 3 | 探测失败也写 `audio_metadata` 键 | `test_a_failed_probe_keeps_the_reason_and_no_metadata` |
+| 4 | `audio_mime_type` 直接返回 `declared` | `test_the_delivery_content_type_is_playable_not_octet_stream` |
+| 5 | `audio_mime_type` 对具体 `audio/*` 也按后缀覆盖 | `test_a_specific_audio_content_type_is_kept_as_is` |
+| 6 | `AudioMetadata` 的时长改取流而非容器 | `test_reads_duration_codec_sample_rate_channels_and_bit_rate` |
+| 7 | 音频分支写成 `media_type is not IMAGE`（图片也进） | `test_image_and_video_never_touch_the_audio_chain` |
+| 8 | `SCAN_SUFFIXES` 去掉 `AUDIO_SUFFIXES` | `test_audio_is_scanned_alongside_photos_and_videos` |
+
+### 4.9 S8 收口
+
+S8a/S8b/S8c 三段全部完成，S8 的四条验收（读到时元数据 / 能在浏览器里播 / 场景成型能跳回
+原片 / 音频能导入能播）都由真机端到端独立验过。**唯一未交付的一项是按用户裁决去掉的
+FunASR 转写**（`s8-deviations.md` §1.1），它不是遗漏，是裁决。

@@ -15,6 +15,7 @@ from typing import Protocol
 from sentrix.domain.media.models import (
     Asset,
     AssetStatus,
+    AudioMetadata,
     DerivedAsset,
     GpsPoint,
     MediaType,
@@ -35,6 +36,36 @@ def needs_transcode(file_name: str, mime_type: str | None) -> bool:
     suffix = Path(file_name).suffix.lower()
     mime = (mime_type or "").split(";", 1)[0].strip().lower()
     return suffix in BROWSER_UNRENDERABLE_SUFFIXES or mime in BROWSER_UNRENDERABLE_MIMES
+
+
+# 音频容器 → 交付用的 content-type。**浏览器这些都能原生播，2.0 一个都不转**
+# （用户裁决②「音频不转写，只做入库与播放」；与视频的 H.264 直出是同一条思路）。
+# 后缀与 ``MediaType.from_file_name`` 认的音频那一组逐字一致。
+AUDIO_MIME_BY_SUFFIX = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+}
+# 上传方（curl / 整册导入）常常给不出音频的具体类型，落到这个通用类型上。
+GENERIC_MIME = "application/octet-stream"
+
+
+def audio_mime_type(file_name: str, declared: str | None) -> str:
+    """音频交付用的 content-type：上传方给了具体的 ``audio/*`` 就用它的，否则按后缀推。
+
+    1.0 直接把 ``mime_type`` 交出去（``app.py:2463``），而上传方不给类型时它是
+    ``application/octet-stream``——S8a 的验收在视频 ``?original=1`` 上观察到过同一现象。
+    音频没有「转码件」这条退路（不转码），交出去的**就是原文件**，所以类型错了浏览器
+    就没有第二次机会。把判定收在后端（后缀是权威）而不是指望上传方，是这个函数存在的理由。
+    """
+    mime = (declared or "").split(";", 1)[0].strip().lower()
+    if mime.startswith("audio/"):
+        return declared or mime
+    suffix = Path(file_name).suffix.lower()
+    return AUDIO_MIME_BY_SUFFIX.get(suffix) or declared or GENERIC_MIME
 
 
 class AssetRepository(Protocol):
@@ -384,4 +415,60 @@ class VideoRepository(Protocol):
         ``event_observations`` 对 ``events``、``observations`` 对 ``assets`` 都有外键，
         且连接开的是 ``PRAGMA foreign_keys = ON``，顺序写反会直接 ``IntegrityError``。
         """
+        ...
+
+
+class AudioMetadataReader(Protocol):
+    """从音频文件里读出时长/编码/采样率/声道/码率与拍摄时间、GPS（走 ffprobe）。
+
+    **为什么单列一个端口，而不是复用 ``VideoMetadataReader``。** 形状不同：音频要的是
+    时长/编码/采样率/声道/码率，视频要的是时长/帧率/宽高/旋转角；硬塞进同一个类型会让
+    两边各背一半恒空字段，而类型上看不出哪几个字段对这类媒体是有意义的。这与 S8a 单列
+    ``VideoMetadataReader``（不复用 EXIF 的 ``MetadataReader`` 三元组）是同一条理由。
+    ffprobe 的子进程与容器标签解析与视频共用 ``infrastructure/media/ffprobe.py``。
+
+    实现在 ``infrastructure/media/audio_metadata.py``：ffprobe 是子进程，
+    ``domain-purity`` 与 ``application-purity`` 两条契约都禁止 domain/application 碰它。
+    """
+
+    def read(self, path: Path) -> AudioMetadata:
+        """读不出来时抛 ``ValueError``（ffprobe 非零退出 / 没有音频流）。
+
+        不返回 ``None``：那会让「这个文件探测不了」与「调用方忘了接线」变成同一个结果。
+        调用方（``ImportAssets``）接住它并把原因写进 ``metadata_json.audio_probe_error``——
+        与视频的 ``video_probe_error`` 同一条口径，探测失败不阻断导入。
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class AudioProbe:
+    """一次音频探测的落库形态（写进 ``assets.metadata_json`` 的 ``audio_metadata``）。
+
+    与 ``VideoProbe`` 的差别只有一条：音频**没有转码件**，所以没有
+    ``browser_preview_path`` / ``browser_preview_error`` 两位——浏览器原生就能放
+    mp3/wav/m4a/aac/flac/ogg（用户裁决②），照抄视频那两位只会得到一对恒空字段。
+    ``probe_error`` 与视频同名同义：失败原因留在资产上，导入照收。
+    """
+
+    metadata: AudioMetadata | None = None
+    probe_error: str = ""
+
+
+class AudioRepository(Protocol):
+    """音频探测结果的落库。
+
+    **为什么与 ``VideoRepository`` 分开。** 后者管的是「派生物怎么指回原片」那几列
+    （迁移 0010）加上视频的预览转码件；音频两样都没有。合在一起会让「谁在写血缘列」
+    与「谁在写音频元数据」在类型上消失——与 ``VideoRepository`` 从 ``AssetRepository``
+    拆出来是同一条理由。
+
+    **只读侧没有方法是有意的**：视频那边 ``probe()`` 的存在是因为 ``GET /videos/{id}``
+    与 ``deliver_media`` 要读回预览件路径；音频没有读侧消费者（元数据随 ``/assets/{id}``
+    的行一起在库里，检索侧读的是 ``asset.media_type``）。**没有调用者的读方法是一条
+    死代码**，`check_method_reachability.py` 会当场报红——所以不预留。
+    """
+
+    def save_probe(self, asset_id: str, probe: AudioProbe) -> None:
+        """把探测结果并进 ``assets.metadata_json``。**必须在资产行落库之后调**（外键）。"""
         ...

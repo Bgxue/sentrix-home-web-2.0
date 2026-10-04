@@ -3,7 +3,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
-from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, VideoMetadata
+from sentrix.domain.media.models import (
+    Asset,
+    AssetStatus,
+    AudioMetadata,
+    GpsPoint,
+    MediaType,
+    VideoMetadata,
+)
 
 
 class FakeAssets:
@@ -313,3 +320,165 @@ def test_video_import_without_the_probe_chain_still_works():
 
     assert result.media_type is MediaType.VIDEO
     assert result.video_probed is False
+
+
+# ---- S8c：音频入库（T521） -----------------------------------------------------------
+#
+# 与视频那一组同形，只验用例本身的判定。真 ffprobe 的抽取口径在
+# tests/integration/test_audio_metadata.py，装配点接线在 tests/contract/test_media_routes.py。
+
+
+class FakeAudioMetadata:
+    """返回一条预置元数据；``error`` 非空时按真适配器的契约抛 ``ValueError``。"""
+
+    def __init__(self, metadata=None, error: str = "") -> None:
+        self._metadata = metadata
+        self._error = error
+        self.calls: list[str] = []
+
+    def read(self, path):
+        self.calls.append(str(path))
+        if self._error:
+            raise ValueError(self._error)
+        return self._metadata
+
+
+class FakeAudioRepository:
+    def __init__(self) -> None:
+        self.probes: dict[str, object] = {}
+
+    def save_probe(self, asset_id, probe):
+        self.probes[asset_id] = probe
+
+
+AUDIO_METADATA = AudioMetadata(
+    captured_at="2026-08-02T14:55:56+08:00",
+    latitude=22.4846,
+    longitude=114.5438,
+    captured_location="22.484600,114.543800",
+    duration_sec=5.0,
+    codec="aac",
+    sample_rate=44100,
+    channels=2,
+    bit_rate=128000,
+)
+
+
+def build_audio(*, metadata_reader):
+    assets, observations, storage = FakeAssets(), FakeObservations(), FakeStorage()
+    audios = FakeAudioRepository()
+    use_case = ImportAssets(
+        assets=assets,
+        observations=observations,
+        storage=storage,
+        metadata=FakeMetadata(),
+        audio_metadata=metadata_reader,
+        audio_repository=audios,
+    )
+    return use_case, assets, audios
+
+
+def test_audio_import_reads_metadata_and_records_the_probe():
+    """T521：音频要读 ffprobe 元数据、写进 metadata_json，**不能收下了什么都不发生**。"""
+    reader = FakeAudioMetadata(AUDIO_METADATA)
+    use_case, assets, audios = build_audio(metadata_reader=reader)
+
+    result = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="clip.m4a", content_type=None, content=b"m4a")
+    )
+
+    assert result.media_type is MediaType.AUDIO
+    assert reader.calls, "音频必须真的走一次探测"
+    assert result.audio_probed is True
+    assert audios.probes[result.asset_id].metadata is AUDIO_METADATA
+    # 拍摄时间/GPS 接到与 EXIF/视频同一条路上：否则音频的 captured_at 只会是导入时刻。
+    asset = assets.get(result.asset_id)
+    assert asset.captured_at == datetime(2026, 8, 2, 6, 55, 56, tzinfo=UTC)
+    assert asset.captured_location == GpsPoint(22.4846, 114.5438)
+
+
+def test_audio_probe_failure_is_recorded_not_swallowed():
+    """探测失败照收，但原因要落在资产上——与视频 ``video_probe_error`` 同一条口径。"""
+    use_case, _, audios = build_audio(metadata_reader=FakeAudioMetadata(error="ffprobe failed: boom"))
+
+    result = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="clip.m4a", content_type=None, content=b"m4a")
+    )
+
+    assert result.audio_probed is False
+    probe = audios.probes[result.asset_id]
+    assert probe.metadata is None
+    assert "ffprobe failed: boom" in probe.probe_error
+
+
+def test_the_audio_delivery_mime_comes_from_the_suffix_not_the_uploader():
+    """交付类型由后端按后缀定。
+
+    上传方给不出具体类型（curl / 整册导入都是 ``application/octet-stream``）时，
+    照抄它会让 ``<audio>`` 拿到一个播不了的类型，而音频没有转码件这条退路。
+    """
+    use_case, assets, _ = build_audio(metadata_reader=FakeAudioMetadata(AUDIO_METADATA))
+
+    result = use_case.execute(
+        ImportRequest(
+            scope_id="album1",
+            file_name="clip.m4a",
+            content_type="application/octet-stream",
+            content=b"m4a",
+        )
+    )
+
+    assert assets.get(result.asset_id).mime_type == "audio/mp4"
+
+
+def test_a_specific_audio_content_type_is_kept_as_is():
+    """上传方给了具体的 ``audio/*`` 就用它的——**后缀映射盖不过已声明的类型**。
+
+    故意选一个「后缀映射会给别的值」的组合（.m4a 的默认是 ``audio/mp4``，这里声明
+    ``audio/x-m4a``），否则这条断言在「永远走后缀映射」的变异下也是绿的。
+    """
+    use_case, assets, _ = build_audio(metadata_reader=FakeAudioMetadata(AUDIO_METADATA))
+
+    result = use_case.execute(
+        ImportRequest(
+            scope_id="album1",
+            file_name="clip.m4a",
+            content_type="audio/x-m4a",
+            content=b"m4a",
+        )
+    )
+
+    assert assets.get(result.asset_id).mime_type == "audio/x-m4a"
+
+
+def test_image_and_video_never_touch_the_audio_chain():
+    """图片与视频一步都不进音频那条路——否则「图片也被 ffprobe 了一遍」不会报错。"""
+    reader = FakeAudioMetadata(AUDIO_METADATA)
+    use_case, assets, audios = build_audio(metadata_reader=reader)
+
+    image = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="a.jpg", content_type="image/jpeg", content=b"jpg")
+    )
+    video = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="clip.mov", content_type="video/quicktime", content=b"mov")
+    )
+
+    assert image.audio_probed is False
+    assert video.audio_probed is False
+    assert reader.calls == []
+    assert audios.probes == {}
+    # 视频的 mime 照旧来自上传方，不被音频那条后缀规则改掉。
+    assert assets.get(video.asset_id).mime_type == "video/quicktime"
+
+
+def test_audio_import_without_the_probe_chain_still_works():
+    """协作者全缺时退化成旧行为（不报错）——与其余可选协作者同一形状。"""
+    use_case, assets, _ = build_audio(metadata_reader=None)
+
+    result = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="clip.m4a", content_type=None, content=b"m4a")
+    )
+
+    assert result.media_type is MediaType.AUDIO
+    assert result.audio_probed is False
+    assert assets.get(result.asset_id).mime_type == "audio/mp4"

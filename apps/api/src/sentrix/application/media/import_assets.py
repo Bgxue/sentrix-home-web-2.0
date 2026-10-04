@@ -60,6 +60,17 @@ S8a 追加一条：**视频不再静默空转**。原先只有 ``media_type is I
 并且 ``ImportResult.video_probed`` 把「这次到底有没有探测」变成响应里看得见的一位数。
 **它不建场景、不抽帧**——那是 S8b。
 
+S8c 追加一条：**音频走同一条链，但不转码、不转写**（用户裁决②「音频只做入库与播放」）：
+
+1. 走 ffprobe 读时长/编码/采样率/声道/码率（``AudioMetadataReader``）；
+2. 把拍摄时间与 GPS 接到与 EXIF/视频同一条路上（``captured_at`` / ``captured_location``）；
+3. 把结果写进 ``assets.metadata_json``（``AudioRepository.save_probe``）；
+4. 交付的 content-type 由后端按后缀定（``audio_mime_type``），不照抄上传方给的
+   ``application/octet-stream``——音频没有转码件这条退路，类型错了就没有第二次机会。
+
+**不做转写**：1.0 的 ``observations.transcript`` 与 ``compose_text`` 里的那一段都不搬
+（``docs/refactor/s8-deviations.md`` §1.1），2.0 的 ``compose_text`` 保持七字段。
+
 **去重命中时只重跑幂等的那几步**（视觉向量 + 地点）。事件归属不重跑：它不是幂等的，
 对同一条 Observation 再跑一次可能给它开出第二个事件。1.0 有过 223 张图没有任何视觉
 向量却毫无征兆的记录，重新导入是使用者唯一能想到的补救动作，它必须真的有效——
@@ -79,6 +90,9 @@ from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observati
 from sentrix.domain.media.ports import (
     AssetObserver,
     AssetRepository,
+    AudioMetadataReader,
+    AudioProbe,
+    AudioRepository,
     MediaStorage,
     MetadataReader,
     ObservationRepository,
@@ -86,6 +100,7 @@ from sentrix.domain.media.ports import (
     VideoProbe,
     VideoRepository,
     VideoTranscoder,
+    audio_mime_type,
 )
 from sentrix.domain.places.ports import AssetPlaceIndex
 from sentrix.domain.retrieval.ports import AssetVisualIndexer, LexicalIndex
@@ -136,6 +151,9 @@ class ImportResult:
     # 「视频导入成功但一个场景都没有」必须在响应上看得见，否则又回到静默空转。
     # 非视频、或抽取链没接、或探测不到时长时都是 0。
     video_scenes: int = 0
+    # 本次导入的音频有没有真的走过 ffprobe（S8c T521）。与 ``video_probed`` 同一条
+    # 理由：「音频收下了但什么都没发生」必须在响应上看得见。音频以外一律 False。
+    audio_probed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +209,11 @@ class ImportAssets:
         video_metadata: VideoMetadataReader | None = None,
         video_transcoder: VideoTranscoder | None = None,
         video_repository: VideoRepository | None = None,
+        # 音频两个协作者（S8c T521）。与视频那三个同形：**成组出现**，缺任一个就整条
+        # 跳过。音频**不要转码器**——浏览器原生放得了 mp3/wav/m4a/aac/flac/ogg
+        # （用户裁决②），照搬视频那套只会多一个恒不生效的协作者。
+        audio_metadata: AudioMetadataReader | None = None,
+        audio_repository: AudioRepository | None = None,
         # 关键帧挂到场景事件上的那条路（S8b T513）。**没有它就不能强制归属**：
         # 关键帧的观察属于它那一秒的源片场景，按 6 小时窗去折进某张照片的事件是错的。
         event_attacher: Callable[[str, Observation], None] | None = None,
@@ -207,6 +230,8 @@ class ImportAssets:
         self._video_metadata = video_metadata
         self._video_transcoder = video_transcoder
         self._video_repository = video_repository
+        self._audio_metadata = audio_metadata
+        self._audio_repository = audio_repository
         self._event_attacher = event_attacher
         self._video_scene_extractor = video_scene_extractor
         self._visual_indexer = visual_indexer
@@ -263,6 +288,29 @@ class ImportAssets:
                 gps = video_probe.metadata.gps() or gps
                 device = video_probe.metadata.device or device
 
+        # 音频：探测元数据（S8c T521）。**排在资产落库之前**，理由与视频同一条：
+        # 拍摄时间/GPS 要跟 EXIF 一样在建资产之前拿到，否则 captured_at 只能退回导入时刻。
+        audio_probe: AudioProbe | None = None
+        if (
+            media_type is MediaType.AUDIO
+            and self._audio_metadata is not None
+            and self._audio_repository is not None
+        ):
+            audio_probe = self._probe_audio(asset_id, stored_path)
+            if audio_probe.metadata is not None:
+                captured_at = audio_probe.metadata.captured_datetime() or captured_at
+                gps = audio_probe.metadata.gps() or gps
+
+        # 音频的交付类型由**后端按后缀**定（``audio_mime_type``），不照抄上传方的
+        # content-type：上传方常常给不出具体类型（curl / 整册导入是
+        # ``application/octet-stream``），而音频不转码、交出去的就是原文件，
+        # 类型错了浏览器没有第二次机会。S8a 的验收在视频 ``?original=1`` 上见过同一现象。
+        mime_type = (
+            audio_mime_type(request.file_name, request.content_type)
+            if media_type is MediaType.AUDIO
+            else request.content_type
+        )
+
         now = self._clock()
         asset = Asset(
             id=asset_id,
@@ -270,7 +318,7 @@ class ImportAssets:
             file_name=request.file_name,
             media_type=media_type,
             path=str(stored_path),
-            mime_type=request.content_type,
+            mime_type=mime_type,
             size_bytes=len(request.content),
             status=AssetStatus.PROCESSED,
             content_sha256=content_sha256,
@@ -284,6 +332,8 @@ class ImportAssets:
         # 探测结果落库**必须在资产行之后**：它写的是 ``assets.metadata_json``。
         if video_probe is not None and self._video_repository is not None:
             self._video_repository.save_probe(asset.id, video_probe)
+        if audio_probe is not None and self._audio_repository is not None:
+            self._audio_repository.save_probe(asset.id, audio_probe)
 
         processed = self.process_image(asset)
         # 场景抽取排在图片流水线**之后**：它自己会再建一批资产与观察（关键帧），
@@ -306,6 +356,7 @@ class ImportAssets:
             text_rows=processed.text_rows,
             video_probed=video_probe is not None and video_probe.metadata is not None,
             video_scenes=video_scenes,
+            audio_probed=audio_probe is not None and audio_probe.metadata is not None,
         )
 
     def process_image(self, asset: Asset, *, forced_event_id: str | None = None) -> ProcessedAsset:
@@ -412,6 +463,22 @@ class ImportAssets:
             browser_preview_error=preview_error,
             probe_error=probe_error,
         )
+
+    def _probe_audio(self, asset_id: str, path: Path) -> AudioProbe:
+        """一次音频探测：ffprobe 元数据。**没有转码那一步**——音频不转码。
+
+        与 ``_probe_video`` / ``PillowMetadataReader.read`` 同一条既有口径：
+        **失败不阻断导入**（EXIF 读不出来降级成 ``(None, None, None)``，这里降级成
+        「元数据为空 + 一条原因」）。区别是这里**必须**把原因留在资产上：元数据本身就是
+        这一路要交付的东西，没有它「收下了但什么都没发生」。
+        """
+        assert self._audio_metadata is not None
+        try:
+            return AudioProbe(metadata=self._audio_metadata.read(path))
+        except Exception as error:  # noqa: BLE001 —— 坏文件不阻断导入，见 docstring
+            probe_error = f"{type(error).__name__}: {error}"
+            log.warning("音频元数据读取失败 asset=%s: %s", asset_id, probe_error)
+            return AudioProbe(probe_error=probe_error)
 
     def _extract_entities(self, observation: Observation, event_id: str | None) -> tuple[str, ...]:
         """非人物实体抽取（S6 T127）。协作者缺失就静默跳过——与其余可选协作者同形。

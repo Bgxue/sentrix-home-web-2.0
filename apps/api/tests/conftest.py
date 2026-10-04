@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from sentrix.config import Settings
 from sentrix.domain.assistant.models import ChatMessage, ModelReply
-from sentrix.domain.media.models import VideoMetadata
+from sentrix.domain.media.models import AudioMetadata, VideoMetadata
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.database import Database
@@ -111,6 +111,29 @@ class FakeVideoMetadataReader:
         )
 
 
+class FakeAudioMetadataReader:
+    """契约测试用的确定性音频探测器（S8c T521）。
+
+    真实现起 ``ffprobe`` 子进程；与 ``FakeVideoMetadataReader`` 同一条理由——契约测试
+    要验的是接线与 HTTP 映射，不该把「这台机器有没有 ffprobe」变成断言的前置条件。
+    真适配器的抽取口径在 ``tests/integration/test_audio_metadata.py`` 里用假 subprocess 钉住。
+    """
+
+    def read(self, path):
+        return AudioMetadata(
+            captured_at="2026-08-02T14:55:56+08:00",
+            latitude=22.4846,
+            longitude=114.5438,
+            captured_location="22.484600,114.543800",
+            duration_sec=5.0,
+            codec="aac",
+            sample_rate=44100,
+            channels=2,
+            bit_rate=128000,
+            creation_source="format.creation_time",
+        )
+
+
 class FakeVideoTranscoder:
     """把「转码」换成写一个可辨认的假文件，让交付分支可断言。规则与真适配器一致：
     H.264 **不转**（返回 None），其余才落一个转码件。"""
@@ -194,6 +217,8 @@ def client(settings) -> TestClient:
         # 视频探测与转码同理：真适配器起 ffprobe/ffmpeg 子进程，契约测试不该依赖它们。
         video_metadata_reader=FakeVideoMetadataReader(),
         video_transcoder=FakeVideoTranscoder(),
+        # 音频探测同理（S8c）：真实现起 ffprobe 子进程。
+        audio_metadata_reader=FakeAudioMetadataReader(),
         # 抽帧同理：真实现起 ffmpeg。这里给的是「每个场景一张真 JPEG」的假件，
         # 所以契约测试能走完整条「导入视频 → 场景成型 → 关键帧落库」的链。
         video_keyframe_extractor=FakeVideoKeyframeExtractor(),
