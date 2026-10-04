@@ -45,6 +45,9 @@ from sentrix.domain.media.ports import (
     ObservationRepository,
     PhotoInspector,
     PreviewEncoder,
+    VideoMetadataReader,
+    VideoRepository,
+    VideoTranscoder,
     VlmObserver,
 )
 from sentrix.domain.memories.ports import (
@@ -76,6 +79,8 @@ from sentrix.infrastructure.media.person_vision import (
 from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.photo_inspector import OpenAIPhotoInspector
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
+from sentrix.infrastructure.media.video_metadata import FfprobeVideoMetadataReader
+from sentrix.infrastructure.media.video_transcode import FfmpegVideoTranscoder
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
 from sentrix.infrastructure.models.wemm import WeMMSidecarEmbedder
@@ -115,6 +120,7 @@ from sentrix.infrastructure.persistence.repositories.structured import (
 )
 from sentrix.infrastructure.persistence.repositories.turns import SqliteTurnRepository
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
+from sentrix.infrastructure.persistence.repositories.video import SqliteVideoRepository
 from sentrix.infrastructure.places.aliases import load_place_aliases
 from sentrix.infrastructure.places.composite import OfflinePlaceResolver
 from sentrix.infrastructure.places.geonames import GeoNamesNearestResolver
@@ -139,6 +145,11 @@ class Container:
     media_storage: MediaStorage
     metadata_reader: MetadataReader
     preview_encoder: PreviewEncoder
+    # 视频三件（S8a）：ffprobe 探测、浏览器预览转码、血缘仓储。三者都是端口声明——
+    # 具体实现（子进程 / 子进程 / SQL）全在 infrastructure，见 pyproject 的两条 purity 契约。
+    video_metadata_reader: VideoMetadataReader
+    video_transcoder: VideoTranscoder
+    video_repository: VideoRepository
     vector_repository: VectorRepository
     vector_index: VectorIndex
     visual_embedder: VisualEmbedder
@@ -236,6 +247,11 @@ class Container:
             media_storage=FileSystemMediaStorage(settings.media_dir),
             metadata_reader=PillowMetadataReader(),
             preview_encoder=PillowPreviewEncoder(),
+            video_metadata_reader=FfprobeVideoMetadataReader(),
+            # 预览转码件落在 ``media_dir/derived/video`` 下：与其余媒体文件同一个根，
+            # 换数据目录就整体换（与 ``Settings`` 里 preview_dir / qdrant_dir 同一条理由）。
+            video_transcoder=FfmpegVideoTranscoder(settings.media_dir),
+            video_repository=SqliteVideoRepository(database),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
             # **两个槽指向同一个实例**（W1 起方案是统一空间）。建两个实例不只是浪费

@@ -1,0 +1,150 @@
+"""ffprobe 视频元数据适配器。移植自 1.0 ``backend/video/metadata.py``。
+
+**为什么落在 infrastructure。** 它要起 ``ffprobe`` 子进程，而 ``pyproject.toml`` 的
+``domain-purity`` 与 ``application-purity`` 两条 import-linter 契约明令禁止
+domain/application 碰子进程那类东西。端口声明在 ``domain/media/ports.py``
+（``VideoMetadataReader``），形状在 ``domain/media/models.py``（``VideoMetadata``）。
+
+移植时保留 1.0 的全部抽取口径，一处不改：
+
+- **QuickTime 的 ``com.apple.quicktime.creationdate`` 优先于通用的 ``creation_time``**
+  （``1.0 metadata.py:60-63``）：iPhone 导出把本地时区的拍摄时间放在前者，后者是 UTC，
+  取错会整体偏一个时区。``creation_source`` 就是给这件事留下的可观测面。
+- **ISO6709 的 GPS**（``com.apple.quicktime.location.ISO6709`` 或 ``location``）——
+  MP4 的定位不在 EXIF 里，只在这两个标签里。
+- 时区写法两种都要认：``+0800`` 补成 ``+08:00``，``Z`` 换成 ``+00:00``。
+- 旋转角优先读 ``side_data_list`` 的 ``rotation``，退回流标签的 ``rotate``。
+
+与 1.0 的唯一区别是失败形态：1.0 抛 ``RuntimeError``/``ValueError``，本适配器抛
+``ValueError``（端口契约里写了），由 ``ImportAssets`` 接住写进 metadata_json。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+
+from sentrix.domain.media.models import VideoMetadata
+
+# 1.0 ``metadata.py:9-10`` 的两条正则，逐字照抄。
+ISO6709_RE = re.compile(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)?/?$")
+COMPACT_TZ_RE = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
+def _rate(value: object) -> float:
+    """``avg_frame_rate`` / ``r_frame_rate`` 是 ``"70400/2347"`` 这样的分数串。"""
+    try:
+        numerator, denominator = str(value or "0/1").split("/", 1)
+        return float(numerator) / float(denominator) if float(denominator) else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _location(tags: dict[str, object]) -> tuple[float | None, float | None]:
+    raw = str(tags.get("com.apple.quicktime.location.ISO6709") or tags.get("location") or "").strip()
+    match = ISO6709_RE.match(raw)
+    if not match:
+        return None, None
+    return float(match.group(1)), float(match.group(2))
+
+
+def _normalized_datetime(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = COMPACT_TZ_RE.sub(r"\1:\2", text)
+    return text[:-1] + "+00:00" if text.endswith("Z") else text
+
+
+class FfprobeVideoMetadataReader:
+    """domain ``VideoMetadataReader`` 的 ffprobe 实现。"""
+
+    def __init__(self, *, timeout_s: int = 60) -> None:
+        # 1.0 的 timeout 是 60 秒（``metadata.py:43``）。读元数据只解容器头，
+        # 与转码（可能几分钟）不是一件事，不该共用一个上限。
+        self._timeout_s = timeout_s
+
+    def read(self, path: Path) -> VideoMetadata:
+        path = Path(path).resolve()
+        process = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self._timeout_s,
+        )
+        if process.returncode:
+            raise ValueError(f"ffprobe failed: {process.stderr.strip()[-1000:]}")
+        try:
+            payload = json.loads(process.stdout)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"ffprobe output is not JSON: {error}") from error
+        format_info = payload.get("format") or {}
+        format_tags = format_info.get("tags") or {}
+        video = next(
+            (item for item in payload.get("streams") or [] if item.get("codec_type") == "video"),
+            None,
+        )
+        if not video:
+            raise ValueError("ffprobe found no video stream")
+        stream_tags = video.get("tags") or {}
+        captured_at = (
+            format_tags.get("com.apple.quicktime.creationdate")
+            or format_tags.get("creation_time")
+            or stream_tags.get("creation_time")
+        )
+        creation_source = (
+            "com.apple.quicktime.creationdate"
+            if format_tags.get("com.apple.quicktime.creationdate")
+            else "format.creation_time"
+            if format_tags.get("creation_time")
+            else "stream.creation_time"
+        )
+        # 流标签覆盖格式标签：流上的定位比容器上的更具体（1.0 同一个写法）。
+        latitude, longitude = _location({**stream_tags, **format_tags})
+        rotation = 0
+        for item in video.get("side_data_list") or []:
+            if "rotation" in item:
+                rotation = int(float(item["rotation"]))
+                break
+        if not rotation:
+            try:
+                rotation = int(float(stream_tags.get("rotate") or 0))
+            except ValueError:
+                rotation = 0
+        fps = _rate(video.get("avg_frame_rate")) or _rate(video.get("r_frame_rate"))
+        duration = float(format_info.get("duration") or video.get("duration") or 0)
+        device = " ".join(
+            filter(
+                None,
+                [
+                    format_tags.get("com.apple.quicktime.make"),
+                    format_tags.get("com.apple.quicktime.model"),
+                ],
+            )
+        ).strip()
+        return VideoMetadata(
+            captured_at=_normalized_datetime(captured_at),
+            latitude=latitude,
+            longitude=longitude,
+            captured_location=f"{latitude:.6f},{longitude:.6f}" if latitude is not None else None,
+            duration_sec=duration,
+            fps=fps,
+            width=int(video.get("width") or 0),
+            height=int(video.get("height") or 0),
+            codec=str(video.get("codec_name") or ""),
+            rotation=rotation,
+            device=device,
+            creation_source=creation_source,
+        )

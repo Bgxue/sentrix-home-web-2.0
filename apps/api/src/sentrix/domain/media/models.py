@@ -82,6 +82,66 @@ class GpsPoint:
         return 6371.0088 * 2 * math.asin(math.sqrt(a))
 
 
+# 视频拍摄时间/GPS 的抽取结果。字段逐个照抄 1.0 ``backend/video/contracts.py`` 的
+# ``VideoMetadata``（``probe_video_metadata`` 的返回形状），只有 ``raw`` 不搬——
+# 那是整包 ffprobe JSON，1.0 写进 ``metadata_json.video_metadata`` 之后没有任何读侧用过，
+# 留在 2.0 只会让每导入一个视频就在库里塞一份完整的流/标签树（见 ``s8-deviations.md`` §4）。
+#
+# **它落在 domain 而不是 infrastructure**：形状是领域词汇（时长/编码/旋转角），
+# 谁去读那个文件（ffprobe 子进程）才是 infrastructure 的事。
+@dataclass(frozen=True, slots=True)
+class VideoMetadata:
+    captured_at: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    captured_location: str | None = None
+    duration_sec: float = 0.0
+    fps: float = 0.0
+    width: int = 0
+    height: int = 0
+    codec: str = ""
+    rotation: int = 0
+    device: str = ""
+    creation_source: str = ""
+
+    def gps(self) -> GpsPoint | None:
+        """经纬度 -> ``GpsPoint``。两个都解析出来才算——与 ``PillowMetadataReader``
+        同一口径：EXIF 也允许只标一半，那半边不该冒充一个完整坐标。"""
+        if self.latitude is None or self.longitude is None:
+            return None
+        try:
+            return GpsPoint(self.latitude, self.longitude)
+        except ValueError:
+            return None
+
+    def captured_datetime(self) -> datetime | None:
+        """``captured_at`` 已被适配器规整成 ISO-8601（含 ``+08:00`` 这类偏移）。"""
+        if not self.captured_at:
+            return None
+        try:
+            return datetime.fromisoformat(self.captured_at)
+        except ValueError:
+            return None
+
+
+# 一条派生物的血缘切片。派生物**本来就是 ``media_type='image'`` 的普通资产**
+# （1.0 ``video/processor.py:188``），这里只把「怎么指回原片」那几个列（迁移 0010）带出来。
+# S8a 读它（``GET /video-scenes/{id}`` 的 ``keyframe_assets``），S8b 写它。
+@dataclass(frozen=True, slots=True)
+class DerivedAsset:
+    id: str
+    file_name: str
+    media_type: str
+    status: str
+    captured_at: str | None
+    captured_location: str | None
+    parent_asset_id: str | None
+    derived_kind: str | None
+    source_timestamp_sec: float | None
+    source_frame_index: int | None
+    source_scene_index: int | None
+
+
 @dataclass(frozen=True, slots=True)
 class Asset:
     id: str

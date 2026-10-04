@@ -108,7 +108,8 @@ PENDING_METHODS: dict[str, str] = {
     # 登记在此，等两条工具接上时**由反向规则自己删掉**——与 facts 那三条走的是同一条路。
     "MediaStorage.path_for": "S6 · 依赖核查（媒体路径解析，归属未定）",
     "LexicalIndex.rebuild_scope": "S6 · 依赖核查（词法索引重建，归属未定）",
-    "AssetRepository.update_status": "S6 · 依赖核查（资产状态流转，归属未定）",
+    # AssetRepository.update_status 在 S8a · T504 接线（POST /videos/{id}/reprocess
+    # 重置状态），按反向规则删掉——**又是被门禁自己删掉的一条**。
 }
 
 

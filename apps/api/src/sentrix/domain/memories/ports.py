@@ -89,6 +89,16 @@ class EventRepository(Protocol):
 
     def dissolve(self, event_id: str) -> None: ...
 
+    def list_video_scenes(self, source_asset_id: str) -> Sequence[EventRecord]:
+        """某个源视频的场景事件，按场景序号升序。
+
+        1.0 ``db.py:2427`` 的 ``list_video_scene_events``：``source_type = 'video_scene'
+        AND source_asset_id = ? AND status = 'active' ORDER BY source_scene_index``。
+        **它不区分 ``derived_kind``**——场景是事件，派生物是资产，两者靠
+        ``(source_asset_id, source_scene_index)`` 在两边各自成键（迁移 0010 的两个唯一索引）。
+        """
+        ...
+
 
 class EventParticipantRepository(Protocol):
     """事件参与者与事件-实体两张投影表。

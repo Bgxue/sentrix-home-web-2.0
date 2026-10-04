@@ -58,3 +58,71 @@ S8 的设计文档定义是「**FunASR 音频、关键帧/场景切分、派生�
 ## 4. 施工中的新增偏离
 
 （施工时追加）
+
+---
+
+## 4. 施工中的新增偏离（S8a · T501–T506，2026-10-04）
+
+S8a 交付「元数据 + 血缘列能用 + 能播 + 路由通」，不建场景、不抽帧（那是 S8b）。
+下面每条都指到具体的一处代码或一件 2.0 没有的东西，**没有一条是凭喜好**。
+
+### 4.1 `VideoMetadata` 不带 1.0 的 `raw`
+
+| 项 | 内容 |
+|---|---|
+| **1.0 怎么做** | `backend/video/contracts.py` 的 `VideoMetadata` 有一个 `raw: dict` 字段，装的是整包 ffprobe JSON（`metadata.py` 的 `raw=payload`）；`processor.py` 把 `metadata.as_dict()`（含 `raw`）整份写进 `assets.metadata_json.video_metadata` |
+| **2.0 改成什么** | `domain/media/models.py` 的 `VideoMetadata` 保留其余 12 个字段，**去掉 `raw`** |
+| **为什么** | `raw` 在 1.0 **没有任何读侧**（全仓 grep 只命中写入处与 dataclass 定义），而它把每条流的完整标签树都带进库里——一个 4K 视频的 ffprobe payload 是几十 KB，每次导入写一份没人读。2.0 的 `metadata_json` 只放真正要被读的东西 |
+| **可逆性** | 高。要原始 payload 时加回一个字段、适配器多传一个键即可 |
+| **证据强度** | 全仓 grep：`raw` 只出现在 `contracts.py` 的定义与 `metadata.py` 的赋值处 |
+
+### 4.2 `video_scenes` 的响应只回 2.0 拿得到的那几块
+
+| 项 | 内容 |
+|---|---|
+| **1.0 怎么做** | `GET /api/video-scenes/{id}` 返回 `get_event_detail`（`db.py:3273`）= `{event, observations, facts, entities, event_revisions}`，其中 `event` 被 `get_event` 顺手挂上 `keyframe_assets` / `source_video`（`db.py:2345-2367`） |
+| **2.0 改成什么** | 只回 `{event, keyframe_assets, source_video}`——**六个键去掉三个**（`observations` / `facts` / `entities` / `event_revisions` 里的四个），且 `keyframe_assets` / `source_video` 放在 `event` **旁边**而不是里面 |
+| **为什么** | 2.0 没有通用的事件详情读侧（`GET /events/{id}` 只回 `TimelineEvent`），而 `event_revisions` 这张表**在 2.0 根本不存在**（0005_timeline.sql 的表头注释：「2.0 本切片只保留 events 与 event_observations」）。按 1.0 的形状填四个恒空的键，正是 `read_entity_detail` 明确拒绝过的那种「恒空占位键」。摊平而不是嵌套，是为了让列表端点（`/videos/{id}/scenes`）复用同一个 `VideoScenePayload` 时不背上两个它永远为空的字段 |
+| **可逆性** | 高。三个键的读路径将来落地时，加回去是纯新增 |
+| **证据强度** | 迁移 0005 的表头注释 + `GET /events/{id}` 的现存响应形状 |
+
+### 4.3 `reprocess` 在 S8a 只清场 + 重置状态
+
+| 项 | 内容 |
+|---|---|
+| **1.0 怎么做** | `app.py:1472-1481`：清派生数据 → 状态置 `video-queued` → `background_tasks.add_task(process_asset, asset_id)` 真跑一遍抽取链 |
+| **2.0 改成什么** | 前两步照做，**第三步没有**——`cleanup_derivatives` + `update_status(QUEUED)`，返回 `202 {accepted, asset_id, status: "video-queued"}` |
+| **为什么** | 抽取链是 S8b（T511–T514）。2.0 **没有任务队列**，起一个查无此人的后台任务只会把「跑到哪了」藏起来——与 `routes/timeline.py` 的 `import_album` 选同步是同一条纪律（那里写着「2.0 没有任务队列，装作异步只会把『跑到哪了』藏起来」） |
+| **代价** | S8a 里 `queued` 没有消费者，重跑之后资产停在 `queued`。**这是登记在案的已知状态，S8b 的 T511–T514 接走它**；S8a 是切片、没有前端调用方 |
+| **可逆性** | 高。S8b 往 `update_status` 之后接上抽取链即可，路由不动 |
+| **证据强度** | 计划书 T504 原文「可以只做「清派生数据 + 重置状态」，把真正重跑留到 S8b 接上，并在注释里写明」 |
+
+### 4.4 三处 2.0 新加的可观测面（1.0 没有）
+
+| 项 | 1.0 | 2.0 为什么加 |
+|---|---|---|
+| `metadata_json.video_probe_error` | 没有。ffprobe 失败 → 整条资产标 `failed`（`processor.py` 的 `except` 把 stage 写成 `video-failed`） | 2.0 选择「导入照收、原因留在资产上」（与 EXIF 读不出来不阻断同一条既有口径），那就得有地方放原因；没有它，失败又变成不可见 |
+| `ImportResponse.video_probed` | 没有。接口上看不出视频有没有被处理过 | 正是 S8a 要修的失败模式：「视频收下了但什么都没发生」在响应里完全不可见。与 `indexed` / `placed` 同一个位置 |
+| `VideoPayload.metadata` | 1.0 把整行 asset（含整个 `metadata_json`）交出去 | 2.0 只列出视频真正有的那几位 + 探测结果，形状固定、不随 metadata_json 里塞了什么都变 |
+
+### 4.5 预览转码的时机与落点
+
+| 项 | 1.0 | 2.0 |
+|---|---|---|
+| 时机 | 后台 worker（`process_asset`）里转 | **导入请求内同步转**（`ImportAssets._probe_video`） |
+| 落点 | `{SENTRIX_DATA_DIR}/derived/video/{asset_id}/preview.mp4` | `{SENTRIX_DATA_DIR}/media/derived/video/{asset_id}/preview.mp4` |
+
+**时机**：2.0 的导入本来就是同步的（整册导入甚至在同一请求里跑完整趟画像流水线），
+没有 worker 可以挂。代价是导入一个长视频要等一次转码——S8a 取「能播」优先。
+**落点**：2.0 的媒体文件统一在 `media_dir` 下，派生件跟它同一个根，换数据目录就整体换
+（与 `Settings.preview_dir` / `qdrant_dir` 都由 `data_dir` 派生是同一条理由）。
+
+### 4.6 `cleanup_derivatives` 的级联范围
+
+| 项 | 内容 |
+|---|---|
+| **1.0 怎么做** | `cleanup_video_derivatives` → 对每个派生物再调 `cleanup_asset_derivatives`，后者递归清掉那张图名下的观察 / 向量 / 人脸 / 提及等一大堆行 |
+| **2.0 S8a 做多少** | 只清：场景事件、事件的 `event_observations`、派生物本身、以及挂在派生物上的 `observations`。**人脸 / 实体提及 / 地点 / 向量那几张表的级联没做** |
+| **为什么** | 那几行是 S8b 的 T513（派生帧送进图片流水线）造出来的，而 T514 才是「幂等与清理」。照着还没写的写侧去猜表结构、多删一张表都可能是错的。**S8a 里这些行根本不存在**，所以不做不会漏 |
+| **可逆性** | 高。S8b 的 T514 在同一个方法里往下接 |
+| **证据强度** | 计划书 §2 的 S8b 任务表（T513 落派生物、T514 幂等与清理） |

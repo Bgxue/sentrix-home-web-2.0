@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from sentrix.config import Settings
 from sentrix.domain.assistant.models import ChatMessage, ModelReply
+from sentrix.domain.media.models import VideoMetadata
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.database import Database
@@ -81,6 +82,47 @@ class FakeVlmObserver:
         )
 
 
+class FakeVideoMetadataReader:
+    """契约测试用的确定性视频探测器（S8a）。
+
+    真实现起 ``ffprobe`` 子进程；契约测试要验的是 HTTP 映射与装配点接线，不该把
+    「这台机器有没有 ffmpeg」变成断言的前置条件——与 ``FakeVisualEmbedder`` /
+    ``FakeVlmObserver`` 是同一条理由。真适配器的抽取口径在
+    ``tests/integration/test_video_metadata.py`` 里用假 subprocess 钉住。
+
+    **文件名里带 ``hevc`` 就给 hevc 编码，其余给 h264**：交付有两条分支
+    （转码件 / 原片），用例靠这个开关选路。
+    """
+
+    def read(self, path):
+        codec = "hevc" if "hevc" in Path(path).name.lower() else "h264"
+        return VideoMetadata(
+            captured_at="2026-08-02T14:55:56+08:00",
+            latitude=22.4846,
+            longitude=114.5438,
+            captured_location="22.484600,114.543800",
+            duration_sec=12.5,
+            fps=30.0,
+            width=1920,
+            height=1080,
+            codec=codec,
+            device="Apple iPhone 14 Plus",
+            creation_source="com.apple.quicktime.creationdate",
+        )
+
+
+class FakeVideoTranscoder:
+    """把「转码」换成写一个可辨认的假文件，让交付分支可断言。规则与真适配器一致：
+    H.264 **不转**（返回 None），其余才落一个转码件。"""
+
+    def browser_preview(self, asset_id, source, codec):
+        if str(codec or "").lower() in {"h264", "avc1"}:
+            return None
+        target = Path(source).with_suffix(".preview.mp4")
+        target.write_bytes(b"fake-preview-mp4")
+        return target
+
+
 class FakeChatModel:
     """契约测试用的确定性文本模型。
 
@@ -126,6 +168,9 @@ def client(settings) -> TestClient:
         visual_embedder=FakeVisualEmbedder(),
         vlm_observer=FakeVlmObserver(),
         chat_model=FakeChatModel(),
+        # 视频探测与转码同理：真适配器起 ffprobe/ffmpeg 子进程，契约测试不该依赖它们。
+        video_metadata_reader=FakeVideoMetadataReader(),
+        video_transcoder=FakeVideoTranscoder(),
     )
     return TestClient(app)
 

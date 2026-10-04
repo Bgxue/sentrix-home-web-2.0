@@ -132,6 +132,14 @@ class EventRecord:
     # 事件的落库时间。``time_start`` 缺失时按日期分组要退回它——回退规则属于后端，
     # 否则两个前端会把同一份数据分到不同的天。
     created_at: datetime | None = None
+    # 视频场景事件的血缘（迁移 0010）。普通事件这几位都是空——``source_type`` 只在
+    # ``= 'video_scene'`` 时有意义。S8b 写它，S8a 读它（``GET /video-scenes/{id}``
+    # 要靠 ``source_asset_id`` / ``source_scene_index`` 找出这个场景的派生物）。
+    source_type: str = ""
+    source_asset_id: str = ""
+    source_scene_index: int | None = None
+    source_start_sec: float | None = None
+    source_end_sec: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

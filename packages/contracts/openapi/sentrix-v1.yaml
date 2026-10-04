@@ -109,6 +109,14 @@ paths:
       tags:
       - media
       summary: Get Asset File
+      description: '``?original=1`` 拿原片；不传时**视频**给浏览器预览件（1.0 ``app.py:2448-2478``）。
+
+
+        图片这条路上 ``original`` 是空操作：2.0 的 ``/file`` 一直是原文件（契约测试钉着
+
+        「交出去的字节与传上来的一模一样」），预览在 ``/preview``。不为了对称去改它——
+
+        改了会让 HEIC 从「原图直出」变成「转码件直出」，那是另一个决定。'
       operationId: get_asset_file_api_v1_assets__asset_id__file_get
       parameters:
       - name: asset_id
@@ -117,6 +125,13 @@ paths:
         schema:
           type: string
           title: Asset Id
+      - name: original
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Original
       responses:
         '200':
           description: Successful Response
@@ -665,6 +680,134 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ImportBatchResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/videos/{asset_id}:
+    get:
+      tags:
+      - videos
+      summary: Get Video
+      operationId: get_video_api_v1_videos__asset_id__get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoDetailResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/videos/{asset_id}/scenes:
+    get:
+      tags:
+      - videos
+      summary: Get Video Scenes
+      operationId: get_video_scenes_api_v1_videos__asset_id__scenes_get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoScenesResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/video-scenes/{scene_id}:
+    get:
+      tags:
+      - videos
+      summary: Get Video Scene
+      operationId: get_video_scene_api_v1_video_scenes__scene_id__get
+      parameters:
+      - name: scene_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Scene Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoSceneDetailResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/videos/{asset_id}/reprocess:
+    post:
+      tags:
+      - videos
+      summary: Reprocess Video
+      description: '清派生数据 + 重置状态，**S8a 阶段没有抽取链可跑**（那是 S8b 的 T511–T514）。
+
+
+        1.0 这里还有一句 ``background_tasks.add_task(process_asset, asset_id)``
+
+        （``app.py:1477``）——那正是 S8a 做不了的一半。**不装作异步**：2.0 没有任务队列，
+
+        起一个查无此人的后台任务只会把「跑到哪了」藏起来（``routes/timeline.py`` 的
+
+        ``import_album`` 也是为这个选择同步的）。所以这里如实做两件现在成立的事：
+
+
+        1. ``cleanup_derivatives`` 清掉这个源片的派生物与场景事件；
+
+        2. 状态回到 ``queued``——**S8b 的抽取链会从这个状态上接走它**。
+
+
+        ``status`` 回给客户端的是 1.0 的那个阶段名 ``video-queued``；资产行上的状态是
+
+        2.0 的 ``AssetStatus.QUEUED``。两者不是一个词表（2.0 没有 ``video_stage`` 列），
+
+        但指同一件事：**排队等着被处理**。S8a 里没有消费者把它接走，这一点写在
+
+        ``s8-deviations.md`` §4，不藏的。'
+      operationId: reprocess_video_api_v1_videos__asset_id__reprocess_post
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoReprocessResponse'
         '422':
           description: Validation Error
           content:
@@ -4211,6 +4354,10 @@ components:
           - type: string
           - type: 'null'
           title: Event Id
+        video_probed:
+          type: boolean
+          title: Video Probed
+          default: false
       type: object
       required:
       - asset_id
@@ -4257,6 +4404,72 @@ components:
         调用方而不是只落日志：这一趟会走几十次模型调用、让本来就长的导入请求再长一截，
 
         **"到底跑了没有、跑了多少"必须能从响应里看见**——否则它就是一个没人能观测的副作用。'
+    KeyframeAssetPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        file_name:
+          type: string
+          title: File Name
+        media_type:
+          type: string
+          title: Media Type
+        status:
+          type: string
+          title: Status
+        captured_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured At
+        captured_location:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured Location
+        parent_asset_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Asset Id
+        derived_kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Derived Kind
+        source_timestamp_sec:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Source Timestamp Sec
+        source_frame_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Source Frame Index
+        source_scene_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Source Scene Index
+      type: object
+      required:
+      - id
+      - file_name
+      - media_type
+      - status
+      - captured_at
+      - captured_location
+      - parent_asset_id
+      - derived_kind
+      - source_timestamp_sec
+      - source_frame_index
+      - source_scene_index
+      title: KeyframeAssetPayload
+      description: '一张派生关键帧。**它本来就是普通 image 资产**（1.0 ``processor.py:188``），
+
+        这里只带出「指回原片」的那几列。'
     KnowledgeResponse:
       properties:
         profiles:
@@ -5202,6 +5415,54 @@ components:
         换值、保留键名的（``event_memory_json`` 仍是这个名字），**这是一处偏离**：
 
         2.0 的模型层把「解过了」这件事表达在类型与名字上。'
+    SourceVideoPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        file_name:
+          type: string
+          title: File Name
+        media_type:
+          type: string
+          title: Media Type
+        mime_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mime Type
+        status:
+          type: string
+          title: Status
+        captured_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured At
+        captured_location:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured Location
+        size_bytes:
+          type: integer
+          title: Size Bytes
+        duration_sec:
+          type: number
+          title: Duration Sec
+          default: 0.0
+      type: object
+      required:
+      - id
+      - file_name
+      - media_type
+      - mime_type
+      - status
+      - captured_at
+      - captured_location
+      - size_bytes
+      title: SourceVideoPayload
+      description: 场景事件指回的源视频。1.0 ``db.py:2364`` 的原样一小份，外加时长。
     SplitClusterRequest:
       properties:
         face_instance_id:
@@ -5474,3 +5735,284 @@ components:
       - msg
       - type
       title: ValidationError
+    VideoDetailResponse:
+      properties:
+        video:
+          $ref: '#/components/schemas/VideoPayload'
+        scenes:
+          items:
+            $ref: '#/components/schemas/VideoScenePayload'
+          type: array
+          title: Scenes
+      type: object
+      required:
+      - video
+      - scenes
+      title: VideoDetailResponse
+    VideoMetadataPayload:
+      properties:
+        captured_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured At
+        latitude:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Latitude
+        longitude:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Longitude
+        captured_location:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured Location
+        duration_sec:
+          type: number
+          title: Duration Sec
+          default: 0.0
+        fps:
+          type: number
+          title: Fps
+          default: 0.0
+        width:
+          type: integer
+          title: Width
+          default: 0
+        height:
+          type: integer
+          title: Height
+          default: 0
+        codec:
+          type: string
+          title: Codec
+          default: ''
+        rotation:
+          type: integer
+          title: Rotation
+          default: 0
+        device:
+          type: string
+          title: Device
+          default: ''
+        creation_source:
+          type: string
+          title: Creation Source
+          default: ''
+      type: object
+      title: VideoMetadataPayload
+      description: ffprobe 探测结果的投影。字段与 ``domain.media.models.VideoMetadata`` 一一对应。
+    VideoPayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        file_name:
+          type: string
+          title: File Name
+        media_type:
+          type: string
+          title: Media Type
+        mime_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mime Type
+        size_bytes:
+          type: integer
+          title: Size Bytes
+        status:
+          type: string
+          title: Status
+        captured_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured At
+        captured_location:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Captured Location
+        gps:
+          anyOf:
+          - additionalProperties:
+              type: number
+            type: object
+          - type: 'null'
+          title: Gps
+        metadata:
+          anyOf:
+          - $ref: '#/components/schemas/VideoMetadataPayload'
+          - type: 'null'
+        browser_preview_path:
+          type: string
+          title: Browser Preview Path
+          default: ''
+        browser_preview_error:
+          type: string
+          title: Browser Preview Error
+          default: ''
+        probe_error:
+          type: string
+          title: Probe Error
+          default: ''
+      type: object
+      required:
+      - id
+      - scope_id
+      - file_name
+      - media_type
+      - mime_type
+      - size_bytes
+      - status
+      - captured_at
+      - captured_location
+      - gps
+      title: VideoPayload
+      description: 1.0 ``GET /api/videos/{id}`` 的 ``video`` 字段。
+    VideoReprocessResponse:
+      properties:
+        accepted:
+          type: boolean
+          title: Accepted
+        asset_id:
+          type: string
+          title: Asset Id
+        status:
+          type: string
+          title: Status
+      type: object
+      required:
+      - accepted
+      - asset_id
+      - status
+      title: VideoReprocessResponse
+    VideoSceneDetailResponse:
+      properties:
+        event:
+          $ref: '#/components/schemas/VideoScenePayload'
+        keyframe_assets:
+          items:
+            $ref: '#/components/schemas/KeyframeAssetPayload'
+          type: array
+          title: Keyframe Assets
+        source_video:
+          anyOf:
+          - $ref: '#/components/schemas/SourceVideoPayload'
+          - type: 'null'
+      type: object
+      required:
+      - event
+      - keyframe_assets
+      - source_video
+      title: VideoSceneDetailResponse
+      description: '``GET /video-scenes/{id}``。
+
+
+        **``source_video`` / ``keyframe_assets`` 放在 ``event`` 的旁边，而不是像 1.0 那样
+
+        塞进 ``event`` 里面。** 1.0 那个嵌套是 ``get_event`` 顺手给行加键的产物；摊平之后
+
+        列表端点（``/videos/{id}/scenes``）用的同一个 ``VideoScenePayload`` 不必背上两个
+
+        它永远为空的字段。'
+    VideoScenePayload:
+      properties:
+        id:
+          type: string
+          title: Id
+        scope_id:
+          type: string
+          title: Scope Id
+        title:
+          type: string
+          title: Title
+        event_type:
+          type: string
+          title: Event Type
+        time_start:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Time Start
+        time_end:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Time End
+        place:
+          type: string
+          title: Place
+        activity:
+          type: string
+          title: Activity
+        summary:
+          type: string
+          title: Summary
+        confidence:
+          type: number
+          title: Confidence
+        status:
+          type: string
+          title: Status
+        source_type:
+          type: string
+          title: Source Type
+          default: ''
+        source_asset_id:
+          type: string
+          title: Source Asset Id
+          default: ''
+        source_scene_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Source Scene Index
+        source_start_sec:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Source Start Sec
+        source_end_sec:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Source End Sec
+      type: object
+      required:
+      - id
+      - scope_id
+      - title
+      - event_type
+      - time_start
+      - time_end
+      - place
+      - activity
+      - summary
+      - confidence
+      - status
+      title: VideoScenePayload
+      description: 一个视频场景事件。血缘那几位（``source_*``）来自迁移 0010。
+    VideoScenesResponse:
+      properties:
+        video_asset_id:
+          type: string
+          title: Video Asset Id
+        scenes:
+          items:
+            $ref: '#/components/schemas/VideoScenePayload'
+          type: array
+          title: Scenes
+      type: object
+      required:
+      - video_asset_id
+      - scenes
+      title: VideoScenesResponse

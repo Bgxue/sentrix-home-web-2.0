@@ -144,4 +144,50 @@ infrastructure**；`application-purity` 同理。
 
 ## 4. 施工记录
 
-（施工时逐条填）
+### 4.1 S8a 完成（2026-10-04）
+
+T502–T506 全部落地。新增 9 个文件（ffprobe 适配器、转码器、血缘仓储、4 条路由 + schema、
+4 个测试文件），修改 21 个（含 module-map / capability-map / behaviour-baseline /
+`s8-deviations.md` §4 / 重跑 openapi）。**迁移 `0010_video.sql` 一个字未改**，
+未引入任何新依赖。
+
+**定点变异 11/11 被杀**：creationdate 标签优先级 · ISO6709 解析 · H.264 判据 ·
+`?original=1` 分流 · 探测结果不落库 · 探测失败改成抛 · 整册放行视频 ·
+reprocess 不清派生数据 · 场景过滤 · 血缘列读错 · `/preview` 回退 Pillow。
+
+**`make ci`**：`1 failed / 2039 passed`，唯一失败是那条已知的模型侧 flaky；
+coverage 97.79%（门 ≥85%）；web-check 单独补跑绿。
+
+### 4.2 独立验收（我自己跑的，不复用实施方的结论）
+
+真 ffmpeg 造视频 → 真 app：
+
+```
+导入        media_type=video · status=processed · video_probed=true · deduplicated=false
+GET /videos/{id}        {video, scenes}；元数据读对：3.0 秒 / mpeg4 / 12fps / 352x288
+GET /videos/{id}/scenes {video_asset_id, scenes: []}   ← 空是对的，场景写入者属 S8b
+/file 默认              200 video/mp4  109078B   ← 转码出的预览
+/file?original=1        200            166443B   ← 原片；大小不同即证明分流生效
+/preview                200 video/mp4  109078B   ← **原先这里是 500**
+reprocess               202 {accepted, asset_id, status: "video-queued"}
+```
+
+**计划书 §2 里 S8a 的三条验收（读到时元数据 / 能在浏览器里播 / `/videos/{id}`
+返回得出来）都成立**，另外顺手修掉了那条存量 500。
+
+**一处小观察（不阻塞）**：`?original=1` 这次回的 `content-type` 是
+`application/octet-stream` 而不是 `video/quicktime`——它取决于上传时探测到的
+`mime_type`。浏览器仍能播（默认那条路径给的就是 `video/mp4`），`?original=1`
+是逃生口，影响面小。记在这里备查。
+
+### 4.3 一处门禁的反向规则又生效了
+
+`scripts/check_method_reachability.py` 里有一条 PENDING 登记：
+
+```
+"AssetRepository.update_status": "S6 · 依赖核查（资产状态流转，归属未定）"
+```
+
+S8a 的 `POST /videos/{id}/reprocess` 认领了它（`routes/videos.py` 重置资产状态），
+按反向规则删掉。**这是「登记过的未接线方法」被后续切片追上的一次**——
+与 S7 那几次同一个形状。

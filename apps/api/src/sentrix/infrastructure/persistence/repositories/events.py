@@ -17,7 +17,8 @@ from sentrix.infrastructure.persistence.database import Database
 _COLUMNS = (
     "id, scope_id, title, event_type, time_start, time_end, place, admin_district,"
     "activity, summary, confidence, aggregation_score, aggregation_breakdown_json,"
-    " status, revision, created_at"
+    " status, revision, created_at,"
+    " source_type, source_asset_id, source_scene_index, source_start_sec, source_end_sec"
 )
 
 # 1.0 ``merge_observation_into_event`` 新建事件时的两个占位值（``db.py:2310`` 附近）。
@@ -69,6 +70,13 @@ def _row_to_event(row: sqlite3.Row) -> EventRecord:
         status=row["status"],
         revision=row["revision"],
         created_at=_parse_datetime(row["created_at"]),
+        # 迁移 0010 的血缘列。老库升级上来的行是 NULL，统一收成空串/None——
+        # 「没有血缘」与「血缘是空串」在这里是同一件事，调用方（视频路由）只判 ``source_type``。
+        source_type=row["source_type"] or "",
+        source_asset_id=row["source_asset_id"] or "",
+        source_scene_index=row["source_scene_index"],
+        source_start_sec=row["source_start_sec"],
+        source_end_sec=row["source_end_sec"],
     )
 
 
@@ -320,3 +328,14 @@ class SqliteEventRepository:
         with self._database.connect() as connection, connection:
             connection.execute("DELETE FROM event_observations WHERE event_id = ?", (event_id,))
             connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
+
+    def list_video_scenes(self, source_asset_id: str) -> Sequence[EventRecord]:
+        """1.0 ``db.py:2427`` 的 ``list_video_scene_events``，原样四条：来源类型 / 源片 /
+        active / 按场景序号升序。"""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT {_COLUMNS} FROM events WHERE source_type = 'video_scene'"
+                " AND source_asset_id = ? AND status = 'active' ORDER BY source_scene_index",
+                (source_asset_id,),
+            ).fetchall()
+        return [_row_to_event(row) for row in rows]

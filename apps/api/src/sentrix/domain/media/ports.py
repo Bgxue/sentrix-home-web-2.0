@@ -15,10 +15,12 @@ from typing import Protocol
 from sentrix.domain.media.models import (
     Asset,
     AssetStatus,
+    DerivedAsset,
     GpsPoint,
     MediaType,
     Observation,
     ObservationFact,
+    VideoMetadata,
 )
 
 SUPPORTED_IMAGE_SUFFIXES = frozenset(
@@ -247,3 +249,91 @@ class PreviewEncoder(Protocol):
 
 class MediaTypeResolver(Protocol):
     def resolve(self, content_type: str | None, file_name: str | None) -> MediaType: ...
+
+
+class VideoMetadataReader(Protocol):
+    """从视频文件里读出时长/帧率/编码/旋转角与拍摄时间、GPS（走 ffprobe）。
+
+    **为什么单列一个端口，而不是扩展 ``MetadataReader``。** 后者的返回形状是
+    ``(拍摄时间, GPS, 设备)`` 三元组——那是 EXIF 的形状。视频多出来的时长/帧率/编码/
+    旋转角没有地方放，硬塞进同一个元组会让 EXIF 那条路也背上四个它永远为空的字段。
+    而且两者的失败语义不同：EXIF 读不出来降级成 ``None``（图片照样导入），
+    视频的探测结果本身就是导入要交付的那份元数据。
+
+    实现在 ``infrastructure/media/video_metadata.py``：ffprobe 是子进程，
+    ``domain-purity`` 与 ``application-purity`` 两条契约都禁止 domain/application 碰它。
+    """
+
+    def read(self, path: Path) -> VideoMetadata:
+        """读不出来时抛 ``ValueError``（ffprobe 非零退出 / 没有视频流）。
+
+        不返回 ``None``：那会让「这个文件探测不了」与「调用方忘了接线」变成同一个结果。
+        调用方（``ImportAssets``）接住它并把原因写进 ``metadata_json.video_probe_error``，
+        于是失败是看得见的——S8a 要修的正是「收下了但什么都没发生」。
+        """
+        ...
+
+
+class VideoTranscoder(Protocol):
+    """把浏览器放不了的视频转成 H.264 mp4。1.0 ``processor.py:58-69`` 的 ``_browser_preview``。"""
+
+    def browser_preview(self, asset_id: str, source: Path, codec: str) -> Path | None:
+        """非 H.264 才转；已经是 H.264 时返回 ``None``（**返回 None 是「不用转」，不是失败**）。
+
+        转码失败抛异常：调用方记下 ``browser_preview_error`` 后回落原片，
+        与 1.0 的 ``preview_error`` 同一条路（``processor.py:112-117``）。
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class VideoProbe:
+    """一次视频探测的落库形态（写进 ``assets.metadata_json``）。
+
+    前三个字段对应 1.0 写进去的三个键（``processor.py:118-121``）：
+    ``video_metadata`` / ``browser_preview_path`` / ``browser_preview_error``。
+    **``probe_error`` 是 2.0 加的**：1.0 的 ffprobe 失败会把整条资产标成 ``failed``；
+    2.0 选择「导入照收、把原因留在资产上」，那就得有地方放那个原因——
+    否则失败又变成不可见（1.0 的 ``error``/``error_stage`` 是分散在资产行上的）。
+    """
+
+    metadata: VideoMetadata | None = None
+    browser_preview_path: str = ""
+    browser_preview_error: str = ""
+    probe_error: str = ""
+
+
+class VideoRepository(Protocol):
+    """视频血缘的读写：探测结果的落库与回读、派生物的查询与清场。
+
+    **为什么与 ``AssetRepository`` 分开。** 这几个方法全都围绕「派生物怎么指回原片」
+    那几列（迁移 0010）转，而 ``AssetRepository`` 管的是资产本身的通用读写。
+    合在一起会让「谁在写血缘列」在类型上消失——与 ``FaceRepository`` / ``EntityRepository``
+    拆开是同一条理由。
+    """
+
+    def save_probe(self, asset_id: str, probe: VideoProbe) -> None:
+        """把探测结果并进 ``assets.metadata_json``。**必须在资产行落库之后调**（外键）。"""
+        ...
+
+    def probe(self, asset_id: str) -> VideoProbe | None:
+        """没探测过（``metadata_json`` 里没有任何视频键）返回 ``None``。"""
+        ...
+
+    def list_derived(self, parent_asset_id: str, *, scene_index: int | None = None) -> Sequence[DerivedAsset]:
+        """这个源片的派生物，按 ``(source_scene_index, source_timestamp_sec, source_frame_index)``。
+
+        1.0 ``db.py:2383`` 的 ``list_derived_assets``。**``derived_kind IS NOT NULL``
+        就够**——1.0 的 ``WHERE derived_kind IN ('video_keyframe','video_keyframe_webp')``
+        是它自己双算法并存留下的补丁（``s8-deviations.md`` §3），2.0 只有一条路径。
+        """
+        ...
+
+    def cleanup_derivatives(self, parent_asset_id: str) -> int:
+        """删掉这个源片的派生物与场景事件，返回删掉的派生物行数。
+
+        1.0 ``db.py:2435`` 的 ``cleanup_video_derivatives``。**先删随行数据再删主行**：
+        ``event_observations`` 对 ``events``、``observations`` 对 ``assets`` 都有外键，
+        且连接开的是 ``PRAGMA foreign_keys = ON``，顺序写反会直接 ``IntegrityError``。
+        """
+        ...

@@ -17,6 +17,9 @@ class ImportResponse(BaseModel):
     placed: bool = False
     # 折进的 / 新建的事件 id。事件归属没接上时为 None。
     event_id: str | None = None
+    # 视频有没有真的走到 ffprobe（S8a T505）。与 indexed / placed 同一个可观测面：
+    # 原先「视频收下了但什么都没发生」在响应里完全看不出来。图片恒为 False。
+    video_probed: bool = False
 
 
 class AssetSummary(BaseModel):

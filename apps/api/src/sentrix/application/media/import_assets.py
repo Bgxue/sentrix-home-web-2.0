@@ -46,6 +46,20 @@ S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
 
 协作者全是可选的：不传就退化成纯导入（本文件的既有调用方与单元测试不必构造整条链）。
 
+S8a 追加一条：**视频不再静默空转**。原先只有 ``media_type is IMAGE`` 才读元数据
+（本文件旧版 :179-180），视频拿 ``(None, None, None)`` 却照样入库，于是「收下了、
+什么都没发生」——与 W1 那次同类：看着正常，实际什么都没有，而且不报错。现在视频会：
+
+1. 走 ffprobe 读时长/编码/拍摄时间/GPS（``VideoMetadataReader``）；
+2. 把拍摄时间与 GPS 接到与 EXIF 同一条路上（``captured_at`` / ``captured_location``）；
+3. 需要时转码出浏览器预览（``VideoTranscoder``，非 H.264 才转）；
+4. 把整包结果写进 ``assets.metadata_json``（``VideoRepository.save_probe``）。
+
+**探测失败与转码失败都不阻断导入**（与「EXIF 读不出来不阻断」同一条既有口径），
+但失败原因落在资产上（``video_probe_error`` / ``browser_preview_error``），
+并且 ``ImportResult.video_probed`` 把「这次到底有没有探测」变成响应里看得见的一位数。
+**它不建场景、不抽帧**——那是 S8b。
+
 **去重命中时只重跑幂等的那几步**（视觉向量 + 地点）。事件归属不重跑：它不是幂等的，
 对同一条 Observation 再跑一次可能给它开出第二个事件。1.0 有过 223 张图没有任何视觉
 向量却毫无征兆的记录，重新导入是使用者唯一能想到的补救动作，它必须真的有效——
@@ -55,9 +69,11 @@ S4 追加一条**顺序是硬约束**（``s4-deviations.md`` §2.3）：
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
 from sentrix.domain.media.ports import (
@@ -66,10 +82,16 @@ from sentrix.domain.media.ports import (
     MediaStorage,
     MetadataReader,
     ObservationRepository,
+    VideoMetadataReader,
+    VideoProbe,
+    VideoRepository,
+    VideoTranscoder,
 )
 from sentrix.domain.places.ports import AssetPlaceIndex
 from sentrix.domain.retrieval.ports import AssetVisualIndexer, LexicalIndex
 from sentrix.domain.spaces.ports import SpaceRepository
+
+log = logging.getLogger("sentrix.media.import_assets")
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +128,10 @@ class ImportResult:
     # 要分开它们就得有个可观测面。**它在下游有用**：``retrieve_entity`` 的
     # ``person_bridge`` 与 ``entity_groups`` 都按实体 id 聚合。
     entity_ids: tuple[str, ...] = ()
+    # 本次导入的视频有没有真的走过 ffprobe（S8a T505）。与 ``indexed`` / ``placed``
+    # 同一条理由：1.0/2.0 原先「视频收下了但什么都没发生」在响应上完全不可见。
+    # 视频以外一律 False（图片走 EXIF，不走这条路）。
+    video_probed: bool = False
 
 
 def _new_id(prefix: str) -> str:
@@ -134,12 +160,21 @@ class ImportAssets:
         entity_extractor: Callable[[Observation, str], tuple[str, ...]] | None = None,
         lexical_index: LexicalIndex | None = None,
         spaces: SpaceRepository | None = None,
+        # 视频三个协作者（S8a）。**成组出现**：只有 reader 没有 repository 时探测结果
+        # 没有地方落，只有 repository 没有 reader 时没有东西可落——`_probe_video`
+        # 因此要求前两个同时在，缺任一个就整条跳过（与其余可选协作者同一个形状）。
+        video_metadata: VideoMetadataReader | None = None,
+        video_transcoder: VideoTranscoder | None = None,
+        video_repository: VideoRepository | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets
         self._observations = observations
         self._storage = storage
         self._metadata = metadata
+        self._video_metadata = video_metadata
+        self._video_transcoder = video_transcoder
+        self._video_repository = video_repository
         self._visual_indexer = visual_indexer
         self._place_indexer = place_indexer
         self._observer = observer
@@ -179,6 +214,21 @@ class ImportAssets:
         if media_type is MediaType.IMAGE:
             captured_at, gps, device = self._metadata.read(stored_path)
 
+        # 视频：探测 + 转码（S8a T505）。**排在这里、而不是排到资产落库之后**，
+        # 因为拍摄时间/GPS 要跟 EXIF 一样在**建资产之前**拿到——否则视频的
+        # captured_at 只能退回导入时刻，而导入时刻与拍摄时间不是一回事。
+        video_probe: VideoProbe | None = None
+        if (
+            media_type is MediaType.VIDEO
+            and self._video_metadata is not None
+            and self._video_repository is not None
+        ):
+            video_probe = self._probe_video(asset_id, stored_path)
+            if video_probe.metadata is not None:
+                captured_at = video_probe.metadata.captured_datetime() or captured_at
+                gps = video_probe.metadata.gps() or gps
+                device = video_probe.metadata.device or device
+
         now = self._clock()
         asset = Asset(
             id=asset_id,
@@ -196,6 +246,10 @@ class ImportAssets:
             updated_at=now,
         )
         self._assets.add(asset)
+
+        # 探测结果落库**必须在资产行之后**：它写的是 ``assets.metadata_json``。
+        if video_probe is not None and self._video_repository is not None:
+            self._video_repository.save_probe(asset.id, video_probe)
 
         placed = self._index_place(asset)
         indexed = self._index_visual(asset)
@@ -238,6 +292,42 @@ class ImportAssets:
             fact_ids=fact_ids,
             faces=faces,
             text_rows=text_rows,
+            video_probed=video_probe is not None and video_probe.metadata is not None,
+        )
+
+    def _probe_video(self, asset_id: str, path: Path) -> VideoProbe:
+        """一次视频探测：ffprobe 元数据 + 必要时转码预览。
+
+        与 ``PillowMetadataReader.read`` 同一条既有口径——**失败不阻断导入**：
+        EXIF 读不出来降级成 ``(None, None, None)``，这里降级成「元数据为空 + 一条原因」。
+        两者都只是记下来，资产照收；区别是这里**必须**把原因留在资产上，
+        因为元数据本身就是这一路要交付的东西，没有它「收下了但什么都没发生」。
+        """
+        assert self._video_metadata is not None
+        probe_error = ""
+        metadata = None
+        try:
+            metadata = self._video_metadata.read(path)
+        except Exception as error:  # noqa: BLE001 —— 坏文件不阻断导入，见 docstring
+            probe_error = f"{type(error).__name__}: {error}"
+            log.warning("视频元数据读取失败 asset=%s: %s", asset_id, probe_error)
+
+        preview_path = ""
+        preview_error = ""
+        # 探测失败就不转码：连编码都不知道，转出来也没有判据说它该不该转。
+        if metadata is not None and self._video_transcoder is not None:
+            try:
+                target = self._video_transcoder.browser_preview(asset_id, path, metadata.codec)
+                preview_path = str(target) if target is not None else ""
+            except Exception as error:  # noqa: BLE001 —— 预览是增强，回落原片（1.0 亦然）
+                preview_error = f"{type(error).__name__}: {error}"
+                log.warning("浏览器预览转码失败 asset=%s: %s", asset_id, preview_error)
+
+        return VideoProbe(
+            metadata=metadata,
+            browser_preview_path=preview_path,
+            browser_preview_error=preview_error,
+            probe_error=probe_error,
         )
 
     def _extract_entities(self, observation: Observation, event_id: str | None) -> tuple[str, ...]:

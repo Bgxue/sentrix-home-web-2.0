@@ -20,6 +20,7 @@ from sentrix.api.routes import (
     search,
     spaces,
     timeline,
+    videos,
 )
 from sentrix.bootstrap.container import Container
 from sentrix.config import Settings, load_settings
@@ -43,6 +44,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(search.router)
     v1.include_router(assistant.router)
     v1.include_router(timeline.router)
+    # 视频端点（S8a）。与 timeline 分开：视频那四条有自己的响应形状与血缘读法。
+    v1.include_router(videos.router)
     v1.include_router(identity.router)
     v1.include_router(maintenance.router)
     v1.include_router(spaces.router)

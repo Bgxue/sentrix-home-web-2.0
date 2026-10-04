@@ -41,6 +41,14 @@ log = logging.getLogger("sentrix.media.import_album")
 # 整册导入拿到的是磁盘上的文件，没有 upload 的 content-type 可依。
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp"})
 
+# 视频后缀，与 ``MediaType.from_file_name`` 认得的那一组逐字一致（S8a T506）。
+# **原先只看图片**：目录里的视频被静默跳过，而结果里看不出少过东西——
+# 「导入了一整册，视频一个都不在」与「这一册真的没有视频」是同一个输出。
+VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".avi", ".mkv"})
+
+# 扫描的实际判据 = 图片 ∪ 视频。
+SCAN_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
+
 DEFAULT_ALBUM_LIMIT = 200
 
 
@@ -91,7 +99,7 @@ class ImportAlbum:
             raise NotADirectoryError(str(root))
 
         paths = sorted(
-            path for path in root.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+            path for path in root.iterdir() if path.is_file() and path.suffix.lower() in SCAN_SUFFIXES
         )[: max(1, int(request.limit))]
 
         imported = deduplicated = events = lexical_terms = 0

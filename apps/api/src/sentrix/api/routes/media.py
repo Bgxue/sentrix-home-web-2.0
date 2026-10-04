@@ -20,7 +20,7 @@ from sentrix.application.memories.maintain_facts import MaintainFacts
 from sentrix.application.retrieval.index_observation_text import IndexObservationText
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
-from sentrix.domain.media.models import Asset, Observation
+from sentrix.domain.media.models import Asset, MediaType, Observation
 
 router = APIRouter(tags=["media"])
 
@@ -73,6 +73,7 @@ async def import_media(
         indexed=result.indexed,
         placed=result.placed,
         event_id=result.event_id,
+        video_probed=result.video_probed,
     )
 
 
@@ -132,6 +133,12 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
         # 记忆空间行（裁决一）。**只在这里接**：簇列表内连 ``memory_spaces``，
         # 少接这一处，全新部署导入一整册之后审阅页一个簇都不显示（第 97 / 103 条）。
         spaces=container.spaces,
+        # 视频探测链（S8a T505）。**接在这里而不是路由里**：单张上传与整册导入共用
+        # 这一处装配，分开接会让「整册导入的视频不读元数据」以「单张能读到、批量读不到」
+        # 的形式出现——而那种差异在两端各看一半时都看不出来（与上面几处同一条理由）。
+        video_metadata=container.video_metadata_reader,
+        video_transcoder=container.video_transcoder,
+        video_repository=container.video_repository,
     )
 
 
@@ -263,11 +270,62 @@ def deliver_asset(asset_id: str, *, original: bool, container: Container) -> Res
     return Response(content=payload, media_type="image/jpeg")
 
 
+def deliver_video(asset: Asset, container: Container) -> Response:
+    """视频的浏览器交付：**能转就交转码件，转不了交原片**。
+
+    1.0 ``app.py:2452-2458`` 的分流只有一句判据（``media_type == 'video' and not original
+    and preview_path.is_file()``），其余一律回落原片。2.0 照搬，但把「转码件在哪」
+    的读法收在 ``VideoRepository.probe`` 上——它与写入侧成对，是唯一知道
+    ``metadata_json`` 里怎么放的地方。
+
+    **这条路同时修掉了 ``GET /assets/{id}/preview`` 对视频的 500**：原先它无条件走
+    ``PillowPreviewEncoder``，而 PIL 打不开视频。视频的「预览」就是那个 mp4，
+    与 1.0 的 ``preview.mp4`` 是同一件东西。
+    """
+    probe = container.video_repository.probe(asset.id)
+    preview_path = Path(probe.browser_preview_path) if probe and probe.browser_preview_path else None
+    if preview_path is not None and preview_path.is_file():
+        return FileResponse(
+            preview_path,
+            media_type="video/mp4",
+            filename=f"{Path(asset.file_name).stem}-preview.mp4",
+            headers={"Cache-Control": "private, max-age=86400", "X-Sentrix-Source": "browser-preview"},
+        )
+    # 没有转码件（H.264 不用转 / 转码失败 / 还没探测过）一律交原片：
+    # 浏览器放不放得了是它的事，服务端不做第二次判断。
+    return FileResponse(
+        Path(asset.path),
+        media_type=asset.mime_type or "application/octet-stream",
+        filename=asset.file_name,
+    )
+
+
+def _video_or_none(asset_id: str, container: Container) -> Asset | None:
+    asset = container.asset_repository.get(asset_id)
+    return asset if asset is not None and asset.media_type is MediaType.VIDEO else None
+
+
 @router.get("/assets/{asset_id}/file")
-def get_asset_file(asset_id: str, container: Container = Depends(get_container)) -> Response:
+def get_asset_file(
+    asset_id: str,
+    original: bool = False,
+    container: Container = Depends(get_container),
+) -> Response:
+    """``?original=1`` 拿原片；不传时**视频**给浏览器预览件（1.0 ``app.py:2448-2478``）。
+
+    图片这条路上 ``original`` 是空操作：2.0 的 ``/file`` 一直是原文件（契约测试钉着
+    「交出去的字节与传上来的一模一样」），预览在 ``/preview``。不为了对称去改它——
+    改了会让 HEIC 从「原图直出」变成「转码件直出」，那是另一个决定。
+    """
+    asset = _video_or_none(asset_id, container)
+    if asset is not None and not original:
+        return deliver_video(asset, container)
     return deliver_asset(asset_id, original=True, container=container)
 
 
 @router.get("/assets/{asset_id}/preview")
 def get_asset_preview(asset_id: str, container: Container = Depends(get_container)) -> Response:
+    asset = _video_or_none(asset_id, container)
+    if asset is not None:
+        return deliver_video(asset, container)
     return deliver_asset(asset_id, original=False, container=container)

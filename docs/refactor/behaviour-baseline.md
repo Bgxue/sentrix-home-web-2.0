@@ -458,3 +458,28 @@
 
 **这一格与 `entities.family_role` 是两条不同的轴。** 1.0 真实库里 298 对
 「`family_role` × `membership`」的配对**一致率 0**：一条是自由文本角色，一条是三值分类。
+
+## 视频与音频（S8a · T501–T506，2026-10-04）
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 浏览器可直接播的编码 | **只有** `h264` / `avc1`（判 `codec_name`，不看后缀） | 1.0 `video/processor.py:59` |
+| 预览转码参数 | `libx264` / `-preset veryfast` / `-crf 23` / `-pix_fmt yuv420p` / `-c:a aac` / `-movflags +faststart` | 1.0 `video/processor.py:62-67` |
+| 转码映射 | `-map 0:v:0` 与 **可选** `-map 0:a:0?`（无音轨不该让整次转码失败） | 同上 |
+| 转码超时 | 3600 秒（读元数据的 ffprobe 超时是 60 秒，两件事不共用一个上限） | 1.0 `video/processor.py:68` / `metadata.py:43` |
+| 拍摄时间优先级 | `com.apple.quicktime.creationdate` → `format.creation_time` → `stream.creation_time`（`creation_source` 记下用的是哪个） | 1.0 `video/metadata.py:60-63` |
+| GPS 来源 | `com.apple.quicktime.location.ISO6709`，退 `location`；**ISO6709 格式**（`+22.4846+114.5438+005.469/`） | 1.0 `video/metadata.py:9,31-36` |
+| 时区写法 | 紧凑写法 `+0800` 补成 `+08:00`；`Z` 换成 `+00:00` | 1.0 `video/metadata.py:10,44-45` |
+| 旋转角 | 先 `side_data_list[].rotation`，退流标签 `rotate`；都没有是 0 | 1.0 `video/metadata.py:66-74` |
+| 探测结果的落库键 | `assets.metadata_json` 的 `video_metadata` / `browser_preview_path` / `browser_preview_error`，2.0 另加 `video_probe_error` | 1.0 `video/processor.py:118-121` |
+| `/assets/{id}/file` | 视频且非 `?original=1` 且转码件在 → `preview.mp4`；否则原片。**图片那条路一直交原文件**（预览在 `/preview`） | 1.0 `app.py:2448-2478`（2.0 的 `/file` 行为见 `routes/media.py` 注释） |
+| 场景事件的类型标记 | `events.source_type = 'video_scene'`；场景列表只取 `status = 'active'`、按 `source_scene_index` 升序 | 1.0 `db.py:2427-2433` |
+| 派生物的清场顺序 | 先删 `event_observations` / `observations`，再删 `events` / `assets`（外键开着） | 1.0 `db.py:2435-2448`（2.0 的顺序约束写在仓储 docstring） |
+| `reprocess` 的返回 | `202` + `{accepted: true, asset_id, status: "video-queued"}`；资产行状态回到 `queued` | 1.0 `app.py:1472-1481` |
+| 整册导入认的视频后缀 | `.mp4` / `.mov` / `.m4v` / `.avi` / `.mkv`（与 `MediaType.from_file_name` 同一组） | 1.0 `app.py` 批量目录扫描（2.0 原先只有 `IMAGE_SUFFIXES`） |
+
+**音频/视频的转写不在 S8a**，也不在 S8 的任何一段：用户 2026-10-04 裁决「不要 FunASR」，
+`observations` 不加 `transcript` 列，`compose_text` 保持七字段。理由与代价逐条登记在
+`docs/refactor/s8-deviations.md` §1.1。音频的入库/元数据/播放属 S8c（T521–T523）。
+
+**抽帧参数（间隔、质量门）不在本表**：那是 S8b 的 T511，落地时才登记。

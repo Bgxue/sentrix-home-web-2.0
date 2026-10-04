@@ -190,3 +190,26 @@ def test_without_a_summarizer_events_keep_their_placeholder(album: Path):
 
     assert result.summarized == 0
     assert result.events == 3
+
+
+# ---- S8a T506：整册导入放行视频 ------------------------------------------------------
+
+
+def test_videos_are_scanned_alongside_photos(tmp_path: Path):
+    """目录里的视频原先被静默跳过：`IMAGE_SUFFIXES` 只看图片，而结果里看不出少过东西。
+
+    这一条钉的是 `SCAN_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES`：把视频那半边删掉，
+    `b.mov` / `c.MP4` / `d.mkv` 立刻从 `calls` 里消失（大小写不敏感也一起钉住）。
+    """
+    root = tmp_path / "album"
+    root.mkdir()
+    for name in ("a.jpg", "b.mov", "c.MP4", "d.mkv", "notes.txt"):
+        (root / name).write_bytes(b"content-" + name.encode())
+
+    importer = StubImporter()
+    result = ImportAlbum(importer=importer).execute(
+        AlbumImportRequest(scope_id="album1", directory=str(root))
+    )
+
+    assert importer.calls == ["a.jpg", "b.mov", "c.MP4", "d.mkv"]
+    assert result.imported == 4
