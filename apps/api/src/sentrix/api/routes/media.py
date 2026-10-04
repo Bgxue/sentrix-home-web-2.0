@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, Response
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
 from sentrix.application.identity.enroll_face import EnrollFace
+from sentrix.application.media.extract_video_scenes import ExtractVideoScenes
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
 from sentrix.application.media.maintain_entities import MaintainObservationEntities
@@ -74,6 +75,7 @@ async def import_media(
         placed=result.placed,
         event_id=result.event_id,
         video_probed=result.video_probed,
+        video_scenes=result.video_scenes,
     )
 
 
@@ -86,7 +88,52 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
     ``observe`` 控制要不要为每张图付视觉观察的模型调用（首轮 + 补全 + 中文化，
     最多 3 次）。单张上传走快路径（1.0 的 ``_commit_fast_image`` 同样时机），
     整册导入才接观察器。
+
+    **视频抽帧链（S8b）也挂在这一处**，理由同上：单张上传与整册导入都必须建场景，
+    分开接会让「整册导入的视频没有场景」以「单张有、批量没有」的形式出现。
     """
+    # 关键帧走**另一条 import 实例**，而且固定 ``observe=True``：视频的语义整个都在
+    # 关键帧上，跳过观察等于让视频一条语义都不进库——正是 S8a 要修的那种「收下了但
+    # 什么都没发生」。裁决④要的是关键帧白得 observation，不是白得一张空观察。
+    # 用独立实例而不是复用入参那个，是因为入参的 ``observe`` 由调用方按「一张照片
+    # 值不值得三次模型调用」定的，与视频无关。
+    keyframe_importer = _build_importer(container, observe=True)
+    extractor = _build_video_scenes(container, keyframe_importer.process_image)
+    return _build_importer(
+        container,
+        observe=observe,
+        video_scene_extractor=lambda asset_id: extractor.execute(asset_id).scene_count,
+    )
+
+
+def build_video_scenes(container: Container) -> ExtractVideoScenes:
+    """独立的抽取链，给 ``POST /videos/{id}/reprocess`` 重跑用（S8b T514）。
+
+    与导入时走的是同一个 ``_build_video_scenes``：重跑与首次导入是同一条链，
+    差别只在重跑前先 ``cleanup_derivatives`` 清场。分开写一遍会让「重跑出来的场景
+    与首次不一样」，而那种差异只有在对比两次结果时才看得出来。
+    """
+    return _build_video_scenes(container, _build_importer(container, observe=True).process_image)
+
+
+def _build_video_scenes(container: Container, process_image: Callable[..., object]) -> ExtractVideoScenes:
+    return ExtractVideoScenes(
+        assets=container.asset_repository,
+        events=container.event_repository,
+        places=container.asset_place_repository,
+        video_repository=container.video_repository,
+        keyframes=container.video_keyframe_extractor,
+        process_image=lambda asset, event_id: process_image(asset, forced_event_id=event_id),
+    )
+
+
+def _build_importer(
+    container: Container,
+    *,
+    observe: bool,
+    video_scene_extractor: Callable[[str], int] | None = None,
+) -> ImportAssets:
+    """``ImportAssets`` 的装配本体。两个调用方共用：导入本身，以及关键帧那条流水线。"""
     assigner = AssignEvents(
         events=container.event_repository,
         observations=container.observation_repository,
@@ -125,6 +172,11 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
             else None
         ),
         event_assigner=lambda observation: _event_id(assigner, observation),
+        # 关键帧的强制归属（S8b T513）。**不受 ``observe`` 影响**：只要有人给了
+        # ``forced_event_id`` 就需要它，而那一条路只有视频抽帧会走。
+        event_attacher=lambda event_id, observation: container.event_repository.attach(
+            event_id, observation.id
+        ),
         face_enroller=_face_enroller(container),
         fact_maintainer=_fact_maintainer(container),
         text_indexer=_text_indexer(container),
@@ -139,6 +191,9 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
         video_metadata=container.video_metadata_reader,
         video_transcoder=container.video_transcoder,
         video_repository=container.video_repository,
+        # 抽帧链（S8b T511–T513）。只有导入那条实例拿得到它；关键帧那条实例传 None，
+        # 从根上杜绝「关键帧再去抽一层关键帧」的递归。
+        video_scene_extractor=video_scene_extractor,
     )
 
 

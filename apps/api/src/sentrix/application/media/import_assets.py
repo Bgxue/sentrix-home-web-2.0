@@ -132,6 +132,31 @@ class ImportResult:
     # 同一条理由：1.0/2.0 原先「视频收下了但什么都没发生」在响应上完全不可见。
     # 视频以外一律 False（图片走 EXIF，不走这条路）。
     video_probed: bool = False
+    # 本次导入**建起来**的视频场景数（S8b T512）。与 ``video_probed`` 同一条理由：
+    # 「视频导入成功但一个场景都没有」必须在响应上看得见，否则又回到静默空转。
+    # 非视频、或抽取链没接、或探测不到时长时都是 0。
+    video_scenes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessedAsset:
+    """一张图片走完流水线之后各步的结果（``ImportAssets.process_image`` 的返回）。
+
+    从 ``execute`` 里拆出来是因为**关键帧也要走这条链**（S8b T513）：视频的派生帧与
+    上传的照片经历的是同一组步骤与同一套顺序，唯一差别是事件归属带了个
+    ``forced_event_id``。字段与 ``ImportResult`` 的那几位一一对应，只是少了
+    「导入本身」的几个（去重、探测、媒体类型）。
+    """
+
+    observation_id: str
+    indexed: bool = False
+    placed: bool = False
+    event_id: str | None = None
+    lexical_terms: int = 0
+    faces: int = 0
+    fact_ids: tuple[str, ...] = ()
+    text_rows: int = 0
+    entity_ids: tuple[str, ...] = ()
 
 
 def _new_id(prefix: str) -> str:
@@ -166,6 +191,13 @@ class ImportAssets:
         video_metadata: VideoMetadataReader | None = None,
         video_transcoder: VideoTranscoder | None = None,
         video_repository: VideoRepository | None = None,
+        # 关键帧挂到场景事件上的那条路（S8b T513）。**没有它就不能强制归属**：
+        # 关键帧的观察属于它那一秒的源片场景，按 6 小时窗去折进某张照片的事件是错的。
+        event_attacher: Callable[[str, Observation], None] | None = None,
+        # 抽帧链（S8b T511–T513）。入参是源片 id，返回**建起来的场景数**。
+        # 不传就退化成「只入库、不建场景」——正是 S8a 的行为，测试与不需要视频
+        # 场景的调用方都不必构造它。
+        video_scene_extractor: Callable[[str], int] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets
@@ -175,6 +207,8 @@ class ImportAssets:
         self._video_metadata = video_metadata
         self._video_transcoder = video_transcoder
         self._video_repository = video_repository
+        self._event_attacher = event_attacher
+        self._video_scene_extractor = video_scene_extractor
         self._visual_indexer = visual_indexer
         self._place_indexer = place_indexer
         self._observer = observer
@@ -251,13 +285,51 @@ class ImportAssets:
         if video_probe is not None and self._video_repository is not None:
             self._video_repository.save_probe(asset.id, video_probe)
 
+        processed = self.process_image(asset)
+        # 场景抽取排在图片流水线**之后**：它自己会再建一批资产与观察（关键帧），
+        # 先跑会把派生物的数混进「这次导入」的结果里。
+        video_scenes = self._extract_video_scenes(asset)
+
+        return ImportResult(
+            asset_id=asset.id,
+            observation_id=processed.observation_id,
+            media_type=media_type,
+            status=asset.status,
+            deduplicated=False,
+            indexed=processed.indexed,
+            placed=processed.placed,
+            event_id=processed.event_id,
+            lexical_terms=processed.lexical_terms,
+            entity_ids=processed.entity_ids,
+            fact_ids=processed.fact_ids,
+            faces=processed.faces,
+            text_rows=processed.text_rows,
+            video_probed=video_probe is not None and video_probe.metadata is not None,
+            video_scenes=video_scenes,
+        )
+
+    def process_image(self, asset: Asset, *, forced_event_id: str | None = None) -> ProcessedAsset:
+        """把一张**已经落库的图片资产**走完整条图片流水线。
+
+        **为什么是公开方法。** 视频派生的关键帧走的就是这一条（S8b T513，对应 1.0
+        ``video/processor.py:188`` 的 ``pipeline.process(keyframe_id, ...)``），所以它
+        不能埋在 ``execute`` 里——那一半要负责去重、落盘、探测，关键帧三样都不需要。
+        不另写一遍的理由是下面每一步的顺序都是硬约束（见模块注释里的顺序表）：
+        两处各写一遍迟早有一处漏一步，而漏掉的那一步**不报错**，只是算错。
+
+        ``forced_event_id`` 不为空时**跳过事件候选打分**，把这条观察直接挂到那条事件上
+        （1.0 ``pipeline.py:333`` 的 ``attach_observation_to_event``）。关键帧属于它那一
+        秒的源片场景，让 6 小时窗去替它挑事件会把它折进某张同时段的照片——那是错的，
+        而且不报错。
+        """
+        now = self._clock()
         placed = self._index_place(asset)
         indexed = self._index_visual(asset)
 
         observation = Observation(
             id=_new_id("obs"),
-            scope_id=request.scope_id,
-            asset_id=asset_id,
+            scope_id=asset.scope_id,
+            asset_id=asset.id,
             source_type="import",
             captured_at=asset.captured_at,
             confidence=0.0,
@@ -268,7 +340,7 @@ class ImportAssets:
 
         observation = self._observe(asset, observation) or observation
         faces = self._enroll_faces(asset, observation)
-        event_id = self._assign_event(observation)
+        event_id = self._assign_event(observation, forced_event_id)
         # 文本向量**必须在事件归并之后**：1.0 ``pipeline.py:324`` 的注释
         # 「Update the same vector with its final event link after selection」。
         # 写在前面则 event_id 恒为空，而那条 metadata 只在召回时用得到——
@@ -278,12 +350,8 @@ class ImportAssets:
         fact_ids = self._maintain_facts(observation)
         lexical_terms = self._project_lexical(observation)
 
-        return ImportResult(
-            asset_id=asset_id,
+        return ProcessedAsset(
             observation_id=observation.id,
-            media_type=media_type,
-            status=asset.status,
-            deduplicated=False,
             indexed=indexed,
             placed=placed,
             event_id=event_id,
@@ -292,8 +360,23 @@ class ImportAssets:
             fact_ids=fact_ids,
             faces=faces,
             text_rows=text_rows,
-            video_probed=video_probe is not None and video_probe.metadata is not None,
         )
+
+    def _extract_video_scenes(self, asset: Asset) -> int:
+        """导入一个视频之后建场景（S8b T512），返回建起来的场景数。
+
+        **不阻断导入**：与 ``_probe_video`` 同一条口径（探测/转码失败都只记下来）。
+        差别是这里只留一条日志——把失败原因落到资产上要再开一个 ``metadata_json`` 键，
+        本切片不做（登记在 ``s8-deviations.md`` §4）。协作链没接时静默跳过，与其余
+        可选协作者同形。
+        """
+        if asset.media_type is not MediaType.VIDEO or self._video_scene_extractor is None:
+            return 0
+        try:
+            return int(self._video_scene_extractor(asset.id))
+        except Exception as error:  # noqa: BLE001 —— 场景是增强，不该让整次导入 500
+            log.warning("视频场景抽取失败 asset=%s: %s", asset.id, error)
+            return 0
 
     def _probe_video(self, asset_id: str, path: Path) -> VideoProbe:
         """一次视频探测：ffprobe 元数据 + 必要时转码预览。
@@ -386,7 +469,16 @@ class ImportAssets:
             return 0
         return self._face_enroller(asset, observation)
 
-    def _assign_event(self, observation: Observation) -> str | None:
+    def _assign_event(self, observation: Observation, forced_event_id: str | None) -> str | None:
+        if forced_event_id is not None:
+            # 1.0 ``db.py:2371`` 的 ``attach_observation_to_event``：插入 event_observations，
+            # 不做候选打分。``event_attacher`` 缺失是装配错误（调用方给了 forced_event_id
+            # 却没接这条路），所以抛出来而不是静默退回候选打分——后者会把关键帧塞进一个
+            # 不相干的事件，而且看起来一切正常。
+            if self._event_attacher is None:
+                raise RuntimeError("forced_event_id 需要 event_attacher 协作者")
+            self._event_attacher(forced_event_id, observation)
+            return forced_event_id
         if self._event_assigner is None:
             return None
         return self._event_assigner(observation)

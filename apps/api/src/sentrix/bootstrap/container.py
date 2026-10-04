@@ -45,6 +45,7 @@ from sentrix.domain.media.ports import (
     ObservationRepository,
     PhotoInspector,
     PreviewEncoder,
+    VideoKeyframeExtractor,
     VideoMetadataReader,
     VideoRepository,
     VideoTranscoder,
@@ -79,6 +80,7 @@ from sentrix.infrastructure.media.person_vision import (
 from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.photo_inspector import OpenAIPhotoInspector
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
+from sentrix.infrastructure.media.video_keyframes import FfmpegVideoKeyframeExtractor
 from sentrix.infrastructure.media.video_metadata import FfprobeVideoMetadataReader
 from sentrix.infrastructure.media.video_transcode import FfmpegVideoTranscoder
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
@@ -149,6 +151,9 @@ class Container:
     # 具体实现（子进程 / 子进程 / SQL）全在 infrastructure，见 pyproject 的两条 purity 契约。
     video_metadata_reader: VideoMetadataReader
     video_transcoder: VideoTranscoder
+    # 关键帧抽取（S8b T511）：在给定的原片秒数上取一帧。切窗规则在 domain，解码在
+    # 适配器里——子进程只能落 infrastructure（purity 契约）。
+    video_keyframe_extractor: VideoKeyframeExtractor
     video_repository: VideoRepository
     vector_repository: VectorRepository
     vector_index: VectorIndex
@@ -251,6 +256,7 @@ class Container:
             # 预览转码件落在 ``media_dir/derived/video`` 下：与其余媒体文件同一个根，
             # 换数据目录就整体换（与 ``Settings`` 里 preview_dir / qdrant_dir 同一条理由）。
             video_transcoder=FfmpegVideoTranscoder(settings.media_dir),
+            video_keyframe_extractor=FfmpegVideoKeyframeExtractor(settings.media_dir),
             video_repository=SqliteVideoRepository(database),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),

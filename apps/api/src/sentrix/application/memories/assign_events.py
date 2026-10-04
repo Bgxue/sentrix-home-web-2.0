@@ -419,9 +419,12 @@ class ConfirmedPersonEvents:
         ``event_participants`` 表——第一条 UPDATE 的剩余效果只有 revision，于是合成
         一次 ``apply_summary``：**每个受影响事件恰好 +1**。
 
-        1.0 在这里还有一条 ``source_type != 'video_scene'`` 的摘要豁免。2.0 的 ``events``
-        没有 ``source_type`` 列，也就没有 ``video_scene`` 事件，这条判据在 2.0 恒真；
-        等视频事件进来时要连列一起补（登记在 ``s5-deviations.md``）。
+        1.0 在这里还有一条 ``source_type != 'video_scene'`` 的摘要豁免（``db.py:5576``）：
+        ``video_scene`` 事件的摘要只在导入时算一次，之后**永远不刷新**。
+        **2.0 不豁免**（S8b T512；``s8-deviations.md`` §2 第 2 条）：迁移 0010 已经把
+        ``source_type`` 列建好，视频场景事件从 S8b 起真实存在，照搬那条判据会让
+        「确认一个人之后参与者写进了场景事件、摘要却停在 ``视频场景 · 0.0s~60.0s``」
+        变成一个没人看得见的状态。这是**修 1.0 的缺陷，不是偏离**。
         """
         grouped = self._events.events_for_observations(list(observation_ids))
         affected: list[str] = []

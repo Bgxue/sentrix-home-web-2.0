@@ -286,6 +286,30 @@ class VideoTranscoder(Protocol):
         ...
 
 
+class VideoKeyframeExtractor(Protocol):
+    """在给定的原片秒数上取一帧写成图片。实现在 ``infrastructure/media/video_keyframes.py``。
+
+    **为什么单列一个端口。** 它起 ``ffmpeg`` 子进程；``domain-purity`` 与
+    ``application-purity`` 两条契约都禁止 domain/application 碰子进程。形状与
+    ``VideoTranscoder`` 同一条：端口在 domain，实现在 infrastructure。
+
+    **抽什么帧由 domain 决定，不在这里。** 切窗规则（``SCENE_WINDOW_SEC`` /
+    ``MAX_SCENES``）在 ``domain/media/scenes.py``——那是产品行为，与「怎么解码」无关。
+    这个端口只回答「第 N 秒那一帧，请你给我」。
+    """
+
+    def extract(self, source: Path, asset_id: str, scene_index: int, timestamp_sec: float) -> Path:
+        """把 ``source`` 第 ``timestamp_sec`` 秒那一帧写成图片，返回产物路径。
+
+        产物路径由适配器自己拼（与 ``VideoTranscoder.browser_preview`` 同一个根：
+        ``media_dir/derived/video``），调用方不必知道派生目录长什么样。
+
+        失败抛异常（ffmpeg 非零退出 / 产物没写出来）。调用方决定是整条放弃还是跳过——
+        ``ExtractVideoScenes`` 选的是整条放弃：半套场景比没有场景更难解释。
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class VideoProbe:
     """一次视频探测的落库形态（写进 ``assets.metadata_json``）。
@@ -326,6 +350,30 @@ class VideoRepository(Protocol):
         1.0 ``db.py:2383`` 的 ``list_derived_assets``。**``derived_kind IS NOT NULL``
         就够**——1.0 的 ``WHERE derived_kind IN ('video_keyframe','video_keyframe_webp')``
         是它自己双算法并存留下的补丁（``s8-deviations.md`` §3），2.0 只有一条路径。
+        """
+        ...
+
+    def add_derived(
+        self,
+        *,
+        parent_asset_id: str,
+        asset: Asset,
+        derived_kind: str,
+        source_timestamp_sec: float,
+        source_frame_index: int,
+        source_scene_index: int,
+    ) -> None:
+        """把一张派生帧落库，并把迁移 0010 的血缘列写上。
+
+        **为什么单开一个方法而不是让 ``AssetRepository.add`` 带上这几列。**
+        ``Asset`` 是「资产本身」，血缘列描述的是「这张资产怎么指回原片」——它们是
+        ``VideoRepository`` 这条链的词汇（见本端口类的注释），塞进 ``Asset`` 会让
+        每一张普通照片也背上五个恒空的字段。所以写入分成两步：资产行归 ``AssetRepository``，
+        血缘行归这里；``add_derived`` 一次写完，不让调用方有机会只写一半。
+
+        ``parent_asset_id`` 由调用方给而不是从 ``asset`` 上取：``Asset`` 里没有这一位
+        （同上）。``source_frame_index`` 上有唯一索引——重复插入直接 ``IntegrityError``，
+        那是有意的（见 ``cleanup_derivatives`` 与迁移 0010 表头）。
         """
         ...
 

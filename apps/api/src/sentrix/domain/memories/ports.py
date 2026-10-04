@@ -99,6 +99,38 @@ class EventRepository(Protocol):
         """
         ...
 
+    def create_video_scene(
+        self,
+        *,
+        event_id: str,
+        scope_id: str,
+        title: str,
+        summary: str,
+        place: str,
+        time_start: datetime | None,
+        time_end: datetime | None,
+        source_asset_id: str,
+        source_scene_index: int,
+        source_start_sec: float,
+        source_end_sec: float,
+    ) -> EventRecord:
+        """建一条 ``source_type='video_scene'`` 的事件，**同一 (源片, 场景序号) 幂等**。
+
+        对应 1.0 ``db.py:2397`` 的 ``create_video_scene_event``。写成端口上的一个方法
+        而不是复用 ``create`` + 一次 UPDATE：血缘那五列必须在**插入时**一起写，
+        分两步的话中间那一刻的事件是一行没有来源的场景（``list_video_scenes`` 看不见它，
+        而它已经占了 ``source_asset_id`` 这对键）。
+
+        **``time_start`` / ``time_end`` 与血缘的 ``source_start_sec`` / ``source_end_sec``
+        是两套坐标**：前者是墙钟时间（拍摄时间 + 偏移，给时间线与事件归并），后者是原片
+        内秒数（给前端 seek）。两套都要，谁也不能替代谁。
+
+        已存在时返回那一行**原样**（不覆盖 title/summary）：重跑同一个视频是正常操作
+        （``POST /videos/{id}/reprocess``），先清场再重来的顺序在 ``ExtractVideoScenes``
+        那一侧。
+        """
+        ...
+
 
 class EventParticipantRepository(Protocol):
     """事件参与者与事件-实体两张投影表。

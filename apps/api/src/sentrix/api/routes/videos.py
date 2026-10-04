@@ -6,9 +6,9 @@
 响应形状照 1.0 ``backend/app.py:1448-1481`` 四条路由，**前缀不同**：2.0 的 v1 路由挂在
 ``/api/v1`` 下（``main.py`` 的 ``APIRouter(prefix="/api/v1")``），1.0 是 ``/api``。
 
-**S8a 里 ``scenes`` 恒为空数组**：建场景是 S8b（T512）的事。这四条路由现在就把形状
-定下来，S8b 只管往里填数据；读侧不随着写侧一起长，是因为「场景成型后能不能读回来」
-正是 S8a 的血缘列要保证的事（``s8-deviations.md`` §0）。
+**S8b 起 ``scenes`` 有内容**：建场景是 T512/T513 的事（``ExtractVideoScenes``），
+写侧与读侧现在都在。四条路由的形状自 S8a 起没动过——读侧先于写侧落地，正是
+「场景成型后能不能读回来」那条验收要先有读法（``s8-deviations.md`` §0）。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from sentrix.api.deps import get_container
+from sentrix.api.routes.media import build_video_scenes
 from sentrix.api.schemas.videos import (
     KeyframeAssetPayload,
     SourceVideoPayload,
@@ -30,15 +31,15 @@ from sentrix.api.schemas.videos import (
 from sentrix.bootstrap.container import Container
 from sentrix.domain.media.models import Asset, AssetStatus, DerivedAsset, MediaType, VideoMetadata
 from sentrix.domain.media.ports import VideoProbe
+from sentrix.domain.media.scenes import VIDEO_SCENE_SOURCE_TYPE
 from sentrix.domain.memories.events import EventRecord
 
 router = APIRouter(tags=["videos"])
 
-VIDEO_SCENE_SOURCE_TYPE = "video_scene"
-
-# 重跑之后资产停在这个状态。**它不是 AssetStatus 的成员**——1.0 的 ``video-queued``
-# 是它的视频阶段名，2.0 没有那一列（见 ``reprocess_video`` 的注释）。
-REPROCESS_STATUS = "video-queued"
+# 重跑的响应里那个 ``status``。S8a 回的是 1.0 的阶段名 ``video-queued``——那时它真的
+# 只是排队，没有抽取链会来接走；S8b 起这条链是**同步跑完**的（见 ``reprocess_video``），
+# 所以如实回它跑完的状态。
+REPROCESS_STATUS = AssetStatus.PROCESSED.value
 
 
 def _metadata_payload(metadata: VideoMetadata | None) -> VideoMetadataPayload | None:
@@ -181,22 +182,23 @@ def get_video_scene(scene_id: str, container: Container = Depends(get_container)
 
 @router.post("/videos/{asset_id}/reprocess", status_code=202)
 def reprocess_video(asset_id: str, container: Container = Depends(get_container)) -> VideoReprocessResponse:
-    """清派生数据 + 重置状态，**S8a 阶段没有抽取链可跑**（那是 S8b 的 T511–T514）。
+    """清派生数据 + **真重跑一次抽取链**。
 
-    1.0 这里还有一句 ``background_tasks.add_task(process_asset, asset_id)``
-    （``app.py:1477``）——那正是 S8a 做不了的一半。**不装作异步**：2.0 没有任务队列，
-    起一个查无此人的后台任务只会把「跑到哪了」藏起来（``routes/timeline.py`` 的
-    ``import_album`` 也是为这个选择同步的）。所以这里如实做两件现在成立的事：
+    S8a 里它只做两件事（清场 + 状态回到 ``queued``），当时的注释写着「S8a 阶段没有
+    抽取链可跑」——**那句话到 S8b 不成立了**：抽取链就是 ``ExtractVideoScenes``
+    （T511–T513）。顺序与 1.0 ``app.py:1472-1481`` 一致：先 ``cleanup_derivatives``
+    清掉这个源片的派生物与场景事件，再跑一遍抽取。清场是必须的——不清就重跑的话，
+    已有帧会被幂等判重跳过，得到的是一份新旧混合、看不出哪里陈旧的场景表。
 
-    1. ``cleanup_derivatives`` 清掉这个源片的派生物与场景事件；
-    2. 状态回到 ``queued``——**S8b 的抽取链会从这个状态上接走它**。
-
-    ``status`` 回给客户端的是 1.0 的那个阶段名 ``video-queued``；资产行上的状态是
-    2.0 的 ``AssetStatus.QUEUED``。两者不是一个词表（2.0 没有 ``video_stage`` 列），
-    但指同一件事：**排队等着被处理**。S8a 里没有消费者把它接走，这一点写在
-    ``s8-deviations.md`` §4，不藏的。
+    **同步**，不是 1.0 的 ``background_tasks.add_task(process_asset, asset_id)``：
+    2.0 没有任务队列，起一个查无此人的后台任务只会把「跑到哪了」藏起来（与
+    ``routes/timeline.py`` 的整册导入同一条选择）。所以返回时资产行上已经是
+    ``processed``，响应的 ``status`` 也如实回它——回 1.0 那个「排队中」的阶段名
+    （``video-queued``）在同步执行下是一句假话。
     """
     _require_video(asset_id, container)
     container.video_repository.cleanup_derivatives(asset_id)
     container.asset_repository.update_status(asset_id, AssetStatus.QUEUED)
+    build_video_scenes(container).execute(asset_id)
+    container.asset_repository.update_status(asset_id, AssetStatus.PROCESSED)
     return VideoReprocessResponse(accepted=True, asset_id=asset_id, status=REPROCESS_STATUS)

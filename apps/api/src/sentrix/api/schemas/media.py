@@ -20,6 +20,9 @@ class ImportResponse(BaseModel):
     # 视频有没有真的走到 ffprobe（S8a T505）。与 indexed / placed 同一个可观测面：
     # 原先「视频收下了但什么都没发生」在响应里完全看不出来。图片恒为 False。
     video_probed: bool = False
+    # 这次导入之后建起来的视频场景数（S8b T512）。与 ``video_probed`` 同一条理由：
+    # 「视频导入成功但一个场景都没有」也要看得见。图片恒为 0。
+    video_scenes: int = 0
 
 
 class AssetSummary(BaseModel):

@@ -123,6 +123,29 @@ class FakeVideoTranscoder:
         return target
 
 
+class FakeVideoKeyframeExtractor:
+    """契约测试用的确定性抽帧器（S8b）。
+
+    真实现起 ffmpeg 子进程；与 FakeVideoMetadataReader / FakeVideoTranscoder
+    同一条理由——契约测试要验的是接线与 HTTP 映射，不该把「这台机器有没有 ffmpeg」
+    变成断言的前置条件。
+
+    **产物写一张真 JPEG**：关键帧后面要走完整的图片流水线（向量、人脸、观察），
+    一个空文件会让那条链在别处炸，而炸点离这里很远。
+    """
+
+    def extract(self, source, asset_id, scene_index, timestamp_sec):
+        import io
+
+        from PIL import Image
+
+        target = Path(source).parent / f"{asset_id}-scene{scene_index:03d}.jpg"
+        buffer = io.BytesIO()
+        Image.new("RGB", (16, 16), "red").save(buffer, format="JPEG")
+        target.write_bytes(buffer.getvalue())
+        return target
+
+
 class FakeChatModel:
     """契约测试用的确定性文本模型。
 
@@ -171,6 +194,9 @@ def client(settings) -> TestClient:
         # 视频探测与转码同理：真适配器起 ffprobe/ffmpeg 子进程，契约测试不该依赖它们。
         video_metadata_reader=FakeVideoMetadataReader(),
         video_transcoder=FakeVideoTranscoder(),
+        # 抽帧同理：真实现起 ffmpeg。这里给的是「每个场景一张真 JPEG」的假件，
+        # 所以契约测试能走完整条「导入视频 → 场景成型 → 关键帧落库」的链。
+        video_keyframe_extractor=FakeVideoKeyframeExtractor(),
     )
     return TestClient(app)
 

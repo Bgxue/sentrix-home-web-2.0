@@ -40,7 +40,7 @@ S8 的设计文档定义是「**FunASR 音频、关键帧/场景切分、派生�
 | # | 1.0 的缺陷 | 2.0 怎么修 |
 |---|---|---|
 | 1 | **唯一血缘索引只覆盖一种 `derived_kind`**：`db.py:1054-1056` 是 `WHERE derived_kind = 'video_keyframe'`，而 1.0 的**默认**算法产出的是 `video_keyframe_webp` → **默认路径没有 DB 级幂等保证**，重复导入只能靠 `cleanup_video_derivatives` 兜底 | S8a 的 T501 把索引做成**覆盖所有 `derived_kind`**。2.0 只保留一条抽帧路径（§3），所以一个覆盖全部的索引就够 |
-| 2 | **视频场景摘要不刷新**：`db.py:5576` 对 `source_type='video_scene'` 跳过重建，摘要只在导入时算一次，后续补齐无法更新 | S8b 登记为待定：2.0 的事件摘要若走 `refresh_event_summary`，视频场景**不豁免**。具体在 T512 落地时定 |
+| 2 | **视频场景摘要不刷新**：`db.py:5576` 对 `source_type='video_scene'` 跳过重建，摘要只在导入时算一次，后续补齐无法更新 | **S8b 已落地（T512）**：2.0 走 `ConfirmedPersonEvents.refresh_participants` + `EventRepository.apply_summary`，视频场景**不豁免**——确认人物之后场景摘要照常重写。由 `test_video_scenes.py::test_a_video_scene_summary_is_not_exempt_from_the_participant_refresh` 钉住 |
 | 3 | **前端关键帧计数恒 0**：`src/app.js:742` 用 `derived_kind === "video_keyframe"` 统计，而默认算法产出 `video_keyframe_webp` | 2.0 前端见 §3 第 3 条 |
 
 ---
@@ -57,7 +57,36 @@ S8 的设计文档定义是「**FunASR 音频、关键帧/场景切分、派生�
 
 ## 4. 施工中的新增偏离
 
-（施工时追加）
+### 4.1 S8b 抽到的两条新常量（**不是 1.0 的值**）
+
+| 项 | 内容 |
+|---|---|
+| **场景切分** | 固定时长窗 `SCENE_WINDOW_SEC = 60.0`、每窗取中点一帧、总场景数封顶 `MAX_SCENES = 40`（超过时按比例放大窗口） |
+| **为什么** | 用户 2026-10-04 裁决①「先做简化闭环」。1.0 那一套是 YOLO/Pose 预筛 + Katna 质量门 + WorldMM 聚类，没有「固定时长窗」这个概念，所以这三条**没有 1.0 的值可抄** |
+| **登记位置** | `behaviour-baseline.md` 的「视频抽帧与场景（S8b）」段，逐条写明「不是 1.0 的值」 |
+| **可逆性** | 高。换算法只需换 `plan_scenes` 与抽帧适配器；血缘列、场景事件、派生帧走图片流水线三件都不动（裁决①的原文） |
+
+### 4.2 场景抽取失败只留日志，没有落到资产上
+
+`ImportAssets._extract_video_scenes` 接住抽帧链的异常后只 `log.warning`，没有像
+ffprobe 失败（`video_probe_error`）或转码失败（`browser_preview_error`）那样把原因写进
+`assets.metadata_json`。理由：那两条各有 1.0 的键名可抄，而场景抽取是 2.0 的新链路，
+开一个 `video_scene_error` 键属于本切片之外的设计（键名、读侧、响应形状三样都要一起定）。
+代价是明确的：**抽帧失败在接口上不可见**，只有服务端日志里有。补法是给
+`VideoRepository` 加一对键的读写，挂在 `GET /videos/{id}` 上。
+
+### 4.3 T514 的清理级联与 1.0 的一处不同
+
+1.0 的 `cleanup_asset_derivatives` 用 `metadata_json LIKE '%"asset_id": "..."%'` 找向量；
+2.0 按 `source_id` 删（`asset` / `observation` / `event` / `face_instance` 四个方向）。
+理由：`source_id` 是 2.0 的权威键（`memory_vectors` 的唯一约束就是它），LIKE 会误伤
+id 互为后缀的行，而那种误删不报错。
+
+### 4.4 施工中**没有**发生其他偏离
+
+除上面三条，S8b 完全按计划书 T511–T514 落地：抽帧落 infrastructure、场景事件带
+`source_*` 血缘、派生帧是 `media_type='image'` 的普通资产走现有图片流水线、
+`reprocess` 真重跑、`video_scene` 的摘要刷新不豁免。
 
 ---
 

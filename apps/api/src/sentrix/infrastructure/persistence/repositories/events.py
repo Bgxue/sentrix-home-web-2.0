@@ -329,6 +329,71 @@ class SqliteEventRepository:
             connection.execute("DELETE FROM event_observations WHERE event_id = ?", (event_id,))
             connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
 
+    def create_video_scene(
+        self,
+        *,
+        event_id: str,
+        scope_id: str,
+        title: str,
+        summary: str,
+        place: str,
+        time_start: datetime | None,
+        time_end: datetime | None,
+        source_asset_id: str,
+        source_scene_index: int,
+        source_start_sec: float,
+        source_end_sec: float,
+    ) -> EventRecord:
+        """1.0 ``db.py:2397`` 的 ``create_video_scene_event``：**先查后插**，幂等。
+
+        先查再插而不是靠迁移 0010 那条唯一索引兜：索引抛的是 ``IntegrityError``，而
+        重跑同一个视频是正常操作（``POST /videos/{id}/reprocess``），它不该以异常收场。
+        索引留在那里是最后一道网——它挡的是「查与插之间被别人插了一行」。
+
+        与 1.0 照抄的三处：``event_type`` / ``activity`` 都是「视频场景」；
+        ``aggregation_breakdown`` 记 ``forced_video_scene``（这条事件的观察是强制
+        归属的，没参与候选打分，翻账时看得出来）；``confidence`` 是 1.0 的默认 1.0。
+        """
+        with self._database.connect() as connection, connection:
+            existing = connection.execute(
+                "SELECT id FROM events WHERE source_type = 'video_scene'"
+                " AND source_asset_id = ? AND source_scene_index = ?",
+                (source_asset_id, int(source_scene_index)),
+            ).fetchone()
+            if existing is not None:
+                scene_id = existing["id"]
+            else:
+                scene_id = event_id
+                now = datetime.now(UTC).isoformat()
+                connection.execute(
+                    "INSERT INTO events (id, scope_id, title, event_type, time_start, time_end,"
+                    " place, activity, summary, confidence, aggregation_score,"
+                    " aggregation_breakdown_json, status, revision, source_type, source_asset_id,"
+                    " source_scene_index, source_start_sec, source_end_sec, source_metadata_json,"
+                    " created_at, updated_at)"
+                    " VALUES (?,?,?,'视频场景',?,?,?, '视频场景',?,1.0,0.0,?,'active',1,"
+                    " 'video_scene',?,?,?,?, '{}', ?, ?)",
+                    (
+                        scene_id,
+                        scope_id,
+                        title or "视频场景",
+                        time_start.isoformat() if time_start else None,
+                        time_end.isoformat() if time_end else None,
+                        place or DEFAULT_EVENT_PLACE,
+                        summary or title or "视频场景",
+                        json.dumps({"forced_video_scene": True}, ensure_ascii=False),
+                        source_asset_id,
+                        int(source_scene_index),
+                        float(source_start_sec),
+                        float(source_end_sec),
+                        now,
+                        now,
+                    ),
+                )
+        created = self.get(scene_id)
+        assert created is not None
+        return created
+
     def list_video_scenes(self, source_asset_id: str) -> Sequence[EventRecord]:
         """1.0 ``db.py:2427`` 的 ``list_video_scene_events``，原样四条：来源类型 / 源片 /
         active / 按场景序号升序。"""

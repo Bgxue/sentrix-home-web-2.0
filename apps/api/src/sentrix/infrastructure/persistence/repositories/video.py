@@ -16,7 +16,7 @@ import json
 import sqlite3
 from collections.abc import Sequence
 
-from sentrix.domain.media.models import DerivedAsset, VideoMetadata
+from sentrix.domain.media.models import Asset, DerivedAsset, VideoMetadata
 from sentrix.domain.media.ports import VideoProbe
 from sentrix.infrastructure.persistence.database import Database
 
@@ -50,6 +50,11 @@ _DERIVED_COLUMNS = (
     "id, file_name, media_type, status, captured_at, gps_latitude, gps_longitude,"
     " parent_asset_id, derived_kind, source_timestamp_sec, source_frame_index, source_scene_index"
 )
+
+
+def _placeholders(values: Sequence[object]) -> str:
+    """一串 ``?``。清理级联里 ``IN`` 的名单全是这样拼的——SQLite 不支持绑定一个列表。"""
+    return ",".join("?" for _ in values)
 
 
 def _parse_metadata(value: str | None) -> dict[str, object]:
@@ -147,15 +152,68 @@ class SqliteVideoRepository:
             ).fetchall()
         return [_row_to_derived(row) for row in rows]
 
-    def cleanup_derivatives(self, parent_asset_id: str) -> int:
-        """先删随行数据、再删主行。**顺序是硬约束**：``event_observations`` 与
-        ``observations`` 都带外键且连接开着 ``PRAGMA foreign_keys = ON``，反过来直接
-        ``IntegrityError``（1.0 的 ``cleanup_asset_derivatives`` 先递归清资产也是这个道理）。
+    def add_derived(
+        self,
+        *,
+        parent_asset_id: str,
+        asset: Asset,
+        derived_kind: str,
+        source_timestamp_sec: float,
+        source_frame_index: int,
+        source_scene_index: int,
+    ) -> None:
+        """落一张派生帧，连同迁移 0010 的血缘列一次写完。
 
-        **S8a 只清到「S8a 能产生的那几行」**：场景事件、派生物本身、以及挂在派生物上的
-        观察。派生物真正走完图片流水线之后还会带出人脸实例 / 实体提及 / 地点 / 向量——
-        那些的行是 S8b 的 T513 造出来的，级联清理**属于 T514**（否则就是照着还没写的
-        写侧猜表结构）。今天多删一张表都可能是错的。
+        **血缘列只能在这里写**：``SqliteAssetRepository.add`` 是通用写入，不认识那几列，
+        而 ``Asset`` 里也没有它们（见 ``domain/media/ports.py`` 的 ``add_derived`` 注释）。
+
+        ``(parent_asset_id, source_frame_index)`` 上的唯一索引**故意不用 DO NOTHING 兜**：
+        重复插入要炸出来。抽取链靠 ``list_derived`` 前置判重保证幂等，索引是那道判重
+        写错时的最后一道网——把它静音掉，重复处理一个视频就会静默多出一批孤儿观察。
+        """
+        with self._database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO assets (id, scope_id, file_name, media_type, path, mime_type,"
+                " size_bytes, status, content_sha256, captured_at, gps_latitude, gps_longitude,"
+                " created_at, updated_at, parent_asset_id, derived_kind, source_timestamp_sec,"
+                " source_frame_index, source_scene_index)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    asset.id,
+                    asset.scope_id,
+                    asset.file_name,
+                    asset.media_type.value,
+                    asset.path,
+                    asset.mime_type,
+                    asset.size_bytes,
+                    asset.status.value,
+                    asset.content_sha256,
+                    asset.captured_at.isoformat() if asset.captured_at else None,
+                    asset.captured_location.latitude if asset.captured_location else None,
+                    asset.captured_location.longitude if asset.captured_location else None,
+                    asset.created_at.isoformat(),
+                    asset.updated_at.isoformat(),
+                    parent_asset_id,
+                    derived_kind,
+                    float(source_timestamp_sec),
+                    int(source_frame_index),
+                    int(source_scene_index),
+                ),
+            )
+
+    def cleanup_derivatives(self, parent_asset_id: str) -> int:
+        """删掉这个源片的派生物、它们的随行数据、以及场景事件，返回删掉的派生物行数。
+
+        **顺序是硬约束**：连接开着 ``PRAGMA foreign_keys = ON``，先删主行直接
+        ``IntegrityError``。总则一句话：**引用者先死**——人脸/提及/地点/向量 → 观察 →
+        事件投影 → 事件 → 资产。1.0 的 ``cleanup_asset_derivatives``（``db.py:1648``）
+        逐层递归同一个道理。
+
+        **S8a 只清到「S8a 能产生的那几行」**（场景事件 / 派生物 / 挂在派生物上的观察）。
+        S8b 的 T513 让关键帧真的走完了图片流水线，于是派生物上多出人脸实例 / 实体提及 /
+        地点 / 向量 / 词法投影那几层——这一版把它们一起接上（T514，``s8-deviations.md``
+        §4）。少删一层的代价不是报错，是**下一次重跑留下孤儿行**：它们仍挂在已经不存在的
+        资产/观察 id 上，谁也看不见，直到某次按 observation_id 的连接查询莫名其妙地多出几行。
         """
         with self._database.connect() as connection, connection:
             derived_ids = [
@@ -165,22 +223,105 @@ class SqliteVideoRepository:
                     (parent_asset_id,),
                 ).fetchall()
             ]
+            scene_event_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM events WHERE source_type = 'video_scene' AND source_asset_id = ?",
+                    (parent_asset_id,),
+                ).fetchall()
+            ]
             for asset_id in derived_ids:
+                observation_ids = [
+                    row["id"]
+                    for row in connection.execute(
+                        "SELECT id FROM observations WHERE asset_id = ?", (asset_id,)
+                    ).fetchall()
+                ]
+                if not observation_ids:
+                    # 处理到一半失败的派生物可能一行观察都没有（资产已落库、流水线没跑完）。
+                    # 它仍然可能有 asset_places——那行不清掉的话，最后那句 DELETE FROM assets
+                    # 会直接撞外键。报错是好的，但不该为一行地点把整次清场拖死。
+                    connection.execute("DELETE FROM asset_places WHERE asset_id = ?", (asset_id,))
+                    continue
+                observations = tuple(observation_ids)
+                obs_slots = _placeholders(observations)
+                face_ids = [
+                    row["id"]
+                    for row in connection.execute(
+                        f"SELECT id FROM face_instances WHERE observation_id IN ({obs_slots})",
+                        observations,
+                    ).fetchall()
+                ]
+                if face_ids:
+                    faces = tuple(face_ids)
+                    face_slots = _placeholders(faces)
+                    # 人脸带出来的四张投影 + 它自己的向量，都要先走。
+                    for table in (
+                        "person_appearance_evidence",
+                        "person_moments",
+                        "face_prototypes",
+                        "entity_mentions",
+                    ):
+                        connection.execute(
+                            f"DELETE FROM {table} WHERE face_instance_id IN ({face_slots})", faces
+                        )
+                    connection.execute(
+                        "DELETE FROM memory_vectors WHERE source_type = 'face_instance'"
+                        f" AND source_id IN ({face_slots})",
+                        faces,
+                    )
+                    connection.execute(f"DELETE FROM face_instances WHERE id IN ({face_slots})", faces)
+                # 观察级：外观证据 / 瞬间 / 提及 / 事实桥 / 事件桥 / 词法投影。
                 connection.execute(
-                    "DELETE FROM event_observations WHERE observation_id IN"
-                    " (SELECT id FROM observations WHERE asset_id = ?)",
-                    (asset_id,),
+                    f"DELETE FROM person_appearance_evidence WHERE observation_id IN ({obs_slots})",
+                    observations,
                 )
+                for table in (
+                    "person_moments",
+                    "entity_mentions",
+                    "entity_observations",
+                    "event_observations",
+                    "observation_search_terms",
+                ):
+                    connection.execute(
+                        f"DELETE FROM {table} WHERE observation_id IN ({obs_slots})", observations
+                    )
+                connection.execute(
+                    f"DELETE FROM observation_search_fts WHERE observation_id IN ({obs_slots})",
+                    observations,
+                )
+                for observation_id in observations:
+                    connection.execute(
+                        "DELETE FROM facts WHERE evidence_ids_json LIKE ?",
+                        (f"%{observation_id}%",),
+                    )
+                # 向量：资产级一行（visual/asset）+ 观察级两行（episodic 与 semantic
+                # 都写 source_type='observation'）。1.0 那一下 ``metadata_json LIKE``
+                # 不搬：2.0 的 source_id 就是权威键，LIKE 会误伤同名后缀的 id。
+                connection.execute(
+                    "DELETE FROM memory_vectors WHERE"
+                    " (source_type = 'asset' AND source_id = ?)"
+                    f" OR (source_type = 'observation' AND source_id IN ({obs_slots}))",
+                    (asset_id, *observations),
+                )
+                connection.execute("DELETE FROM asset_places WHERE asset_id = ?", (asset_id,))
                 connection.execute("DELETE FROM observations WHERE asset_id = ?", (asset_id,))
-            connection.execute(
-                "DELETE FROM event_observations WHERE event_id IN"
-                " (SELECT id FROM events WHERE source_type = 'video_scene' AND source_asset_id = ?)",
-                (parent_asset_id,),
-            )
-            connection.execute(
-                "DELETE FROM events WHERE source_type = 'video_scene' AND source_asset_id = ?",
-                (parent_asset_id,),
-            )
+            if scene_event_ids:
+                events = tuple(scene_event_ids)
+                event_slots = _placeholders(events)
+                for table in (
+                    "person_moments",
+                    "event_participants",
+                    "event_entities",
+                    "event_observations",
+                ):
+                    connection.execute(f"DELETE FROM {table} WHERE event_id IN ({event_slots})", events)
+                connection.execute(
+                    "DELETE FROM memory_vectors WHERE source_type = 'event'"
+                    f" AND source_id IN ({event_slots})",
+                    events,
+                )
+                connection.execute(f"DELETE FROM events WHERE id IN ({event_slots})", events)
             connection.execute(
                 "DELETE FROM assets WHERE parent_asset_id = ? AND derived_kind IS NOT NULL",
                 (parent_asset_id,),

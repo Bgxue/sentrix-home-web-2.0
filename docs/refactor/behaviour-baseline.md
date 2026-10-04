@@ -483,3 +483,30 @@
 `docs/refactor/s8-deviations.md` §1.1。音频的入库/元数据/播放属 S8c（T521–T523）。
 
 **抽帧参数（间隔、质量门）不在本表**：那是 S8b 的 T511，落地时才登记。
+
+## 视频抽帧与场景（S8b · T511–T514，2026-10-04）
+
+**前四条是 2.0 新定的值，1.0 没有对应物**——1.0 的抽帧是 YOLO/Pose 预筛 + Katna 质量门
++ WorldMM 聚类，没有「固定时长窗」这个概念（用户 2026-10-04 裁决①「先做简化闭环」，
+见 `s8-deviations.md` §3 第 1 条）。登记在这里是为了让它们可被质疑，而不是当成 1.0 的口径。
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| **场景 = 固定时长的时间窗** | `SCENE_WINDOW_SEC = 60.0` 秒 | **不是 1.0 的值**（S8b 新定） |
+| **每个场景抽几帧** | 一帧，取**窗口中点**那一秒 | **不是 1.0 的值**（S8b 新定） |
+| **总场景数封顶** | `MAX_SCENES = 40`；超过时**按比例放大窗口**，不是无限抽帧 | **不是 1.0 的值**（S8b 新定） |
+| **`derived_kind` 取值** | 只有一个：`video_keyframe` | 用户裁决⑧（不搬双算法并存）；1.0 有两个（`video_keyframe` / `video_keyframe_webp`） |
+| 抽帧的 ffmpeg 参数 | `-ss <输入侧> -frames:v 1 -q:v 2`，产物 `scenes/{n:03d}/kf_0001.jpg` | **不是 1.0 的值**（1.0 出的是 webp/jpg 混合） |
+| 场景事件的标题 / 摘要 | `视频场景 N` / `视频场景 · {start:.1f}s~{end:.1f}s` | 1.0 `video/processor.py:203` |
+| 场景事件的时间区间 | `source_start_sec` / `source_end_sec` 是**原片秒数**；`time_start` / `time_end` 是拍摄时间 + 偏移 | 1.0 `processor.py:183-184` |
+| 关键帧的拍摄时间 | 源片 `captured_at` + `source_timestamp_sec` | 1.0 `processor.py:186` |
+| 关键帧的事件归属 | **强制**挂到它那一秒的场景事件（不走候选打分） | 1.0 `pipeline.py:333` |
+| 幂等键 | `(parent_asset_id, source_frame_index)`；**不是 timestamp** | 迁移 0010 表头；1.0 那条按 timestamp 的索引在默认路径上从未生效 |
+| 场景摘要是否豁免刷新 | **不豁免**（1.0 `db.py:5576` 豁免 `video_scene`，是缺陷） | `s8-deviations.md` §2 第 2 条 |
+| 关键帧是否付 VLM 观察 | **付**（走完整图片流水线，含观察） | 用户裁决④「派生帧走图片流水线」 |
+| `POST /videos/{id}/reprocess` 的 `status` | `processed`（同步跑完后的真实状态） | **S8b 变更**：S8a 曾按 1.0 回 `video-queued`，那时确实只是排队；S8b 起抽取链同步跑，回那个词是假话 |
+
+**封顶的代价与理由**：每个关键帧要走完整图片流水线（VLM 观察 + wemm 嵌入 + 人脸），
+**帧数就是 VLM 调用数**；10 分钟视频 ≈ 10 次，不封顶的话长视频会把 GPU 打满。
+
+**音频/视频的转写不在 S8b**（用户裁决②「不要 FunASR」）。音频属 S8c。

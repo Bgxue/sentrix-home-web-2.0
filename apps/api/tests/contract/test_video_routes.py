@@ -48,16 +48,30 @@ def test_video_detail_returns_the_video_and_its_metadata(client: TestClient):
     assert body["video"]["metadata"]["duration_sec"] == pytest.approx(12.5)
     assert body["video"]["metadata"]["codec"] == "h264"
     assert body["video"]["captured_location"] == "22.484600,114.543800"
-    # S8a 不建场景（那是 S8b），所以这里必须是空数组而不是缺键。
-    assert body["scenes"] == []
+    # S8b 起场景成型（T512）：12.5 秒的片子落在 60 秒那一个窗里，正好一个场景。
+    # 这里不能只断言「非空」——场景必须带着血缘指回源片，否则「跳回原片」没落点。
+    assert len(body["scenes"]) == 1
+    scene = body["scenes"][0]
+    assert scene["source_type"] == "video_scene"
+    assert scene["source_asset_id"] == asset_id
+    assert scene["source_scene_index"] == 0
+    assert scene["source_start_sec"] == pytest.approx(0.0)
+    assert scene["source_end_sec"] == pytest.approx(12.5)
 
 
 def test_video_scenes_endpoint_returns_the_1_0_shape(client: TestClient):
+    """``GET /videos/{id}/scenes`` → ``{video_asset_id, scenes}``（1.0 ``app.py:1461``）。
+
+    键集是 1.0 的形状；S8b 起 ``scenes`` 里有东西——空数组与「场景真的建起来了」
+    在响应上分得开，靠的就是这个列表的内容。
+    """
     asset_id = import_video(client).json()["asset_id"]
 
     body = client.get(f"/api/v1/videos/{asset_id}/scenes").json()
 
-    assert body == {"video_asset_id": asset_id, "scenes": []}
+    assert body["video_asset_id"] == asset_id
+    assert len(body["scenes"]) == 1
+    assert body["scenes"][0]["source_scene_index"] == 0
 
 
 def test_video_detail_404s_for_non_videos_and_missing_assets(client: TestClient):
@@ -118,38 +132,39 @@ def test_video_preview_route_no_longer_500s(client: TestClient):
     assert response.headers["content-type"].startswith("video/")
 
 
-def test_reprocess_clears_derivatives_and_queues_the_asset(client: TestClient):
-    """``POST /videos/{id}/reprocess`` → 202 ``{accepted, asset_id, status}``。
+def test_reprocess_clears_and_rebuilds_the_derivatives(client: TestClient):
+    """``POST /videos/{id}/reprocess`` → 202 + 清场 + **真重跑一次抽取链**（T514）。
 
-    清场那一步可证伪：先种一条派生物与一个场景事件，重跑之后它们必须消失，
-    而且资产状态回到 ``queued``（S8b 的抽取链会从那里接走）。
+    判据是**派生物的 id 变了**：重跑前先 ``cleanup_derivatives`` 清掉旧的，所以新帧
+    是新行。如果只清了不重建（S8a 的行为），列表会是空的；如果没清就重跑（幂等跳过），
+    列表里会是**同一个 id**——两种退化都被这一条挡住。
     """
     asset_id = import_video(client).json()["asset_id"]
-    database = client.app.state.container.database
-    with database.connect() as connection, connection:
-        connection.execute(
-            "INSERT INTO assets (id, scope_id, file_name, media_type, path, size_bytes, status,"
-            " content_sha256, created_at, updated_at, parent_asset_id, derived_kind,"
-            " source_timestamp_sec, source_frame_index, source_scene_index)"
-            " VALUES ('asset_frame', 'album1', 'f.webp', 'image', '/media/f', 1, 'processed',"
-            " 'asset_frame', ?, ?, ?, 'video_keyframe', 1.0, 1, 0)",
-            (NOW.isoformat(), NOW.isoformat(), asset_id),
-        )
-        connection.execute(
-            "INSERT INTO events (id, scope_id, title, event_type, source_type, source_asset_id,"
-            " source_scene_index, source_start_sec, source_end_sec, created_at, updated_at)"
-            " VALUES ('evt_scene', 'album1', '视频场景', '视频场景', 'video_scene', ?, 0, 0.0, 5.0, ?, ?)",
-            (asset_id, NOW.isoformat(), NOW.isoformat()),
-        )
+    container = client.app.state.container
+    before = container.video_repository.list_derived(asset_id)
+    assert len(before) == 1
 
     response = client.post(f"/api/v1/videos/{asset_id}/reprocess")
 
     assert response.status_code == 202
-    assert response.json() == {"accepted": True, "asset_id": asset_id, "status": "video-queued"}
-    container = client.app.state.container
-    assert container.asset_repository.get(asset_id).status.value == "queued"
-    assert container.video_repository.list_derived(asset_id) == []
-    assert container.event_repository.list_video_scenes(asset_id) == []
+    assert response.json() == {"accepted": True, "asset_id": asset_id, "status": "processed"}
+    after = container.video_repository.list_derived(asset_id)
+    assert [item.id for item in after] != [item.id for item in before]
+    assert len(after) == 1
+    assert len(container.event_repository.list_video_scenes(asset_id)) == 1
+    # 同步跑完，资产行上不再是 queued——响应里那个 status 说的就是这件事。
+    assert container.asset_repository.get(asset_id).status.value == "processed"
+
+
+def test_the_import_response_reports_the_scene_count(client: TestClient):
+    """导入响应里的 ``video_scenes``（T512）：与 ``video_probed`` 同一个可观测面。
+
+    没有它，「视频导入成功但一个场景都没建」在接口上完全看不出来——正是 S8a 修过的
+    那种静默。图片一律 0。
+    """
+    body = import_video(client).json()
+
+    assert body["video_scenes"] == 1
 
 
 def test_reprocess_404s_on_a_missing_video(client: TestClient):
