@@ -189,6 +189,23 @@ episodic   BAAI/bge-m3                 1024  observation     46   （旧，不�
 semantic   BAAI/bge-m3                 1024  observation     46   （旧，不动）
 ```
 
+### 终态 CI（2026-10-04）
+
+```
+domain-purity / application-purity / api-transport-only / infrastructure-purity / layers  KEPT
+reachability 0 · method-reachability 0 · capability-map 0 · module-map 0 · openapi 契约一致
+1 failed, 1999 passed, 0 skipped
+```
+
+**唯一失败是那条已知的模型侧 flaky**（`test_assistant_turn.py::
+test_the_answer_never_leaks_internal_identifiers`，模型把内部 handle 写进回答），
+S6/S7a/S7b1/S7b2/F7 各登记过一次，这是第七次。**不是 W1 引入的。**
+
+**0 skipped 值得记一笔**：F7 那次 CI 报了 29 个跳过，根因是 GPU 显存被
+（llama.cpp 4.9G + wemm 侧车 12.2G + 两个后端）占满，需要 CUDA 的模型加载全部
+`OutOfMemoryError`，被 `skip_or_fail_on_load_error` 正确判成环境原因跳过。
+这一次同样的用例全部跑起来了——**说明那是瞬时争用，不是配置问题**。
+
 ### 补做：把方案漂移接进查询侧（用户 2026-10-03 裁决）
 
 上面那节「反面验证未达标」之后，用户裁决**补上**。做法与依据：
