@@ -198,6 +198,25 @@ class _CancelOnListAssets(FakeSentrixClient):
         return super().list_assets(**kwargs)
 
 
+def test_cancel_never_calls_a_remote_batch_endpoint():
+    """1.0 的 ``_cancel_remote_batch``（``:2264``）打 ``/api/ingest-batches/{id}/cancel``
+    ——**1.0 与 2.0 都不存在的死端点**，1.0 那边还被 ``except Exception`` 吞成静默 404。
+
+    2.0 的导入是**同步**的（``POST /api/v1/imports`` 一个请求跑完整条链），既没有批量
+    实体也没有可取消的后台任务。所以取消路径**一次主 API 调用都不该发**——那条调用
+    只会往 run.json 里写一个假的 ``batch_cancel_requested``。
+
+    **区分力**：把 1.0 那段照搬回来的实现会在这里留下一次 ``client`` 调用。
+    """
+    execution, writer = _execution()
+    client = FakeSentrixClient()
+    execution.client = client
+    execution._state = RunState({"status": "running"}, run_id="run_test", writer=writer)
+    execution._request = _request()
+    execution.cancel("api")
+    assert client.calls == []
+
+
 def test_cancel_is_recorded_on_the_state_with_its_source():
     state = RunState({"status": "running"})
     state.request_cancel("run_api")

@@ -53,6 +53,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSampler
 from photobench.application.run_execution.judge import InlineImages, JudgeRunner
 from photobench.application.run_execution.state import RunState
@@ -207,6 +208,9 @@ class RunExecution:
     telemetry_source: str = ""
     #: 召回图 → data URL 的实现（要用 PIL）。由装配点注入，application 不许 import PIL。
     inline_images: InlineImages | None = None
+    #: 换模型 = 重启 2.0（S9c · T923）：把 2.0 的 ``vlm_base_url`` 对准本轮的端点。
+    #: ``None`` 时 ``model_deploy`` 如实报「未装配」——用例里的默认，不假装同步过。
+    sentrix_switch: SentrixModelSwitch | None = None
     _state: RunState | None = field(default=None, repr=False)
     _judge: JudgeRunner | None = field(default=None, repr=False)
     _sampler: GpuSampler | None = field(default=None, repr=False)
@@ -555,10 +559,13 @@ class RunExecution:
         云端模型，判据换成「有没有 manager_url」——没有管理器就没有可起停的东西，
         与 1.0 的云端分支在语义上是同一件事。
 
-        **1.0 的第 4 步（``bind-runtime`` 把 Sentrix 指向新模型）没有对应**：2.0 的
-        ``vlm_base_url`` 是启动时从 Settings 读死的（``container.py:248`` 的
-        ``ServedModel(settings.vlm_base_url)``），换模型只能重启 2.0——那是 S9c 的
-        T923（裁决③）。这一段**刻意留空并如实登记**，不假装同步过了。
+        **1.0 的第 4 步（``bind-runtime`` 把 Sentrix 指向新模型）在 2.0 变成「重启 2.0」**
+        （S9c · T923 / 裁决③）：2.0 的 ``vlm_base_url`` 是启动时从 Settings 读死的
+        （``apps/api/src/sentrix/bootstrap/container.py`` 的
+        ``ServedModel(settings.vlm_base_url)``），端点换不了，只能换一个环境变量再起一个
+        进程。这一段的 ``gamma_sync`` 现在是真的（``_sync_sentrix_endpoint``），不再是
+        占位——**两个分支都要做**：没有 Manager 的「外部端点」正是 153 上的形态，
+        而 2.0 的助手用哪个模型只由它自己的 ``vlm_base_url`` 决定，与有没有 Manager 无关。
         """
         if not request.manager_url:
             state.phase_done(
@@ -568,6 +575,7 @@ class RunExecution:
                     "deployment_mode": "external_model_manager_not_configured",
                     "manager_status": "not_applicable",
                     "model_base_url": request.model_base_url or None,
+                    "gamma_sync": self._sync_sentrix_endpoint(request),
                 },
             )
             return
@@ -610,10 +618,7 @@ class RunExecution:
                 "unload_seconds": round(stop_seconds, 1),
                 "load_seconds": round(load_seconds, 1),
                 "model_probe": self._model_probe(manager_state, request),
-                "gamma_sync": {
-                    "ok": False,
-                    "error": "not_applicable: 2.0 的 vlm_base_url 在启动时读死，换模型要重启（S9c T923）",
-                },
+                "gamma_sync": self._sync_sentrix_endpoint(request),
                 "total_seconds": round(time.perf_counter() - started, 1),
                 "model_state": {
                     key: manager_state.get(key)
@@ -629,6 +634,31 @@ class RunExecution:
                 },
             },
         )
+
+    def _sync_sentrix_endpoint(self, request: RunRequest) -> dict[str, Any]:
+        """1.0 第 4 步（``bind-runtime``，``:2611``）的 2.0 落地：把 2.0 指到本轮端点。
+
+        **失败要中断整轮，这一条与 1.0 刻意不同。** 1.0 的 ``bind-runtime`` 只是同步一个
+        **缓存**——Sentrix 的答题用的是它自己的直连端点，同步失败最多让 grep 慢一点，
+        所以 1.0 把异常收进 ``gamma_sync.error`` 就继续跑（``:2613``）。2.0 不是：
+        **助手的答案由 2.0 用自己的 ``vlm_base_url`` 产出**，重启失败意味着这一轮
+        评测的每一个答案都来自另一个模型——继续跑只会产出一份**标着 A 模型、其实是
+        B 模型**的结果。那正是本项目最不想要的那种错。所以：真重启过（``restarted``）
+        却没起来 → 抛，让 ``model_deploy`` 记 ``failed``。
+
+        「本来就不用换」（``restarted=False``）不是失败，照常记结果——没有 Manager、
+        端点又正好对得上，是 153 上最常见的形态。
+        """
+        if self.sentrix_switch is None:
+            return {
+                "ok": False,
+                "error": "sentrix process controller is not wired",
+                "restarted": False,
+            }
+        outcome = self.sentrix_switch.ensure_endpoint(request.model_base_url)
+        if outcome.restarted and not outcome.ok:
+            raise RuntimeError(f"could not point Sentrix at {outcome.endpoint or '(none)'}: {outcome.error}")
+        return outcome.to_state()
 
     def _cancel_wait(self, seconds: float) -> None:
         """等一段时间；被取消就抛 ``RunCancelledError``。1.0 ``self._cancel.wait(...)``。

@@ -34,6 +34,15 @@ from photobench.domain.runs import analysis
 #: 11 GB）；2.0 只留最近两个——翻页是顺序的，两条足够覆盖「一边看详情一边翻题目」。
 _STATE_CACHE_SIZE = 2
 
+#: **缓存只对终态的 run 生效。** 这条不是性能取舍，是正确性：还在跑的 run 每读一次
+#: 都必须重新解析——否则调用方会一直看到**第一次读到的那份快照**。
+#: 这是 S9c 真机验收撞出来的：``run.json`` 已经 ``completed``、八个相位全 done，而
+#: ``GET /api/runs/{id}`` 一直回 ``running``（驱动脚本按它轮询，于是白等了十分钟）。
+#: 1.0 没有这个问题——它对活跃 run 持有**活的** ``BenchmarkRun`` 对象，次次读的都是当前值。
+#: 代价可控：非终态的 run 体量随跑随长（不是那 447 MB 的历史 run），重解析远比
+#: 「界面卡在旧状态」便宜。
+NON_TERMINAL_STATUSES = frozenset({"pending", "running", "cancelling"})
+
 
 class ReadRuns:
     """读侧用例。依赖四个端口，全部由装配点注入（``bootstrap.container``）。"""
@@ -58,18 +67,26 @@ class ReadRuns:
     # -- 内部 ---------------------------------------------------------------
 
     def _state(self, run_id: str) -> dict[str, Any]:
-        """按需解析一个 run 的完整状态（含 items），缓存最近两个。"""
+        """按需解析一个 run 的完整状态（含 items），**只把终态的放进缓存**。
+
+        **非终态的不入缓存**（S9c 真机验收撞到的缺陷）：一个 run 在跑的时候被读过
+        一次就会进 LRU，之后再没有东西把它摘掉——于是它跑完之后 ``GET /api/runs/{id}``
+        仍然回那份 ``running`` 快照。判据就落在这**一处**写侧：入缓存的先决条件是
+        「这一份是终态」。用例 ``test_a_running_run_is_not_served_from_a_stale_cache``
+        钉住它（把 ``not in`` 去掉，用例立刻红）。
+        """
         with self._lock:
             cached = self._states.get(run_id)
             if cached is not None:
                 self._states.move_to_end(run_id)
                 return cached
         state = self._store.load_state(run_id)  # 不存在 -> KeyError，HTTP 层映射成 404
-        with self._lock:
-            self._states[run_id] = state
-            self._states.move_to_end(run_id)
-            while len(self._states) > _STATE_CACHE_SIZE:
-                self._states.popitem(last=False)
+        if state.get("status") not in NON_TERMINAL_STATUSES:
+            with self._lock:
+                self._states[run_id] = state
+                self._states.move_to_end(run_id)
+                while len(self._states) > _STATE_CACHE_SIZE:
+                    self._states.popitem(last=False)
         return state
 
     def _qa_index(self) -> dict[str, dict[str, Any]]:

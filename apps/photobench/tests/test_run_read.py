@@ -292,3 +292,20 @@ def test_runs_without_a_scope_id_never_touch_the_network(results: Path):
     http = FakeJsonHttpClient()
     assert _read_runs(results, http).get_run_items("run-a")["total"] == 2
     assert http.calls == []
+
+
+def test_a_running_run_is_not_served_from_a_stale_cache(results: Path):
+    """跑着的时候读到的那份快照，在它跑完之后**不许**继续被端出去。
+
+    **来历不是推演**：S9c 真机验收时 ``run.json`` 已经 ``completed``、八个相位全
+    ``done``，而 ``GET /api/runs/{id}`` 一直回 ``running``——读侧把第一次读到的
+    在跑快照缓存住了，按它轮询的驱动脚本白等了十分钟。
+
+    **区分力**：不按状态筛选缓存的实现会在第二次读到 ``running``。终态之后缓存
+    照常生效（这条用例顺带钉住「修好了，但没把缓存整个砍掉」）。
+    """
+    reader = _read_runs(results)
+    assert reader.get_run("run-b")["status"] == "running"  # 第一次：跑着，不入缓存
+    _write(results, "run-b", _state("run-b", status="completed"))
+    assert reader.get_run("run-b")["status"] == "completed"  # 第二次必须看到新状态
+    assert reader.get_run("run-b")["status"] == "completed"  # 终态之后走缓存

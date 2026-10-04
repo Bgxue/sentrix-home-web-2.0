@@ -192,3 +192,34 @@ def test_profiles_without_a_manager_is_not_an_error(client: TestClient):
     body = response.json()
     assert body["status"] == "not_applicable"
     assert body["target_id"] == "local"
+
+
+# ---- 两个死端点（S9c · T922） -----------------------------------------------
+
+
+def test_no_route_serves_the_two_dead_endpoints(client: TestClient):
+    """**T922 的机械凭据：2.0 的服务面里没有这两条路。**
+
+    ``/api/arbiter/status`` 与 ``/api/ingest-batches/{id}/cancel`` 在 1.0 主 API 里
+    都不存在（arbiter 零命中；ingest-batches 只有 POST/GET/complete）。1.0 的
+    PhotoBench 轮询它们、被 ``except Exception`` 吞成静默 404，占了 8091 流量的 17%。
+
+    2.0 是重写而不是拷贝，S9b-1 只建了真正需要的那几条路由——所以「删掉」在本仓里
+    的表现是**从未加过**。这条用例把「从未加过」变成一条会红的断言，免得后来人
+    照 1.0 的 handler 补路由时把它一起搬回来。
+    """
+    paths = [str(getattr(route, "path", "")) for route in client.app.routes]
+    offenders = [path for path in paths if "arbiter" in path or "ingest-batch" in path]
+    assert offenders == [], f"死端点又出现了：{offenders}"
+
+
+def test_the_sentrix_client_has_no_arbiter_or_batch_cancel_capability():
+    """端口上也一样：主链没有「查 arbiter」「取消批量」这两件事可做。
+
+    2.0 的 ``POST /api/v1/imports`` 是**同步**的，没有批量实体可取消；arbiter 在 2.0
+    不存在——所以两条都是「没有等价物就删」，不是「改指别处」。
+    """
+    from photobench.domain.sentrix.ports import SentrixClient
+
+    names = [name for name in dir(SentrixClient) if not name.startswith("_")]
+    assert [name for name in names if "arbiter" in name or "cancel" in name] == []

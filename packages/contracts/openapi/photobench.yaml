@@ -1,0 +1,630 @@
+openapi: 3.1.0
+info:
+  title: PhotoBench
+  version: 0.1.0
+paths:
+  /api/runs:
+    post:
+      tags:
+      - suites
+      summary: Start Suite
+      description: '``POST /api/runs``（1.0 ``:7854`` 分支 → ``start_suite`` ``:7306``）。'
+      operationId: start_suite_api_runs_post
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Start Suite Api Runs Post
+    get:
+      tags:
+      - runs
+      summary: List Runs
+      description: 1.0 ``:7648``。
+      operationId: list_runs_api_runs_get
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: string
+          default: '1'
+          title: Page
+      - name: page_size
+        in: query
+        required: false
+        schema:
+          type: string
+          default: '20'
+          title: Page Size
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Runs Api Runs Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/cancel:
+    post:
+      tags:
+      - suites
+      summary: Cancel Run
+      description: '``POST /api/runs/{id}/cancel``（1.0 ``:7770``）。'
+      operationId: cancel_run_api_runs__run_id__cancel_post
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Cancel Run Api Runs  Run Id  Cancel Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/cancel-active:
+    post:
+      tags:
+      - suites
+      summary: Cancel Active
+      description: '``POST /api/cancel-active``（1.0 ``:7767``）。'
+      operationId: cancel_active_api_cancel_active_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Cancel Active Api Cancel Active Post
+  /api/runs/{run_id}/rejudge:
+    post:
+      tags:
+      - suites
+      summary: Start Rejudge
+      description: '``POST /api/runs/{id}/rejudge``（1.0 ``:7804``）。'
+      operationId: start_rejudge_api_runs__run_id__rejudge_post
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Start Rejudge Api Runs  Run Id  Rejudge Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/reviews:
+    post:
+      tags:
+      - suites
+      summary: Save Reviews
+      description: '``POST /api/runs/{id}/reviews``（1.0 ``:7807``）。'
+      operationId: save_reviews_api_runs__run_id__reviews_post
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Save Reviews Api Runs  Run Id  Reviews Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - runs
+      summary: Get Reviews
+      description: 1.0 ``:7730``。写侧（``POST``）属 S9b-3。
+      operationId: get_reviews_api_runs__run_id__reviews_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Reviews Api Runs  Run Id  Reviews Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/judge-prompt:
+    get:
+      tags:
+      - suites
+      summary: Get Run Judge Prompt
+      description: '``GET /api/runs/{id}/judge-prompt``（1.0 ``:7737``）。'
+      operationId: get_run_judge_prompt_api_runs__run_id__judge_prompt_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Run Judge Prompt Api Runs  Run Id  Judge Prompt
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/memory-profile:
+    post:
+      tags:
+      - suites
+      summary: Start Memory Profile
+      description: '``POST /api/memory-profile``（1.0 ``:7850``）。'
+      operationId: start_memory_profile_api_memory_profile_post
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Start Memory Profile Api Memory Profile Post
+  /api/runs/{run_id}:
+    delete:
+      tags:
+      - suites
+      summary: Delete Run
+      description: '``DELETE /api/runs/{id}``（1.0 ``:7870``）。'
+      operationId: delete_run_api_runs__run_id__delete
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Delete Run Api Runs  Run Id  Delete
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - runs
+      summary: Get Run
+      description: 1.0 ``:7739``。run 不存在时 ``KeyError`` → 404（handler 在 ``api/errors.py``）。
+      operationId: get_run_api_runs__run_id__get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Run Api Runs  Run Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/resume:
+    post:
+      tags:
+      - suites
+      summary: Resume Run Not Supported
+      description: '1.0 ``POST /api/runs/{id}/resume``（``:7768``）在 2.0 **没有对应能力**。
+
+
+        返回 501 而不是 404：这条路在 1.0 存在、前端会调它，一个「未实现」的明确回答
+
+        比一个「查无此路」更容易定位（见模块 docstring）。'
+      operationId: resume_run_not_supported_api_runs__run_id__resume_post
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/items:
+    get:
+      tags:
+      - runs
+      summary: Get Run Items
+      description: 1.0 ``:7655``。筛选项逐个透传，规则在 ``ReadRuns.get_run_items``。
+      operationId: get_run_items_api_runs__run_id__items_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: string
+          default: '1'
+          title: Page
+      - name: page_size
+        in: query
+        required: false
+        schema:
+          type: string
+          default: '20'
+          title: Page Size
+      - name: search
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Search
+      - name: score
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Score
+      - name: task_type
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Task Type
+      - name: tag
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Tag
+      - name: agent_status
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Agent Status
+      - name: angle
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Angle
+      - name: difficulty
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Difficulty
+      - name: answerability
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Answerability
+      - name: primary
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Primary
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Run Items Api Runs  Run Id  Items Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/items/{item_index}:
+    get:
+      tags:
+      - runs
+      summary: Get Run Item
+      description: 1.0 ``:7735``。
+      operationId: get_run_item_api_runs__run_id__items__item_index__get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: item_index
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Item Index
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Run Item Api Runs  Run Id  Items  Item Index  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/config:
+    get:
+      tags:
+      - config
+      summary: Get Config
+      description: 1.0 ``:7536``。
+      operationId: get_config_api_config_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Get Config Api Config Get
+    post:
+      tags:
+      - config
+      summary: Save Config
+      description: '1.0 ``:7822``：落非密钥的连接参数；带 ``judge_api_key`` 时同时写 ``.env.local``。
+
+
+        成功时的响应体是 1.0 的 ``{"saved": True, "runtime_config": ...}``。'
+      operationId: save_config_api_config_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Save Config Api Config Post
+  /api/judge-prompts:
+    get:
+      tags:
+      - config
+      summary: List Judge Prompts
+      description: 1.0 ``:7719``：三类提示词的默认值、当前自定义值与存储路径。
+      operationId: list_judge_prompts_api_judge_prompts_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Judge Prompts Api Judge Prompts Get
+    post:
+      tags:
+      - config
+      summary: Save Judge Prompt
+      description: '1.0 ``:7785``：按 ``kind`` 改一类提示词。
+
+
+        **这里不接受空串**（1.0 的文案：「empty string to restore default is not allowed
+
+        here」）——恢复默认走 ``DELETE`` 语义上的空值写入，而这条路由是「保存我改的这一版」。'
+      operationId: save_judge_prompt_api_judge_prompts_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Save Judge Prompt Api Judge Prompts Post
+  /api/judge-prompt:
+    post:
+      tags:
+      - config
+      summary: Save Answer Quality Prompt
+      description: 1.0 ``:7775``：旧版单提示词入口，只改 ``answer_quality``。
+      operationId: save_answer_quality_prompt_api_judge_prompt_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Save Answer Quality Prompt Api Judge Prompt Post
+  /api/profiles:
+    post:
+      tags:
+      - model-profiles
+      summary: List Profiles
+      description: 1.0 ``:7826``。
+      operationId: list_profiles_api_profiles_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Profiles Api Profiles Post
+  /api/current-model:
+    get:
+      tags:
+      - model-profiles
+      summary: Current Model Get
+      description: 1.0 ``:7530``：GET 这一条要明说「请用 POST」，而不是让 405 用 FastAPI 的形状回。
+      operationId: current_model_get_api_current_model_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+    post:
+      tags:
+      - model-profiles
+      summary: Current Model
+      description: 1.0 ``:7844``。
+      operationId: current_model_api_current_model_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Current Model Api Current Model Post
+components:
+  schemas:
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError

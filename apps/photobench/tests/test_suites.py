@@ -505,6 +505,7 @@ def test_memory_profile_replays_questions_without_touching_the_answers(tmp_path:
     record = state["memory_profile"]
     assert record["items_integrity_ok"] is True
     assert record["answers_persisted"] is False
-    # 2.0 没有 bind-runtime 端点（换模型=重启 2.0），这一段如实记 false 并写明原因。
+    # 内存画像这条路径仍然不换模型（1.0 的 bind-runtime 在 2.0 是「重启 2.0」，
+    # 见 application.deploy；这条路径没有端点来源），如实记 false 并写明原因。
     assert record["gamma_sync"]["ok"] is False
-    assert "T923" in record["gamma_sync"]["error"]
+    assert "application.deploy" in record["gamma_sync"]["error"]

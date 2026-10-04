@@ -602,10 +602,15 @@ class RunSuites:
                         timeout=700,
                     )
                     model_state = lifecycle.state()
-                    # 1.0 在这里调 bind-runtime；2.0 没有该端点（换模型=重启 2.0）。
+                    # 1.0 在这里调 bind-runtime；2.0 的等价物是「重启 2.0」
+                    # （``application.deploy.SentrixModelSwitch``，S9c · T923）。
+                    # **这里仍然留空**：内存画像要指向哪个端点，1.0 是从 target 配置推的，
+                    # 而这条路径的请求体里只有 ``vllm_manager_url``，没有可用的端点来源。
+                    # 与其猜一个端点去重启主 API（代价是可能把正在跑的评测指歪），不如
+                    # 如实记下「没做」，并把模块指向真正的实现点。
                     record["gamma_sync"] = {
                         "ok": False,
-                        "error": "not_applicable: 2.0 的 vlm_base_url 在启动时读死，换模型要重启（S9c T923）",
+                        "error": "not_applicable: 内存画像路径没有端点来源；换模型重启见 application.deploy",
                     }
                     sampler.start()
                     self._sleep(2)

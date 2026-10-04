@@ -24,11 +24,13 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from photobench.application.config.service import ConfigService
+from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.model_profiles.service import ModelProfiles
 from photobench.application.run_execution.service import JudgeSettings, RunExecution, RunRequest
 from photobench.application.runs.index import RunIndex
@@ -37,6 +39,7 @@ from photobench.application.runs.suites import RunSuites
 from photobench.config import Settings
 from photobench.domain.config.ports import ConfigStore, SecretEnvStore
 from photobench.domain.datasets.ports import AlbumSource, QaMetadataSource
+from photobench.domain.deploy.ports import SentrixProcess
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.results.ports import RunResultWriter, RunStore
 from photobench.domain.runtime.ports import (
@@ -49,6 +52,7 @@ from photobench.infrastructure.config.env import DotenvSecretStore
 from photobench.infrastructure.config.files import JsonConfigStore
 from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
+from photobench.infrastructure.deploy.sentrix_process import SubprocessSentrixProcess
 from photobench.infrastructure.http.client import HttpxJsonClient
 from photobench.infrastructure.http.judge_images import inline_judge_images
 from photobench.infrastructure.results.store import FileResultWriter, FileRunStore
@@ -86,6 +90,9 @@ class Container:
     run_index: RunIndex
     runs: ReadRuns
     model_profiles: ModelProfiles
+    #: S9c · T923：换模型 = 重启 2.0 的进程控制面。**按 domain 端口声明**——
+    #: S11 接管服务部署时替换的就是它的实现（见 ``domain/deploy/__init__.py``）。
+    sentrix_process: SentrixProcess
     run_execution: Callable[[RunRequest], RunExecution]
     run_suites: RunSuites
 
@@ -159,6 +166,16 @@ class Container:
         http: JsonHttpClient = HttpxJsonClient()
         sentrix: SentrixClient = HttpxSentrixClient(http, lambda: config.sentrix_url)
         result_writer: RunResultWriter = FileResultWriter(settings.results_root)
+        # 换模型 = 重启 2.0（T923）。健康探测复用同一个 ``JsonHttpClient``——那一层
+        # 本来就管「怎么打一个 HTTP 并解 JSON」，不必为部署另造一个。
+        sentrix_process: SentrixProcess = SubprocessSentrixProcess(
+            api_url=settings.sentrix_api_url,
+            start_command=shlex.split(settings.sentrix_start_command),
+            cwd=settings.sentrix_repo_root,
+            pid_file=settings.sentrix_pid_file,
+            log_path=settings.sentrix_log_path,
+            http=http,
+        )
 
         def run_execution(request: RunRequest) -> RunExecution:
             """一 run 一个 ``RunExecution``：它是**有状态**的（跑一轮带一份 item 表），
@@ -190,6 +207,8 @@ class Container:
                 judge_settings=judge,
                 telemetry_source=providers.source,
                 inline_images=judge_images,
+                # 一 run 一个 switch：它只是 ``sentrix_process`` 的薄包装，无状态。
+                sentrix_switch=SentrixModelSwitch(sentrix_process),
             )
 
         runs = ReadRuns(
@@ -238,6 +257,7 @@ class Container:
             run_index=run_index,
             runs=runs,
             model_profiles=model_profiles,
+            sentrix_process=sentrix_process,
             run_execution=run_execution,
             run_suites=run_suites,
         )

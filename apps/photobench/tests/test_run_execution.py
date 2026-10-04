@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from fakes_deploy import FakeSentrixProcess
 from fakes_execution import (
     FakeAlbums,
     FakeInference,
@@ -23,6 +24,7 @@ from fakes_execution import (
     FakeTelemetry,
 )
 
+from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.service import RunExecution, RunRequest
 
 ALBUM = "album-x"
@@ -134,6 +136,7 @@ def _execution(
     lifecycle: FakeLifecycle | None = None,
     inference: FakeInference | None = None,
     writer: FakeResultWriter | None = None,
+    sentrix_switch: SentrixModelSwitch | None = None,
 ) -> tuple[RunExecution, FakeSentrixClient, FakeResultWriter, FakeLifecycle, FakeLifecycle]:
     albums = (
         albums
@@ -164,6 +167,7 @@ def _execution(
         inference=inference if inference is not None else FakeInference(),
         telemetry=telemetry if telemetry is not None else FakeTelemetry(),
         sleep=lambda _seconds: None,
+        sentrix_switch=sentrix_switch,
     )
     return execution, client, writer, lifecycle, albums  # type: ignore[return-value]
 
@@ -713,6 +717,65 @@ def test_with_a_manager_the_model_is_stopped_then_started_then_probed():
     # 再探一次（``:2593``）；``chat_stream`` 是随后的吞吐探测（``model_probe``）。
     # **不是一次多余的调用**——把它们合成一次的实现会让「端点到底通没通」少一个证据。
     assert execution.inference.calls == ["chat", "chat", "chat_stream"]
+
+
+def test_model_deploy_points_sentrix_at_the_requested_endpoint():
+    """1.0 第 4 步 ``bind-runtime`` 的 2.0 落地（T923）：**外部端点那条分支也要做**。
+
+    153 上跑的正是这一支（llama-server，没有 Manager），而 2.0 的助手用哪个模型
+    只由它自己的 ``vlm_base_url`` 决定——所以这一支漏了重启，整轮评测的答案都来自
+    另一个模型。断言三件：真的问了当前端点、端点相同就不重启、``gamma_sync`` 落盘。
+
+    **区分力**：把这一步退回 1.0 那句占位（``ok=False``）的实现在这里红——
+    ``endpoint`` / ``restarted`` 两个键根本不存在。
+    """
+    process = FakeSentrixProcess(current="http://127.0.0.1:8100/v1")
+    execution, _client, _writer, _lifecycle, _albums = _execution(sentrix_switch=SentrixModelSwitch(process))
+    state = execution.execute(_request(model_base_url="http://127.0.0.1:8100/v1"))
+    gamma = state["phases"]["model_deploy"]["gamma_sync"]
+    assert process.endpoint_reads == 1
+    assert gamma["endpoint"] == "http://127.0.0.1:8100/v1"
+    assert gamma["restarted"] is False
+    assert gamma["ok"] is True
+    assert process.restarts == []
+
+
+def test_the_managed_branch_also_points_sentrix_at_the_new_model():
+    """有 Manager 那一支同样要换端点（1.0 的 bind-runtime 原本就只在这一支里）。"""
+    process = FakeSentrixProcess(current="http://old:8100/v1")
+    execution, _client, _writer, _lifecycle, _albums = _execution(sentrix_switch=SentrixModelSwitch(process))
+    state = execution.execute(
+        _request(manager_url="http://manager:8500", model_base_url="http://127.0.0.1:8100/v1")
+    )
+    phase = state["phases"]["model_deploy"]
+    assert phase["status"] == "done"
+    assert phase["gamma_sync"]["restarted"] is True
+    assert process.restarts == ["http://127.0.0.1:8100/v1"]
+
+
+def test_a_restart_that_fails_fails_the_model_deploy_phase():
+    """重启失败 = 这一轮一定会答错模型，**必须红在相位上**（与 1.0 不同的收口）。
+
+    1.0 的 bind-runtime 只是同步一个缓存，失败不致命（``:2613`` 吞掉）。2.0 不是：
+    2.0 自己用那个端点答题，失败意味着答案来自另一个模型——继续跑只会产出
+    「标着 A 模型、其实是 B 模型」的结果。**区分力**：忽略 ``outcome.ok`` 的实现
+    在这里会让 run 收成 ``completed``。
+    """
+    process = FakeSentrixProcess(current="", restart_ok=False, restart_error="port 8191 busy")
+    execution, _client, _writer, _lifecycle, _albums = _execution(sentrix_switch=SentrixModelSwitch(process))
+    state = execution.execute(_request(model_base_url="http://127.0.0.1:8100/v1"))
+    assert process.restarts == ["http://127.0.0.1:8100/v1"]
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "model_deploy"
+
+
+def test_without_a_controller_the_step_is_recorded_as_not_wired():
+    """没装配控制器时如实记「未装配」——**不假装同步过**（S9b-2 的占位就是这么处理的）。"""
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    state = execution.execute(_request(model_base_url="http://127.0.0.1:8100/v1"))
+    gamma = state["phases"]["model_deploy"]["gamma_sync"]
+    assert gamma["ok"] is False
+    assert "not wired" in gamma["error"]
 
 
 def test_a_transient_start_failure_is_retried_before_giving_up():

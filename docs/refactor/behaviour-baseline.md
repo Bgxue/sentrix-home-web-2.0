@@ -732,3 +732,37 @@ S9b-2 把 1.0 `BenchmarkRun`（`benchmark_orchestrator.py:1895`）的六个相�
 | 内存画像的模型同步 | 装载后调 `bind-runtime` 把 Sentrix 指向新模型 | **留空**并记 `gamma_sync.ok=false` | 2.0 没有该端点（换模型=重启 2.0，S9c 的 T923）；不假装同步过 |
 | 云端大模型 | `use_cloud_model` / `big_model` profile | 分支保留、**没有生产入口** | 2.0 没有云端模型这个概念；`select_runtime_providers` 的 `cloud=` 参数照搬留白 |
 | `OrinLlamaCppTelemetryProvider` | 在选择逻辑里**没有任何分支构造它**（import 了但没用） | 同样不构造 | 照搬 1.0 的分支，不替它补一条没人验证过的 ssh 采样路 |
+
+---
+
+## S9c：两个死端点 / 换模型重启 / openapi 收口（2026-10-04）
+
+### 新增的行为（1.0 有对应）
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| 换模型 = 重启 2.0 | 本轮请求的 `model_base_url` 与 2.0 记着的端点**相同 → 不动进程**（`already_pointing_here`）；不同 → 停掉旧进程、以 `SENTRIX_VLM_BASE_URL=<新端点>` 起一个新进程、等 `/api/v1/health`。它是 1.0 `POST /api/model-profiles/bind-runtime`（`:2611`，注释写明 "no restart"）在 2.0 的形态 | `application/deploy/service.py` · `infrastructure/deploy/sentrix_process.py` |
+| 端点的传递媒介 | **环境变量 `SENTRIX_VLM_BASE_URL`**——2.0 的 `Settings`（`env_prefix="SENTRIX_"`）在**启动时**读死它（`Container.build` 的 `ServedModel(settings.vlm_base_url)`），不是可热改的配置 | `sentrix_process.py::VLM_BASE_URL_ENV` |
+| 记录当前端点 | pid 与端点写在 `apps/photobench/logs/sentrix-process.json`（`{"pid", "endpoint"}`）。**pid 已死 → 当前端点视为空**（崩溃之后不会一直说「已经指着这里」） | 同上 |
+| 停旧进程 | 两个来源：pid 记录里的；`lsof -ti tcp:<port>` 反查到的（`make dev` 起的那个不在记录里）。**先停后起**，否则两个进程抢同一个端口 | 同上 |
+| 健康判据 | `GET /api/v1/health` 回 `ok` 或 `degraded` 都算起来（`degraded` 只表示库有问题，进程是活的） | 同上 |
+| 部署参数 | `PHOTOBENCH_SENTRIX_API_URL` / `_REPO_ROOT` / `_START_COMMAND` / `_PID_FILE` / `_LOG_PATH` 五个环境变量，默认值只对「2.0 与 PhotoBench 同机、走 `make dev`」成立 | `photobench/config.py` |
+| `gamma_sync` 的落盘形状 | `phases.model_deploy.gamma_sync = {ok, error, restarted, endpoint, previous_endpoint, pid, reason}`。**保留 1.0 的 `ok` / `error` 两个键**，其余是诊断字段 | `domain/deploy/ports.py::RestartOutcome.to_state` |
+| PhotoBench 自己的 openapi 契约 | 导出到 `packages/contracts/openapi/photobench.yaml`；`make check-docs` 用 `--check` 比对。**文件名没有 `-v1`**——PhotoBench 的路由前缀仍是 `/api`（改它要动前端，属 S10） | `scripts/export_photobench_openapi.py` |
+
+### 本切片偏离 1.0 的地方（都刻意）
+
+| 项 | 1.0 | 2.0 | 为什么 |
+|---|---|---|---|
+| `bind-runtime` 失败的后果 | **非致命**：异常收进 `gamma_sync.error`，run 继续跑（`:2613`） | **致命**：真的重启过却没起来 → `model_deploy` 相位 `failed`，run 收成 `failed` | 1.0 的 `bind-runtime` 只是同步一个**缓存**，Sentrix 答题用自己直连的端点；2.0 的助手用**自己的** `vlm_base_url` 答题——重启失败意味着这一轮的每个答案都来自另一个模型，继续跑只会产出「标着 A 模型、其实是 B 模型」的结果 |
+| 内存画像的模型同步 | 装载后调 `bind-runtime` | **仍然留空**（`gamma_sync.ok=false`），但原因改了：内存画像那条路径的请求体里只有 `vllm_manager_url`，**没有端点来源**。与其猜一个端点去重启主 API（代价是可能把正在跑的评测指歪），如实记没做 | `application/runs/suites.py` |
+| `POST /api/runs/{id}/resume` | 断点续跑 | **501**（未变，S9b-3 的处置沿用） | 同 S9b-3 |
+| 批量导入的取消 | `POST /api/ingest-batches/{id}/cancel`（1.0 主 API **从不存在**，被 `except Exception` 吞成静默 404） | **2.0 没有对应能力，删除**：`POST /api/v1/imports` 是同步请求，没有批量实体可取消 | 见 `docs/refactor/s9-deviations.md` |
+| arbiter 状态 | `GET /api/arbiter/status`（1.0/2.0 主 API **从不存在**；1.0 的 PhotoBench 前端轮询它，占 8091 流量 17%） | **2.0 没有对应能力，删除**：S9b-1 只建了真正需要的路由，这条从未加过 | 同上 |
+
+### S9c 真机验收抓到的两个缺陷（已修，行为已回到「1.0 没有这个问题」）
+
+| 项 | 缺陷 | 2.0 修后 |
+|---|---|---|
+| 重启时的进程发现 | `lsof -ti tcp:PORT` 会把**客户端**也列出来（httpx 默认 keep-alive），照单 SIGTERM 会误杀 Web 前端 / PhotoBench 自己 / 任何在调 2.0 的进程。真机验收里驱动脚本就这样被自己触发的重启杀了 | 只认**监听**进程（`-sTCP:LISTEN`） |
+| 读侧状态缓存 | `ReadRuns._state` 的 LRU 2 永不失效，run 完成之后 `GET /api/runs/{id}` 仍回那份「running」旧快照（1.0 对活跃 run 持有活对象，没有这个问题） | 缓存**只对终态生效**；非终态每次重新解析 |

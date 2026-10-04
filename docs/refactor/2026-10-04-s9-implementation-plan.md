@@ -760,3 +760,137 @@ llama.cpp）。这一段**照 1.0 的分支搬，不替它补一条没人验证�
 llama.cpp + qwen35-q4km）把它起回来，再重跑 `make ci`——就是上面这一次。
 **它为什么退出没有定论**（没有 OOM 记录、没有 systemd 记录；8100 那个进程本来也不在
 systemd 管理下——`sentrix-vllm.service` 显示 active (exited) 是文档里点名的假活）。
+
+### S9c 适配与收口（T922 / T923 / T925 的一部分，2026-10-05）
+
+**S9 的最后一块，也是 S9 的收口。** 验收原话是「**能对 2.0 跑完一轮评测**」。
+
+#### 两个死端点（T922）
+
+| 端点 | 处置 | 依据 |
+|---|---|---|
+| `GET {sentrix}/api/arbiter/status` | **删（从未加过）** | 1.0 主 API 里 `arbiter` 零命中；2.0 主 API 也没有这个能力。S9b-1 只建 2.0 真正需要的路由，**2.0 的 PhotoBench 也没有前端**——1.0 那三样（代理函数 / `/api/arbiter-status` 路由 / 前端轮询）在 2.0 一个都没有。用例扫 `app.routes` 与端口方法名钉住「从未加过」 |
+| `POST {sentrix}/api/ingest-batches/{id}/cancel` | **删（没有等价物）** | **先核了 2.0 的导入取消语义落在哪**：没有落点。`POST /api/v1/imports` 是**同步**请求（`timeline.py:130-142` 一个请求跑完整条链），没有任务队列、没有 batch 实体。1.0 的 `_cancel_remote_batch`（`:2265`）打的端点从不存在，被 `except Exception` 吞成静默 404 |
+
+两处「连带清理」的表现都是**从未移植**（1.0 的 `unsupported` 兜底分支与前端契约）。
+新增两条用例把它变成会红的断言。
+
+#### 换模型 = 重启 2.0（T923，用户裁决③）
+
+1.0 的 `bind-runtime`（`:2611`，"no restart"）在 2.0 只能变成**重启进程**——`vlm_base_url`
+启动时读死（`SENTRIX_VLM_BASE_URL`），`ServedModel` 只有模型名带 TTL 重探。
+
+- **新增** `domain/deploy/{__init__,ports}.py`（`SentrixProcess` 端口 + `RestartOutcome`）、
+  `application/deploy/{__init__,service}.py`（`SentrixModelSwitch.ensure_endpoint`）、
+  `infrastructure/deploy/{__init__,sentrix_process}.py`（`SubprocessSentrixProcess`）。
+- **改动** `config.py`（五个 `sentrix_*` 部署参数）、`bootstrap/container.py`、
+  `application/run_execution/service.py`（`model_deploy` 的**两个分支**都接上，替换 S9b-2 的占位）。
+- **与 S11 的重叠**：按计划书 §1 的要求写进了模块注释；三块（端口 / 应用服务 / 适配器）
+  就是 S11 接管的全部边界。**三条部署假设**（同机 `make dev`、pid 归属靠 `lsof`、健康判据
+  只看 `/api/v1/health`）也逐条写在注释里。
+- **偏离 1.0 的一处**：重启失败**致命**（1.0 非致命）——2.0 的助手用自己的端点答题。
+
+#### photobench 自己的 openapi（T925 的一半）
+
+新增 `scripts/export_photobench_openapi.py` → `packages/contracts/openapi/photobench.yaml`，
+挂上 `make check-docs`。文件名没有 `-v1`（前缀仍是 `/api`，T924 未做，见下）。
+
+#### 真机验收（153，对跑着的 8191 与 8100）
+
+夹具：`/tmp/pb-smoke/album-noident/` —— 2 张真照片 + 2 道题（**不进仓库**）。
+**没有 `faces`**：身份环为空是**刻意**的，为的是绕过 `POST /api/v1/imports` 在
+「先种过身份」的 scope 上必然 500 的那个既有缺陷（§2 第 3 条，不在 S9 范围）。
+用 `album-judge`（带 faces）跑的那一次**如实复现了它**：`photo_import` 相位
+`HTTP 500 Internal Server Error`，与 S9b-2 记的一字不差。
+
+**结果：`status=completed`、`run_valid=true`，八个相位全 `done`，墙钟 63 s。**
+
+```
+model_deploy         done  30.6s   ← 重启 2.0（换模型那一步）
+scope_setup          done   0.0s
+identity_seed        done   0.0s   seeded 0（夹具无身份环，见上）
+photo_import         done  24.2s
+pipeline_processing  done   3.0s
+qa_eval              done   5.1s
+gpu_metrics          done   0.0s
+aggregate            done   0.0s
+```
+
+**「换模型 = 重启 2.0」被真的走到，而且是这一轮自己走的**：
+
+| 段 | 真跑 / 假件 |
+|---|---|
+| A. 重启路径（用真的 `SubprocessSentrixProcess`） | **真跑**：8191 从 8100 重启到标记端点 8199；旧 pid 消失、新 pid 在听、`/api/v1/health` 200、**`/proc/<新pid>/environ` 的 `SENTRIX_VLM_BASE_URL = 8199`** |
+| B. 一轮评测 | **真跑**：起 PhotoBench 8772 → `POST /api/runs`（model_base_url=8100）→ `model_deploy` 发现 2.0 正指着 8199，**在 run 内把它重启回 8100**（`gamma_sync = {ok:true, restarted:true, endpoint:8100, previous_endpoint:8199, pid:86759}`）→ 导入 / 处理 / 两道题走真模型（8100 的 llama-server）→ 判分也真打 8100 |
+| C. 收尾核对 | **真跑**：8191 最终指着 8100，健康 200 |
+| 单元用例 | **全假件**（352 条），不碰网络、不起真进程 |
+| judge 打分 | **真跑**（8100 的 llama-server）：`judge_valid_count=2`、`answer_quality_mean=2.0`、`exact_accuracy=1.0` |
+| 身份环 / 关系 | **空**（夹具刻意无 faces，见上）——这是这一轮的**假件侧** |
+| 证据判分（`BENCH_EVIDENCE_JUDGE`） | **没跑**（默认关） |
+
+**清理**：5 个验收 scope 全删干净——`foreign_key_check` **0 问题**，
+`assets 53`、`events 17`、`entities 36`、`person_moments 8` 全部回到基线；删掉 11 个媒体文件。
+
+#### 真机验收抓到两个「假件看不见」的接缝缺陷（已修）
+
+1. **重启时的进程发现会误杀客户端**：`lsof -ti tcp:PORT` 把客户端也列出来，而验收
+   驱动脚本的 httpx 连接池里留着到 8191 的连接，于是它被自己触发的重启 SIGTERM 掉
+   （静默，没有堆栈）。修法是只停监听进程（`-sTCP:LISTEN`）。
+2. **读侧状态缓存不失效**：`ReadRuns._state` 的 LRU 2 从不失效，run 已 `completed`
+   而 `GET /api/runs/{id}` 一直回 `running`（验收脚本按 API 轮询，白等十分钟）。
+   修法是缓存**只对终态生效**。
+
+两条都有用例钉住（`test_the_port_discovery_only_looks_at_listeners` /
+`test_a_running_run_is_not_served_from_a_stale_cache`），详见 `s9-deviations.md` §7.5。
+
+**一次环境事故如实记录**：验收第二轮时 **8100 的 llama-server 已经不在了**（与 S9b-3
+那次同一形态）。用仓库外的 `/home/asus/start_vlm_8100.sh` 起回来再跑。
+
+#### 收口
+
+`photobench-module-map.md`（+6 行，改 3 行的依赖列）、`capability-map.jsonl`（+1 条）、
+`behaviour-baseline.md`（新增 S9c 一节）、**新建 `docs/refactor/s9-deviations.md`**（S9a–S9c 的偏离汇总）。
+
+#### 门禁
+
+`make ci`（2026-10-05 01:06→01:35），前七段**全绿**：
+
+- `lint` / `format-check`（449 files）/ `typecheck`（mypy strict，275 files）；
+- `arch`：`lint-imports` **11 契约全 KEPT**（含 `photobench-isolation`、`photobench-application-purity`）；
+  两套可达性检查 0 问题；
+- `photobench-check`：可达性 0 / 端口可达性 0 / 模块地图 0；
+- `check-docs`：capability-map 0、module-map 0、**两份 openapi 契约都一致**（sentrix + photobench）。
+
+`coverage`：**`2 failed, 2417 passed, 14 skipped`（28 分 42 秒）**，覆盖率 **93.75%**（门槛 85%）。
+
+两条失败**没有一条是 PhotoBench 的**：
+
+| 失败的用例 | 判读 |
+|---|---|
+| `apps/api/tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers` | **已知的模型侧 flaky**（S9a / S9b-1 / S9b-2 / S9b-3 四次全量跑红的都是同一条）。**单独重跑仍然红**：`assert "photo_" not in answer`（模型把内部标识符 `photo_1` 写进了答案）。与 S9c 无关 |
+| `apps/api/tests/e2e/test_visual_search.py::test_qdrant_ranking_matches_the_exact_scan_on_the_authoritative_store` | **GPU 显存竞争**：onnxruntime 初始化时 `Failed to allocate memory for requested buffer`（人脸检测器与其它 GPU 消费者抢显存）。**单独重跑整个文件全绿** |
+
+因为 pytest 非零退出，`web-check` 没有跑；单独补跑 `make web-check` 通过（`tsc -b --force` /
+oxlint / vitest **62 passed** / vite build 82 ms）。
+
+**一次环境处置如实记录**：第一次 `make ci` 慢得反常（30 分钟才 11%），查明
+**8102 的 WeMM 嵌入 sidecar 不在了**——检索类测试打不通它、各自等超时。用仓库外的
+`/home/asus/Github/Sentrix-Home-Web/scripts/deploy/restart_wemm_sidecar.sh` 起回来
+（6 s 就绪）之后重跑，28 分 42 秒跑完、失败从 7 条降到 2 条。**第一次那次跑在废弃的树上，
+已作废。**
+
+---
+
+## S9 整体状态（2026-10-05 收口）
+
+| 段 | 交付点 | 状态 |
+|---|---|---|
+| S9a 运行时提供者与遥测（T901–T904） | 能在 2.0 里查到本机 GPU/模型进程遥测，provider 可换假件 | **完成** |
+| S9b-1 服务骨架与 HTTP 层（T911–T914） | 8772 起得来、能列出 run | **完成** |
+| S9b-2 run-execution 主链 | 能对跑着的 2.0 跑完「建空间 → 种身份 → 导入 → 处理 → 问答」 | **完成**（真机达成） |
+| S9b-3 judge / 遥测聚合 / 写侧 | 一轮评测带着 judge 分数与遥测样本落盘 + 写侧路由 | **完成**（真机达成） |
+| S9c 适配与收口（T922 / T923 / T925） | 两个死端点 / 换模型重启 / openapi / 收口 | **完成**（真机达成） |
+
+**S9 收口：设计文档的验收「能对 2.0 跑完一轮评测」已达成**——见 §5 · S9c 的真机验收。
+**未纳入本切片的两件**：T924（PhotoBench 自己的前缀，属前端/S10）与
+`POST /api/v1/imports` 的既有缺陷（`apps/api` 的产品问题，不在 S9 范围）。
