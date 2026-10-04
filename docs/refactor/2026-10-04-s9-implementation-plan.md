@@ -594,3 +594,10 @@ sqlite3.IntegrityError: FOREIGN KEY constraint failed
 - 前端一行没动。
 - 真机验收的 GPU 采样**没有拿到样本**（原因见偏离 1）。
 - `results/` 的 447 MB 单文件问题本切片没有碰（本切片的 run 只有 21 KB）。
+
+### S9b-2 带出的两个待定项与裁决（2026-10-04）
+
+| # | 待定项 | 裁决 |
+|---|---|---|
+| 1 | **`select_runtime_providers` + `jetson_telemetry.py`（660 行）归哪一段**——S9a 说归 S9b，但 S9b 切三段时没把它分进任何一段。后果之一：**真机遥测没有可用来源**（GPU 采样器真起了，但拿不到样本——153 上 llama-server 那一路没有被选中的路径） | **归 S9b-3**，与遥测聚合一起。它属于「provider 选择 + 遥测」那一块，放在那里才能让采样器真拿到样本 |
+| 2 | `backend/hardware.py` 另外四个函数的归属（S9a 的模块地图注记写「服务 run meta，归 S9b-2」） | **不搬**。实测它们**只被 1.0 的 `app.py` 调用**，`benchmark_orchestrator.py` 一次都没调。注记已按实情改写 |
