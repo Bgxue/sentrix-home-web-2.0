@@ -53,6 +53,24 @@ from photobench.domain.runs.analysis import (
 IMPORT_DIRECTORY_IS_FLAT = True
 
 
+class RunCancelledError(RuntimeError):
+    """一次 run 被取消时，正在等待的那一段抛它（1.0 ``:905`` 同名类）。
+
+    **它继承 ``RuntimeError`` 而不是 ``DomainError``**，这一点是有意的：取消是**运行
+    状态**，不是请求错误。如果它是 ``DomainError``，``api/errors.py`` 会把它映射成
+    400 回给发起取消的那个 HTTP 请求——而取消请求本身是成功的，应该是 202/200。
+    1.0 也是 ``RuntimeError``。
+
+    抛出点有三处（与 1.0 相同）：judge 重试退避、judge 限流等待、模型/回合等待。
+    ``RunExecution.execute`` 接住它并把 run 收成 ``cancelled``——它必须与「某个相位
+    失败」分开，否则一次主动取消会在 run.json 里显示成一个错误。
+    """
+
+    def __init__(self, message: str = "run cancelled") -> None:
+        super().__init__(message)
+        self.message = message
+
+
 def safe_slug(value: str, fallback: str = "x") -> str:
     """1.0 ``:1581``。给 scope 名与 run 目录名用，所以只留 ``[a-z0-9._-]``。"""
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-._").lower()

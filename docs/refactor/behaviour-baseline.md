@@ -693,3 +693,42 @@ S9b-2 把 1.0 `BenchmarkRun`（`benchmark_orchestrator.py:1895`）的六个相�
 | id 的 URL 转义 | `GET /api/assets?scope_id={scope_id}` **完全不转义**（`:2952` / `:3111`）；`:1439` / `:2456` 用默认的 `quote`（把 `/` 当安全字符） | 一律 `quote(value, safe="")` | 查询串里斜杠合法，但**路径**里会把 `/assistant/turns/a/b` 切成两段。一次收紧，让两种位置只有一种编码 |
 | `upload_files` 的非 2xx | 没有 `except`，`HTTPError` 原样冒（调用方只看到 `str(exc)`） | 转成与 `request_json` 同一条 `RuntimeError` 文案 | S9b-2 的调用方是 `seed_person`，它要从 2.0 的 `400 {"detail": ...}` 里读出「哪一步拒绝了」。1.0 的两个上传端点（`seed-batch` / `import`）在 2.0 都不再由这个方法服务，所以不改变任何既有失败语义的观测 |
 | `execution_status` 的超时分类 | 只按文案 | 多一条 `isinstance(exc, TimeoutError)` | 见上表——1.0 自己的超时文案里没有那个词 |
+
+---
+
+## S9b-3：judge / 遥测聚合 / 写侧（2026-10-04）
+
+### 新增的行为（1.0 有对应）
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| judge 重试 | `PHOTOBENCH_JUDGE_RETRY_ATTEMPTS` 默认 **6**；退避 `PHOTOBENCH_JUDGE_RETRY_BACKOFF_SECONDS` 默认 **5 s**，上限 `..._MAX_SECONDS` 默认 **60 s**，外加 `+U(0, min(2, 0.2*delay))` 抖动（1.0 `:206-215` / `:4508`） | `application/run_execution/judge.py` |
+| judge 4xx 不重试 | 400/401/403/404/422…**立刻抛**；**408 与 429 排除**（它们重试才对症，`Retry-After` 就是给它们的） | `JudgeRunner._client_error_code` |
+| judge 请求间隔 | `PHOTOBENCH_JUDGE_REQUEST_INTERVAL_SECONDS` 默认 **0.5 s**，多个 worker 之间错开 | `_wait_for_request_slot` |
+| 分数—理由一致性 | `score=0` 而理由里出现「回答正确 / 与参考答案一致 / 符合预期 / 核心信息完整」→ **重问一次**（system 里追加一致性提示）；仍不一致则 `score=None` + `reason="judge_inconsistent_score_reason"`（1.0 `:4272`） | `JudgeRunner.judge` / `analysis.judge_score_consistency` |
+| 判分失败的形状 | `judge_status="failed"` 且 `score=None`——**判分失败不是 0 分**（0 是合法分数） | 同上 |
+| 证据判分开关 | `BENCH_EVIDENCE_JUDGE=1` 才开（默认关）；判分前把召回的图缩到 **896 px** 再转 JPEG data URL（1.0 `:1549`） | `JudgeRunner._inline_images` |
+| 一个 item 的判分粒度 | **每一轮各判一次**（任务行为 + 回答质量并发），item 级取**最后一轮**；任一子判分 failed → item `judge_status="failed"` | `JudgeRunner.judge_item` |
+| 遥测聚合的分位数 | `peak` / `mean` / `p50` / `p95`；**p95 在 n<20 时退化成 peak**（1.0 `:1800`）。n=21 起按秩取值（`sorted[int(n*0.95)]`） | `analysis.aggregate_gpu_samples` |
+| 三套 memory_profile | UMA（`process_pss_uma_mib`，按样本 `source` 报 jetson/orin）／Apple（`apple_phys_footprint_mib`）／默认（`fixed_base = idle - kv_capacity`，`comparable = fixed_base + capacity*peak%`）。**没有 kv_capacity 就不给估算** | 同上 |
+| idle 基线 | 「KV 占用为 0」的样本里**最小**的进程内存；没有这种样本时退回 p50 | 同上 |
+| 实时视图尾部 | `PHOTOBENCH_LIVE_TELEMETRY_TAIL_POINTS` 默认 **240**；完整曲线始终在 `gpu_samples.jsonl` | `service.py` / `analysis.apply_live_sample` |
+| 滚动聚合节流 | 每 **2 s** 发布一次 `phases.gpu_metrics`（`partial=true`）；已 `done`/`skipped` 的相位不再被覆盖 | `service._publish_partial_gpu_metrics` |
+| 后台落盘 | 快照由后台线程写，**debounce 合并** `PHOTOBENCH_PERSIST_DEBOUNCE_SECONDS` 默认 **0.25 s**；`persist(wait=True)` 等到落盘（1.0 `:211` / `:2056` / `:2080`） | `state.py` |
+| 取消语义 | 跑着 → `cancelling`（相位循环发现后收成 `cancelled` + `cancelled_phase`）；还没跑 → `cancelled`。取消**回收本轮起过的模型**（Manager 报的 profile 与本轮一致才停） | `state.request_cancel` / `RunExecution.cancel` |
+| 取消感知的等待 | 模型就绪轮询、冷却、退避、管道轮询、回合轮询、judge 退避与限流**全部**可被取消打断 | `service._cancel_wait` / `JudgeRunner._wait` |
+| judge 提示词的存储 | `config/custom_judge_prompt.json`（`answer_quality` / `task_decision` / `evidence` 三键，旧的单键 `judge_prompt` 迁到 `answer_quality`）；空串表示恢复默认 | `application/config/service.py` |
+| judge 密钥的存储 | `config/.env.local` 的 `BENCH_JUDGE_API_KEY=`，写后 `chmod 0600`；**不进 `runtime_connection.json`** | `infrastructure/config/env.py` |
+| 写入长度上限 | judge 提示词 **50000** 字符（1.0 `:7786`） | `api/routes/config.py` |
+
+### 本切片偏离 1.0 的地方（都刻意）
+
+| 项 | 1.0 | 2.0 | 为什么 |
+|---|---|---|---|
+| `mode` | `full` / `reuse` / `build` | **只接 `full`**，其余显式 400 | 2.0 删掉了 `scope_attach`（scope 由导入内部 ensure），`reuse` 没有可复用的入口；静默降级成 `full` 会建出一个调用方想避免的新 scope |
+| `POST /api/runs/{id}/resume` | 断点续跑 | **501** | 要重建一个 `mode=resume` 的 run + `existing_scope_id`，而 2.0 没有「复用已存在 scope」那条路。返回 501 而不是假装成功 |
+| 重判的轮次来源 | `item["conversation"]`（题面声明） | `item["runtime_turns"]`（实际跑过） | 2.0 的 item 不保存 `conversation`；混用会让 item 级分数取到一个没有 judge 的轮次 |
+| 重判的判分范围 | 回答质量 + 任务行为 + 证据 | 回答质量 + 任务行为；**证据判分不重判**，标 `not_applicable` | 证据判分要按 asset_id 现取图片字节（1.0 `:7226` 打活着的 2.0）；`EVIDENCE_JUDGE` 默认关，留一个上次的值比标 not_applicable 更容易误读 |
+| 内存画像的模型同步 | 装载后调 `bind-runtime` 把 Sentrix 指向新模型 | **留空**并记 `gamma_sync.ok=false` | 2.0 没有该端点（换模型=重启 2.0，S9c 的 T923）；不假装同步过 |
+| 云端大模型 | `use_cloud_model` / `big_model` profile | 分支保留、**没有生产入口** | 2.0 没有云端模型这个概念；`select_runtime_providers` 的 `cloud=` 参数照搬留白 |
+| `OrinLlamaCppTelemetryProvider` | 在选择逻辑里**没有任何分支构造它**（import 了但没用） | 同样不构造 | 照搬 1.0 的分支，不替它补一条没人验证过的 ssh 采样路 |

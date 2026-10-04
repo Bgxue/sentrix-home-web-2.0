@@ -26,29 +26,38 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from photobench.application.config.service import ConfigService
 from photobench.application.model_profiles.service import ModelProfiles
-from photobench.application.run_execution.service import RunExecution
+from photobench.application.run_execution.service import JudgeSettings, RunExecution, RunRequest
 from photobench.application.runs.index import RunIndex
 from photobench.application.runs.read_runs import ReadRuns
+from photobench.application.runs.suites import RunSuites
 from photobench.config import Settings
-from photobench.domain.config.ports import ConfigStore
+from photobench.domain.config.ports import ConfigStore, SecretEnvStore
 from photobench.domain.datasets.ports import AlbumSource, QaMetadataSource
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.results.ports import RunResultWriter, RunStore
-from photobench.domain.runtime.ports import InferenceProvider, LifecycleProvider, TelemetryProvider
+from photobench.domain.runtime.ports import (
+    InferenceProvider,
+    LifecycleProvider,
+    RuntimeProviders,
+)
 from photobench.domain.sentrix.ports import SentrixClient
+from photobench.infrastructure.config.env import DotenvSecretStore
 from photobench.infrastructure.config.files import JsonConfigStore
 from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
 from photobench.infrastructure.http.client import HttpxJsonClient
+from photobench.infrastructure.http.judge_images import inline_judge_images
 from photobench.infrastructure.results.store import FileResultWriter, FileRunStore
 from photobench.infrastructure.runtime.providers import (
     create_runtime_providers,
     manager_lifecycle,
     manager_telemetry,
 )
+from photobench.infrastructure.runtime.selection import detect_runtime_framework, select_runtime_providers
 from photobench.infrastructure.sentrix.client import HttpxSentrixClient
 
 #: 1.0 建 provider 时用的超时：``query_current_model`` 里是 15 秒（``:5095``）。
@@ -60,6 +69,7 @@ _CURRENT_MODEL_TIMEOUT = 15
 class Container:
     settings: Settings
     config_store: ConfigStore
+    secrets: SecretEnvStore
     run_store: RunStore
     result_writer: RunResultWriter
     qa_metadata: QaMetadataSource
@@ -68,17 +78,22 @@ class Container:
     sentrix: SentrixClient
     lifecycle_provider: Callable[[str], LifecycleProvider]
     inference_provider: Callable[[str, str], InferenceProvider]
-    telemetry_provider: Callable[[str], TelemetryProvider]
+    #: S9b-3：``(manager_url, endpoint_url, framework) -> RuntimeProviders``。
+    #: **替换掉 S9b-2 的 ``telemetry_provider``**——那一个只会「有 Manager 就用
+    #: ManagerTelemetry」，于是 153 上的 llama-server（没有 Manager）永远拿不到遥测。
+    runtime_providers: Callable[[str, str, str], RuntimeProviders]
     config: ConfigService
     run_index: RunIndex
     runs: ReadRuns
     model_profiles: ModelProfiles
-    run_execution: Callable[[str, str], RunExecution]
+    run_execution: Callable[[RunRequest], RunExecution]
+    run_suites: RunSuites
 
     @staticmethod
     def build(settings: Settings) -> Container:
         config_store: ConfigStore = JsonConfigStore(settings.config_root)
-        config = ConfigService(config_store)
+        secrets: SecretEnvStore = DotenvSecretStore(settings.config_root)
+        config = ConfigService(config_store, secrets)
         run_store: RunStore = FileRunStore(settings.results_root)
         run_index = RunIndex()
         qa_metadata: QaMetadataSource = JsonQaMetadataSource(
@@ -109,16 +124,34 @@ class Container:
                 timeout=_CURRENT_MODEL_TIMEOUT,
             ).inference
 
-        def telemetry_provider(manager_url: str) -> TelemetryProvider:
-            """遥测也按端口工厂声明，理由与另外两个相同。
+        def runtime_providers(manager_url: str, endpoint_url: str, framework: str) -> RuntimeProviders:
+            """一 run 的三件套，按主机形态选（1.0 ``select_runtime_providers`` ``:176``）。
 
-            **实现是 ``manager_telemetry``**：有 Manager 就用 ``ManagerTelemetryProvider``，
-            没有就用 ``UnavailableTelemetryProvider``。**这不是 1.0 的完整选择逻辑**——
-            1.0 的 ``select_runtime_providers``（``:176``）还会按主机形态选
-            Apple / Jetson / Orin / 宿主 nvidia-smi 四路，那一份要连 660 行的
-            ``jetson_telemetry.py`` 一起搬，是独立的一块（见 S9b-2 施工记录）。
+            端点为空时退回配置里的那个：1.0 的 ``self.vllm_model_base_url`` 本来就是
+            ``_configured_url`` 读出来的，不由调用方每次传。**不退的话
+            ``OpenAICompatibleInferenceProvider`` 会在空串上抛 ``ValueError``**
+            （``providers.py:453``）——那是把「配置缺失」报成「参数缺失」。
             """
-            return manager_telemetry(manager_url)
+            resolved = endpoint_url or config.model_base_url
+            selection = select_runtime_providers(manager_url, resolved, framework or "generic")
+            inference = create_runtime_providers(
+                resolved,
+                manager_url=manager_url,
+                api_mode="generic",
+                timeout=_CURRENT_MODEL_TIMEOUT,
+            ).inference
+            return RuntimeProviders(
+                inference=inference,
+                lifecycle=selection.lifecycle,
+                telemetry=selection.telemetry,
+                source=selection.source,
+            )
+
+        def judge_images(sentrix_url: str, images: Any, assets_by_name: Any) -> list[dict[str, Any]]:
+            """证据判分的图内联。**PIL 只能在 infrastructure**（``photobench-application-purity``
+            的 forbidden 名单里有它，惰性 import 也照样判红）——所以这段代码住在这里，
+            由 application 以可注入回调的形式收下。"""
+            return inline_judge_images(http, sentrix_url, images, assets_by_name)
 
         album_source: AlbumSource = JsonAlbumSource(
             settings.data_root, settings.config_root / "qa_task_actions.json"
@@ -127,23 +160,36 @@ class Container:
         sentrix: SentrixClient = HttpxSentrixClient(http, lambda: config.sentrix_url)
         result_writer: RunResultWriter = FileResultWriter(settings.results_root)
 
-        def run_execution(manager_url: str, model_base_url: str) -> RunExecution:
+        def run_execution(request: RunRequest) -> RunExecution:
             """一 run 一个 ``RunExecution``：它是**有状态**的（跑一轮带一份 item 表），
-            所以是工厂不是常驻字段——与三个 provider 工厂同一个理由。
+            所以是工厂不是常驻字段——与 provider 工厂同一个理由。
 
-            端点为空时退回配置里的那个：1.0 的 ``self.vllm_model_base_url`` 本来就是
-            ``_configured_url`` 读出来的，不由调用方每次传。**不退的话
-            ``OpenAICompatibleInferenceProvider`` 会在空串上抛 ``ValueError``**
-            （``providers.py:453``）——那是把「配置缺失」报成「参数缺失」。
+            S9b-3 起它收整个 ``RunRequest``：遥测要按请求里的端点与框架选
+            （``runtime_providers``），judge 要按请求里的覆盖项装配。**取消回收模型**
+            也走这条装配出来的生命周期提供者。
             """
-            resolved_base_url = model_base_url or config.model_base_url
+            providers = runtime_providers(
+                request.manager_url, request.model_base_url, request.runtime_framework
+            )
+            judge = JudgeSettings(
+                judge_url=config.judge_url,
+                judge_model=config.judge_model,
+                judge_api_key=config.judge_api_key,
+                answer_quality_prompt=None,
+                task_judge_prompt=None,
+                evidence_judge_prompt=None,
+            )
             return RunExecution(
                 client=sentrix,
                 albums=album_source,
                 writer=result_writer,
-                lifecycle=lifecycle_provider(manager_url),
-                inference=inference_provider(resolved_base_url, manager_url),
-                telemetry=telemetry_provider(manager_url),
+                lifecycle=providers.lifecycle,
+                inference=providers.inference,
+                telemetry=providers.telemetry,
+                http=http,
+                judge_settings=judge,
+                telemetry_source=providers.source,
+                inline_images=judge_images,
             )
 
         runs = ReadRuns(
@@ -161,9 +207,24 @@ class Container:
             lifecycle_for=lifecycle_provider,
             inference_for=inference_provider,
         )
+        run_suites = RunSuites(
+            store=run_store,
+            writer=result_writer,
+            index=run_index,
+            albums=album_source,
+            config=config,
+            sentrix=sentrix,
+            http=http,
+            new_execution=run_execution,
+            lifecycle_for=lifecycle_provider,
+            manager_telemetry_for=manager_telemetry,
+            detect_framework=detect_runtime_framework,
+            inline_images=judge_images,
+        )
         return Container(
             settings=settings,
             config_store=config_store,
+            secrets=secrets,
             run_store=run_store,
             result_writer=result_writer,
             qa_metadata=qa_metadata,
@@ -172,10 +233,11 @@ class Container:
             sentrix=sentrix,
             lifecycle_provider=lifecycle_provider,
             inference_provider=inference_provider,
-            telemetry_provider=telemetry_provider,
+            runtime_providers=runtime_providers,
             config=config,
             run_index=run_index,
             runs=runs,
             model_profiles=model_profiles,
             run_execution=run_execution,
+            run_suites=run_suites,
         )

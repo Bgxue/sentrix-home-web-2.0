@@ -17,6 +17,7 @@ from photobench.application.config.service import (
     normalize_service_url,
 )
 from photobench.domain.errors import InvalidRequestError
+from photobench.infrastructure.config.env import DotenvSecretStore
 from photobench.infrastructure.config.files import JsonConfigStore
 
 PROVIDERS = {
@@ -61,7 +62,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _service(root: Path) -> ConfigService:
-    return ConfigService(JsonConfigStore(root))
+    # S9b-3 起 ConfigService 还收一个 ``.env.local`` 的读写端口（judge 密钥）。
+    return ConfigService(JsonConfigStore(root), DotenvSecretStore(root))
 
 
 def test_file_values_win_over_the_builtin_fallbacks(config_root: Path):
@@ -190,19 +192,43 @@ def test_persist_rejects_an_unknown_provider(config_root: Path):
         _service(config_root).persist_runtime_connection({"judge_model": "m", "judge_provider_id": "nope"})
 
 
-def test_persist_refuses_the_api_key_explicitly(config_root: Path):
-    """密钥写入属 S9b-3。**显式报错**比静默丢弃好：后者会让界面显示「保存成功」。"""
-    with pytest.raises(InvalidRequestError) as excinfo:
-        _service(config_root).persist_runtime_connection(
+def test_persist_writes_the_api_key_into_dotenv_not_the_json(config_root: Path):
+    """S9b-1 的这条用例钉的是「密钥写入尚未接线」；S9b-3 接线了，按实情改写。
+
+    **它现在钉的是落点**，不是「有没有拒绝」：密钥进 ``.env.local``（0600），
+    不进 ``runtime_connection.json``——后者会被复制、会被贴进工单、会进版本库。
+    只断言「保存成功」的用例对一个把密钥写进 JSON 的实现同样成立。
+    """
+    config = _service(config_root)
+    config.persist_runtime_connection(
+        {
+            "sentrix_url": "http://x:8191",
+            "judge_url": "http://j/v1",
+            "judge_model": "m",
+            "judge_provider_id": "cloud",
+            "judge_api_key": "sekret-value",
+        }
+    )
+    assert config.judge_api_key == "sekret-value"
+    env_text = (config_root / ".env.local").read_text(encoding="utf-8")
+    assert "BENCH_JUDGE_API_KEY=sekret-value" in env_text
+    saved = json.loads((config_root / "runtime_connection.json").read_text(encoding="utf-8"))
+    assert "judge_api_key" not in saved
+
+
+def test_a_multiline_secret_is_refused(config_root: Path):
+    """``.env.local`` 是 ``KEY=VALUE`` 的行格式；多行值会被 ``shlex`` 解析成别的东西。"""
+    config = _service(config_root)
+    with pytest.raises(ValueError):
+        config.persist_runtime_connection(
             {
                 "sentrix_url": "http://x:8191",
                 "judge_url": "http://j/v1",
                 "judge_model": "m",
                 "judge_provider_id": "cloud",
-                "judge_api_key": "x",
+                "judge_api_key": "line1\nline2",
             }
         )
-    assert "S9b-3" in str(excinfo.value)
 
 
 def test_persist_rejects_a_url_without_a_host(config_root: Path):

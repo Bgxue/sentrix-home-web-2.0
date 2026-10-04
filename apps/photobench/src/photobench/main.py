@@ -25,6 +25,7 @@ from photobench.api import errors
 from photobench.api.routes import config as config_routes
 from photobench.api.routes import model_profiles as model_profiles_routes
 from photobench.api.routes import runs as runs_routes
+from photobench.api.routes import suites as suites_routes
 from photobench.bootstrap.container import Container
 from photobench.config import Settings
 
@@ -52,6 +53,9 @@ def create_app(
     errors.install(app)
 
     api: APIRouter = APIRouter(prefix=API_PREFIX)
+    # 写侧（S9b-3）先于只读侧挂上：``/runs/{id}/judge-prompt`` 这类更具体的路径要与
+    # ``/runs/{id}`` 区分开，先挂的一方在同形路径上优先匹配。
+    api.include_router(suites_routes.router)
     api.include_router(runs_routes.router)
     api.include_router(config_routes.router)
     api.include_router(model_profiles_routes.router)

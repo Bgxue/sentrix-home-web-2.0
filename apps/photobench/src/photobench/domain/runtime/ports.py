@@ -89,8 +89,17 @@ class TelemetryProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeProviders:
-    """一次评测所用的三件套。1.0 是 ``@dataclass(frozen=True)`` 无 ``slots``，形状一致。"""
+    """一次评测所用的三件套。1.0 是 ``@dataclass(frozen=True)`` 无 ``slots``，形状一致。
+
+    ``source`` 是 S9b-3 加的：``select_runtime_providers`` 除了挑出遥测，还给出
+    「这是哪一路」（``jetson_local_pss`` / ``apple_unified`` / ``host_nvidia_smi`` /
+    ``vllm_manager`` / ``unavailable``）。它要落进 ``run.json`` 的 ``telemetry_source``
+    ——**不同来源的数字口径不同**（UMA 的 PSS 不是显存），读侧与运维靠这个字段判断
+    曲线能不能横向比。默认空串，因为 ``create_runtime_providers`` 那条 Manager 路径
+    不经过选择器。
+    """
 
     inference: InferenceProvider
     lifecycle: LifecycleProvider
     telemetry: TelemetryProvider
+    source: str = ""

@@ -6,6 +6,13 @@ extend-exclude = ["docs/"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# judge 的三段提示词是**逐字照搬** 1.0 的常量（`benchmark_orchestrator.py:455`），
+# 与 `ANSWER_QUALITY_RUBRICS` 一样是一整段连续的中文文本。E501 约束的是代码的
+# 行宽；在这里它只会逼出「往提示词里插换行」——那会改变发给模型的字节，也改变
+# 判分口径。**把这条豁免钉在一个文件上，而不是全局**。
+"apps/photobench/src/photobench/domain/runs/judge.py" = ["E501"]
+
 [tool.ruff.lint.isort]
 # photobench 是**另一个发行包**（apps/photobench），不是 sentrix 的子包：设计文档
 # §145 定死「PhotoBench 不得读取主产品 Python 内部模块」。两个都是本仓库的一等包。

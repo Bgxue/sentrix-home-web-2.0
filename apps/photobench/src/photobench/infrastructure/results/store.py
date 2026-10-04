@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -124,3 +125,26 @@ class FileResultWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    def save_reviews(self, run_id: str, stored: dict[str, Any]) -> None:
+        """原子写 ``reviews.json``（1.0 ``save_reviews`` 的 ``atomic_json``）。"""
+        run_dir = self._run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        target = run_dir / "reviews.json"
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(stored, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(target)
+
+    def delete_run(self, run_id: str) -> None:
+        """删掉整个 run 目录（1.0 ``:7010``）。
+
+        ``_run_dir`` 已经挡住 ``..`` 与分隔符；这里再加一道「解析后的路径必须真的在
+        ``results_root`` 之下」——符号链接也能把 ``results/x`` 指到别处，而 1.0 的
+        ``self.results_root in run_dir.parents`` 正是这道校验。
+        """
+        run_dir = self._run_dir(run_id).resolve()
+        root = self._root.resolve()
+        if root not in run_dir.parents:
+            raise KeyError(run_id)
+        if run_dir.exists():
+            shutil.rmtree(run_dir)

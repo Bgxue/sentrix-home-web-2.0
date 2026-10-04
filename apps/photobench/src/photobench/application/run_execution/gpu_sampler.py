@@ -21,10 +21,12 @@
 1. ``hasattr(self.provider, "system_memory")`` 的那层探测去掉——2.0 的
    ``TelemetryProvider`` 协议里它一定在（S9a 的端口定义），留一个 hasattr 只会让
    「协议少了一个方法」这件事在运行时静默通过。
-2. 没有 ``aggregate()``：把样本收成曲线统计属于遥测聚合，是 S9b-3 的
-   ``_phase_gpu_metrics``（``:4568``）。**本切片只采样不聚合。**
-3. ``samples`` 仍然留在内存里（1.0 亦然），但本切片没有人读它；保留它是因为
-   ``_run`` 的语义就是「累积 + 回调」，去掉累积会让 S9b-3 必须重写这个循环。
+2. ``aggregate()`` 在 S9b-3 补上：它**委托给纯函数**
+   ``domain.runs.analysis.aggregate_gpu_samples``（1.0 ``:1785``），自己只负责把
+   ``self.samples`` 递过去。留在采样器上的理由只有一个——调用方
+   （``_phase_gpu_metrics``）手上就是采样器对象，让它去 import 一个 domain 函数会
+   把「采样的状态」与「聚合的算法」的边界画反。
+3. ``samples`` 累积在内存里（1.0 亦然），聚合与实时视图都读它。
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from photobench.domain.runs.analysis import aggregate_gpu_samples
 from photobench.domain.runtime.ports import TelemetryProvider
 
 #: 采样行会带上相位标签，读侧就不必去 run.json 里反查「这条样本属于哪一段」。
@@ -167,6 +170,14 @@ class GpuSampler:
                 # 回调失败吞掉：采样是增强，见类注释（1.0 ``:1767``）。
                 with contextlib.suppress(Exception):
                     self.on_sample(sample)
+
+    def aggregate(self) -> dict[str, Any]:
+        """把已累积的样本收成曲线统计（1.0 ``GpuSampler.aggregate`` ``:1785``）。
+
+        算法在 ``domain.runs.analysis.aggregate_gpu_samples``——**采样器只做转发**，
+        这样聚合逻辑能在一个没有线程、没有 provider 的用例里逐字段被钉住。
+        """
+        return aggregate_gpu_samples(self.samples)
 
     def _run(self) -> None:
         while not self._stop.is_set():

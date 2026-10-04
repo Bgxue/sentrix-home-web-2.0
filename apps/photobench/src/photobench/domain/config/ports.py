@@ -45,3 +45,38 @@ class ConfigStore(Protocol):
     def path_for(self, name: str) -> str:
         """``name`` 对应的绝对路径字符串，只用于响应里给运维看的那个字段。"""
         ...
+
+
+@runtime_checkable
+class SecretEnvStore(Protocol):
+    """``.env.local`` 的读写端口——**只服务密钥，不服务配置**。
+
+    1.0 把 ``BENCH_JUDGE_API_KEY`` 写进 ``services/photobench/.env.local`` 并同时改
+    ``os.environ``（``_write_local_env_secret`` ``:317`` + ``persist_runtime_connection_config``
+    ``:449``）。密钥不进 ``runtime_connection.json``：那是会被复制、会被贴进工单的
+    东西，而密钥不该跟着走。
+
+    **为什么不并进 ``ConfigStore``。** 那个端口只认 JSON（``read_json`` / ``write_json``）
+    ——``.env.local`` 是 ``KEY=VALUE`` 的行格式，硬塞进去要么给这个端口加第二种格式，
+    要么在 adapter 里假装它是 JSON。分开之后每条规则（单行、去重、``0o600``）都落在
+    一个说得出理由的地方。
+    """
+
+    def read_all(self) -> dict[str, str]:
+        """整份文件解析成键值对（坏行跳过）。
+
+        1.0 的 ``_load_dotenv_file`` 是**逐行**读整份文件并把每个键补进 ``os.environ``
+        （``:79``），不是按名字查——所以端口要能给出整份，否则那条「文件里任意的
+        ``BENCH_*`` 覆盖项都生效」的行为会在 2.0 里悄悄变窄。
+        """
+        ...
+
+    def read(self, name: str) -> str | None:
+        """读一个键；文件不存在或键不存在都返回 ``None``（「没配」与「配成空」是两回事，
+        但两者从环境里都读不到值，调用方只看得到空）。"""
+        ...
+
+    def write(self, name: str, value: str) -> None:
+        """写一个键（``value`` 为空表示删除它）。**必须是单行值**——多行会被
+        ``shlex`` 解析成别的东西，1.0 在写之前就拒绝它（``:319``）。"""
+        ...

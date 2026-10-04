@@ -102,16 +102,33 @@ def test_get_run_item_by_index(client: TestClient):
     assert client.get("/api/runs/run-a/items/9").status_code == 404
 
 
-def test_reviews_route_is_read_only(client: TestClient):
+def test_reviews_route_accepts_a_write_on_a_finished_run(client: TestClient):
+    """写侧在 S9b-3 接上：``run-a`` 已 ``completed``，所以评审可写（1.0 ``:4988``）。
+
+    空 ``reviews`` 是合法的——它保存的是「这批评审现在是空的」，返回 ``saved`` 计数。
+    """
     assert client.get("/api/runs/run-a/reviews").json() == {"reviews": {}}
-    assert client.post("/api/runs/run-a/reviews", json={"reviews": {}}).status_code == 405
+    response = client.post("/api/runs/run-a/reviews", json={"reviews": {}})
+    assert response.status_code == 200
+    assert response.json()["saved"] == 0
 
 
-def test_no_write_routes_are_mounted_in_this_slice(client: TestClient):
-    """写侧（建 run / 取消 / 重跑）属 S9b-2——本切片一条都不该有。"""
-    assert client.post("/api/runs", json={}).status_code == 405
-    assert client.post("/api/runs/run-a/cancel").status_code == 404
-    assert client.delete("/api/runs/run-a").status_code == 405
+def test_the_write_routes_are_mounted(client: TestClient):
+    """S9b-1 那条「写侧一条都不该有」的用例，S9b-3 按实情反过来钉。
+
+    ``POST /api/runs`` 落到 album 校验上（fixture 的 datasets 是空的）→ 400；
+    ``cancel`` 对一个不在跑的 run 返回「没取消」而不是 404；``resume`` 明确 501。
+    """
+    start = client.post("/api/runs", json={})
+    assert start.status_code == 400
+    assert "manifest not found" in start.json()["error"]
+    cancel = client.post("/api/runs/run-a/cancel")
+    assert cancel.status_code == 200
+    assert cancel.json()["cancelled"] is False
+    assert client.post("/api/runs/run-a/resume").status_code == 501
+    assert client.post("/api/cancel-active").json()["total"] == 0
+    assert client.delete("/api/runs/run-a").json() == {"deleted": True, "run_id": "run-a"}
+    assert client.get("/api/runs/run-a").status_code == 404
 
 
 def test_get_config_exposes_the_effective_values(client: TestClient):
@@ -122,8 +139,12 @@ def test_get_config_exposes_the_effective_values(client: TestClient):
     assert body["judge_providers"][0]["id"] == "cloud"
     assert body["runtime_config_file"].endswith("runtime_connection.json")
     assert body["cloud_model_profile"]["id"] == "big_model"
-    # 三项 judge 域字段刻意没搬（见路由模块的注释），这里钉住「没搬」这件事。
-    assert "judge_prompt" not in body and "custom_judge_prompt" not in body
+    # S9b-1 那条「三项 judge 域字段刻意没搬」的断言在 S9b-3 按实情反过来：搬了。
+    assert body["judge_prompt"].startswith("你是通用对话任务的回答质量评测员")
+    assert body["custom_judge_prompt"] is None
+    assert body["evidence_judge_enabled"] is False
+    kinds = {entry["kind"] for entry in client.get("/api/judge-prompts").json()["kinds"]}
+    assert kinds == {"answer_quality", "task_decision", "evidence"}
 
 
 def test_post_config_persists_and_answers_in_the_1_0_shape(client: TestClient):

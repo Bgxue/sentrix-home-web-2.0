@@ -184,6 +184,7 @@ def test_the_chain_runs_every_phase_in_order_and_completes():
     execution, _client, writer, _lifecycle, _albums = _execution()
     state = execution.execute(_request())
     phases = state["phases"]
+    # S9b-3 补上遥测聚合的两个收尾相位（1.0 ``:2356`` 的 ``all_phases`` 末两项）。
     assert list(phases) == [
         "model_deploy",
         "scope_setup",
@@ -191,15 +192,26 @@ def test_the_chain_runs_every_phase_in_order_and_completes():
         "photo_import",
         "pipeline_processing",
         "qa_eval",
+        "gpu_metrics",
+        "aggregate",
     ]
-    assert {name: bucket["status"] for name, bucket in phases.items()} == {
+    statuses = {name: bucket["status"] for name, bucket in phases.items()}
+    assert statuses == {
         "model_deploy": "done",
         "scope_setup": "done",
         "identity_seed": "done",
         "photo_import": "done",
         "pipeline_processing": "done",
         "qa_eval": "done",
+        "gpu_metrics": "done",
+        "aggregate": "done",
     }
+    # 汇总相位真的写了 summary（不是留一个空 dict 让读侧去猜）。这一轮**没有配 judge**
+    # （`_execution()` 默认 `judge_settings=None`），所以有效分数是 0——`completed`
+    # 数的是「判分走到终态的题」，而不是「答过的题」（1.0 的口径，``:4591``）。
+    assert state["summary"]["total"] == 1
+    assert state["summary"]["judge_valid_count"] == 0
+    assert state["items"][0]["judge_status"] == "pending"
     assert state["status"] == "completed"
     assert writer.last_state()["run_id"] == "run_test"
 
@@ -508,6 +520,31 @@ def test_a_question_without_an_answer_in_the_library_costs_recall():
     }
 
 
+def test_runtime_turns_carry_the_gt_expected_action():
+    """回合记录必须带上 GT 的 ``expected_action``，否则**一次判分都不会发生**。
+
+    这条用例的来历是一次真机验收：主链 29 秒跑完、八个相位全 done、遥测样本 38 行，
+    但每个 item 的 judge 都是 ``{"score": None, "reason": "not_labeled"}``——
+    ``JudgeRunner.judge_item`` 从**回合**上读 expected_action（1.0 的 runtime_turns
+    带这个字段），而 2.0 的 ``_evaluate_one`` 没把它放进去。**失败的样子是「一切正常、
+    只是没有分数」**，所以只能靠把字段本身钉住。多轮题按题面每一轮取，单轮题退回行级。
+    """
+    rows = [dict(_rows()[0], expected_action="refuse")]
+    execution, _client, _writer, _lifecycle, _albums = _execution(
+        albums=FakeAlbums(
+            manifest=_manifest(),
+            qa_rows=rows,
+            files={"faces/1.jpg": b"J"},
+            directory_entries={"photos": 2},
+        )
+    )
+    state = execution.execute(_request())
+    turn = state["items"][0]["runtime_turns"][0]
+    assert turn["expected_action"] == "refuse"
+    # 「回合上有」才算接线：只断言 item 上有，对一个没往回合里放的实现同样成立。
+    assert state["items"][0].get("expected_action") == "refuse"
+
+
 def test_the_trace_is_persisted_verbatim_and_digested():
     """轨迹是 2.0 的 ``public_progress`` 逐条原样，外加一份只做计数的摘要。
 
@@ -759,8 +796,8 @@ def test_a_sample_carries_the_label_of_the_phase_that_was_running():
     from photobench.application.run_execution.state import RunState
 
     execution, _client, writer, _lifecycle, _albums = _execution()
-    state = RunState({"current_phase": "qa_eval"})
-    execution._sample_writer("run_test", state)({"index": 0, "temperature_c": 50.0})
+    state = RunState({"current_phase": "qa_eval"}, run_id="run_test")
+    execution._sample_writer(state)({"index": 0, "temperature_c": 50.0})
     assert writer.gpu_samples == [
         ("run_test", {"index": 0, "temperature_c": 50.0, "phase": "qa_eval", "phase_label": "QA 测评"})
     ]

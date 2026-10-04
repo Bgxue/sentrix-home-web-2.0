@@ -55,20 +55,23 @@ def test_the_two_provider_factories_are_typed_by_the_domain_protocols() -> None:
 def test_a_run_execution_can_be_built_without_a_manager_or_an_endpoint(tmp_path):
     """**没有管理器、没有端点也要能构造出主链**——「外部端点」是 2.0 的合法运行形态。
 
-    这条用例的来历不是推演：**真机验收时在这里连炸两次**。`run_execution` 的三个
-    provider 工厂是**无条件**构造的，而 1.0 的两条外部路线（云端模型 / 不带 Manager
-    的 llama.cpp）本来就不需要 Manager：
+    这条用例的来历不是推演：**真机验收时在这里连炸两次**。`run_execution` 的 provider
+    工厂是**无条件**构造的，而 1.0 的两条外部路线（云端模型 / 不带 Manager 的
+    llama.cpp）本来就不需要 Manager：
 
     - `ManagerLifecycleProvider("")` 抛 `ValueError("manager URL is required")`；
     - `OpenAICompatibleInferenceProvider("")` 抛 `ValueError("model base URL is required")`。
 
-    S9b-1 的调用方（`ModelProfiles._manager_profiles`）先自判 `if not manager_url` 再调，
-    所以没撞上；主链是按 run 构造的，撞上了。**一个只测「有端点时能构造」的用例对
-    这两种空串完全没有区分力。**
+    **S9b-3 起它收整个 `RunRequest`，并且遥测按主机形态选（`select_runtime_providers`）**。
+    所以两个场景改成用**显式端点**表达，而不是靠「空串」——空串会退回配置里的地址，
+    而那台机器是不是本机取决于运行用例的机器（`host_nvidia_smi` 还是 `unavailable`），
+    一个机器相关的断言不能钉住选择逻辑。
     """
+    from photobench.application.run_execution.service import RunRequest
     from photobench.config import APP_ROOT, Settings
     from photobench.infrastructure.runtime.providers import (
         ManagerLifecycleProvider,
+        ManagerTelemetryProvider,
         UnavailableLifecycleProvider,
         UnavailableTelemetryProvider,
     )
@@ -76,15 +79,35 @@ def test_a_run_execution_can_be_built_without_a_manager_or_an_endpoint(tmp_path)
     container = Container.build(
         Settings(config_root=APP_ROOT / "config", results_root=tmp_path, data_root=tmp_path)
     )
-    without_endpoint = container.run_execution("", "")
-    assert isinstance(without_endpoint.lifecycle, UnavailableLifecycleProvider)
-    assert isinstance(without_endpoint.telemetry, UnavailableTelemetryProvider)
-    # 端点为空时退回配置里的那个（1.0 的 `self.vllm_model_base_url` 就是从配置读的）
-    assert without_endpoint.inference is not None
+    # 一个**非本机**端点且没有 Manager：生命周期与遥测都是显式占位，推理仍然构造得出来。
+    external = container.run_execution(
+        RunRequest(
+            album_id="a",
+            qa_set="q",
+            model_profile="m",
+            sentrix_url="http://sentrix:8191",
+            model_base_url="http://example.invalid:9999/v1",
+        )
+    )
+    assert isinstance(external.lifecycle, UnavailableLifecycleProvider)
+    assert isinstance(external.telemetry, UnavailableTelemetryProvider)
+    assert external.telemetry_source == "unavailable"
+    assert external.inference is not None
 
-    with_manager = container.run_execution("http://manager:8500", "")
-    assert isinstance(with_manager.lifecycle, ManagerLifecycleProvider)
-    assert not isinstance(with_manager.telemetry, UnavailableTelemetryProvider)
+    # Manager 配了、端点是本机：生命周期归 Manager，遥测走 Manager 这一路。
+    managed = container.run_execution(
+        RunRequest(
+            album_id="a",
+            qa_set="q",
+            model_profile="m",
+            sentrix_url="http://sentrix:8191",
+            manager_url="http://manager:8500",
+            model_base_url="http://127.0.0.1:8100/v1",
+        )
+    )
+    assert isinstance(managed.lifecycle, ManagerLifecycleProvider)
+    assert isinstance(managed.telemetry, ManagerTelemetryProvider)
+    assert managed.telemetry_source == "vllm_manager"
 
 
 def test_the_settings_dataclass_exposes_the_app_root():

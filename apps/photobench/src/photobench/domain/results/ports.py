@@ -95,3 +95,20 @@ class RunResultWriter(Protocol):
         """追加一条采样（1.0 ``:2110``）。**立即落盘**：取消或崩溃时内存里的采样全丢，
         而这个文件是完整曲线的唯一权威来源。"""
         ...
+
+    def save_reviews(self, run_id: str, stored: dict[str, Any]) -> None:
+        """原子写 ``reviews.json``（1.0 ``save_reviews`` ``:4988`` 的那次 ``atomic_json``）。
+
+        **筛选（哪些 qa_id 合法、verdict 白名单）不在这里**——那是规则，属 application。
+        写侧只保证「一份完整的状态被原子地换上去」：``reviews.json`` 被读到一半就是
+        「这个 run 的评审全丢了」，而那些评审是人工做的，丢了不可重建。
+        """
+        ...
+
+    def delete_run(self, run_id: str) -> None:
+        """删除一个 run 的整个目录（1.0 ``delete_run`` ``:7010`` 的 ``shutil.rmtree``）。
+
+        1.0 先确认 ``run_dir`` 真在 ``results_root`` 之下才删；``_run_dir`` 的路径穿越
+        拦截在这里是**保护性**的：删错目录比读错文件严重得多。
+        """
+        ...

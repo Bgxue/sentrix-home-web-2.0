@@ -33,7 +33,11 @@ from photobench.domain.results.ports import RunStore
 
 
 class RunIndex:
-    """扫描进度 + 瘦条目表。**只读**：写侧（建 run / 取消 / 重跑）属 S9b-2。"""
+    """扫描进度 + 瘦条目表。
+
+    S9b-1 时它是**只读**的（写侧属后续切片）；S9b-3 的写侧路由通过 ``upsert`` /
+    ``remove`` 增量维护它——**增量而不是重扫**，见 ``upsert`` 的 docstring。
+    """
 
     #: 1.0 ``:5014`` 的 ``dirty_statuses`` 里那几个「进程还在时才算活着」的状态。
     _ACTIVE_STATUSES = {"running", "pending", "cancelling"}
@@ -73,6 +77,23 @@ class RunIndex:
     def entries(self) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._entries.values())
+
+    def upsert(self, entry: dict[str, Any]) -> None:
+        """写侧在 run 结束时把新条目推进来（`RunSuites`）。
+
+        **不重扫目录**：一次 suite 只会新增几个 run，重扫 267 个 ``run.json`` 是
+        75 秒的工作（见本模块 docstring）。这条路径只补上刚变的那一个。
+        """
+        run_id = str(entry.get("run_id") or "")
+        if not run_id:
+            return
+        with self._lock:
+            self._entries[run_id] = entry
+
+    def remove(self, run_id: str) -> None:
+        """`DELETE /api/runs/{id}` 之后把条目从索引里去掉。"""
+        with self._lock:
+            self._entries.pop(run_id, None)
 
     def status(self) -> dict[str, Any]:
         """给 ``GET /api/runs`` 的 ``scan`` 字段：调用方据此知道答案是否还残缺。

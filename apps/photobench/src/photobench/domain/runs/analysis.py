@@ -1670,6 +1670,237 @@ def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> Non
             live["history"] = []
 
 
+# ---------------------------------------------------------------------------
+# 遥测聚合（S9b-3）：把采样点收成曲线统计
+# ---------------------------------------------------------------------------
+
+
+#: 1.0 ``GpuSampler.aggregate``（``:1790``）逐项求 peak/mean/p50/p95 的那些键。
+#: 顺序与 1.0 一致（JSON 里键的顺序不影响读，但差分对照要能逐字段比）。
+GPU_AGGREGATE_KEYS = (
+    "temperature_c",
+    "cpu_temperature_c",
+    "gpu_utilization_pct",
+    "memory_used_mib",
+    "gpu_allocated_unified_memory_mib",
+    "gpu_in_use_unified_memory_mib",
+    "model_process_memory_used_mib",
+    "kv_cache_usage_pct",
+    "kv_cache_used_tokens",
+    "power_draw_w",
+    "sm_clock_mhz",
+    "other_processes_memory_mib",
+    "all_processes_memory_mib",
+    "system_memory_used_mib",
+    "system_memory_total_mib",
+    "model_process_system_memory_used_mib",
+    "system_memory_delta_mib",
+    "sentrix_stack_pss_mib",
+    "product_stack_memory_mib",
+)
+
+
+def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """1.0 ``GpuSampler.aggregate``（``:1785``）的纯函数版。
+
+    **为什么能从采样器里搬出来。** 1.0 里它读 ``self.samples`` 并 ``isinstance`` 判
+    ``self.provider``——那两样都是「采样器的状态」。2.0 把样本表当入参，把那个
+    ``isinstance`` 换成读样本自己的 ``source``：``GpuSampler`` 给每条样本打的
+    ``source`` 就是 provider 的 ``gpu_stats()["source"]``（``jetson_local_pss`` /
+    ``orin_ssh_pss``），**这正是那两个分支唯一要区分的东西**。搬出来之后聚合能在
+    没有 provider、没有线程的用例里被逐字段钉住。
+
+    **三条 memory_profile 分支照搬**（PSS-UMA / Apple footprint / 默认的
+    idle−reserved+peak 估算）：它们的分母口径不同（UMA 是共享物理内存、不是显存），
+    混用会让两台机器上的曲线看起来可比而实际不可比。
+    """
+    if not samples:
+        return {"samples_count": 0}
+    metrics: dict[str, Any] = {}
+    for key in GPU_AGGREGATE_KEYS:
+        values = [s[key] for s in samples if isinstance(s.get(key), (int, float))]
+        if not values:
+            continue
+        values_sorted = sorted(values)
+        n = len(values_sorted)
+        metrics[key] = {
+            "peak": round(values_sorted[-1], 1),
+            "mean": round(sum(values) / n, 1),
+            "p50": round(values_sorted[n // 2], 1),
+            "p95": round(values_sorted[int(n * 0.95)], 1) if n >= 20 else round(values_sorted[-1], 1),
+        }
+    limits = [
+        sample.get("model_process_memory_limit_mib")
+        for sample in samples
+        if isinstance(sample.get("model_process_memory_limit_mib"), (int, float))
+    ]
+    over_limit_flags = [
+        sample.get("model_process_memory_over_limit")
+        for sample in samples
+        if isinstance(sample.get("model_process_memory_over_limit"), bool)
+    ]
+    latest = samples[-1]
+    if latest.get("memory_unit") == "process_pss_uma_mib":
+        pss_sample_count = len(
+            {s["pss_sampled_at_monotonic"] for s in samples if s.get("pss_sampled_at_monotonic") is not None}
+        )
+        return {
+            "samples_count": len(samples),
+            "pss_samples_count": pss_sample_count,
+            # 1.0 这里判的是 provider 的类；2.0 判样本自己的 source——GpuSampler 就是
+            # 从 gpu_stats()["source"] 抄下来的，两者是同一个事实。
+            "source": ("jetson_local_pss" if latest.get("source") == "jetson_local_pss" else "orin_ssh_pss"),
+            "memory_profile": {
+                "method": "orin_process_pss_uma_v1",
+                "memory_unit": "process_pss_uma_mib",
+                "kv_cache_used_peak_tokens": (metrics.get("kv_cache_used_tokens") or {}).get("peak"),
+                "kv_cache_usage_peak_pct": (metrics.get("kv_cache_usage_pct") or {}).get("peak"),
+                "kv_cache_used_peak_gib": None,
+                "comparable_workload_memory_gib": None,
+                "note": (
+                    "PSS is shared physical RAM, not dedicated GPU VRAM; "
+                    "KV bytes unavailable without verified per-token allocation."
+                ),
+            },
+            **metrics,
+        }
+    if latest.get("memory_unit") == "apple_phys_footprint_mib":
+        return {
+            "samples_count": len(samples),
+            "source": "apple_unified",
+            "memory_profile": {
+                "method": "apple_phys_footprint_v1",
+                "memory_unit": "apple_phys_footprint_mib",
+                "comparable_workload_memory_gib": None,
+                "note": (
+                    "Process physical footprint is not dedicated GPU VRAM; "
+                    "per-process GPU-only memory and KV bytes are unavailable."
+                ),
+            },
+            **metrics,
+        }
+    kv_capacity_gib = latest.get("kv_cache_capacity_gib")
+    process_memory = metrics.get("model_process_memory_used_mib") or {}
+    kv_usage = metrics.get("kv_cache_usage_pct") or {}
+    idle_samples: list[Any] = [
+        sample.get("model_process_memory_used_mib")
+        for sample in samples
+        if isinstance(sample.get("model_process_memory_used_mib"), (int, float))
+        and isinstance(sample.get("kv_cache_usage_pct"), (int, float))
+        and sample.get("kv_cache_usage_pct") == 0
+    ]
+    idle_process_mib: Any = min(idle_samples) if idle_samples else process_memory.get("p50")
+    fixed_base_gib = (
+        max(0.0, idle_process_mib / 1024 - kv_capacity_gib)
+        if isinstance(idle_process_mib, (int, float)) and isinstance(kv_capacity_gib, (int, float))
+        else None
+    )
+    kv_peak_gib = (
+        kv_capacity_gib * float(kv_usage.get("peak") or 0) / 100
+        if isinstance(kv_capacity_gib, (int, float)) and kv_usage
+        else None
+    )
+    return {
+        "samples_count": len(samples),
+        "model_process_memory_limit_mib": limits[-1] if limits else None,
+        "model_process_over_limit_samples": sum(over_limit_flags) if over_limit_flags else None,
+        "memory_profile": {
+            "method": "idle_process_minus_reserved_kv_plus_peak_used_kv_v1",
+            "comparable_memory_is_estimate": True,
+            "idle_process_memory_gib": round(idle_process_mib / 1024, 4)
+            if isinstance(idle_process_mib, (int, float))
+            else None,
+            "kv_cache_capacity_gib": kv_capacity_gib,
+            "kv_cache_capacity_tokens": latest.get("kv_cache_capacity_tokens"),
+            "kv_cache_usage_peak_pct": kv_usage.get("peak"),
+            "kv_cache_used_peak_gib": round(kv_peak_gib, 4) if kv_peak_gib is not None else None,
+            "fixed_base_memory_gib": round(fixed_base_gib, 4) if fixed_base_gib is not None else None,
+            "comparable_workload_memory_gib": round(fixed_base_gib + kv_peak_gib, 4)
+            if fixed_base_gib is not None and kv_peak_gib is not None
+            else None,
+            "weight_gib": latest.get("weight_gib"),
+            "peak_activation_gib": latest.get("peak_activation_gib"),
+            "non_torch_gib": latest.get("non_torch_gib"),
+            "cuda_graph_gib": latest.get("cuda_graph_gib"),
+            "formula": (
+                "fixed_base = idle_process - kv_capacity; comparable = fixed_base + kv_capacity * kv_peak_pct"
+            ),
+        },
+        **metrics,
+    }
+
+
+def apply_live_sample(
+    live: dict[str, Any], sample: dict[str, Any], phase: str, phase_label: str, *, tail: int = 240
+) -> None:
+    """把一条采样并进 run.json 的 ``telemetry_live``（1.0 ``_persist_gpu_sample`` 中段，
+    ``:2110``–``:2208``）。
+
+    **它与 ``gpu_samples.jsonl`` 的分工照搬 1.0**：JSONL 是完整曲线的权威来源（读侧
+    ``attach_gpu_sample_history`` 从它重建），``telemetry_live`` 只是给实时卡片看的
+    滚动视图——所以这里可以按 ``tail`` 截断，而那个文件不行。
+
+    **旧 run 的字段可能是 null/缺项**（1.0 的注释）：三处 ``isinstance`` 归一化是照搬的，
+    一个历史字段不该让整条实时视图瘫痪。
+    """
+    if not isinstance(live.get("history"), list):
+        live["history"] = []
+    if not isinstance(live.get("peak"), dict):
+        live["peak"] = {}
+    if not isinstance(live.get("phase_snapshots"), dict):
+        live["phase_snapshots"] = {}
+    live["status"] = "running"
+    live["source"] = sample.get("source") or live.get("source")
+    live["samples_count"] = int(live.get("samples_count") or 0) + 1
+    live["latest"] = {key: sample.get(key) for key in GPU_SAMPLE_FIELDS if sample.get(key) is not None}
+    live["model_processes"] = sample.get("model_processes") or []
+    live["model_system_processes"] = sample.get("model_system_processes") or []
+    live["benchmark_processes"] = sample.get("benchmark_processes") or []
+    live["benchmark_gpu_processes"] = sample.get("benchmark_gpu_processes") or []
+    live["other_processes"] = sample.get("other_processes") or []
+    live["all_processes"] = sample.get("all_processes") or []
+    live["scopes"] = {
+        "system_memory": sample.get("system_memory_scope"),
+        "gpu_memory": sample.get("memory_scope"),
+        "model_process": sample.get("process_memory_scope"),
+        "model_process_ram": sample.get("model_process_system_memory_scope"),
+        "benchmark_process_ram": sample.get("benchmark_process_memory_scope"),
+        "benchmark_process_gpu": sample.get("benchmark_process_gpu_memory_scope"),
+        "all_gpu_processes": sample.get("all_processes_scope"),
+        "process_attribution": sample.get("process_attribution"),
+    }
+    live["history"].append(
+        {
+            "t": sample.get("_t", time.time()),
+            "phase": phase,
+            "phase_label": phase_label,
+            **live["latest"],
+        }
+    )
+    if tail and len(live["history"]) > tail:
+        del live["history"][:-tail]
+    peak = live.setdefault("peak", {})
+    for key in GPU_SAMPLE_FIELDS:
+        value = sample.get(key)
+        if isinstance(value, (int, float)):
+            peak[key] = max(float(peak.get(key, value)), float(value))
+    phase_view = live.setdefault("phase_snapshots", {}).setdefault(
+        phase,
+        {
+            "samples_count": 0,
+            "latest": {},
+            "peak": {},
+        },
+    )
+    phase_view["samples_count"] = int(phase_view.get("samples_count") or 0) + 1
+    phase_view["latest"] = live["latest"]
+    phase_peak = phase_view.setdefault("peak", {})
+    for key in GPU_SAMPLE_FIELDS:
+        value = sample.get(key)
+        if isinstance(value, (int, float)):
+            phase_peak[key] = max(float(phase_peak.get(key, value)), float(value))
+
+
 def paginate_rows(rows: list[Any], page: int, page_size: int, *, max_page_size: int = 100) -> dict[str, Any]:
     """1.0 ``:779``。``GET /api/runs`` 的分页形状。"""
     page = max(1, int(page))

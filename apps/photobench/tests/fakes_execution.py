@@ -366,6 +366,9 @@ class FakeResultWriter:
         self.snapshots: list[tuple[str, dict[str, Any]]] = []
         self.gpu_samples: list[tuple[str, dict[str, Any]]] = []
         self.resets: list[str] = []
+        #: S9b-3 的写侧面：评审与删除。
+        self.reviews: list[tuple[str, dict[str, Any]]] = []
+        self.deleted: list[str] = []
 
     def write_snapshot(self, run_id: str, state: dict[str, Any]) -> None:
         self.snapshots.append((run_id, state))
@@ -376,8 +379,73 @@ class FakeResultWriter:
     def append_gpu_sample(self, run_id: str, sample: dict[str, Any]) -> None:
         self.gpu_samples.append((run_id, sample))
 
+    def save_reviews(self, run_id: str, stored: dict[str, Any]) -> None:
+        self.reviews.append((run_id, stored))
+
+    def delete_run(self, run_id: str) -> None:
+        self.deleted.append(run_id)
+
     def last_state(self) -> dict[str, Any]:
         return self.snapshots[-1][1]
 
     def phase(self, name: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
         return (state or self.last_state()).get("phases", {}).get(name, {})
+
+
+class FakeHttpClient:
+    """``JsonHttpClient`` 的替身：按队列作答，队列耗尽即失败。
+
+    **队列耗尽失败而不是回落默认值**：judge 的重试逻辑会让「第几次调用」变成断言
+    对象，一个安静地重复上一条响应的假件会把「重试了几次」这件事藏起来。
+    队列里放 ``Exception`` 就是让那一次调用抛它。
+    """
+
+    def __init__(self, responses: list[Any] | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.responses = list(responses or [])
+
+    def _next(self) -> Any:
+        if not self.responses:
+            raise AssertionError("FakeHttpClient 的响应队列空了——用例没有预设这一次调用")
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def request_json(
+        self,
+        url: str,
+        payload: Any = None,
+        method: str = "GET",
+        timeout: int = 120,
+        extra_headers: Any = None,
+    ) -> Any:
+        self.calls.append(
+            (
+                "request_json",
+                {
+                    "url": url,
+                    "payload": payload,
+                    "method": method,
+                    "timeout": timeout,
+                    "headers": dict(extra_headers or {}),
+                },
+            )
+        )
+        return self._next()
+
+    def request_bytes(self, url: str, timeout: int = 120) -> bytes:
+        self.calls.append(("request_bytes", {"url": url, "timeout": timeout}))
+        return self._next()
+
+    def request_multipart(self, url: str, fields: Any, files: Any, timeout: int = 300) -> Any:
+        self.calls.append(("request_multipart", {"url": url, "fields": dict(fields), "files": list(files)}))
+        return self._next()
+
+    def payloads(self) -> list[Any]:
+        return [kwargs["payload"] for name, kwargs in self.calls if name == "request_json"]
+
+
+def judge_reply(content: str) -> dict[str, Any]:
+    """judge 端点的最小响应信封：``choices[0].message.content`` 里放那段 JSON。"""
+    return {"choices": [{"message": {"content": content}}]}

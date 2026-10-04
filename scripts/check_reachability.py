@@ -82,9 +82,14 @@ PENDING_WIRING: dict[str, str] = {
     # （`create_runtime_providers` 那一支：ManagerTelemetryProvider / Unavailable），
     # 这台机器上跑的 llama-server 那一路根本没有被选中的路径。
     # **本切片的盲区清单要如实记上这一条**：apple_telemetry 至今无人调用。
-    "photobench.infrastructure.runtime.apple_telemetry": (
-        "未分配切片：provider 选择逻辑（select_runtime_providers + 660 行 jetson_telemetry）尚未搬"
-    ),
+    #
+    # —— S9b-3（2026-10-04）：那条登记被这张表自己删掉了 ——
+    #
+    # `photobench.infrastructure.runtime.selection`（1.0 `select_runtime_providers` 的重建）
+    # 构造了 `LocalAppleUnifiedTelemetryProvider`，于是 apple_telemetry 被这条检查报红
+    # 要求删除登记。**与 S5c / S6 / S7b1 / S9b-1 每次接线后走的是同一条反向规则**：
+    # 接线的那一刻它自己就报红要求删。同一批接上的还有 660 行的
+    # `photobench.infrastructure.runtime.jetson_telemetry`（Jetson 那一路）。
 }
 
 

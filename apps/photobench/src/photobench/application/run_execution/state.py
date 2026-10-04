@@ -1,4 +1,4 @@
-"""一次 run 的持久状态与相位记账。
+"""一次 run 的持久状态、相位记账、**后台落盘**与**取消信号**。
 
 1.0 的 ``self.state`` 是一个挂在 ``BenchmarkRun`` 上的裸 dict，配一把 ``threading.RLock``
 （``_record_phase`` ``:2278``）。2.0 收成这个类，理由不是整洁：**那份 dict 的形状是
@@ -10,30 +10,74 @@
 （写 run.json）本身就要在一致快照上做。
 
 字典形状与 1.0 ``BenchmarkRun.__init__``（``:1979-2010``）逐键对应，只去掉 2.0
-本切片不产出的那几项（judge / 重判 / 遥测聚合 / 云端模型），并加上 2.0 特有的
-``sentrix_url`` 与 ``import_directories``。
+本切片不产出的那几项（云端模型），并加上 2.0 特有的 ``sentrix_url`` 与
+``import_directories``。
+
+**S9b-3 补上的三件（都是从 1.0 ``BenchmarkRun`` 上搬下来的）：**
+
+1. **后台 persist 写线程**（1.0 ``_persist_loop`` ``:2056`` / ``persist`` ``:2080`` /
+   ``_stop_persist_writer`` ``:2095``）。S9b-2 是同步写快照并如实记了代价。那个线程
+   存在的理由有两条，现在两条都成立：不让磁盘 IO 污染 Agent/Judge 的墙钟测量，
+   以及让写侧路由查到的实时视图保持新鲜（1.0 的 ``_persist_condition`` 注释）。
+   保留 1.0 的**debounce 合并**（同一个短窗口里的多次请求只写一次）与
+   ``persist(wait=True)`` 的「等这次落到盘上」语义。
+2. **取消信号** ``cancel_event``（1.0 ``self._cancel``）。它现在是真的被
+   ``_wait_model_ready`` / ``_await_turn`` / judge 的退避与限流等着的——S9b-2 记的
+   「等待不是取消感知的」这条账在这里还清。
+3. **实时遥测视图** ``telemetry_live`` 的维护挪到了 ``service._sample_writer`` 里
+   （算法在 ``domain.runs.analysis.apply_live_sample``）；``RunState`` 只提供
+   ``mutate`` 这个「在锁下改一段状态」的口子。
 """
 
 from __future__ import annotations
 
+import copy
+import os
 import threading
 import time
 from typing import Any
 
+from photobench.domain.results.ports import RunResultWriter
 from photobench.domain.runs.analysis import now_iso
+
+#: 1.0 ``:211`` 的 ``PERSIST_DEBOUNCE_SECONDS``。合并同一短窗口里的多次快照请求。
+PERSIST_DEBOUNCE_SECONDS = max(0.05, float(os.environ.get("PHOTOBENCH_PERSIST_DEBOUNCE_SECONDS", "0.25")))
 
 
 class RunState:
-    """带锁的 run 状态字典 + 相位记账。"""
+    """带锁的 run 状态字典 + 相位记账 + 后台写线程 + 取消信号。"""
 
-    def __init__(self, initial: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        initial: dict[str, Any],
+        *,
+        run_id: str = "",
+        writer: RunResultWriter | None = None,
+        debounce: float = PERSIST_DEBOUNCE_SECONDS,
+    ) -> None:
         self._lock = threading.RLock()
         self.data = initial
         self._phase_started: dict[str, float] = {}
+        self.run_id = run_id
+        self._writer = writer
+        self.debounce = debounce
+        #: 取消信号。**它在构造时就存在**（不是被取消时才建）——等待方拿到的必须是
+        #: 同一个 Event，否则「取消」对已经在等的那一段永远不可见。
+        self.cancel_event = threading.Event()
+        self._persist_condition = threading.Condition()
+        self._persist_requested = 0
+        self._persist_written = 0
+        self._persist_stopping = False
+        self._persist_error: Exception | None = None
+        self._persist_thread: threading.Thread | None = None
 
     @property
     def lock(self) -> threading.RLock:
         return self._lock
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel_event.is_set()
 
     def set(self, key: str, value: Any) -> None:
         with self._lock:
@@ -42,6 +86,20 @@ class RunState:
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             return self.data.get(key, default)
+
+    def mutate(self, key: str) -> dict[str, Any]:
+        """取一个可变的子字典（不存在就建），**调用方需自己持锁**。
+
+        给 ``telemetry_live`` 这种「整块被反复追加」的字段用：把它的维护写成
+        「读—改—写」三步在锁外做，两个采样点会互相覆盖。1.0 是在 ``self.lock``
+        里直接 ``self.state.setdefault(...)``，这里给它一个等价的名。
+        """
+        with self._lock:
+            value = self.data.get(key)
+            if not isinstance(value, dict):
+                value = {}
+                self.data[key] = value
+            return value
 
     def record_phase(self, phase: str, key: str, value: Any) -> None:
         """1.0 ``:2278``。相位不存在就建一个 ``{"status": "pending"}`` 的空壳，
@@ -82,3 +140,114 @@ class RunState:
         self.record_phase(phase, "status", "failed")
         self.record_phase(phase, "error", error)
         self.record_phase(phase, "finished_at", now_iso())
+
+    # ---- 取消 ---------------------------------------------------------------
+
+    def request_cancel(self, source: str = "api") -> None:
+        """置取消信号并记账。**不落盘、不回收模型**——那两件在 ``RunExecution.cancel``。
+
+        1.0 ``BenchmarkRun.cancel``（``:2232``）把三件揉在一起；这里拆开的理由是
+        回收模型要 ``LifecycleProvider``，而 ``RunState`` 没有（也不该有）它。
+        """
+        self.cancel_event.set()
+        with self._lock:
+            self.data["cancel_requested_at"] = now_iso()
+            self.data["cancel_source"] = source
+            # 1.0：还没开跑的 run 直接落 ``cancelled``；跑着的落 ``cancelling``，
+            # 由 ``execute`` 在相位循环发现信号后收成 ``cancelled``。这个区别让前端
+            # 能区分「已经停了」与「正在停」。
+            if self.data.get("status") == "pending":
+                self.data["status"] = "cancelled"
+                self.data["finished_at"] = now_iso()
+            else:
+                self.data["status"] = "cancelling"
+
+    # ---- 后台落盘 -----------------------------------------------------------
+
+    def start_persist_writer(self) -> None:
+        """起后台写线程（1.0 在 ``__init__`` 里起，这里在 ``execute`` 开头起）。
+
+        没有 writer 时是空操作——用例里的 ``RunState({"current_phase": ...})`` 直接
+        用来调 ``_sample_writer``，那条路径不该要求一个写线程。
+        """
+        if self._writer is None or self._persist_thread is not None:
+            return
+        with self._persist_condition:
+            self._persist_stopping = False
+        self._persist_thread = threading.Thread(
+            target=self._persist_loop, daemon=True, name=f"persist-{self.run_id}"
+        )
+        self._persist_thread.start()
+
+    def _persist_loop(self) -> None:
+        """1.0 ``:2056``：合并短窗口内的请求，**在锁外**做深拷贝与磁盘 IO。"""
+        while True:
+            with self._persist_condition:
+                while self._persist_written >= self._persist_requested and not self._persist_stopping:
+                    self._persist_condition.wait()
+                if self._persist_stopping and self._persist_written >= self._persist_requested:
+                    return
+                self._persist_condition.wait(timeout=self.debounce)
+                target = self._persist_requested
+                stored = copy.deepcopy(self.data)
+            writer = self._writer
+            if writer is None:  # start_persist_writer 保证了非空；这里只为类型收窄
+                return
+            try:
+                writer.write_snapshot(self.run_id, stored)
+            except Exception as exc:  # noqa: BLE001 —— 写失败要能被下一个 wait=True 的调用看见
+                with self._persist_condition:
+                    self._persist_error = exc
+                    self._persist_written = max(self._persist_written, target)
+                    self._persist_condition.notify_all()
+                continue
+            with self._persist_condition:
+                self._persist_written = max(self._persist_written, target)
+                self._persist_condition.notify_all()
+
+    def persist(self, wait: bool = False) -> None:
+        """请求一份快照；``wait=True`` 时等到它落盘（1.0 ``persist`` ``:2080``）。
+
+        **写线程没起来时同步写**：``persist(wait=True)`` 在一条不存在的线程上等下去会
+        永久挂住——而最可能调用它的两条路（``cancel()`` 与 ``stop_persist_writer()``）
+        恰好都是「收尾」路径，挂在那里等于 run 永远不结束。1.0 里线程在
+        ``__init__`` 就起了，所以没有这个形状；2.0 的写线程是 ``execute`` 才起的。
+        """
+        writer = self._writer
+        if writer is None:
+            return
+        if self._persist_thread is None:
+            writer.write_snapshot(self.run_id, copy.deepcopy(self.data))
+            return
+        with self._persist_condition:
+            if self._persist_error is not None and wait:
+                raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")
+            self._persist_requested += 1
+            target = self._persist_requested
+            self._persist_condition.notify()
+            if not wait:
+                return
+            while self._persist_written < target:
+                self._persist_condition.wait()
+            if self._persist_error is not None:
+                raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")
+
+    def stop_persist_writer(self) -> None:
+        """1.0 ``_stop_persist_writer`` ``:2095``：先等最后一份，再收线程。
+
+        线程没起过（``start_persist_writer`` 之前就出错）时**同步写一次**再返回——
+        让 ``persist(wait=True)`` 在一条不存在的线程上等下去会挂死，而那正是「run
+        已经失败了，收尾又挂住」的最坏形状。
+        """
+        writer = self._writer
+        if writer is None:
+            return
+        self.persist(wait=True)
+        with self._persist_condition:
+            self._persist_stopping = True
+            self._persist_condition.notify_all()
+        if self._persist_thread is not None:
+            self._persist_thread.join(timeout=10)
+
+
+__all__ = ["PERSIST_DEBOUNCE_SECONDS", "RunState"]

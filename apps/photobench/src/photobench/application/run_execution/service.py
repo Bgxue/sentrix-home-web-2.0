@@ -28,15 +28,16 @@
                           通常一两次就收敛；保留轮询是因为它是 1.0 的契约，
                           而且它是「导入真的落库了」的独立证据。
 ``qa_eval``               每题一个会话：``POST /assistant/conversations`` 建会话，
-                          逐条消息 ``POST .../turns`` 再轮询到终态。
-``gpu_metrics`` /
-``aggregate``             **不搬**（S9b-3）。所以 ``summary`` 落盘时是空的，
-                          ``run_valid`` 由 ``qa_eval`` 决定——1.0 也是这么定的。
+                          逐条消息 ``POST .../turns`` 再轮询到终态。**Agent 池与 Judge
+                          池是两个池**（1.0 ``:3103``）：Agent 一完成就立刻排进 Judge 池。
+``gpu_metrics``           ``GpuSampler.aggregate()`` 的曲线统计（1.0 ``:4568``）。
+``aggregate``             汇总（1.0 ``:4580``），写入 ``state["summary"]``。
 ========================  ==================================================================
 
-**没有 judge**：1.0 的 ``_judge_item``（``:3588``）与两个 judge 池不在本切片。
-``_evaluate_one`` 返回的 item 里三个 judge 字段都写成 ``pending_judge`` 占位
-（1.0 的同一位置也这么写，见 ``:3555-3557``）——读侧的
+**judge（S9b-3 接上）**：``_judge_item``（``:3588``）在
+``application.run_execution.judge.JudgeRunner`` 里；这里只负责把它排进第二个池。
+没有 judge 配置时（用例里的默认）item 的三个 judge 字段保持
+``pending_judge`` 占位（1.0 的同一位置也这么写，见 ``:3555-3557``）——读侧的
 ``domain.runs.analysis.effective_summary`` 要这三个键存在才能算出分布。
 """
 
@@ -48,19 +49,24 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSampler
+from photobench.application.run_execution.judge import InlineImages, JudgeRunner
 from photobench.application.run_execution.state import RunState
 from photobench.domain.datasets.ports import AlbumSource
+from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.results.ports import RunResultWriter
 from photobench.domain.runs.analysis import (
+    apply_live_sample,
     derive_attribution,
+    effective_summary,
     now_iso,
 )
 from photobench.domain.runs.execution import (
+    RunCancelledError,
     album_media_entries,
     import_directories,
     index_assets_by_name,
@@ -101,6 +107,21 @@ MODEL_READY_TIMEOUT_SECONDS = 600
 PIPELINE_POLL_SECONDS = 3.0
 DEFAULT_STALL_TIMEOUT_SECONDS = 1200
 
+#: 1.0 ``:213`` 的 ``LIVE_TELEMETRY_TAIL_POINTS``：run.json 里的实时曲线只留尾部
+#: 若干个点。**权威来源是 gpu_samples.jsonl**（读侧从它重建完整曲线），这里是
+#: 防「run.json 被一次次追加撑大」的那条闸门。
+LIVE_TELEMETRY_TAIL_POINTS = max(0, int(os.environ.get("PHOTOBENCH_LIVE_TELEMETRY_TAIL_POINTS", "240")))
+#: 1.0 ``:2222``：滚动聚合的发布节流。每来一条样本就重算一次聚合，在一个 0.5s 采样、
+#: 跑一小时的 run 上是 7200 次全表扫描；GPU 卡片并不需要那个刷新率。
+GPU_METRICS_PUBLISH_SECONDS = 2.0
+
+#: 真正的 ``time.sleep``，**在导入时绑死**。``_cancel_wait`` 靠 ``self.sleep is`` 它
+#: 来判断「调用方有没有注入假等待」。不能写成 ``self.sleep is time.sleep``：用例会把
+#: 整个 ``service.time`` 换成假钟（``_TickingTime``），那个假钟根本没有 ``sleep``
+#: 属性，于是这个判断本身会抛 ``AttributeError``——一次「为了可测试性」的比较把
+#: 被测代码弄崩，而且崩在一个与断言无关的地方。
+_DEFAULT_SLEEP = time.sleep
+
 #: 顺带搬过来的 item 字段（1.0 ``:3379``）。这些是题库侧的标签，主链只负责带过去。
 PASSTHROUGH_FIELDS = (
     "task_type",
@@ -120,7 +141,13 @@ PASSTHROUGH_FIELDS = (
 
 @dataclass(frozen=True)
 class RunRequest:
-    """一次 run 的输入。对应 1.0 ``POST /api/runs`` 的请求体（写侧路由是 S9b-3）。"""
+    """一次 run 的输入。对应 1.0 ``POST /api/runs`` 的请求体。
+
+    S9b-3 加了 ``runtime_framework``（``detect_runtime_framework`` 的结果，决定
+    ``select_runtime_providers`` 选哪一路遥测）与 judge 的四项覆盖（1.0 的
+    ``start_suite`` 把它们从请求体透传给 ``BenchmarkRun``）。覆盖为空时用
+    ``RunExecution.judge_settings``（配置里的默认值）。
+    """
 
     album_id: str
     qa_set: str
@@ -133,11 +160,38 @@ class RunRequest:
     import_timeout: int = 7200
     turn_timeout: int = 900
     qa_concurrency: int = 0
+    runtime_framework: str = ""
+    judge_url: str = ""
+    judge_model: str = ""
+    judge_api_key: str = ""
+    judge_prompts: Mapping[str, str | None] = field(default_factory=dict)
+    evidence_judge_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class JudgeSettings:
+    """judge 的**默认**配置。来源是 ``ConfigService``（提示词 / provider / 密钥）。
+
+    ``RunRequest`` 上的同名项是**一次请求的覆盖**（1.0 的 ``start_suite`` 允许请求体
+    带 ``judge_url`` / ``judge_model`` / ``judge_api_key`` / 三个提示词）。
+    """
+
+    judge_url: str = ""
+    judge_model: str = ""
+    judge_api_key: str = ""
+    answer_quality_prompt: str | None = None
+    task_judge_prompt: str | None = None
+    evidence_judge_prompt: str | None = None
+    evidence_enabled: bool = False
 
 
 @dataclass
 class RunExecution:
-    """跑完一条主链。构造一次跑一轮——状态不跨 run 复用（1.0 是一 run 一个对象）。"""
+    """跑完一条主链。构造一次跑一轮——状态不跨 run 复用（1.0 是一 run 一个对象）。
+
+    ``http`` 与 ``judge_settings`` 都可空：空 ``http`` 意味着**这一轮不打分**
+    （用例里的默认），此时 item 保留 ``pending_judge`` 占位。
+    """
 
     client: SentrixClient
     albums: AlbumSource
@@ -146,16 +200,92 @@ class RunExecution:
     inference: InferenceProvider
     telemetry: TelemetryProvider
     sleep: Callable[[float], None] = field(default=time.sleep)
+    http: JsonHttpClient | None = None
+    judge_settings: JudgeSettings | None = None
+    #: 选中的遥测来源（``select_runtime_providers`` 的 ``source``）。写进 run.json
+    #: 供读侧与运维判断这轮的数字是什么口径（1.0 ``:1977`` 的 ``telemetry_source``）。
+    telemetry_source: str = ""
+    #: 召回图 → data URL 的实现（要用 PIL）。由装配点注入，application 不许 import PIL。
+    inline_images: InlineImages | None = None
+    _state: RunState | None = field(default=None, repr=False)
+    _judge: JudgeRunner | None = field(default=None, repr=False)
+    _sampler: GpuSampler | None = field(default=None, repr=False)
+    #: 这一轮的输入。**它不进 ``state.data``**：那份 dict 是落盘契约，会被
+    #: ``json.dumps`` 写进 run.json，而 ``RunRequest`` 不是可序列化的值——
+    #: 塞进去会让每一次快照写都抛 ``TypeError``，而错误被后台写线程记成
+    #: ``_persist_error`` 之后只会表现为「run.json 一直没有出现」。
+    _request: RunRequest | None = field(default=None, repr=False)
+
+    @property
+    def state(self) -> RunState | None:
+        """当前/最近一轮的状态。取消与写侧路由要用它。"""
+        return self._state
+
+    def cancel(self, source: str = "api") -> None:
+        """1.0 ``BenchmarkRun.cancel``（``:2232``）的 2.0 版。
+
+        **拆成三件事的顺序照搬**：先置取消信号（让正在等的那一段立刻醒来）、再尽力
+        回收这一轮起过的模型（否则取消在 model_deploy 中间会把一个没人要的模型留在
+        GPU 上）、最后 ``persist(wait=True)`` 把 ``cancelling`` 落盘。
+
+        **1.0 的 ``_cancel_remote_batch`` 没有对应**：它打的是
+        ``/api/ingest-batches/{id}/cancel`` 那个 2.0/1.0 都不存在的死端点（S9c 的
+        T922 要处理它）。这里不假装调过——那会让 run.json 里出现一个假的
+        ``batch_cancel_requested``。
+        """
+        state = self._state
+        if state is None:
+            return
+        state.request_cancel(source)
+        self._reclaim_model_after_cancel(state)
+        state.persist(wait=True)
+
+    def _reclaim_model_after_cancel(self, state: RunState) -> None:
+        """1.0 ``_reclaim_vllm_after_cancel``（``:2245``）：这一轮起过的模型就停掉。
+
+        判据用「Manager 报的 profile 与本轮要的一致」——不一致说明那个模型不是这一轮
+        起的，停了会踩到别人。1.0 另外还看 ``use_current_model`` / ``use_cloud_model``
+        两个开关，2.0 没有它们（外部端点那一支本来就没有 Manager 可停）。
+        """
+        request = self._request
+        if request is None or not request.manager_url:
+            return
+        try:
+            manager_state = self.lifecycle.state() or {}
+        except Exception:  # noqa: BLE001 —— 回收是尽力而为，探不到就什么都不做
+            return
+        if manager_state.get("profile") and manager_state.get("profile") == request.model_profile:
+            try:
+                self.lifecycle.stop({"timeout": 60}, timeout=90)
+                state.set("cancel_vllm_stopped", now_iso())
+            except Exception as exc:  # noqa: BLE001
+                state.set("cancel_vllm_stop_error", str(exc)[:300])
 
     def execute(self, request: RunRequest) -> dict[str, Any]:
         run_id = request.run_id or f"run_{uuid.uuid4().hex[:12]}"
         album_id = request.album_id
         manifest = self.albums.manifest(album_id)
         scope_id = request.scope_id or self._default_scope_id(album_id, request.model_profile)
-        state = RunState(self._initial_state(run_id, request, manifest, scope_id, album_id))
-        self._persist(run_id, state)
-        sampler = GpuSampler(self.telemetry, on_sample=self._sample_writer(run_id, state))
-        sampling = self._sampling_enabled()
+        state = RunState(
+            self._initial_state(run_id, request, manifest, scope_id, album_id),
+            run_id=run_id,
+            writer=self.writer,
+        )
+        # 取消回收模型时要读它（``_reclaim_model_after_cancel``）。存在 self 上而不是
+        # state 里：state 要被 json.dumps 落盘，见 ``_request`` 的注释。
+        self._request = request
+        self._state = state
+        self._judge = self._build_judge(request, state)
+        state.start_persist_writer()
+        state.persist()
+        # 采样回调要在 ``on_sample`` 里拿到采样器本身（发布滚动聚合），而采样器的构造
+        # 又要先有回调——用一个一格容器解开这个环，等价于 1.0 里 ``self._gpu_sampler``
+        # 这个属性（它的回调是方法，能随时读 self）。
+        sampler_holder: list[GpuSampler] = []
+        sampler = GpuSampler(self.telemetry, on_sample=self._sample_writer(state, sampler_holder))
+        sampler_holder.append(sampler)
+        self._sampler = sampler
+        sampling = self._sampling_enabled() and self.telemetry_source != "unavailable"
         phases: list[tuple[str, Callable[[RunState, RunRequest], None]]] = [
             ("model_deploy", self._phase_model_deploy),
             ("scope_setup", self._phase_scope_setup),
@@ -163,6 +293,8 @@ class RunExecution:
             ("photo_import", self._phase_photo_import),
             ("pipeline_processing", self._phase_processing),
             ("qa_eval", self._phase_qa_eval),
+            ("gpu_metrics", self._phase_gpu_metrics),
+            ("aggregate", self._phase_aggregate),
         ]
         state.set("status", "running")
         state.set("started_at", now_iso())
@@ -173,15 +305,25 @@ class RunExecution:
         current: str | None = None
         try:
             for name, phase in phases:
+                if state.cancelled:
+                    raise RunCancelledError(f"cancelled before phase {name}")
                 current = name
                 state.set("current_phase", name)
                 state.phase_start(name)
                 phase(state, request)
-                self._persist(run_id, state)
+                state.persist()
             partial = any(
                 bucket.get("status") == "partial" for bucket in (state.get("phases") or {}).values()
             )
             state.set("status", "completed_with_errors" if partial else "completed")
+        except RunCancelledError as exc:
+            # **取消与失败必须分开**：一次主动取消落到 ``failed`` 会让读侧把它当成
+            # 「这轮评测炸了」，而事实是有人叫停了它（1.0 ``:2417`` 的同一条区分）。
+            if current:
+                state.record_phase(current, "status", "cancelled")
+                state.record_phase(current, "error", str(exc))
+            state.set("status", "cancelled")
+            state.set("cancelled_phase", current)
         except Exception as exc:  # noqa: BLE001 —— 1.0 ``:2404``：任何相位异常都收成 failed
             if current:
                 state.phase_failed(current, str(exc))
@@ -196,7 +338,8 @@ class RunExecution:
             snapshots = dict(state.get("hardware_snapshots") or {})
             snapshots["end"] = self._hardware_snapshot()
             state.set("hardware_snapshots", snapshots)
-            self._persist(run_id, state)
+            state.persist()
+            state.stop_persist_writer()
         return state.data
 
     # ---- 状态与落盘 ---------------------------------------------------------
@@ -238,6 +381,18 @@ class RunExecution:
             "sentrix_url": request.sentrix_url,
             "manager_url": request.manager_url or None,
             "model_base_url": request.model_base_url or None,
+            # 1.0 ``:1977``：这两个是读侧与运维判断「这轮的数字是什么口径」的入口
+            # （``run_list_entry`` 会取它们）。
+            "telemetry_source": self.telemetry_source or None,
+            "runtime_framework": request.runtime_framework or "generic",
+            "judge_url": request.judge_url
+            or (self.judge_settings.judge_url if self.judge_settings else "")
+            or None,
+            "judge_model": request.judge_model
+            or (self.judge_settings.judge_model if self.judge_settings else "")
+            or None,
+            "rejudge": None,
+            "memory_profile": None,
             "input_integrity": self.albums.integrity(album_id, manifest, request.qa_set),
             "hardware_snapshots": {"start": None, "end": None},
             "status": "pending",
@@ -252,25 +407,111 @@ class RunExecution:
         }
 
     def _persist(self, run_id: str, state: RunState) -> None:
-        with state.lock:
-            self.writer.write_snapshot(run_id, state.data)
+        """请求一份快照。``run_id`` 保留只为让调用点不必改——写线程知道自己的 run。"""
+        del run_id
+        state.persist()
 
-    def _sample_writer(self, run_id: str, state: RunState) -> Callable[[dict[str, Any]], None]:
-        """采样回调：给样本打上相位标签再落盘。
+    def _build_judge(self, request: RunRequest, state: RunState) -> JudgeRunner | None:
+        """按「请求覆盖 > 配置默认」造一个 ``JudgeRunner``；两者都没有就是不判分。
 
-        1.0 ``_persist_gpu_sample``（``:2113``）还顺带维护 ``state["telemetry_live"]``
-        的实时视图（latest/peak/history），那是**遥测聚合**，归 S9b-3。这里只做
-        「打标签 + 追加」，也就是 ``gpu_samples.jsonl`` 这份权威原始数据。
+        **不判分是一条合法路径**，不是错误：用例与「只想跑链路不要分数」的部署都走它。
+        ``cancel`` 传的是这一轮的取消信号，所以 judge 的退避与限流等待可取消。
         """
+        defaults = self.judge_settings
+        if self.http is None:
+            return None
+        judge_url = request.judge_url or (defaults.judge_url if defaults else "")
+        judge_model = request.judge_model or (defaults.judge_model if defaults else "")
+        if not judge_url or not judge_model:
+            return None
+        prompts = request.judge_prompts or {}
+        return JudgeRunner(
+            http=self.http,
+            judge_url=judge_url,
+            judge_model=judge_model,
+            judge_api_key=request.judge_api_key or (defaults.judge_api_key if defaults else ""),
+            answer_quality_prompt=prompts.get("answer_quality")
+            or (defaults.answer_quality_prompt if defaults else None),
+            task_judge_prompt=prompts.get("task_decision")
+            or (defaults.task_judge_prompt if defaults else None),
+            evidence_judge_prompt=prompts.get("evidence")
+            or (defaults.evidence_judge_prompt if defaults else None),
+            evidence_enabled=bool(
+                request.evidence_judge_enabled or (defaults.evidence_enabled if defaults else False)
+            ),
+            sentrix_url=request.sentrix_url,
+            cancel=state.cancel_event,
+            inline_images=self.inline_images,
+        )
+
+    def _sample_writer(
+        self, state: RunState, sampler_holder: list[GpuSampler] | None = None
+    ) -> Callable[[dict[str, Any]], None]:
+        """采样回调：打相位标签、追加 JSONL、并维护 run.json 的实时视图。
+
+        1.0 ``_persist_gpu_sample``（``:2110``）的三段在这里逐段对应：
+
+        1. **追加 JSONL**（立即落盘，取消/崩溃时才不丢）——``gpu_samples.jsonl`` 是
+           完整曲线的权威来源。
+        2. **更新 ``telemetry_live``**（``domain.runs.analysis.apply_live_sample``）：
+           latest/peak/history/phase_snapshots 的滚动视图，给实时 GPU 卡片看。
+        3. **发布一次滚动聚合**到 ``phases.gpu_metrics``（节流
+           ``GPU_METRICS_PUBLISH_SECONDS``，1.0 ``_refresh_gpu_metrics_phase``
+           ``:2209``）——卡片不必等到整轮结束才有数字。
+
+        ``sampler_holder`` 是那格「装着采样器自己的容器」：回调要在 ``on_sample`` 里
+        读 ``sampler.samples`` 来算滚动聚合，而采样器要先用回调构造。没有它（用例里
+        直接调这个闭包）时第 3 段跳过。
+        """
+        sampler = sampler_holder[0] if sampler_holder else None
+        last_publish = [0.0]
 
         def on_sample(sample: dict[str, Any]) -> None:
             phase = str(state.get("current_phase") or "unassigned")
+            label = PHASE_LABELS.get(phase, phase)
             persisted = dict(sample)
             persisted.setdefault("phase", phase)
-            persisted.setdefault("phase_label", PHASE_LABELS.get(phase, phase))
-            self.writer.append_gpu_sample(run_id, persisted)
+            persisted.setdefault("phase_label", label)
+            self.writer.append_gpu_sample(state.run_id, persisted)
+            live = state.mutate("telemetry_live")
+            with state.lock:
+                apply_live_sample(live, sample, phase, label, tail=LIVE_TELEMETRY_TAIL_POINTS)
+                if sample.get("llama_server_args") and not state.data.get("llama_server_args"):
+                    state.data["llama_server_args"] = sample.get("llama_server_args")
+            if sampler is not None:
+                now = time.monotonic()
+                if now - last_publish[0] >= GPU_METRICS_PUBLISH_SECONDS:
+                    last_publish[0] = now
+                    self._publish_partial_gpu_metrics(state, sampler)
+            state.persist()
 
         return on_sample
+
+    def _publish_partial_gpu_metrics(self, state: RunState, sampler: GpuSampler) -> None:
+        """1.0 ``_refresh_gpu_metrics_phase``（``:2209``）：让 GPU 卡片是活的。
+
+        **已经 ``done`` / ``skipped`` 的相位不再被覆盖**——那说明聚合已经由
+        ``_phase_gpu_metrics`` 写过，滚动值把它盖回去会让最终数字随机停在某一秒。
+        """
+        existing = (state.get("phases") or {}).get("gpu_metrics") or {}
+        if existing.get("status") in {"done", "skipped"}:
+            return
+        if not sampler.samples:
+            return
+        partial = sampler.aggregate()
+        if not partial.get("samples_count"):
+            return
+        partial.update(
+            {
+                "status": "running",
+                "partial": True,
+                "started_at": existing.get("started_at") or now_iso(),
+                "updated_at": now_iso(),
+                "llama_server_args": state.get("llama_server_args"),
+            }
+        )
+        with state.lock:
+            state.data.setdefault("phases", {})["gpu_metrics"] = partial
 
     def _sampling_enabled(self) -> bool:
         return os.environ.get("PHOTOBENCH_DISABLE_GPU_SAMPLING", "0") != "1"
@@ -335,7 +576,7 @@ class RunExecution:
         # 1.0 ``:2547``：卸载失败不阻断装载——没在跑的模型本来就停不掉。
         with contextlib.suppress(Exception):
             stop_seconds = self._timed(lambda: self.lifecycle.stop({"timeout": 60}, timeout=90))
-        self.sleep(MODEL_COOLDOWN_SECONDS)
+        self._cancel_wait(MODEL_COOLDOWN_SECONDS)
         load_started = time.perf_counter()
         start_error: Exception | None = None
         for attempt, backoff in enumerate(MODEL_START_BACKOFF_SECONDS):
@@ -344,10 +585,12 @@ class RunExecution:
                 start_error = self._wait_model_ready(request)
                 if start_error is None:
                     break
+            except RunCancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 start_error = exc
             if attempt < len(MODEL_START_BACKOFF_SECONDS) - 1:
-                self.sleep(backoff)
+                self._cancel_wait(backoff)
         if start_error is not None:
             raise RuntimeError(
                 f"model manager /start failed after {len(MODEL_START_BACKOFF_SECONDS)} attempts: "
@@ -387,12 +630,33 @@ class RunExecution:
             },
         )
 
+    def _cancel_wait(self, seconds: float) -> None:
+        """等一段时间；被取消就抛 ``RunCancelledError``。1.0 ``self._cancel.wait(...)``。
+
+        S9b-2 如实记过「``_wait_model_ready`` 与 ``_await_turn`` 的等待不是取消感知的」
+        ——这里还清：等待走 ``Event.wait``，取消立刻打断，而不是「下一次循环才看到」。
+
+        **``sleep`` 被注入过时走注入的那个**。用例注入 ``lambda _: None`` 是为了不真等
+        （否则 5 秒冷却 + 3 秒轮询 × 每条用例会把秒级的用例拖成分钟级），而
+        ``Event.wait`` 不吃这个替身。两种模式下**取消语义是同一份**：真等待时由
+        ``Event.wait`` 的返回值给，假等待时由等待后的 ``is_set()`` 给——不会出现
+        「用例里能取消、生产里不能」。
+        """
+        state = self._state
+        event = state.cancel_event if state is not None else None
+        if event is not None and self.sleep is _DEFAULT_SLEEP:
+            if event.wait(seconds):
+                raise RunCancelledError("cancelled while waiting")
+            return
+        self.sleep(seconds)
+        if event is not None and event.is_set():
+            raise RunCancelledError("cancelled while waiting")
+
     def _wait_model_ready(self, request: RunRequest) -> Exception | None:
         """1.0 ``:2471``：轮询 Manager 状态，再用一次探活确认端点真的在答。
 
         返回 ``None`` 表示就绪，返回异常表示这一轮没等到。1.0 用 ``self._cancel``
-        的 ``wait`` 做取消感知——取消路由是 S9b-3，这里没有可等的取消信号，
-        所以退化成固定的 2 秒间隔。
+        的 ``wait`` 做取消感知——S9b-3 接上取消路由后这里是真的可取消的。
         """
         deadline = time.monotonic() + MODEL_READY_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -407,7 +671,7 @@ class RunExecution:
                 probe = self._probe_model_endpoint(manager_state, request, timeout=20)
                 if probe is None:
                     return None
-            self.sleep(2.0)
+            self._cancel_wait(2.0)
         return TimeoutError(f"model not ready within {MODEL_READY_TIMEOUT_SECONDS}s")
 
     def _probe_model_endpoint(
@@ -610,6 +874,10 @@ class RunExecution:
         failures: list[dict[str, Any]] = []
         per_directory: list[dict[str, Any]] = []
         for relative in directories:
+            # 逐个目录检查取消（1.0 ``:2843``）：一个 7200 秒超时的导入正在跑时，
+            # 取消至少要能在**下一个目录之前**生效，而不是等整段结束。
+            if state.cancelled:
+                raise RunCancelledError("cancelled during photo_import")
             absolute, entry_count = self.albums.import_target(album_id, relative)
             limit = min(1000, max(1, entry_count))
             result = self.client.import_album(
@@ -758,7 +1026,7 @@ class RunExecution:
                 state.record_phase("pipeline_processing", "status", "stalled")
                 state.record_phase("pipeline_processing", "stalled_at", now_iso())
                 break
-            self.sleep(PIPELINE_POLL_SECONDS)
+            self._cancel_wait(PIPELINE_POLL_SECONDS)
         failed_assets = [item for item in assets if item.get("status") in PIPELINE_FAILED_STATUSES]
         skipped = [
             item for item in assets if terminal_error and item.get("status") in PIPELINE_PENDING_STATUSES
@@ -831,6 +1099,44 @@ class RunExecution:
         except ValueError:
             return DEFAULT_STALL_TIMEOUT_SECONDS
 
+    # ---- gpu_metrics / aggregate -------------------------------------------
+
+    def _phase_gpu_metrics(self, state: RunState, request: RunRequest) -> None:
+        """1.0 ``:4568``：把采样收成曲线统计。
+
+        1.0 在这里有两条早退（``use_cloud_model`` / ``telemetry_source ==
+        "unavailable"``）。2.0 没有云端模型这个概念，只保留第二条：**没有遥测来源时
+        报 ``skipped`` 并写明原因**，绝不产出一份 ``samples_count: 0`` 的假聚合——
+        那会让读侧把「这台机器没遥测」与「跑了但一个点都没采到」看成一回事。
+        """
+        if self.telemetry_source == "unavailable" or self._sampler is None:
+            state.phase_done(
+                "gpu_metrics",
+                {
+                    "status": "skipped",
+                    "source": self.telemetry_source or "unavailable",
+                    "reason": "no_local_telemetry_source",
+                },
+            )
+            return
+        agg = self._sampler.aggregate()
+        agg["partial"] = False
+        state.phase_done("gpu_metrics", agg)
+
+    def _phase_aggregate(self, state: RunState, request: RunRequest) -> None:
+        """1.0 ``:4580``：算总分分布、召回均值、能力汇总，写进 ``state["summary"]``。
+
+        **2.0 复用读侧的 ``effective_summary``**（``domain.runs.analysis``），而不是
+        把 1.0 那段 60 行再抄一遍：两者算的是同一批字段，而读侧那份还要在**老 run**
+        上重算一次（``get_run`` 就是这么做的）。两份实现迟早会漂，一处就够了。
+        ``summary`` 落盘之后读侧仍然会重算，所以即使这里的版本落后于代码，展示也不会
+        错——它只是让 run.json 里有一份「当时算的」快照。
+        """
+        state.set("summary", {})
+        summary = effective_summary(state.data)
+        state.set("summary", summary)
+        state.phase_done("aggregate", {"summary": summary})
+
     # ---- qa_eval ------------------------------------------------------------
 
     def _resolve_qa_concurrency(self, request: RunRequest) -> int:
@@ -852,13 +1158,23 @@ class RunExecution:
                 pass
         return 1
 
-    def _phase_qa_eval(self, state: RunState, request: RunRequest) -> None:
-        """1.0 ``:3103`` 去掉 judge 那一半。
+    @staticmethod
+    def _resolve_judge_concurrency(qa_concurrency: int) -> int:
+        """1.0 ``:3347``：judge 是一个独立的池，绝不占 Agent 的槽位。"""
+        raw = str(os.environ.get("PHOTOBENCH_JUDGE_CONCURRENCY") or "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return min(8, max(1, int(qa_concurrency or 1)))
 
-        **1.0 里 Agent 池与 Judge 池是两个独立的池**，一个 item 的 Agent 一完成就立刻
-        排进 Judge 池（``:3200``）。本切片没有 judge，所以只剩一个池；池的形态与
-        合并顺序照搬（按 ``_index`` 排序后落盘），**这样 S9b-3 接上 judge 时
-        不需要重写这一段**。
+    def _phase_qa_eval(self, state: RunState, request: RunRequest) -> None:
+        """1.0 ``:3103``：Agent 池 + 独立的 Judge 池。**Agent 一完成就立刻排进 Judge**。
+
+        两个池分开是 1.0 的形态（``:3200``），理由写在 ``_resolve_judge_concurrency``
+        上：judge 打的是另一个端点（云 API 或本机另一个模型），把它塞进 Agent 的
+        并发预算会让「评测吞吐」与「打分吞吐」互相拖住。
         """
         started = time.perf_counter()
         scope_id = str(state.get("scope_id"))
@@ -867,10 +1183,15 @@ class RunExecution:
         assets_by_name = index_assets_by_name(assets)
         rows = self.albums.qa_rows(album_id, request.qa_set)
         concurrency = self._resolve_qa_concurrency(request)
+        judge = self._judge
+        judge_concurrency = self._resolve_judge_concurrency(concurrency)
         state.set("qa_concurrency", concurrency)
         state.set("qa_assets", len(assets))
+        state.set("judge_concurrency", judge_concurrency if judge is not None else 0)
         state.record_phase("qa_eval", "agent_total", len(rows))
         state.record_phase("qa_eval", "agent_phase_started_at", now_iso())
+        if judge is not None:
+            state.record_phase("qa_eval", "judge_total", len(rows))
 
         def record_progress(done: int) -> None:
             state.record_phase(
@@ -887,34 +1208,62 @@ class RunExecution:
 
         record_progress(0)
         items: dict[int, dict[str, Any]] = {}
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=concurrency, thread_name_prefix="qa-agent"
-        ) as executor:
-            futures = {
-                executor.submit(self._evaluate_one, row, scope_id, assets_by_name, request): index
-                for index, row in enumerate(rows)
-            }
-            for future in concurrent.futures.as_completed(tuple(futures)):
-                index = futures[future]
-                try:
-                    item = future.result()
-                except Exception as exc:  # noqa: BLE001 —— 1.0 ``:3218``
-                    item = {"error": repr(exc), "failed": True}
-                item["_index"] = index
-                # 「没有答案可打分的题」与「还没打分的题」是两件事（1.0 ``:3220``）：
-                # 前者标 skipped，后者标 pending。本切片没有 judge，但这条区分必须
-                # 现在就写对——否则 S9b-3 接上 judge 时，一个失败的 item 会被当成
-                # 「待打分」重新送去打分，而它根本没有答案。
-                if item.get("failed") or item.get("error"):
-                    item["judge_status"] = "skipped"
-                else:
-                    item.setdefault("judge_status", "pending")
-                items[index] = item
-                state.record_phase("qa_eval", "agent_completed", len(items))
-                record_progress(len(items))
-                with state.lock:
-                    state.data["items"] = [items[i] for i in sorted(items)]
-                self._persist(str(state.get("run_id")), state)
+        judge_futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
+        judge_done = 0
+        judge_pool = (
+            concurrent.futures.ThreadPoolExecutor(
+                max_workers=judge_concurrency, thread_name_prefix="qa-judge"
+            )
+            if judge is not None
+            else None
+        )
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix="qa-agent"
+            ) as executor:
+                futures = {
+                    executor.submit(self._evaluate_one, row, scope_id, assets_by_name, request): index
+                    for index, row in enumerate(rows)
+                }
+                for future in concurrent.futures.as_completed(tuple(futures)):
+                    index = futures[future]
+                    try:
+                        item = future.result()
+                    except Exception as exc:  # noqa: BLE001 —— 1.0 ``:3218``
+                        item = {"error": repr(exc), "failed": True}
+                    item["_index"] = index
+                    # 「没有答案可打分的题」与「还没打分的题」是两件事（1.0 ``:3220``）：
+                    # 前者标 skipped，后者标 pending。跳过判分的 item **绝不**再排进
+                    # Judge 池——它没有答案可评，送进去只会产出一个假的 0 分。
+                    if item.get("failed") or item.get("error"):
+                        item["judge_status"] = "skipped"
+                    else:
+                        item.setdefault("judge_status", "pending")
+                        if judge is not None and judge_pool is not None:
+                            judge_futures[
+                                judge_pool.submit(judge.judge_item, item, rows[index], assets_by_name)
+                            ] = index
+                    items[index] = item
+                    state.record_phase("qa_eval", "agent_completed", len(items))
+                    record_progress(len(items))
+                    with state.lock:
+                        state.data["items"] = [items[i] for i in sorted(items)]
+                    state.persist()
+                for judge_future in concurrent.futures.as_completed(tuple(judge_futures)):
+                    index = judge_futures[judge_future]
+                    try:
+                        judge_future.result()
+                    except Exception as exc:  # noqa: BLE001 —— judge 崩了不能让整轮没有结果
+                        items[index]["judge_status"] = "failed"
+                        items[index]["judge"] = {"score": None, "reason": f"judge_error: {exc}"}
+                    judge_done += 1
+                    state.record_phase("qa_eval", "judge_completed", judge_done)
+                    with state.lock:
+                        state.data["items"] = [items[i] for i in sorted(items)]
+                    state.persist()
+        finally:
+            if judge_pool is not None:
+                judge_pool.shutdown(wait=True)
         with state.lock:
             ordered = [items[i] for i in sorted(items)]
             for item in ordered:
@@ -1001,6 +1350,11 @@ class RunExecution:
             last_result: dict[str, Any] = {}
             last_progress: list[Any] = []
             for turn_index, message in enumerate(messages or [query]):
+                turn_definition = (
+                    conversation[turn_index]
+                    if turn_index < len(conversation) and isinstance(conversation[turn_index], dict)
+                    else {}
+                )
                 started_turn = self.client.start_turn(
                     conversation_id=conversation_id, message=message, timeout=300
                 )
@@ -1023,6 +1377,15 @@ class RunExecution:
                         "requirements": last_result.get("requirements") or [],
                         "termination_reason": last_result.get("termination_reason") or "",
                         "error": polled.get("error") or "",
+                        # **判分要用它**：``JudgeRunner.judge_item`` 从**回合**上读
+                        # ``expected_action``（1.0 的 runtime_turns 带这个字段），
+                        # 读不到就标 ``not_labeled`` 并且**一次判分都不发**——
+                        # 一轮评测于是「跑完了、一个分数都没有」。多轮题按题面每一轮
+                        # 的定义取，单轮题退回行级。
+                        "expected_action": turn_definition.get("expected_action")
+                        or row.get("expected_action"),
+                        "reference_answer": str(turn_definition.get("reference_answer") or ""),
+                        "agent_status": polled.get("status"),
                         # 轨迹**逐条原样**落盘（2.0 的 ProgressEventPayload），
                         # 不做投影：它是 2.0 关于「这一轮怎么走的」的全部记录。
                         "trace": last_progress,
@@ -1131,7 +1494,7 @@ class RunExecution:
                 raise TimeoutError(
                     f"assistant turn {turn_id} did not complete within {request.turn_timeout}s"
                 )
-            self.sleep(0.5)
+            self._cancel_wait(0.5)
             polled = self.client.get_turn(turn_id=turn_id)
         return polled
 
@@ -1159,6 +1522,7 @@ __all__ = [
     "PASSTHROUGH_FIELDS",
     "PIPELINE_FAILED_STATUSES",
     "PIPELINE_PENDING_STATUSES",
+    "JudgeSettings",
     "RunExecution",
     "RunRequest",
 ]

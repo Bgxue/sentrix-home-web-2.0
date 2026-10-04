@@ -601,3 +601,162 @@ sqlite3.IntegrityError: FOREIGN KEY constraint failed
 |---|---|---|
 | 1 | **`select_runtime_providers` + `jetson_telemetry.py`（660 行）归哪一段**——S9a 说归 S9b，但 S9b 切三段时没把它分进任何一段。后果之一：**真机遥测没有可用来源**（GPU 采样器真起了，但拿不到样本——153 上 llama-server 那一路没有被选中的路径） | **归 S9b-3**，与遥测聚合一起。它属于「provider 选择 + 遥测」那一块，放在那里才能让采样器真拿到样本 |
 | 2 | `backend/hardware.py` 另外四个函数的归属（S9a 的模块地图注记写「服务 run meta，归 S9b-2」） | **不搬**。实测它们**只被 1.0 的 `app.py` 调用**，`benchmark_orchestrator.py` 一次都没调。注记已按实情改写 |
+
+### S9b-3 judge / 遥测聚合 / 写侧（2026-10-04）
+
+**交付点达成**：一轮评测**带着 judge 分数与遥测样本**落盘；写侧路由能建 run / 取消 /
+重判 / 评审 / judge 提示词 / 内存画像。这一块也是 S9b 的最后一块。
+
+#### 新增
+
+| 文件 | 一句话 |
+|---|---|
+| `infrastructure/runtime/selection.py` | 1.0 `select_runtime_providers`（`:176`）连同 `local_lan_ip` / `is_orin_telemetry_host` / `resolve_runtime_framework` / `detect_runtime_framework` 的重建。**它是 S9b-2「153 上采不到样本」的修复点** |
+| `infrastructure/runtime/jetson_telemetry.py` | 1.0 `backend/jetson_telemetry.py` 的重建（S9a 裁决「归 S9b」、S9b-2 再次上报的那 660 行）。调用者只有一个：`selection.py` 的 Jetson 分支 |
+| `domain/runs/judge.py` | 三段打分提示词与评分规则（1.0 `:455`–`:664`，逐字照搬）+ `parse_judge_json` / `execution_failure` / `thinking_kwargs` / `judge_chat_url` |
+| `application/run_execution/judge.py` | `JudgeRunner`：`_judge` / `_judge_task_action` / `_judge_evidence` / `_judge_request`（退避 + 4xx 不重试 + 限流）/ `_judge_item` |
+| `infrastructure/http/judge_images.py` | 证据判分的「召回图 → data URL」。**因为 PIL 只能在 infrastructure**（见下「一处门禁红」） |
+| `application/runs/suites.py` | 写侧注册表：`start_suite` / `cancel_run` / `cancel_active_suite` / `delete_run` / `save_reviews` / `get_run_judge_prompt` / `start_rejudge` / `start_memory_profile` |
+| `api/routes/suites.py` | 写侧路由（含 `resume` 的 501） |
+| `infrastructure/config/env.py` | `.env.local` 的 `SecretEnvStore`（judge 密钥；0600 原子写） |
+| `tests/{test_selection,test_judge,test_aggregation,test_suites,test_run_execution_cancel}.py` | 新增 5 份用例（+ `fakes_execution` 里的 `FakeHttpClient` / `judge_reply`） |
+
+**改动**：`domain/runs/analysis.py`（`aggregate_gpu_samples` + `apply_live_sample`）、
+`domain/runs/execution.py`（`RunCancelledError`）、`domain/{config,results,runtime}/ports.py`
+（`SecretEnvStore` / 写侧两个方法 / `RuntimeProviders.source`）、
+`application/run_execution/{state,service,gpu_sampler}.py`（后台 persist、取消信号、判分池、
+两个收尾相位）、`application/config/service.py`（自定义提示词 + 密钥 + 三个 config 字段）、
+`application/runs/index.py`（`upsert` / `remove`）、`infrastructure/results/store.py`
+（`save_reviews` / `delete_run`）、`bootstrap/container.py`、`api/routes/config.py`、`main.py`、
+根 `pyproject.toml`（judge.py 的 E501 单文件豁免）、`scripts/check_reachability.py` /
+`check_method_reachability.py`（各删一条被反向规则追上的登记）。
+
+#### 真机验收（153，对跑着的 8191 与 8100）
+
+夹具：`/tmp/pb-smoke/album-judge/` —— 2 张真照片 + 1 张参考脸 + 2 道题（**不进仓库**）。
+判分真打 **8100 的 llama-server**（qwen35-q4km），不烧云端额度。
+
+**结果：`status=completed`，八个相位全 `done`，墙钟 29.0 s。**
+
+```
+model_deploy / scope_setup / identity_seed / photo_import /
+pipeline_processing / qa_eval / gpu_metrics / aggregate   全部 done
+telemetry_source = host_nvidia_smi
+```
+
+| 验收点 | 结果 |
+|---|---|
+| **GPU 采样器真拿到样本了吗** | **是**：`gpu_samples.jsonl` **39 行**，`gpu_metrics.samples_count=39`，首行带 `gpu_utilization_pct` / `memory_used_mib` / `power_draw_w` / `cpu_temperature_c`（宿主 nvidia-smi 口径） |
+| judge 分数 | `judge_valid_count=2`，分布 `{"0":0,"1":0,"2":2}`，`answer_quality_mean=2.0` |
+| 任务行为判分 | q1 `answer`、q2 `clarify`（与题面 GT 一致） |
+| 遥测聚合 | `memory_profile.method = idle_process_minus_reserved_kv_plus_peak_used_kv_v1` |
+
+| 段 | 真跑 / 假件 |
+|---|---|
+| 建 run（`RunSuites.start_suite`） | **真跑** |
+| 主链八相位 | **真跑**（种身份 / 导入 / 处理 / 两道题走真模型） |
+| judge 打分 | **真跑**（8100 的 llama-server，4 次判分调用） |
+| GPU 采样与聚合 | **真跑**（宿主 nvidia-smi） |
+| 单元用例 | **全假件**（291 条），不碰网络 |
+| 证据判分（`BENCH_EVIDENCE_JUDGE`） | **没跑**（默认关；它要图片字节与多模态 judge） |
+
+**清理**：验收写了真实库，做完删干净——`foreign_key_check` **0 问题**，
+`assets 53`、`events 17`、`entities 36`、`person_moments 8` 全部回到基线。
+
+#### 真机验收抓到两个「假件看不见」的接缝缺陷
+
+两个都是**「一切正常、只是结果不对」**的形状，只有真跑才暴露：
+
+1. **`RunRequest` 被塞进 `state` → run.json 一次都没写出来。** 为了让 `cancel()`
+   读得到 `manager_url`，曾经 `state.set("_request", request)`；而 `state.data` 是要
+   `json.dumps` 落盘的。第一次验收的表现是：`gpu_samples.jsonl` 一直在长、
+   **`run.json` 始终不存在**（后台写线程把 `TypeError` 收进 `_persist_error`）。
+   修法是把 request 挂在执行体上；回归用例
+   `test_a_real_writer_gets_a_serializable_state` 直接跑 `FileResultWriter`。
+2. **回合记录不带 `expected_action` → 一次判分都不发生。** 第二次验收：八相位全 done、
+   39 行样本，但每个 item 的 judge 都是 `{"score": None, "reason": "not_labeled"}`
+   ——`JudgeRunner.judge_item` 从**回合**上读 `expected_action`（1.0 的 runtime_turns
+   带这个字段），而 2.0 的 `_evaluate_one` 没放进去。回归用例
+   `test_runtime_turns_carry_the_gt_expected_action`。
+
+**这两条是同一课的第三次**：夹具能跑通不等于链路上每个字段都到位；
+「跑完了」与「拿到了」是两件事。
+
+#### 一处门禁红（`arch` 第一步就报出来的）
+
+证据判分要缩放 JPEG，最初写在 `JudgeRunner._inline_images` 里，`lint-imports` 直接报
+`photobench-application-purity` BROKEN（`judge -> PIL`）。**惰性 import 也照样算**——
+import-linter 看的是 AST 里的 import 节点，不是运行时机。修法是把那段搬到
+`infrastructure/http/judge_images.py`，由装配点以可注入回调交给 `JudgeRunner`。
+
+#### 定点变异（6 被杀 / 1 存活，存活的原因查明了）
+
+每条都先核过锚点在文件里唯一（`count == 1`），改一处、跑**指定的那条**用例、还原。
+变异跑在仓库的一份 `/tmp` 副本上（`make ci` 同时在跑，不能动工作区）。
+
+| # | 变异 | 结果 | 谁杀的 / 为什么没杀 |
+|---|---|---|---|
+| 1 | 选择器的 **Jetson 分支整条关掉** | KILLED | `test_a_local_endpoint_on_a_jetson_is_the_uma_pss_path`（`isinstance` 变 HostNvidia） |
+| 2 | judge 的 4xx 判定段改成 `500 <= code < 600` | KILLED | `test_a_client_error_is_not_retried`（调用次数 1 → 2） |
+| 3 | 聚合的 `p95` 永远取最大值 | KILLED | `test_p95_uses_the_rank_index_not_the_maximum_once_there_are_past_twenty_samples` |
+| 4 | 写线程的收尾判断改成 `if stopping: return` | **存活** | 见下 |
+| 5 | 回合不带 `expected_action` | KILLED | `test_runtime_turns_carry_the_gt_expected_action` |
+| 6 | 重判目标退回 `conversation` | KILLED | `test_rejudge_archives_the_old_score_and_writes_a_new_one` |
+| 7 | 实时曲线不截尾 | KILLED | `test_apply_live_sample_trims_the_history_to_the_tail` |
+
+**第 4 条为什么存活（以及为什么不是用例的错）**：`stop_persist_writer` 自己会先
+`persist(wait=True)` 把 `requested` 追平，而写线程的内层等待条件是
+`written >= requested`——两者一起保证了「停止前那份请求一定会被写出去」。
+所以改「停止判断」这一行**在外部不可观测**：不是夹具没有区分力，是被测代码的结构
+让这个变异等价于恒等变换。**这一条如实记在这里，不当成被杀。**
+
+**两条头一轮打错靶子的**（按纪律记下来）：第一轮的 M1 改的是「宿主分支的
+`not jetson`」，但 Jetson 分支在它之前就返回了，那个条件是**冗余的**——变异等价于
+恒等变换；第一轮的 M4 改的是 `stop_persist_writer` 里那句 `persist(wait=True)`，
+被写线程的 debounce 写覆盖掉了，同样不可观测。两条都换成真能改变行为的变异后，
+M1 被杀；M4 换到另一处仍然存活，原因如上。
+
+#### 与 1.0 的偏离（逐条登记在 `behaviour-baseline.md` 的 S9b-3 一节）
+
+`mode` 只接 `full`（`reuse`/`build` 显式 400）；`POST /runs/{id}/resume` 返回 501；
+重判的轮次来源从 `conversation` 换成 `runtime_turns`；重判不重判证据项；
+内存画像不调 `bind-runtime`（如实记 `gamma_sync.ok=false`）。
+
+#### 一条与任务书措辞不符的实测
+
+任务书说 `select_runtime_providers` 要「在 Apple / Jetson / Orin / nvidia-smi 四路里选」。
+**1.0 的选择逻辑里没有 Orin 那一路**：`OrinLlamaCppTelemetryProvider`（110 行）在
+`benchmark_orchestrator.py` 里只被 import 过、**一次都没被构造**（S9a 报的同一处 F401）；
+「Orin」只通过 `_is_orin_telemetry_host` 参与框架探测（8100 端口的远端主机判成
+llama.cpp）。这一段**照 1.0 的分支搬，不替它补一条没人验证过的 ssh 采样路**。
+
+#### 门禁
+
+`make ci`（2026-10-04 23:12→23:49）：
+
+- 前七段全绿：`lint` / `format-check`（440 files）/ `typecheck`（mypy strict，268 files）/
+  `arch`（`lint-imports` **11 契约全 KEPT**，含 `photobench-application-purity`）/
+  `photobench-check`（可达性 0 / 端口可达性 0 / 模块地图 0）/ `check-docs`（capability-map 0、
+  module-map 0、openapi 契约一致）。
+- `coverage`：**`3 failed, 2402 passed, 8 skipped`（36 分 33 秒）**，覆盖率 **93.73%**
+  （门槛 85%，已达标；`make` 因 pytest 非零退出停在这一步）。
+
+三条失败**没有一条是 PhotoBench 的**：
+
+| 失败的用例 | 判读 |
+|---|---|
+| `apps/api/tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers` | **已知的模型侧 flaky**（S9a / S9b-1 / S9b-2 三次全量跑红的是同一条）。**它不是唯一的失败**——这次还有下面两条；单独重跑它仍然红（4.84 s） |
+| `apps/api/tests/contract/test_search_routes.py::test_the_lexical_channel_is_fused_into_the_endpoint` | **满载下的 flaky**：断言 `text_ann` 这条通道在导入时写进了向量，而它取决于**文本向量 sidecar 在那一刻答不答**。**单独重跑整个文件 12 条全绿** |
+| `apps/api/tests/contract/test_search_routes.py::test_the_endpoint_reports_only_the_channels_that_have_hits` | 同上（同一个断言族） |
+
+因为 pytest 非零退出，`web-check` 没有跑；单独补跑 `make web-check` 通过
+（`tsc -b` / oxlint / vitest / vite build 90 ms）。
+
+**一次环境事故如实记录**：第一次 `make ci`（23:02）跑到 8% 时停住不动。查明
+**8100 上的 llama-server 已经不在了**（它自己的日志最后一行是
+`srv operator(): cleaning up before exit...`——一次干净的退出，不是崩溃，也不是 OOM）。
+模型端点没了，依赖它的 e2e 用例于是各等 900 秒。我把当前 `ci` 停掉，用仓库外面那份
+`/home/asus/start_vlm_8100.sh`（153 上 8100 的既有启动脚本，注释里写明它就是
+llama.cpp + qwen35-q4km）把它起回来，再重跑 `make ci`——就是上面这一次。
+**它为什么退出没有定论**（没有 OOM 记录、没有 systemd 记录；8100 那个进程本来也不在
+systemd 管理下——`sentrix-vllm.service` 显示 active (exited) 是文档里点名的假活）。

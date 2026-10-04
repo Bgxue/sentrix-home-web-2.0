@@ -26,12 +26,18 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from photobench.domain.config.ports import ConfigStore
+from photobench.domain.config.ports import ConfigStore, SecretEnvStore
 from photobench.domain.errors import InvalidRequestError
+from photobench.domain.runs.judge import JUDGE_PROMPT, JUDGE_PROMPT_KINDS
 
 RUNTIME_CONNECTION_NAME = "runtime_connection.json"
 JUDGE_PROVIDERS_NAME = "judge_providers.json"
 VLLM_TARGETS_NAME = "vllm_targets.json"
+CUSTOM_JUDGE_PROMPT_NAME = "custom_judge_prompt.json"
+
+#: 1.0 ``:207`` 的 ``EVIDENCE_JUDGE_ENABLED``。证据判分默认关：它要比对图片，
+#: 每道题都要额外取图 + 一次多模态调用，成本是另外两个判分的数倍。
+EVIDENCE_JUDGE_ENABLED = os.environ.get("BENCH_EVIDENCE_JUDGE", "0") == "1"
 
 # 1.0 ``:301-303`` 的云端大模型 profile：它不是一个 target，因为它不需要 Manager、
 # 也没有本地 GPU 指标。这三条是**代码里的常量 + 环境覆盖**，与配置文件无关。
@@ -82,8 +88,12 @@ def secret_hint(value: str | None) -> str:
 class ConfigService:
     """进程内**当前生效**的配置。写回之后就地更新，与 1.0 的 ``global`` 等价。"""
 
-    def __init__(self, store: ConfigStore) -> None:
+    def __init__(self, store: ConfigStore, secrets: SecretEnvStore | None = None) -> None:
         self._store = store
+        self._secrets = secrets
+        # 1.0 在模块导入时就 ``_load_dotenv_file(PROJECT_ROOT / ".env.local")``
+        # （``:116``）——**必须先于读 judge_api_key**，否则文件里的密钥不会被看到。
+        self._load_dotenv()
         self._runtime = self._load_runtime_connection()
         self.judge_provider_id, self.judge_providers = self._load_judge_providers()
         self.vllm_target_id, self.vllm_targets = self._load_vllm_targets()
@@ -112,6 +122,18 @@ class ConfigService:
         self.judge_api_key = os.environ.get("BENCH_JUDGE_API_KEY", default_key)
 
     # -- 读取 ---------------------------------------------------------------
+
+    def _load_dotenv(self) -> None:
+        """1.0 ``_load_dotenv_file``（``:79``）：把 ``.env.local`` 的键补进 ``os.environ``。
+
+        **已经在环境里的键不覆盖**（1.0 的 ``if key in os.environ: continue``）——运维
+        临时 ``export`` 一个密钥试一次时，不该被上次写进文件的旧值盖回去。
+        """
+        if self._secrets is None:
+            return
+        for name, value in self._secrets.read_all().items():
+            if name not in os.environ:
+                os.environ[name] = value
 
     def _load_runtime_connection(self) -> dict[str, Any]:
         """1.0 ``:71``：文件缺失或不是对象时当空配置，**不报错**。
@@ -207,6 +229,66 @@ class ConfigService:
             api_key = str(provider.get("api_key") or "")
         return selected, url, model, api_key
 
+    # -- judge 提示词（1.0 ``:666``–``:699``） ---------------------------------
+
+    def _read_custom_judge_prompt_file(self) -> dict[str, Any]:
+        """读 ``custom_judge_prompt.json``。**坏文件当空**（1.0 ``:666`` 的
+        ``except (json.JSONDecodeError, OSError)``）——一个写坏的提示词文件不该让
+        ``GET /api/config`` 打不开；提示词是可改的运行参数。"""
+        try:
+            value = self._store.read_json(CUSTOM_JUDGE_PROMPT_NAME)
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def load_custom_judge_prompts(self) -> dict[str, str | None]:
+        """1.0 ``load_custom_judge_prompts``（``:676``），含旧键 ``judge_prompt`` 的兼容。"""
+        data = self._read_custom_judge_prompt_file()
+        legacy = data.get("judge_prompt") or None
+        return {
+            "answer_quality": data.get("answer_quality") or legacy,
+            "task_decision": data.get("task_decision") or None,
+            "evidence": data.get("evidence") or None,
+        }
+
+    def save_custom_judge_prompt(self, prompt: str, kind: str = "answer_quality") -> None:
+        """1.0 ``save_custom_judge_prompt``（``:691``）。
+
+        **空字符串表示恢复默认**（写 ``None`` 而不是空串）——一个空串会被判分器当成
+        system 提示词发出去，模型于是收不到任何评分规则。
+        """
+        if kind not in JUDGE_PROMPT_KINDS:
+            raise InvalidRequestError(f"unknown judge prompt kind: {kind}")
+        data = self._read_custom_judge_prompt_file()
+        if "judge_prompt" in data:  # 旧版单提示词键迁到 answer_quality
+            data.setdefault("answer_quality", data.pop("judge_prompt"))
+        data[kind] = prompt.strip() or None
+        self._store.write_json(CUSTOM_JUDGE_PROMPT_NAME, data)
+
+    def judge_prompt_storage_path(self) -> str:
+        return self._store.path_for(CUSTOM_JUDGE_PROMPT_NAME)
+
+    def public_judge_prompts(self) -> dict[str, Any]:
+        """``GET /api/judge-prompts`` 的响应体（1.0 ``:7719``）。"""
+        custom = self.load_custom_judge_prompts()
+        labels = {
+            "answer_quality": "回答质量 Judge",
+            "task_decision": "任务判断 Judge",
+            "evidence": "证据核验 Judge",
+        }
+        return {
+            "kinds": [
+                {
+                    "kind": kind,
+                    "label": labels[kind],
+                    "default": JUDGE_PROMPT_KINDS[kind],
+                    "custom": custom.get(kind),
+                }
+                for kind in ("answer_quality", "task_decision", "evidence")
+            ],
+            "storage_path": self.judge_prompt_storage_path(),
+        }
+
     def public_judge_providers(self) -> list[dict[str, Any]]:
         """1.0 ``:254``：给界面看的 provider 列表，**不带密钥本体**。"""
         result = []
@@ -268,9 +350,9 @@ class ConfigService:
     def public_config(self) -> dict[str, Any]:
         """``GET /api/config`` 的响应体（1.0 ``do_GET`` ``:7536``）。
 
-        **比 1.0 少两项**：``judge_prompt``（默认 judge 提示词常量）与
-        ``custom_judge_prompt``（自定义提示词读写）——它们是打分口径的一部分，归 S9b-3
-        的 judge 域。``evidence_judge_enabled`` 同理。
+        S9b-1 刻意少了三项（``judge_prompt`` / ``custom_judge_prompt`` /
+        ``evidence_judge_enabled``），S9b-3 补齐——它们是打分口径的一部分，与本切片的
+        judge 域一起落位。上一轮那条「没搬」的用例（``test_api_routes``）按实情改掉了。
         """
         return {
             "default_sentrix_url": self.sentrix_url,
@@ -282,6 +364,9 @@ class ConfigService:
             "runtime_config": self.public_runtime_connection_config(),
             "runtime_config_file": self._store.path_for(RUNTIME_CONNECTION_NAME),
             "judge_model": self.judge_model,
+            "judge_prompt": JUDGE_PROMPT,
+            "custom_judge_prompt": self.load_custom_judge_prompts().get("answer_quality"),
+            "evidence_judge_enabled": EVIDENCE_JUDGE_ENABLED,
             "judge_providers": self.public_judge_providers(),
             "default_judge_provider_id": self.judge_provider_id,
             "cloud_model_profile": {
@@ -320,11 +405,6 @@ class ConfigService:
         }
         if not values["judge_model"]:
             raise InvalidRequestError("Judge model is required")
-        if "judge_api_key" in payload:
-            # 1.0 把密钥写进同目录的 .env.local 并改 os.environ；那属于 judge 域的
-            # 密钥管理，本切片不搬。**这里显式报错而不是静默丢弃**：丢掉会让界面显示
-            # 「保存成功」而实际没换密钥，比明确说「这条还没接」难查得多。
-            raise InvalidRequestError("judge_api_key 的写入属 judge 域（S9b-3），本切片尚未接线")
         self._store.write_json(RUNTIME_CONNECTION_NAME, values)
         self._runtime = dict(values)
         self.sentrix_url = values["sentrix_url"]
@@ -333,6 +413,15 @@ class ConfigService:
         self.model_base_url = values["model_base_url"]
         self.judge_provider_id = values["judge_provider_id"]
         self.judge_model = values["judge_model"]
+        if "judge_api_key" in payload:
+            # 1.0 ``:449``：密钥写 ``.env.local`` **并同时改 os.environ**——两件都要，
+            # 前者让它活过重启，后者让同一个进程里已构造好的 judge 立刻用上新的。
+            secret = str(payload.get("judge_api_key") or "")
+            if self._secrets is None:
+                raise InvalidRequestError("judge_api_key storage is not configured")
+            self._secrets.write("BENCH_JUDGE_API_KEY", secret)
+            os.environ["BENCH_JUDGE_API_KEY"] = secret
+            self.judge_api_key = secret
         return self.public_runtime_connection_config()
 
 

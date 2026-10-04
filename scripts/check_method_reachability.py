@@ -169,7 +169,15 @@ PENDING_METHODS: dict[str, str] = {
     #
     # `request_bytes` 是另一半：端口落地了、调用者还没到（资产代理那条路由要改成 2.0 的
     # `/api/v1/assets`，属 S9c 的端点适配）。照纪律登记，等 S9c 接上时由反向规则删。
-    "JsonHttpClient.request_bytes": "S9c · T921（资产代理改走 2.0 /api/v1/assets）",
+    #
+    # —— S9b-3（2026-10-04）：`request_bytes` 被它自己的反向规则删掉了 ——
+    #
+    # 证据判分（`application/run_execution/judge.py::_inline_images`）要按 asset_id
+    # 取回图片字节做 data URL，它调的就是 `JsonHttpClient.request_bytes`。**又是被这张表
+    # 自己报红要求删的一条**。顺带记一条本切片新出现的盲区：`RunResultWriter.save_reviews`
+    # 与 `.delete_run` 这两个名字在 `RunSuites` 上也有同名方法，于是落进下面的重名盲区
+    # ——它们的真实调用者是 `RunSuites.save_reviews` / `.delete_run`（S9b-3 的写侧路由），
+    # 用例在 `apps/photobench/tests/test_suites.py`。**别把盲区读成已接线**。
 }
 
 
