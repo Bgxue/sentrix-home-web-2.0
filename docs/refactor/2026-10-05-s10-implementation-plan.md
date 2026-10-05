@@ -92,9 +92,11 @@ grep `App.vue` 全文，`model-profiles` **零命中**。前端换模型走的�
 | **B. 前端先做能做的，缺口面板留空** | 只做已有 8 条端点的部分；缺口面板挂「尚未开放」空状态 | 与设计文档「评测控制台可用」有距离；但**与主产品前端 F7 的处置同一条口径**（后端未实现的能力 → 空状态） |
 | **C. 先补后端，S10 拆成 S10a/S10b** | 先把 7 个端点补上，再做前端 | 段数增加，但每段都能单独验收 |
 
-**我倾向 B 或 C**，理由：这 7 个端点里 `manifests`/`qa-dataset`/媒体服务**都不是评测能力**，
-是「把本地数据集与结果图端出来」的展示层——它们与 S9 已经做完的评测链是两回事。
-**但这是范围决定，该你定。**
+**用户 2026-10-05 裁决：选 C —— 拆两段，先补后端（S10a）再重写前端（S10b）。**
+
+理由与我的倾向一致：这 7 个端点里 `manifests`/`qa-dataset`/媒体服务**都不是评测能力**，
+是「把本地数据集与结果图端出来」的展示层——它们与 S9 做完的评测链是两回事，
+所以值得单独成段、单独验收，而不是混进前端重写里。
 
 ### ② 前端端口
 
@@ -106,6 +108,40 @@ grep `App.vue` 全文，`model-profiles` **零命中**。前端换模型走的�
 PhotoBench 的遥测图、记忆层级图全靠它。`apps/web` 没有图表库，
 所以这是**给 PhotoBench 前端单独加一个依赖**——与「生产依赖只有 3 个」那条主产品原则不冲突
 （那是 `apps/web` 的原则，PhotoBench 是另一个 app）。但**要你确认**。
+
+---
+
+## 1.5 S10a：补齐 7 个后端端点（**先做这一段**）
+
+**验收**：`apps/photobench` 的 openapi 契约从 16 条路径增到约 24 条，
+且前端要用的每一条都有真实响应可读。
+
+**范围是 1.0 已有的那 7 条 + 2 条媒体服务**（§0.2 那张表）。
+**1.0 是唯一权威**：`services/photobench/backend/benchmark_orchestrator.py`
+里对应的 handler 要逐条读、照搬响应形状。
+
+| # | 内容 |
+|---|---|
+| T1001 | **数据集展示层**：`GET /api/manifests`（相册 manifest 列表）、`GET /api/qa-dataset`（QA 数据集浏览）。数据源在 `apps/photobench/datasets/`（1.4 GB，按 `DATASET.md` 声明不入 Git）——**先核实目录形状与 DATASET.md 的约定** |
+| T1002 | **媒体服务**：`GET /api/assets/{id}/file`（从 run 结果里取图）、`GET /api/albums/{album}/{coll}/{file}`（相册本地媒体）。**注意路径穿越**——1.0 那条直接拼路径，2.0 要拦（S9b-1 已有先例与用例） |
+| T1003 | **`GET /api/memory-spaces`**：1.0 是编排器**转发** Sentrix 核心的接口（带 `sentrix_url` 参数）。2.0 要转发到 `apps/api` 的 `/api/v1/memory-spaces`——**这是 PhotoBench 唯一一处要调主 API 的读侧**，注意别破 `photobench-isolation` 契约（那是禁止 import，不是禁止 HTTP） |
+| T1004 | **`POST /api/test-model`**：测模型端点是否可用。**2.0 的语义可能与 1.0 不同**（换模型已改成「重启 2.0」）——先读 1.0 那条做什么，再决定 2.0 版测的是什么 |
+| T1005 | **结果读侧三条**：`GET /api/runs/{id}/keyframe-analysis`、`/memory-effectiveness`、`/export-trace`。前两条要从 run 的 `results.jsonl` 里算（S9b-1 的 `domain/runs/analysis.py` 已有那批纯函数可扩），第三条是导出下载 |
+| T1006 | 收口：photobench 的 openapi 重跑、`capability-map` / `photobench-module-map` / `behaviour-baseline`、真机验收（**对 1.0 的真实 run 结果跑一遍**，比对 1.0 的响应） |
+
+**S10a 的风险点**：`keyframe-analysis` 与 `memory-effectiveness` 是**两条最重的计算**
+（1.0 的前端里对应 `:1810-2055` 那 245 行图数据构造）。**先读 1.0 的 handler 到底返回什么**，
+再决定是「后端算好给前端」还是「原样透出原始数据让前端算」——1.0 是哪一种就照哪种。
+
+---
+
+## 1.6 裁决
+
+| # | 问题 | 裁决 |
+|---|---|---|
+| ① | 7 个后端缺口怎么处理 | **拆两段**：S10a 补后端 → S10b 重写前端 |
+| ② | 前端端口 | 待核（建议 4275，`apps/web` 用 4274；后端在 8772） |
+| ③ | 要不要引 `echarts` | **引**。1.0 的遥测图、记忆层级图全靠它；主产品那条「生产依赖只有 3 个」是 `apps/web` 的约束，PhotoBench 是另一个 app |
 
 ---
 
