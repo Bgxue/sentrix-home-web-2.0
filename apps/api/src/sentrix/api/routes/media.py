@@ -43,6 +43,11 @@ def to_summary(asset: Asset) -> AssetSummary:
             if asset.captured_location
             else None
         ),
+        # 关键帧血缘原样带出：普通照片是 None，派生帧是迁移 0010 那三列。1.0 的
+        # ``SELECT *`` 顺带回了它们（``db.py:1505``），2.0 的窄投影不能少。
+        derived_kind=asset.derived_kind,
+        parent_asset_id=asset.parent_asset_id,
+        source_timestamp_sec=asset.source_timestamp_sec,
     )
 
 

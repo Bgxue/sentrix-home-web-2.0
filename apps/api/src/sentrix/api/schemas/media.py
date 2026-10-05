@@ -37,6 +37,13 @@ class AssetSummary(BaseModel):
     status: str
     captured_at: str | None
     gps: dict[str, float] | None
+    # 关键帧血缘（迁移 0010），普通资产为 None。1.0 的 ``/api/assets`` 是
+    # ``SELECT * FROM assets``（``db.py:1505``），这几列顺带就回了；2.0 的窄投影漏了
+    # 它们，于是 PhotoBench 的关键帧分析（``benchmark_orchestrator.py:5712/5724/5798``）
+    # 在 2.0 的数据上认不出派生帧、也算不出采样间隔。**列表与单条都带**（同一个 schema）。
+    derived_kind: str | None = None
+    parent_asset_id: str | None = None
+    source_timestamp_sec: float | None = None
 
 
 class AssetListResponse(BaseModel):

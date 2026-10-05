@@ -21,7 +21,15 @@ def list_memory_spaces(request: Request) -> dict[str, list[dict[str, str]]]:
     spaces = request.app.state.container.spaces.list_all()
     return {
         "spaces": [
-            {"id": space.id, "name": space.name, "kind": space.kind, "status": space.status}
+            {
+                "id": space.id,
+                "name": space.name,
+                "kind": space.kind,
+                "status": space.status,
+                # 1.0 的 ``SELECT *`` 把它一起回了，而 PhotoBench 按它排「新创建的在前」
+                # 并挑最新 scope 做复用基座。少了它那两处退化成空串比较（S10a）。
+                "created_at": space.created_at,
+            }
             for space in spaces
         ]
     }

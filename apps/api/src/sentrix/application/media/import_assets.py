@@ -277,11 +277,16 @@ class ImportAssets:
         # 因为拍摄时间/GPS 要跟 EXIF 一样在**建资产之前**拿到——否则视频的
         # captured_at 只能退回导入时刻，而导入时刻与拍摄时间不是一回事。
         video_probe: VideoProbe | None = None
+        # 视频阶段的计时起点。**用注入的 ``self._clock()``（datetime），不用 ``time.perf_counter()``**
+        # ——后者在测试里无法替换，计时就测不了。终点在场景抽取之后（见文件尾），与 1.0
+        # ``video_processing_seconds`` 覆盖「整个视频处理阶段」对齐（``processor.py:205/420``）。
+        video_started: datetime | None = None
         if (
             media_type is MediaType.VIDEO
             and self._video_metadata is not None
             and self._video_repository is not None
         ):
+            video_started = self._clock()
             video_probe = self._probe_video(asset_id, stored_path)
             if video_probe.metadata is not None:
                 captured_at = video_probe.metadata.captured_datetime() or captured_at
@@ -339,6 +344,14 @@ class ImportAssets:
         # 场景抽取排在图片流水线**之后**：它自己会再建一批资产与观察（关键帧），
         # 先跑会把派生物的数混进「这次导入」的结果里。
         video_scenes = self._extract_video_scenes(asset)
+
+        # 整个视频阶段的秒数落库**排在场景抽取之后**：1.0 的 ``video_processing_seconds``
+        # 覆盖的是「探测 → 图片流水线 → 抽帧建场景」整段（``processor.py:205/420``），
+        # 而场景抽取是最后一步，所以只能等它跑完再写。**探测失败也写**——那一段确实跑过了。
+        if video_probe is not None and self._video_repository is not None and video_started is not None:
+            self._video_repository.save_processing_seconds(
+                asset.id, round((self._clock() - video_started).total_seconds(), 3)
+            )
 
         return ImportResult(
             asset_id=asset.id,

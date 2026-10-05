@@ -170,4 +170,116 @@ apps/photobench/web/            ← 与 apps/photobench/src/ 平级，照 apps/a
 
 ## 3. 施工记录
 
-（动工后填）
+### 3.1 S10a 交付（2026-10-05）
+
+**端点：16 → 27 条**（`packages/contracts/openapi/photobench.yaml`）。
+
+| 任务 | 端点 | 落点 |
+|---|---|---|
+| T1001 | `GET /api/manifests`、`/api/manifests/{id}`、`/api/qa-dataset` | `api/routes/datasets.py` + `domain/datasets/{catalog,qa_media}.py` |
+| T1002 | `GET /api/albums/{album}/{coll}/{file_name}`、`/api/assets/{id}/file` | `api/routes/{datasets,assets}.py` |
+| T1003 | `GET /api/memory-spaces` | `api/routes/spaces.py` + `domain/runs/reuse.py` |
+| T1004 | `POST /api/test-model` | `api/routes/model_profiles.py` |
+| T1005 | `GET /api/runs/{id}/{keyframe-analysis,memory-effectiveness,export-trace,export-sft}` | `api/routes/reports.py` + `application/runs/reports.py` + `domain/runs/{keyframe_analysis,memory_effectiveness,exports}.py` |
+
+**T1005 那两条计算，1.0 是「后端算好给前端」。** 这是动工前核查的第一个问题（本节
+原本把它列为最大风险）：`get_keyframe_analysis` 返回的是 6 组算好的指标、
+`get_memory_effectiveness` 返回的是 5 层表格 + 错误链诊断 + 证据有效性三张表，
+**不是原始数据**。所以 2.0 同样把计算留在后端，逐行移植。
+
+### 3.2 计划外的范围改动
+
+**S10a 扩到了 `apps/api`**——四处补数，全部是「恢复 1.0 有过的东西」：
+
+| # | 补什么 | 用户裁决 |
+|---|---|---|
+| 1 | `AssetSummary` 加 `derived_kind` / `parent_asset_id` / `source_timestamp_sec` | 2026-10-05 裁决 |
+| 2 | `VideoMetadata` 加 `frame_count`（ffprobe `nb_frames`） | 2026-10-05 裁决 |
+| 3 | `VideoPayload` 加 `processing_seconds`（视频流水线计时） | 2026-10-05 裁决 |
+| 4 | spaces 加 `created_at` | 施工中发现，同族第 4 例，按既有口径直接做 |
+
+一句话：**1.0 的读侧是 `SELECT *`，2.0 换窄投影时丢掉了几列，而那几列有真实读者。**
+详细证据、代价与备选方案见 `s10-deviations.md` §1.1 / §2.1 / §2.2 / §4.4。
+
+### 3.3 验证
+
+| 项 | 结果 |
+|---|---|
+| 用例 | `apps/photobench` 408 → 449 条全绿 |
+| 定点变异 | **17/17 全部被杀**（领域 9 + 应用 4 + 数据层 8/4 见 §3.4） |
+| 分层契约 | 11 条全 KEPT（含 `photobench-isolation`） |
+| 可达性 / 模块地图 / 能力地图 | 各 0 问题 |
+| 两份 openapi 契约 | 重跑后 `--check` 一致 |
+| 覆盖率 | domain + application **93.54%**（门禁 85%） |
+| 真机差分 | **4 个 run 逐字段一致**，见 §3.5 |
+
+### 3.4 定点变异清单
+
+**领域层**（`domain/runs/`，9 条）：血缘父级映射清空 / 工具轨迹回退不筛 `media_kind` /
+时间戳只剩 `metadata_json` 一级 / 分母为 0 回 0 而不是 `None` / 血缘覆盖不回溯父视频 /
+工具成功状态表多收一个词 / 0 分题判据改成 2 分 / `export_traces` 取第一个而非最后一个
+model 步 / `export_sft` 的 `if-elif` 变成两个 `if`。
+
+**应用层**（`application/runs/reports.py`，4 条）：关键帧分析不再把「取不到资产清单」
+当 `unavailable` / 逐视频取元数据不筛 `media_type` / 没有 scope 仍去打一次清单 /
+记忆有效性不再吞掉取数失败。
+
+**数据层**（`apps/api` 与展示层，8 条）：血缘列不读回 / `frame_count` 恒 0 /
+计时起点为 `None` / spaces 的 `created_at` 回空串 / manifests 跳过缺 `album_id` 的目录 /
+qa-dataset 双参数校验 / 文件名穿越拦截 / `sentrix_url` 参数失效。
+
+**写用例时发现我自己两条断言是错的**（都是直觉而非 1.0 口径），已改：单个关键帧的
+`mean_span_sec` 我断言 `0.0`——1.0 的收集条件是 `len(values) > 1`，一个点**既不产生
+间隔也不产生跨度**，是 `None`；`levels.L1.created` 我按成功次数算——它数的是**调用
+次数**，失败的那次进 `ineffective`。
+
+### 3.5 真机验收
+
+**差分方法（重要，因为直觉上容易做错）。** 不能「打两个 HTTP 端点比」——那比的是
+「两个后端 + 两个环境」。实测时 1.0 的 Sentrix（8091）没起、2.0 的（8191）起着但那个
+scope 不存在，于是**同一个原因（资产清单取不到）在两边会走到不同分支**：「取不到」→
+`unavailable`，「取到了是空的」→ 工具轨迹回退，比出来的是环境不是代码。
+
+所以验收脚本（`scripts/diff_photobench_reports.py`，随本次提交进仓库，事后可复跑）
+把环境按住：**把两边取资产清单那一步都钉成「取到了、是空的」**，逼它们走同一条回退
+路径，再逐字段比输出。
+
+**结果**：
+
+| run | album | keyframe-analysis | memory-effectiveness |
+|---|---|---|---|
+| `20261002-162809-…reuse-478e58` | album3-max-video10（1167 题） | 47 字段一致 | 260 字段一致 |
+| `20260903-084309-…kling-5df6ff` | album3-kling | 46 字段一致 | 254 字段一致 |
+| `20260815-111203-…album3-14-bc467e` | album3-14 | 46 字段一致 | 253 字段一致 |
+| `20260827-195432-…build-d1f8e4` | album3-max-video10 | 46 字段一致 | 244 字段一致 |
+
+**约 1200 个字段，零差异。**
+
+**其余端点的真机取证**：
+
+- `export-trace` 在 1167 题那个 run 上：200，`Content-Disposition` 正确，
+  **5.4 MB / 416 题，中文零转义**（验到 `ensure_ascii=False` 那条）。
+- `keyframe-analysis` 与 `memory-effectiveness` 在该 run 上给出实质结论：
+  回退路径恢复出 10 个视频 + 10 个关键帧；记忆有效性的错误链主表是
+  `memory_hit_wrong 498` vs `memory_miss_wrong 65`——**大部分错误发生在召回之后**
+  （证据选择 / 推理），不是检索。这正是这块面板存在的意义。
+- 数据集端点实测：`/api/manifests` 列出 5 个相册；`/api/albums/album3/photos/<file>`
+  200 + `image/jpeg`；带 `Range: bytes=0-9` → 206 + `Content-Range: bytes 0-9/2032828`。
+
+### 3.6 一次**环境导致的** CI 失败（不是本次改动）
+
+最后一轮 `make ci` 在 `coverage` 步骤退出 1，但**不是代码问题**：
+
+- 覆盖率自身 **93.54%**（门禁 85%）**通过**；
+- 2491 passed / 10 skipped / **3 errors**，3 个 error 全在 `apps/api/tests/e2e/`，
+  原因是 `模型端点 http://127.0.0.1:8100/v1 不可达：[Errno 111] Connection refused`；
+- **同一份源码的上一次全量 `make ci` 退出码 0**（那次 8100 还活着）。
+
+8100 的日志显示它在当天 13:53 于 llama.cpp 内部崩溃（`server_queue::yield_to_queue`
+的栈回溯），不是 S9 记录过的「干净退出」。**复跑全量门禁需要先把它拉起来**——
+它的启动参数不在 runbook 里（`docs/runbooks/153-services.md` 只写「见部署脚本」），
+所以没有自行重启。
+
+顺带发现：**8091（1.0 生产 API）自 2026-09-29 19:05 起就是 dead**（systemd
+`sentrix-api.service`，被 SIGTERM 终止），与本次改动无关，已单独上报。
+

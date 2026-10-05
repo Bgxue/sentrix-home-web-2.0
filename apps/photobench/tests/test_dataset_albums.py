@@ -131,3 +131,42 @@ def test_a_broken_policy_file_does_not_take_the_dataset_down(tmp_path: Path):
     broken = JsonAlbumSource(tmp_path, tmp_path / "qa_task_actions.json")
     assert broken.qa_rows("album-x", "qa-1") == [{"qa_id": "q1", "question": "谁?", "answer": "明明"}]
     assert source.qa_rows("album-x", "qa-1")[0]["expected_action"] == "answer"
+
+
+# ---- S10a：展示层加的两个方法（列表与媒体交付） -----------------------------
+
+
+def test_list_album_ids_is_sorted_and_directories_only(tmp_path: Path):
+    """``GET /api/manifests`` 靠它遍历；1.0 那边是 ``sorted(iterdir())``。
+
+    夹具混进一个**文件**（``README.txt``）与两个目录，名字顺序刻意不是排序后的顺序
+    ——只列目录且按名字排序的实现才会给出 ``["album-x", "zzz"]``。
+    """
+    source = _source(tmp_path)
+    (tmp_path / "zzz").mkdir()
+    (tmp_path / "README.txt").write_text("x", encoding="utf-8")
+    assert source.list_album_ids() == ["album-x", "zzz"]
+
+
+def test_media_file_returns_the_path_inside_the_collection(tmp_path: Path):
+    source = _source(tmp_path)
+    assert source.media_file("album-x", "photos", "a.jpg") == str(tmp_path / "album-x" / "photos" / "a.jpg")
+
+
+def test_media_file_blocks_every_traversable_segment(tmp_path: Path):
+    """三段都来自 URL，所以三段都要拦。
+
+    夹具在**数据根之外**放一份真文件：不拦的实现会把它交出去，只判「文件在不在」的
+    实现同样会交出去——所以断言必须落在「返回了 None」，而不是「抛了什么」。
+    """
+    source = _source(tmp_path)
+    (tmp_path.parent / "secret.txt").write_text("TOP SECRET", encoding="utf-8")
+
+    assert source.media_file("..", "photos", "a.jpg") is None
+    assert source.media_file("album-x/..", "photos", "a.jpg") is None
+    assert source.media_file("album-x", "..", "secret.txt") is None
+    assert source.media_file("album-x", "photos", "../a.jpg") is None
+    assert source.media_file("album-x", "photos", "../../secret.txt") is None
+    assert source.media_file("album-x", "photos", "/etc/passwd") is None
+    # 白名单之外的一级目录名也要拦住（1.0 在路由里判，2.0 两处都判）。
+    assert source.media_file("album-x", "not-a-collection", "a.jpg") is None

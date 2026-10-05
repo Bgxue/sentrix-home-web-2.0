@@ -21,7 +21,8 @@ from sentrix.infrastructure.persistence.database import Database
 
 _ASSET_COLUMNS = (
     "id, scope_id, file_name, media_type, path, mime_type, size_bytes, status,"
-    " content_sha256, captured_at, gps_latitude, gps_longitude, created_at, updated_at"
+    " content_sha256, captured_at, gps_latitude, gps_longitude, created_at, updated_at,"
+    " derived_kind, parent_asset_id, source_timestamp_sec"
 )
 
 
@@ -47,6 +48,11 @@ def _row_to_asset(row: sqlite3.Row) -> Asset:
         ),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+        # 迁移 0010 的三列。1.0 的 ``SELECT *`` 顺带把它们回了，PhotoBench 的关键帧
+        # 分析读它们认血缘、算时间跨度——窄投影漏掉之后那条链在 2.0 就断了。
+        derived_kind=row["derived_kind"],
+        parent_asset_id=row["parent_asset_id"],
+        source_timestamp_sec=row["source_timestamp_sec"],
     )
 
 
@@ -55,6 +61,14 @@ class SqliteAssetRepository:
         self._database = database
 
     def add(self, asset: Asset) -> None:
+        """插入一条**通用**资产（新导入的照片/视频/音频）。
+
+        **血缘三列不在这里的列清单里**：这条路进来的从来不是派生物，它们的
+        ``derived_kind`` / ``parent_asset_id`` / ``source_timestamp_sec`` 恒为 NULL
+        （``Asset`` 上那三位就是默认 ``None``）。派生帧由 ``SqliteVideoRepository.add_derived``
+        一次写齐。所以 ``_ASSET_COLUMNS``（读）比这里的 INSERT 列清单多三列是**有意**的——
+        读要带回派生物的血缘，写只服务非派生物。
+        """
         with self._database.connect() as connection, connection:
             connection.execute(
                 "INSERT INTO assets (id, scope_id, file_name, media_type, path, mime_type,"

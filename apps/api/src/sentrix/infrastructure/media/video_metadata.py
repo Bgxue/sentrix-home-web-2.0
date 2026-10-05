@@ -76,6 +76,15 @@ class FfprobeVideoMetadataReader:
             except ValueError:
                 rotation = 0
         fps = _rate(video.get("avg_frame_rate")) or _rate(video.get("r_frame_rate"))
+        # 原片总帧数：1.0 唯一的读侧是 PhotoBench 的关键帧分析，它从
+        # ``raw.streams[].nb_frames`` 取（``benchmark_orchestrator.py:5723-5726``），
+        # 口径是 ``int(frames or 0)`` 且类型不对就吞掉。**照抄这个容错**：很多容器
+        # （尤其流式 mp4）根本不给 ``nb_frames``，缺了就是 0，不是错误、不该 raise。
+        frames = video.get("nb_frames")
+        try:
+            frame_count = int(frames or 0)
+        except (TypeError, ValueError):
+            frame_count = 0
         duration = float(format_info.get("duration") or video.get("duration") or 0)
         device = " ".join(
             filter(
@@ -99,4 +108,5 @@ class FfprobeVideoMetadataReader:
             rotation=rotation,
             device=device,
             creation_source=creation_source,
+            frame_count=frame_count,
         )

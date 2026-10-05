@@ -47,6 +47,11 @@ def test_video_detail_returns_the_video_and_its_metadata(client: TestClient):
     assert body["video"]["media_type"] == "video"
     assert body["video"]["metadata"]["duration_sec"] == pytest.approx(12.5)
     assert body["video"]["metadata"]["codec"] == "h264"
+    # 原片总帧数：1.0 藏在 raw 里，PhotoBench 的关键帧分析读它（假件固定 300）。
+    # 少了这条，「适配器读了 nb_frames 但路由没往外带」不会被发现。
+    assert body["video"]["metadata"]["frame_count"] == 300
+    # 整个视频阶段的秒数：导入时写、读回来（假 clock 不在此容器里，只断言「有值」）。
+    assert body["video"]["processing_seconds"] is not None
     assert body["video"]["captured_location"] == "22.484600,114.543800"
     # S8b 起场景成型（T512）：12.5 秒的片子落在 60 秒那一个窗里，正好一个场景。
     # 这里不能只断言「非空」——场景必须带着血缘指回源片，否则「跳回原片」没落点。

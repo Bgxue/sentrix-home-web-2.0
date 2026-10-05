@@ -107,9 +107,14 @@ def _captured_datetime(text: str | None) -> datetime | None:
 
 
 # 视频拍摄时间/GPS 的抽取结果。字段逐个照抄 1.0 ``backend/video/contracts.py`` 的
-# ``VideoMetadata``（``probe_video_metadata`` 的返回形状），只有 ``raw`` 不搬——
-# 那是整包 ffprobe JSON，1.0 写进 ``metadata_json.video_metadata`` 之后没有任何读侧用过，
-# 留在 2.0 只会让每导入一个视频就在库里塞一份完整的流/标签树（见 ``s8-deviations.md`` §4）。
+# ``VideoMetadata``（``probe_video_metadata`` 的返回形状），只有整包 ``raw`` 不搬。
+#
+# **``raw`` 不搬的理由在 2026-10-05 被修正。** S8 原先的判词是「1.0 写进
+# ``metadata_json.video_metadata`` 之后没有任何读侧用过」——那句话只查了主产品读侧，
+# 漏了另一个服务：PhotoBench 的关键帧分析（``services/photobench/backend/
+# benchmark_orchestrator.py`` 的 ``get_keyframe_analysis``）从 ``raw.streams[].nb_frames``
+# 取原片总帧数算采样间隔（``:5724``）。整包 raw 仍不搬（几十 KB 的流/标签树，只有一个
+# 读者），**只把它真正要用的那一个整数搬成 ``frame_count``**。
 #
 # **它落在 domain 而不是 infrastructure**：形状是领域词汇（时长/编码/旋转角），
 # 谁去读那个文件（ffprobe 子进程）才是 infrastructure 的事。
@@ -127,6 +132,11 @@ class VideoMetadata:
     rotation: int = 0
     device: str = ""
     creation_source: str = ""
+    # 原片总帧数，取自 ffprobe 视频流的 ``nb_frames``。1.0 它埋在整包 ``raw`` 里，
+    # 唯一读者是 PhotoBench 的关键帧分析（``benchmark_orchestrator.py:5724``，1.0 的
+    # 容错口径是 ``int(frames or 0)`` 且缺了就当 0）。**缺了就是 0，不是错误**：
+    # 很多容器根本不给 ``nb_frames``（见 ``infrastructure/media/video_metadata.py``）。
+    frame_count: int = 0
 
     def gps(self) -> GpsPoint | None:
         """经纬度 -> ``GpsPoint``，两个都解析出来才算。"""
@@ -200,6 +210,17 @@ class Asset:
     captured_location: GpsPoint | None
     created_at: datetime
     updated_at: datetime
+    # 关键帧血缘（迁移 0010）。派生物**本来就是 ``media_type='image'`` 的普通资产**
+    # （1.0 ``video/processor.py:188``），没有这三列就与真照片分不开。
+    # 1.0 的 ``/api/assets`` 是 ``SELECT * FROM assets``（``db.py:1505``），顺带把这几列
+    # 一起回了；2.0 的 ``AssetSummary`` 是窄投影，S8 只查主产品读侧、漏了 PhotoBench——
+    # 它靠 ``derived_kind`` / ``parent_asset_id`` 认出「这张图是某段视频的派生帧」，
+    # 靠 ``source_timestamp_sec`` 算采样间隔与覆盖跨度（``benchmark_orchestrator.py:5712/5798``）。
+    # 所以它们回到 ``Asset`` 上，并在 ``/assets``（列表与单条）一并暴露。
+    # 默认 ``None``：普通照片本就没有血缘（见 ``SqliteAssetRepository.add`` 的插入列）。
+    derived_kind: str | None = None
+    parent_asset_id: str | None = None
+    source_timestamp_sec: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.media_type, MediaType):

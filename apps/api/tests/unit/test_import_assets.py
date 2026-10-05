@@ -1,6 +1,8 @@
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.domain.media.models import (
@@ -190,12 +192,35 @@ class FakeVideoTranscoder:
 class FakeVideoRepository:
     def __init__(self) -> None:
         self.probes: dict[str, object] = {}
+        self.processing_seconds: dict[str, float] = {}
 
     def save_probe(self, asset_id, probe):
         self.probes[asset_id] = probe
 
+    def save_processing_seconds(self, asset_id, seconds):
+        self.processing_seconds[asset_id] = seconds
+
     def probe(self, asset_id):
         return self.probes.get(asset_id)
+
+
+class SteppingClock:
+    """可替换的 ``clock``：每次调用前进 ``step``，并记下每次返回值。
+
+    用例据此算期望耗时——这样「用 ``time.perf_counter`` 而不是注入时钟」的实现会被
+    钉住（落在 ``processing_seconds`` 上的会是一个真实的小数，与 clock 的差对不上）。
+    """
+
+    def __init__(self, start: datetime, step_seconds: float) -> None:
+        self._value = start
+        self._step = timedelta(seconds=step_seconds)
+        self.calls: list[datetime] = []
+
+    def __call__(self) -> datetime:
+        current = self._value
+        self.calls.append(current)
+        self._value = self._value + self._step
+        return current
 
 
 VIDEO_METADATA = VideoMetadata(
@@ -209,7 +234,7 @@ VIDEO_METADATA = VideoMetadata(
 )
 
 
-def build_video(*, metadata_reader, transcoder=None):
+def build_video(*, metadata_reader, transcoder=None, clock=None, scene_extractor=None):
     assets, observations, storage = FakeAssets(), FakeObservations(), FakeStorage()
     videos = FakeVideoRepository()
     use_case = ImportAssets(
@@ -220,6 +245,8 @@ def build_video(*, metadata_reader, transcoder=None):
         video_metadata=metadata_reader,
         video_transcoder=transcoder,
         video_repository=videos,
+        video_scene_extractor=scene_extractor,
+        clock=clock or (lambda: datetime.now(UTC)),
     )
     return use_case, assets, videos
 
@@ -320,6 +347,35 @@ def test_video_import_without_the_probe_chain_still_works():
 
     assert result.media_type is MediaType.VIDEO
     assert result.video_probed is False
+
+
+def test_video_processing_seconds_cover_the_whole_stage_including_scene_extraction():
+    """整个视频阶段的秒数要落库，且范围覆盖到**场景抽取之后**。
+
+    1.0 的 ``video_processing_seconds`` 是整个视频处理阶段的耗时
+    （``processor.py:205/420``），PhotoBench 的关键帧分析读它算 ``realtime_factor``。
+    计时必须用注入的 ``clock``：这里比对「落库值」与「起止两次 clock 调用之差」——
+    若实现改用 ``time.perf_counter``，落库值会是真实耗时而与这个差对不上。
+    让场景抽取也耗掉一个 step，则「计时在抽帧前就结束」的实现会少算一截。
+    """
+    clock = SteppingClock(datetime(2026, 1, 1, tzinfo=UTC), step_seconds=1.25)
+
+    def extract_scene(_asset_id: str) -> int:
+        clock()  # 场景抽取这一步也消耗时间
+        return 1
+
+    use_case, _, videos = build_video(
+        metadata_reader=FakeVideoMetadata(VIDEO_METADATA), clock=clock, scene_extractor=extract_scene
+    )
+
+    result = use_case.execute(
+        ImportRequest(scope_id="album1", file_name="clip.mov", content_type=None, content=b"mov")
+    )
+
+    recorded = videos.processing_seconds[result.asset_id]
+    expected = (clock.calls[-1] - clock.calls[0]).total_seconds()
+    assert expected > 0
+    assert recorded == pytest.approx(expected)
 
 
 # ---- S8c：音频入库（T521） -----------------------------------------------------------

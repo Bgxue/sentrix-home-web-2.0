@@ -44,6 +44,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
+from photobench.domain.http.ports import HttpStream
+
+#: 2.0 主 API 的 REST 前缀。1.0 是 ``/api``。
+#:
+#: **定义放在这里，不放在适配器里。** 打主 API 的不止主链那一处：``GET
+#: /api/memory-spaces`` 的转发与 ``/api/qa-dataset`` 的媒体解析也要拼地址，而它们
+#: 用的是**请求里带的** ``sentrix_url``（不是配置里那台），没法复用本文件的适配器。
+#: 前缀写两份，改一处就会漏一处——那种漏是「某个面板永远空着」而不是报错。
+API_PREFIX = "/api/v1"
+
 
 @runtime_checkable
 class SentrixClient(Protocol):
@@ -121,5 +131,16 @@ class SentrixClient(Protocol):
 
         返回 ``{turn_id, status, public_progress, result, error}``。终态由调用方判
         （``pending`` / ``running`` 之外都是终态）——这个端口不替调用方决定要等多久。
+        """
+        ...
+
+    def open_asset_file(
+        self, asset_id: str, *, range_header: str | None = None, timeout: int = 60
+    ) -> HttpStream:
+        """``GET /api/v1/assets/{id}/file``，**流式**（1.0 ``_proxy_sentrix_asset`` ``:7992``）。
+
+        它不是评测主链的一步，而是 ``GET /api/assets/{id}/file`` 那条代理的取数口。
+        ``range_header`` 原样转发（视频拖动靠它）；状态码与响应头都不在这里解释，
+        由 HTTP 层决定转哪几个。
         """
         ...

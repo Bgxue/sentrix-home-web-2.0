@@ -22,9 +22,13 @@ from fastapi import APIRouter, FastAPI
 
 from photobench import __version__
 from photobench.api import errors
+from photobench.api.routes import assets as assets_routes
 from photobench.api.routes import config as config_routes
+from photobench.api.routes import datasets as datasets_routes
 from photobench.api.routes import model_profiles as model_profiles_routes
+from photobench.api.routes import reports as reports_routes
 from photobench.api.routes import runs as runs_routes
+from photobench.api.routes import spaces as spaces_routes
 from photobench.api.routes import suites as suites_routes
 from photobench.bootstrap.container import Container
 from photobench.config import Settings
@@ -57,8 +61,16 @@ def create_app(
     # ``/runs/{id}`` 区分开，先挂的一方在同形路径上优先匹配。
     api.include_router(suites_routes.router)
     api.include_router(runs_routes.router)
+    # 报告三条与 ``/runs/{id}`` 不同形（多一段路径），挂载顺序不影响匹配；
+    # 与写侧同批挂在只读侧之后即可。
+    api.include_router(reports_routes.router)
     api.include_router(config_routes.router)
     api.include_router(model_profiles_routes.router)
+    # S10a 的展示层四条（1.0 ``do_GET`` 的 ``/api/manifests*`` / ``/api/qa-dataset`` /
+    # ``/api/memory-spaces`` / 两条媒体）：路径与上面几条不重叠，挂最后不影响匹配。
+    api.include_router(datasets_routes.router)
+    api.include_router(spaces_routes.router)
+    api.include_router(assets_routes.router)
     app.include_router(api)
 
     if scan_in_background:

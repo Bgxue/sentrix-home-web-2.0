@@ -189,6 +189,53 @@ def test_no_video_stream_raises_value_error():
         probe(payload)
 
 
+def test_frame_count_comes_from_the_video_stream():
+    """原片总帧数取自视频流的 ``nb_frames``——1.0 唯一的读侧是 PhotoBench 的关键帧分析。
+
+    故意让 ``nb_frames`` 与别的字段不同源（时长 3、nb_frames 90），否则这条断言在
+    「永远返回 0」的实现下也是绿的。
+    """
+    payload = {
+        "format": {"duration": "3", "tags": {}},
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 640,
+                "height": 480,
+                "nb_frames": "90",
+                "tags": {},
+            }
+        ],
+    }
+
+    assert probe(payload).frame_count == 90
+
+
+def test_frame_count_is_zero_when_the_container_omits_it():
+    """很多容器不给 ``nb_frames``：缺了就是 0，不报错（1.0 的容错口径）。"""
+    assert probe(QUICKTIME_PAYLOAD).frame_count == 0
+
+
+def test_a_non_numeric_nb_frames_degrades_to_zero_instead_of_raising():
+    """``nb_frames`` 是 ``"N/A"`` 这类非数字时吞掉，回落 0——照抄 1.0 ``int(frames or 0)``。"""
+    payload = {
+        "format": {"duration": "1", "tags": {}},
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1,
+                "height": 1,
+                "nb_frames": "N/A",
+                "tags": {},
+            }
+        ],
+    }
+
+    assert probe(payload).frame_count == 0
+
+
 def test_half_a_coordinate_is_not_a_gps_point():
     """ISO6709 只解析出纬度时不算一个 GPS 点——半个坐标不该冒充一个完整位置。"""
     payload = {

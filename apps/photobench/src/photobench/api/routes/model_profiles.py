@@ -34,3 +34,15 @@ async def current_model(request: Request) -> dict[str, Any]:
     """1.0 ``:7844``。"""
     payload = await json_body(request)
     return get_container(request).model_profiles.current_model(payload)
+
+
+@router.post("/test-model")
+async def test_model(request: Request) -> dict[str, Any]:
+    """1.0 ``:7965``：「测试模型端点」按钮。
+
+    2.0 的换模型语义是「重启 2.0」（S9c · 用户裁决③），但那条只影响 run-execution 的
+    ``model_deploy`` 与前端交互——**探活本身没有副作用**，所以 2.0 版与 1.0 版逐行
+    相同，不往这里加重启语义。
+    """
+    payload = await json_body(request)
+    return get_container(request).model_profiles.test_model(payload)

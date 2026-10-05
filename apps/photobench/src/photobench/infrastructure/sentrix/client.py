@@ -20,7 +20,8 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
-from photobench.domain.http.ports import JsonHttpClient
+from photobench.domain.http.ports import HttpStream, JsonHttpClient
+from photobench.domain.sentrix.ports import API_PREFIX
 
 
 def _quote(value: str) -> str:
@@ -38,9 +39,9 @@ def _quote(value: str) -> str:
     return quote(value, safe="")
 
 
-#: 2.0 的 REST 前缀。1.0 是 ``/api``；S9c 的 T924 在 1.0 侧也叫这个名字，但那边指的是
-#: 「把 PhotoBench 自己打出去的路径全换成 v1」——这里一次到位，S9c 只剩收口。
-API_PREFIX = "/api/v1"
+#: 2.0 的 REST 前缀（``/api/v1``）现在定义在 ``domain.sentrix.ports``：打主 API 的
+#: 还有展示层那两条（``/api/memory-spaces`` 的转发与 ``/api/qa-dataset`` 的媒体解析），
+#: 它们用的是请求里带的 ``sentrix_url``，复用不了这个适配器，但必须用同一个前缀。
 
 
 class HttpxSentrixClient:
@@ -181,4 +182,17 @@ class HttpxSentrixClient:
             self._http.request_json(
                 self._url(f"/assistant/turns/{_quote(turn_id)}"), method="GET", timeout=timeout
             )
+        )
+
+    def open_asset_file(
+        self, asset_id: str, *, range_header: str | None = None, timeout: int = 60
+    ) -> HttpStream:
+        """``GET /api/v1/assets/{id}/file``（``api/routes/media.py:290`` 一带）。
+
+        ``Range`` 原样转发——视频的拖动条靠它；超时 60 秒照 1.0 的代理（``:8000``）。
+        状态码**不在这里判**：4xx/5xx 也是合法结果，要原样转给调用方。
+        """
+        headers = {"Range": range_header} if range_header else None
+        return self._http.stream_get(
+            self._url(f"/assets/{_quote(asset_id)}/file"), headers=headers, timeout=timeout
         )

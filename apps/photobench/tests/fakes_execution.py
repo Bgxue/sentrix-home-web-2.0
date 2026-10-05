@@ -329,6 +329,9 @@ class FakeAlbums:
         self.files = files or {}
         self.directory_entries = directory_entries or {}
         self.calls: list[tuple[str, str]] = []
+        #: S10a 加的两个展示层方法：album 名字表与「media 相对路径 -> 绝对路径」表。
+        self.album_ids: list[str] = []
+        self.media_files: dict[str, str] = {}
         self.integrity_data = integrity or {
             "algorithm": "sha256",
             "dataset_sha256": "deadbeef",
@@ -357,6 +360,14 @@ class FakeAlbums:
     def integrity(self, album_id: str, manifest: dict[str, Any], qa_set: str) -> dict[str, Any]:
         self.calls.append(("integrity", qa_set))
         return dict(self.integrity_data)
+
+    def list_album_ids(self) -> list[str]:
+        self.calls.append(("list_album_ids", ""))
+        return list(self.album_ids)
+
+    def media_file(self, album_id: str, collection: str, file_name: str) -> str | None:
+        self.calls.append(("media_file", f"{collection}/{file_name}"))
+        return self.media_files.get(f"{album_id}/{collection}/{file_name}")
 
 
 class FakeResultWriter:

@@ -223,3 +223,44 @@ def test_listing_assets_without_a_scope_covers_every_album(client: TestClient) -
     # 断言**两个相册都被覆盖**，而不只是条数对：条数对但两条都来自 album1 也是错的，
     # 而那种错在只看计数时看不出来。
     assert {item["file_name"] for item in everything} == {"a.jpg", "b.jpg"}
+
+
+def test_asset_endpoints_carry_the_keyframe_lineage(client: TestClient):
+    """``/assets`` 与 ``/assets/{id}`` 必须带回派生帧的血缘三列。
+
+    1.0 的 ``/api/assets`` 是 ``SELECT * FROM assets``，这几列顺带就回了；PhotoBench 的
+    关键帧分析靠 ``derived_kind`` / ``parent_asset_id`` 认派生物、靠
+    ``source_timestamp_sec`` 算时间跨度（``benchmark_orchestrator.py:5712/5798``）。
+    2.0 的窄投影漏了它们——这条同时钉住列表与单条两条路，并钉住「普通照片是 None」。
+    """
+    source_id = client.post(
+        "/api/v1/media/import",
+        files={"file": ("a.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"scope_id": "album1"},
+    ).json()["asset_id"]
+    database = client.app.state.container.database
+    with database.connect() as connection, connection:
+        connection.execute(
+            "INSERT INTO assets (id, scope_id, file_name, media_type, path, size_bytes, status,"
+            " content_sha256, created_at, updated_at, parent_asset_id, derived_kind,"
+            " source_timestamp_sec, source_frame_index, source_scene_index)"
+            " VALUES ('asset_frame', 'album1', 'f.jpg', 'image', '/media/f', 1, 'processed',"
+            " 'asset_frame', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', ?,"
+            " 'video_keyframe', 12.5, 7, 2)",
+            (source_id,),
+        )
+
+    items = client.get("/api/v1/assets", params={"scope_id": "album1"}).json()["items"]
+    derived = next(item for item in items if item["id"] == "asset_frame")
+    assert derived["derived_kind"] == "video_keyframe"
+    assert derived["parent_asset_id"] == source_id
+    assert derived["source_timestamp_sec"] == pytest.approx(12.5)
+    # 普通照片这三位是 None——「有血缘」与「没血缘」必须分得开。
+    plain = next(item for item in items if item["id"] == source_id)
+    assert plain["derived_kind"] is None
+    assert plain["parent_asset_id"] is None
+    assert plain["source_timestamp_sec"] is None
+    # 单条走的是同一个 schema，也要填。
+    single = client.get("/api/v1/assets/asset_frame").json()
+    assert single["derived_kind"] == "video_keyframe"
+    assert single["parent_asset_id"] == source_id

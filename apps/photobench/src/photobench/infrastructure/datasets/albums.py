@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from photobench.domain.datasets.catalog import ALBUM_MEDIA_COLLECTIONS
 from photobench.infrastructure.datasets.qa_metadata import (
     apply_task_action_defaults,
     load_jsonl,
@@ -81,6 +82,44 @@ class JsonAlbumSource:
         if not album_id or "/" in album_id or "\\" in album_id or album_id in {".", ".."}:
             raise KeyError(album_id)
         return self._data_root / album_id
+
+    def list_album_ids(self) -> list[str]:
+        """1.0 ``:5146-5147``：数据根下的条目名，**按名字排序**。
+
+        1.0 遍历的是 ``iterdir()`` 的**全部**条目（文件也进循环，只是 ``d /
+        "manifest.json"`` 不存在就跳过）。这里只留目录——数据根里那个 ``.gitkeep``
+        进不进循环对结果没有差别，而「只列目录」让这个方法的返回值与它的名字一致。
+        数据根不存在时回空表（1.0 的 ``if BENCHMARK_DATA_ROOT.exists()``）。
+        """
+        try:
+            entries = sorted(self._data_root.iterdir())
+        except OSError:
+            return []
+        return [entry.name for entry in entries if entry.is_dir()]
+
+    def media_file(self, album_id: str, collection: str, file_name: str) -> str | None:
+        """1.0 ``_resolve_album_media_file``（``:1188``），**三段都拦穿越**。
+
+        1.0 只比对 ``file_name`` 那一段（``media_path.is_relative_to(media_root)``），
+        而 ``album_id`` 是与它拼在一起的——``album_id="../../etc"`` 会让 ``media_root``
+        自己挪到根之外，比对随之失效。这里 ``album_id`` 先过 ``_album_dir``（挡住
+        ``/``、``\\``、``..``），``collection`` 白名单，``file_name`` 才做相对性比对。
+
+        ``collection`` 的白名单不能挪到路由去：只要这个方法能被直接调用，它就是
+        唯一知道「media 根在哪」的地方。两份判据里少一份，``collection="../../etc"``
+        就能读到 ``../../etc/passwd``。
+        """
+        if collection not in ALBUM_MEDIA_COLLECTIONS:
+            return None
+        try:
+            album_dir = self._album_dir(album_id)
+        except KeyError:
+            return None
+        media_root = (album_dir / collection).resolve()
+        media_path = (media_root / file_name).resolve()
+        if not media_path.is_relative_to(media_root) or not media_path.is_file():
+            return None
+        return str(media_path)
 
     def manifest(self, album_id: str) -> dict[str, Any]:
         path = self._album_dir(album_id) / "manifest.json"

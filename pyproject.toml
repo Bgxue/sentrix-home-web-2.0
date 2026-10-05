@@ -53,6 +53,14 @@ ignore_missing_imports = true
 module = ["onnxruntime", "onnxruntime.*", "insightface", "insightface.*", "cv2", "cv2.*"]
 ignore_missing_imports = true
 
+# 迁移期的差分脚本（``scripts/diff_photobench_reports.py``）按路径 import 1.0 的
+# ``benchmark_orchestrator``——**那份代码不在本仓库里**，它是被迁移的一方，所以没有
+# stub 可找。与上面几条同一条规矩：缺 stub 是环境事实，集中在配置里表达，
+# 而不是散落 ``# type: ignore``。
+[[tool.mypy.overrides]]
+module = ["benchmark_orchestrator"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 # 两个 app 的测试都进默认收集：PhotoBench 的用例不能被「记得单独跑」这件事决定跑不跑。
 testpaths = ["apps/api/tests", "apps/photobench/tests"]

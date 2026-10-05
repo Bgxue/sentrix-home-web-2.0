@@ -108,6 +108,7 @@ class FakeVideoMetadataReader:
             codec=codec,
             device="Apple iPhone 14 Plus",
             creation_source="com.apple.quicktime.creationdate",
+            frame_count=300,
         )
 
 

@@ -30,12 +30,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from photobench.application.config.service import ConfigService
+from photobench.application.datasets.service import DatasetCatalog
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.model_profiles.service import ModelProfiles
 from photobench.application.run_execution.service import JudgeSettings, RunExecution, RunRequest
 from photobench.application.runs.index import RunIndex
 from photobench.application.runs.read_runs import ReadRuns
+from photobench.application.runs.reports import RunReports
 from photobench.application.runs.suites import RunSuites
+from photobench.application.spaces.service import MemorySpaces
 from photobench.config import Settings
 from photobench.domain.config.ports import ConfigStore, SecretEnvStore
 from photobench.domain.datasets.ports import AlbumSource, QaMetadataSource
@@ -89,7 +92,15 @@ class Container:
     config: ConfigService
     run_index: RunIndex
     runs: ReadRuns
+    #: S10a：三份报告读侧（关键帧分析 / 记忆有效性 / trace 导出）。与 ``runs``
+    #: **分开**：那三个都要打 Sentrix 取数，而 ``runs`` 是纯本地读。
+    reports: RunReports
     model_profiles: ModelProfiles
+    #: S10a：数据集展示层（``/api/manifests*`` / ``/api/qa-dataset`` / ``/api/albums/*``）
+    #: 与记忆空间列表（``/api/memory-spaces``）。两者都只读，且都吃 ``JsonHttpClient``
+    #: ——``memory-spaces`` 是 PhotoBench 唯一一处主动读 2.0 主 API 的展示层接口。
+    datasets: DatasetCatalog
+    spaces: MemorySpaces
     #: S9c · T923：换模型 = 重启 2.0 的进程控制面。**按 domain 端口声明**——
     #: S11 接管服务部署时替换的就是它的实现（见 ``domain/deploy/__init__.py``）。
     sentrix_process: SentrixProcess
@@ -221,11 +232,23 @@ class Container:
             # 才会在配置被写回之后用上新的地址——与 1.0 的 ``global`` 等价。
             sentrix_url=lambda: config.sentrix_url,
         )
+        reports = RunReports(
+            store=run_store,
+            http=http,
+            # 与 ``ReadRuns`` 同一个取值函数：1.0 的 ``DEFAULT_SENTRIX_URL`` 是
+            # 可被 ``POST /api/config`` 就地改写的全局量，传当前值会在配置写回后
+            # 仍打旧地址。
+            sentrix_url=lambda: config.sentrix_url,
+        )
         model_profiles = ModelProfiles(
             config=config,
             lifecycle_for=lifecycle_provider,
             inference_for=inference_provider,
         )
+        # 展示层的两条：都复用同一个 ``http``（主链与 judge 用的那个）——
+        # 再建一个客户端只会多一份连接池与一套超时默认值。
+        datasets = DatasetCatalog(albums=album_source, http=http, config=config)
+        spaces = MemorySpaces(http=http, config=config, index=run_index)
         run_suites = RunSuites(
             store=run_store,
             writer=result_writer,
@@ -256,7 +279,10 @@ class Container:
             config=config,
             run_index=run_index,
             runs=runs,
+            reports=reports,
             model_profiles=model_profiles,
+            datasets=datasets,
+            spaces=spaces,
             sentrix_process=sentrix_process,
             run_execution=run_execution,
             run_suites=run_suites,

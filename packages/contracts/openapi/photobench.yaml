@@ -461,6 +461,146 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/keyframe-analysis:
+    get:
+      tags:
+      - reports
+      summary: Keyframe Analysis
+      description: 1.0 ``:7724-7727``。
+      operationId: keyframe_analysis_api_runs__run_id__keyframe_analysis_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Keyframe Analysis Api Runs  Run Id  Keyframe Analysis
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/memory-effectiveness:
+    get:
+      tags:
+      - reports
+      summary: Memory Effectiveness
+      description: 1.0 ``:7728-7731``。
+      operationId: memory_effectiveness_api_runs__run_id__memory_effectiveness_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Memory Effectiveness Api Runs  Run Id  Memory Effectiveness
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/export-trace:
+    get:
+      tags:
+      - reports
+      summary: Export Trace
+      description: 1.0 ``:7789-7803``。``scores`` 与 ``min_score`` 同时生效（1.0 是两个独立的 ``if``）。
+      operationId: export_trace_api_runs__run_id__export_trace_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: scores
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Scores
+      - name: min_score
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Min Score
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/runs/{run_id}/export-sft:
+    get:
+      tags:
+      - reports
+      summary: Export Sft
+      description: 1.0 ``:7804-7819``。**给了 ``scores`` 就忽略 ``min_score``**（1.0 是 ``if/elif``）。
+      operationId: export_sft_api_runs__run_id__export_sft_get
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: scores
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Scores
+      - name: min_score
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Min Score
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/config:
     get:
       tags:
@@ -591,6 +731,248 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Current Model Api Current Model Post
+  /api/test-model:
+    post:
+      tags:
+      - model-profiles
+      summary: Test Model
+      description: '1.0 ``:7965``：「测试模型端点」按钮。
+
+
+        2.0 的换模型语义是「重启 2.0」（S9c · 用户裁决③），但那条只影响 run-execution 的
+
+        ``model_deploy`` 与前端交互——**探活本身没有副作用**，所以 2.0 版与 1.0 版逐行
+
+        相同，不往这里加重启语义。'
+      operationId: test_model_api_test_model_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Test Model Api Test Model Post
+  /api/manifests:
+    get:
+      tags:
+      - datasets
+      summary: List Manifests
+      description: 1.0 ``:7685``。
+      operationId: list_manifests_api_manifests_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Manifests Api Manifests Get
+  /api/manifests/{album_id}:
+    get:
+      tags:
+      - datasets
+      summary: Get Manifest
+      description: '1.0 ``:7689``。1.0 对路径参数做了一次 ``unquote``；FastAPI 自己会解，不再手动解。
+
+
+        读不到 → 404 ``{"error": "not found"}``（1.0 的文案就是这两个字）。'
+      operationId: get_manifest_api_manifests__album_id__get
+      parameters:
+      - name: album_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Album Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Manifest Api Manifests  Album Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/qa-dataset:
+    get:
+      tags:
+      - datasets
+      summary: Qa Dataset
+      description: 1.0 ``:7695``。``sentrix_url`` 缺省取配置里的——调用方可以指向别的 Sentrix。
+      operationId: qa_dataset_api_qa_dataset_get
+      parameters:
+      - name: album_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Album Id
+      - name: qa_set
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Qa Set
+      - name: sentrix_url
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Sentrix Url
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Qa Dataset Api Qa Dataset Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/albums/{album}/{coll}/{file_name}:
+    get:
+      tags:
+      - datasets
+      summary: Album Media
+      description: '1.0 ``:7713`` + ``_resolve_album_media_file``（``:1188``）+ ``_serve_file``（``:8020``）。
+
+
+        **``file_name`` 用 ``:path`` 收**：1.0 是 ``split("/", 2)``，所以第三段可以带子目录
+
+        （``photos/2026/a.jpg``）。用普通的 ``{file_name}`` 会让带子目录的名字落到 404 上。
+
+
+        **Range 不手写。** 1.0 的 ``_serve_file``（``:8020`` 起）自己解析 ``Range`` 并把
+
+        视频按段发；2.0 的 starlette 是 1.6.0，``FileResponse`` 原生支持 Range
+
+        （``responses.py:341`` 的 ``__call__``），非法 Range 也有同样的 416 +
+
+        ``Content-Range: bytes */<size>``。照抄那 60 行只会多一份会漂的实现。
+
+
+        **一处真实差异**：格式错误的 Range（比如 ``bytes=abc``）starlette 回 **400**，
+
+        而 1.0 的 ``re.fullmatch`` 不匹配时回 **416**。两者都带不了 body，且浏览器不会
+
+        发这种头，所以照 starlette 的行为走，登记在行为基线里。'
+      operationId: album_media_api_albums__album___coll___file_name__get
+      parameters:
+      - name: album
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Album
+      - name: coll
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Coll
+      - name: file_name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: File Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/memory-spaces:
+    get:
+      tags:
+      - spaces
+      summary: List Memory Spaces
+      operationId: list_memory_spaces_api_memory_spaces_get
+      parameters:
+      - name: sentrix_url
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Sentrix Url
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Memory Spaces Api Memory Spaces Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/assets/{asset_id}/file:
+    get:
+      tags:
+      - assets
+      summary: Get Asset File
+      description: '1.0 ``:7724-7730``。非法 id → 400 ``invalid asset id``；上游 HTTP 错误
+        →
+
+
+        ``{"error": "asset proxy failed: {code}"}`` 且状态码同上游。
+
+
+        **``asset_id`` 用 ``:path`` 收**：1.0 是在**整条路径**上判
+
+        ``startswith("/api/assets/") and endswith("/file")``，所以 ``/api/assets/a/b/file``
+
+        会走到「id 里有 ``/`` → 400」。用普通的 ``{asset_id}``，那条请求在 2.0 会先撞上
+
+        路由不匹配，回的是 FastAPI 的 404 ``{"detail": ...}``——形状与 1.0 不同。'
+      operationId: get_asset_file_api_assets__asset_id__file_get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     HTTPValidationError:

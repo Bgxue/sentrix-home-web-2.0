@@ -20,12 +20,15 @@ from sentrix.domain.media.models import Asset, DerivedAsset, VideoMetadata
 from sentrix.domain.media.ports import VideoProbe
 from sentrix.infrastructure.persistence.database import Database
 
-# 写进 ``assets.metadata_json`` 的四个键。前三个是 1.0 的键名（``processor.py:118-121``），
-# 第四个是 2.0 加的（探测失败的原因，1.0 那时是整条资产标 failed）。
+# 写进 ``assets.metadata_json`` 的键。前三个是 1.0 的键名（``processor.py:118-121``），
+# ``video_probe_error`` 是 2.0 加的（探测失败的原因，1.0 那时是整条资产标 failed），
+# ``video_processing_seconds`` 是 1.0 的键名（``processor.py:205`` / ``:420``，
+# PhotoBench 的关键帧分析读它，S8a 补回）。
 _VIDEO_METADATA_KEY = "video_metadata"
 _PREVIEW_PATH_KEY = "browser_preview_path"
 _PREVIEW_ERROR_KEY = "browser_preview_error"
 _PROBE_ERROR_KEY = "video_probe_error"
+_PROCESSING_SECONDS_KEY = "video_processing_seconds"
 
 _VIDEO_KEYS = (_VIDEO_METADATA_KEY, _PREVIEW_PATH_KEY, _PREVIEW_ERROR_KEY, _PROBE_ERROR_KEY)
 
@@ -44,6 +47,7 @@ _METADATA_FIELDS = (
     "rotation",
     "device",
     "creation_source",
+    "frame_count",
 )
 
 _DERIVED_COLUMNS = (
@@ -123,6 +127,20 @@ class SqliteVideoRepository:
                 (json.dumps(payload, ensure_ascii=False), asset_id),
             )
 
+    def save_processing_seconds(self, asset_id: str, seconds: float) -> None:
+        """**合并写**，只动 ``video_processing_seconds`` 这一个键（与 ``save_probe`` 同一条
+        理由：``metadata_json`` 上可能还压着别的东西，覆盖会把它们一起抹掉）。"""
+        with self._database.connect() as connection, connection:
+            row = connection.execute("SELECT metadata_json FROM assets WHERE id = ?", (asset_id,)).fetchone()
+            if row is None:
+                raise KeyError(asset_id)
+            payload = _parse_metadata(row["metadata_json"])
+            payload[_PROCESSING_SECONDS_KEY] = float(seconds)
+            connection.execute(
+                "UPDATE assets SET metadata_json = ?, updated_at = datetime('now') WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), asset_id),
+            )
+
     def probe(self, asset_id: str) -> VideoProbe | None:
         with self._database.connect() as connection:
             row = connection.execute("SELECT metadata_json FROM assets WHERE id = ?", (asset_id,)).fetchone()
@@ -131,11 +149,14 @@ class SqliteVideoRepository:
         payload = _parse_metadata(row["metadata_json"])
         if not any(key in payload for key in _VIDEO_KEYS):
             return None
+        seconds = payload.get(_PROCESSING_SECONDS_KEY)
         return VideoProbe(
             metadata=_metadata_from_payload(payload.get(_VIDEO_METADATA_KEY)),
             browser_preview_path=str(payload.get(_PREVIEW_PATH_KEY) or ""),
             browser_preview_error=str(payload.get(_PREVIEW_ERROR_KEY) or ""),
             probe_error=str(payload.get(_PROBE_ERROR_KEY) or ""),
+            # 缺键 / 老库 / 类型不对都回落 None——「没记过」与「记了 0 秒」要能分开。
+            processing_seconds=float(seconds) if isinstance(seconds, (int, float)) else None,
         )
 
     def list_derived(self, parent_asset_id: str, *, scene_index: int | None = None) -> Sequence[DerivedAsset]:

@@ -87,3 +87,25 @@ class AlbumSource(Protocol):
         「模型变了」还是「数据集被改过」。
         """
         ...
+
+    def list_album_ids(self) -> list[str]:
+        """数据根下每个 album 的**目录名**，按名字排序（1.0 ``:5147`` 的 ``sorted``）。
+
+        ``GET /api/manifests`` 靠它逐目录读 manifest。返回名字而不是摘要，是因为那份
+        摘要的形状（缺 ``album_id`` 就跳过、计数怎么取）是展示层的规则，归
+        ``domain.datasets.catalog``；让每个适配器各写一遍，两份就会各偏一点。
+        """
+        ...
+
+    def media_file(self, album_id: str, collection: str, file_name: str) -> str | None:
+        """``<data_root>/<album_id>/<collection>/<file_name>`` 的**绝对路径**，交付不了给 ``None``。
+
+        ``collection`` 只认 ``photos`` / ``faces`` / ``videos``。返回路径而不是字节，
+        是因为 HTTP 层的 ``FileResponse`` 要按 Range 分段读同一个文件——先读成 bytes
+        会把一整个视频吞进内存。
+
+        **穿越拦截在这一层**（与 ``_album_dir`` 同一条口径）：``album_id``、``collection``、
+        ``file_name`` 三段都来自 URL，解析之后的路径必须仍在 media 根之内。1.0 只比对了
+        ``file_name`` 那一段（``:1190``），``album_id`` 上的 ``../`` 它能穿出去。
+        """
+        ...

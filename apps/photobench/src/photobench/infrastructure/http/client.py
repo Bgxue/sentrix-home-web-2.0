@@ -34,10 +34,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 import httpx
+
+from photobench.domain.http.ports import HttpStream
 
 
 def build_multipart(fields: Mapping[str, str], files: Sequence[tuple[str, str, bytes]]) -> tuple[bytes, str]:
@@ -155,3 +157,35 @@ class HttpxJsonClient:
                 f"HTTP {response.status_code} {response.reason_phrase}: {_error_detail(response)}"
             ) from exc
         return response.json()
+
+    def stream_get(
+        self, url: str, headers: Mapping[str, str] | None = None, timeout: int = 120
+    ) -> HttpStream:
+        """1.0 ``_proxy_sentrix_asset`` 的 ``urlopen`` + ``shutil.copyfileobj``（``:7992``）。
+
+        **不用 ``client.stream(...)`` 的上下文管理器**：那要求 body 在本方法里读完，
+        而这里要把迭代器交出去（HTTP 层的 ``StreamingResponse`` 边发边读）。所以手工
+        ``build_request`` + ``send(stream=True)``，再把关闭挂在两处——body 生成器的
+        ``finally``（调用方提前断开时走这条）与 ``close`` 本身（正常发完之后走那条）。
+
+        **不 ``raise_for_status``**：代理要把上游的状态码与头原样转出去（1.0 的
+        ``except urllib.error.HTTPError`` 那一条只换 body）。连接失败照旧抛——那种
+        失败没有状态码可转，1.0 也让它冒到外层变成 400。
+        """
+        request = self._client.build_request("GET", url, headers=dict(headers or {}), timeout=timeout)
+        response = self._client.send(request, stream=True)
+
+        def body() -> Iterator[bytes]:
+            try:
+                yield from response.iter_bytes()
+            finally:
+                response.close()
+
+        # 头名统一成小写：httpx 本来就给小写，但用例的假传输可能给别的写法，
+        # 而 HTTP 层要按名字挑那几个头，大小写不一致就会**静默漏转发**。
+        return HttpStream(
+            status_code=response.status_code,
+            headers={name.lower(): value for name, value in response.headers.items()},
+            body=body(),
+            close=response.close,
+        )

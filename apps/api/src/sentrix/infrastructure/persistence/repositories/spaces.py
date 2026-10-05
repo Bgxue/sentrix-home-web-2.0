@@ -32,13 +32,19 @@ class SqliteSpaceRepository:
     def list_all(self) -> Sequence[MemorySpace]:
         with self._database.connect() as connection:
             rows = connection.execute(
-                "SELECT id, name, kind, status FROM memory_spaces ORDER BY created_at"
+                "SELECT id, name, kind, status, created_at FROM memory_spaces ORDER BY created_at"
             ).fetchall()
-        return [MemorySpace(row["id"], row["name"], row["kind"], row["status"]) for row in rows]
+        return [
+            MemorySpace(row["id"], row["name"], row["kind"], row["status"], row["created_at"]) for row in rows
+        ]
 
     def get(self, scope_id: str) -> MemorySpace | None:
         with self._database.connect() as connection:
             row = connection.execute(
-                "SELECT id, name, kind, status FROM memory_spaces WHERE id = ?", (scope_id,)
+                "SELECT id, name, kind, status, created_at FROM memory_spaces WHERE id = ?", (scope_id,)
             ).fetchone()
-        return MemorySpace(row["id"], row["name"], row["kind"], row["status"]) if row else None
+        return (
+            MemorySpace(row["id"], row["name"], row["kind"], row["status"], row["created_at"])
+            if row
+            else None
+        )

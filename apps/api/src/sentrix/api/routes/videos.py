@@ -58,6 +58,7 @@ def _metadata_payload(metadata: VideoMetadata | None) -> VideoMetadataPayload | 
         rotation=metadata.rotation,
         device=metadata.device,
         creation_source=metadata.creation_source,
+        frame_count=metadata.frame_count,
     )
 
 
@@ -78,6 +79,7 @@ def _video_payload(asset: Asset, probe: VideoProbe | None) -> VideoPayload:
         browser_preview_path=probe.browser_preview_path if probe else "",
         browser_preview_error=probe.browser_preview_error if probe else "",
         probe_error=probe.probe_error if probe else "",
+        processing_seconds=probe.processing_seconds if probe else None,
     )
 
 

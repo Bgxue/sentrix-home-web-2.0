@@ -26,6 +26,9 @@ class VideoMetadataPayload(BaseModel):
     rotation: int = 0
     device: str = ""
     creation_source: str = ""
+    # 原片总帧数（S8a 补）：1.0 藏在整包 ``raw`` 里，PhotoBench 的关键帧分析读它。
+    # 缺了就是 0（很多容器不给 ``nb_frames``）。
+    frame_count: int = 0
 
 
 class VideoPayload(BaseModel):
@@ -46,6 +49,11 @@ class VideoPayload(BaseModel):
     browser_preview_path: str = ""
     browser_preview_error: str = ""
     probe_error: str = ""
+    # 整个视频处理阶段的秒数（探测 + 图片流水线 + 场景抽取），1.0 写在
+    # ``metadata_json.video_processing_seconds``（``processor.py:205`` / ``:420``），
+    # PhotoBench 的关键帧分析读它算 ``realtime_factor``（``benchmark_orchestrator.py:5726``）。
+    # 没处理过（老库 / 导入时没接视频链）时为 None。
+    processing_seconds: float | None = None
 
 
 class VideoScenePayload(BaseModel):

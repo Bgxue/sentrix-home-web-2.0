@@ -93,6 +93,7 @@ PROBED = VideoMetadata(
     rotation=-90,
     device="Apple iPhone 14 Plus",
     creation_source="com.apple.quicktime.creationdate",
+    frame_count=300,
 )
 
 
@@ -148,6 +149,60 @@ def test_save_probe_merges_other_metadata_keys(migrations_ready_db: Database):
         )
     assert payload["reverse_geocode"] == {"city": "邯郸市"}
     assert payload["video_metadata"]["codec"] == "hevc"
+
+
+def test_save_processing_seconds_merges_without_clobbering_other_keys(migrations_ready_db: Database):
+    """``video_processing_seconds`` 单写一个键，不整包覆盖 ``metadata_json``。
+
+    1.0 把整个视频阶段的秒数写进这个键（``processor.py:205``），PhotoBench 的关键帧
+    分析读它。这里同时钉住合并不覆盖：``video_metadata`` 那些键必须原样留着。
+    """
+    assets = SqliteAssetRepository(migrations_ready_db)
+    assets.add(_asset("asset_video"))
+    repository = SqliteVideoRepository(migrations_ready_db)
+    repository.save_probe("asset_video", VideoProbe(metadata=PROBED))
+
+    repository.save_processing_seconds("asset_video", 12.5)
+
+    probe = repository.probe("asset_video")
+    assert probe is not None
+    assert probe.processing_seconds == pytest.approx(12.5)
+    assert probe.metadata is not None
+    assert probe.metadata.codec == "hevc"
+    # **探测过但没记秒数**的资产 → None，而不是 0（「没记过」与「记了 0 秒」要能分开）。
+    assets.add(_asset("asset_video2"))
+    repository.save_probe("asset_video2", VideoProbe(metadata=PROBED))
+    probed_only = repository.probe("asset_video2")
+    assert probed_only is not None
+    assert probed_only.processing_seconds is None
+
+
+def test_asset_repository_reads_back_the_derived_lineage(migrations_ready_db: Database):
+    """``SqliteAssetRepository.get`` 必须带回迁移 0010 的三列。
+
+    PhotoBench 的关键帧分析就是靠这三列（``benchmark_orchestrator.py:5712/5798``）在
+    ``/api/assets`` 的行里认出派生帧的——窄投影漏掉它们，那条链在 2.0 就断了。
+    同时钉住普通资产这三位是 ``None``，否则「有血缘」与「没血缘」分不开。
+    """
+    assets = SqliteAssetRepository(migrations_ready_db)
+    assets.add(_asset("asset_video"))
+    SqliteVideoRepository(migrations_ready_db).add_derived(
+        parent_asset_id="asset_video",
+        asset=_asset("asset_frame", MediaType.IMAGE, file_name="f.webp"),
+        derived_kind="video_keyframe",
+        source_timestamp_sec=7.5,
+        source_frame_index=7,
+        source_scene_index=2,
+    )
+
+    loaded = assets.get("asset_frame")
+    assert loaded is not None
+    assert loaded.derived_kind == "video_keyframe"
+    assert loaded.parent_asset_id == "asset_video"
+    assert loaded.source_timestamp_sec == pytest.approx(7.5)
+    plain = assets.get("asset_video")
+    assert plain is not None
+    assert (plain.derived_kind, plain.parent_asset_id, plain.source_timestamp_sec) == (None, None, None)
 
 
 def test_a_failed_probe_keeps_the_reason_and_no_metadata(migrations_ready_db: Database):

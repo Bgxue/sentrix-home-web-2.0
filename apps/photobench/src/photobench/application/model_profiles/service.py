@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -161,4 +162,48 @@ class ModelProfiles:
             "manager_available": bool(state),
             "manager_error": manager_error,
             "capabilities": inference.capabilities(),
+        }
+
+    def test_model(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """``POST /api/test-model``（1.0 ``OrchestratorRepository.test_model_endpoint`` ``:5232``）。
+
+        **纯探活**：不切端点、不重启进程、不改配置。2.0 的「换模型 = 重启 2.0」
+        （S9c · T923）是 ``application.deploy`` 那一块的事——这条路由答的只是
+        「这个端点在不在、能不能回一次对话」，把它们混起来会让一次探活产生副作用。
+
+        四步逐行照搬 1.0：查端点现状 → 没有 served 模型就报错 → 打一次
+        ``max_tokens=1`` 的 chat → 没有 ``choices`` 就报错。两处错误文案**逐字**
+        照搬（前端按它提示用户去选模型）：
+        ``select a model before testing the endpoint`` 与
+        ``model endpoint returned no completion choices``。
+        """
+        model_base_url = normalize_model_base_url(payload.get("model_base_url"))
+        # 1.0 传的是**空**的 manager url：探活不看 Manager，只看端点本身。
+        snapshot = self._query_current_model("", model_base_url, str(payload.get("model") or ""))
+        served_name = str(snapshot.get("served_model_name") or "").strip()
+        if not served_name:
+            raise InvalidRequestError("select a model before testing the endpoint")
+        inference = self._inference_for(str(snapshot["model_base_url"]), "")
+        started = time.perf_counter()
+        body = inference.chat(
+            {
+                "model": served_name,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 1,
+                "temperature": 0,
+                "stream": False,
+            },
+            timeout=30,
+        )
+        # 端口的 ``chat`` 已经返回解析后的对象（1.0 那里是 ``response.json()``），
+        # 所以 ``isinstance(body, dict)`` 那层防御不必再写一次。
+        choices = body.get("choices") or []
+        if not choices:
+            raise InvalidRequestError("model endpoint returned no completion choices")
+        return {
+            "ok": True,
+            "model": served_name,
+            "model_base_url": snapshot["model_base_url"],
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "verified_at": now_iso(),
         }

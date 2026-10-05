@@ -33,8 +33,28 @@ JSON。没有它，种身份那一步就得在适配器里自己拼一次 HTTP�
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+
+@dataclass(frozen=True)
+class HttpStream:
+    """一次**流式** GET 的结果：状态码 + 响应头 + body 迭代器 + 关闭钩子。
+
+    **非 2xx 不抛。** 资产代理要把上游的状态码原样转给调用方（1.0 ``:8012`` 的
+    ``asset proxy failed: {code}``）；把它变成异常就得在异常里回传状态码，那才是
+    多加一层。其余失败（连不上、超时）照旧抛——那两件事没有状态码可回。
+
+    ``body`` 与 ``close`` 都保留下来而不是只给 ``bytes``：视频要按 Range 边读边发，
+    整段读进内存会让「拖动进度条」变成一次几十 MB 的分配。关不关由调用方负责
+    （HTTP 层用 ``BackgroundTask``）。
+    """
+
+    status_code: int
+    headers: dict[str, str]
+    body: Iterator[bytes]
+    close: Callable[[], None]
 
 
 @runtime_checkable
@@ -63,5 +83,15 @@ class JsonHttpClient(Protocol):
 
         字段名可以是同一个（1.0 的 ``seed-batch`` 与 ``/api/import`` 都用 ``"files"``
         一次带多张）——**不要在这里去重或改名**，那是 1.0 的行为，2.0 的调用方按需决定。
+        """
+        ...
+
+    def stream_get(
+        self, url: str, headers: Mapping[str, str] | None = None, timeout: int = 120
+    ) -> HttpStream:
+        """1.0 ``_proxy_sentrix_asset``（``:7992``）里那段 ``urlopen`` + ``copyfileobj``。
+
+        ``headers`` 是**调用方给的**（资产代理转发 ``Range``）。返回体不落盘、不进内存，
+        直接交出去——这正是 ``request_bytes`` 做不到的那件事。
         """
         ...

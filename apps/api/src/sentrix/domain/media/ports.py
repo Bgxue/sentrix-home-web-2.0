@@ -356,6 +356,11 @@ class VideoProbe:
     browser_preview_path: str = ""
     browser_preview_error: str = ""
     probe_error: str = ""
+    # 整个视频阶段的秒数，1.0 写作 ``metadata_json.video_processing_seconds``
+    # （``processor.py:205`` / ``:420``），由 ``ImportAssets.execute`` 计时后经
+    # ``save_processing_seconds`` 落库。**不在 ``save_probe`` 那一次写**：计时范围要包含
+    # 场景抽取，而场景抽取排在 ``save_probe`` 之后（见 ``import_assets.py``）。
+    processing_seconds: float | None = None
 
 
 class VideoRepository(Protocol):
@@ -371,8 +376,21 @@ class VideoRepository(Protocol):
         """把探测结果并进 ``assets.metadata_json``。**必须在资产行落库之后调**（外键）。"""
         ...
 
+    def save_processing_seconds(self, asset_id: str, seconds: float) -> None:
+        """把整个视频阶段的秒数并进 ``metadata_json.video_processing_seconds``。
+
+        **与 ``save_probe`` 分成两次写**：计时范围要包含场景抽取（1.0 的
+        ``video_processing_seconds`` 覆盖整个视频处理阶段），而场景抽取排在
+        ``save_probe`` 之后——一次写不完。同样是合并写，不覆盖 ``metadata_json`` 上的
+        其他键（1.0 同一列上还压着反地理、事实 id 等）。
+        """
+        ...
+
     def probe(self, asset_id: str) -> VideoProbe | None:
-        """没探测过（``metadata_json`` 里没有任何视频键）返回 ``None``。"""
+        """没探测过（``metadata_json`` 里没有任何视频键）返回 ``None``。
+
+        ``processing_seconds`` 一并读回（缺了就是 ``None``），供 ``GET /videos/{id}`` 暴露。
+        """
         ...
 
     def list_derived(self, parent_asset_id: str, *, scene_index: int | None = None) -> Sequence[DerivedAsset]:
@@ -396,14 +414,15 @@ class VideoRepository(Protocol):
     ) -> None:
         """把一张派生帧落库，并把迁移 0010 的血缘列写上。
 
-        **为什么单开一个方法而不是让 ``AssetRepository.add`` 带上这几列。**
-        ``Asset`` 是「资产本身」，血缘列描述的是「这张资产怎么指回原片」——它们是
-        ``VideoRepository`` 这条链的词汇（见本端口类的注释），塞进 ``Asset`` 会让
-        每一张普通照片也背上五个恒空的字段。所以写入分成两步：资产行归 ``AssetRepository``，
-        血缘行归这里；``add_derived`` 一次写完，不让调用方有机会只写一半。
+        **为什么写入仍然单开一个方法。** ``Asset`` 现在**带上了三个血缘字段**
+        （2026-10-05：PhotoBench 的关键帧分析经 ``/api/assets`` 读它们认血缘、算时间跨度，
+        见 ``domain/media/models.py`` 的 ``Asset``），但那是**读侧**的形状；写入仍归这里，
+        因为 ``add_derived`` 要一次把资产行与 ``source_frame_index`` 等血缘列写齐，
+        不让调用方有机会只写一半。``AssetRepository.add`` 写的是非派生物，不带血缘。
 
-        ``parent_asset_id`` 由调用方给而不是从 ``asset`` 上取：``Asset`` 里没有这一位
-        （同上）。``source_frame_index`` 上有唯一索引——重复插入直接 ``IntegrityError``，
+        ``parent_asset_id`` / ``derived_kind`` 由调用方显式给，而不是复用 ``asset`` 上的
+        默认 ``None``（通用构造的 ``Asset`` 正常不带血缘）。
+        ``source_frame_index`` 上有唯一索引——重复插入直接 ``IntegrityError``，
         那是有意的（见 ``cleanup_derivatives`` 与迁移 0010 表头）。
         """
         ...
