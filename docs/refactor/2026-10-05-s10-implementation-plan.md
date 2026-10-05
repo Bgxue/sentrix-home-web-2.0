@@ -347,11 +347,38 @@ cd /home/asus && setsid ./start_vlm_8100.sh < /dev/null > <log> 2>&1 &
 起完用 `ps -o sid= -p <pid>` 确认 sid 等于 pid，再用探活确认，**然后主动回收发起它的
 那个会话、再确认一次它还活着**——只验一次「起来了」不够，那正是这次被骗的地方。
 
-**同一段时间里 8191（2.0 主 API）也死过一次**，那个不是这条原因：它的进程比我接手时
-已经跑了 21 小时，且没有可读的 `dmesg`（要 sudo 密码）能确认是不是 OOM。
-**验过一个可能的嫌犯并排除**：`apps/photobench/tests/test_sentrix_process.py` 里的
-`api_url` 写着 `http://127.0.0.1:8191`，看着像会动真进程——实测跑完那整个文件，
-8191 的 pid 不变、探活 200。所以不是它。
+**8191（2.0 主 API）也死过——那次不是故障，是同一台机器上的并行工作。**
 
-**结论**：8100 那次可归因（我自己造成的）；**8191 那次不可归因，如实记为未知**。
-两个都已用 `setsid` 重新拉起并验证。
+我先后排除了两个嫌犯：没有可读的 `dmesg`（要 sudo 密码）能证明是 OOM；而
+`apps/photobench/tests/test_sentrix_process.py` 的 `api_url` 写着
+`http://127.0.0.1:8191`，看着像会动真进程——实测跑完那整个文件，8191 的 pid 不变、
+探活 200，**不是它**。
+
+真凶最后是在**进程树的父链**里找到的：
+
+```
+bash /home/asus/Github/Sentrix-Home-Web/.codex-tmp/restart-photobench-stack-20261005.sh
+  ← sshd: asus@notty
+```
+
+那份脚本（另一个 agent 会话经 SSH 跑的，目的是把整套栈切到 ninfer 引擎）开头就是
+
+```sh
+stop_listener 8191 "sentrix.main:create_app"
+stop_listener 8091 "backend.app:app"
+stop_listener 8771 "benchmark_orchestrator.py"
+```
+
+——**它明确地、有意地杀掉 8191**，然后把 8091 与 1.0 PhotoBench（8771）重启到 ninfer 上
+（`sentrix-api-8091-ninfer-c4.log` / `runtime_connection.ninfer-vision-c4-153.json`）。
+
+**教训一**：共用机器上服务不明原因消失时，**先看进程树的父链**（`ps -o ppid=`），
+别先怀疑自己或硬件。我在这上面绕了三轮才走到这一步。
+
+**教训二**：**发现别人在管这台机器的服务之后，立刻停止自己的服务操作。** 那份脚本有
+「端口上出现预期之外的进程就 `exit 1`」的守卫——我再去起 8191，会让**它的**重启失败。
+共用机器上，别人的自动化优先。
+
+**结论**：8100 那次可归因（我自己造成的，`nohup` 没挡住会话级 SIGTERM）；8191 那次
+也已归因（另一个会话的重启脚本）。两个都用 `setsid` 重新拉起过；**此后本切片的操作
+不再触碰这台机器上的任何服务**。
