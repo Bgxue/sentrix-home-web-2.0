@@ -266,20 +266,60 @@ scope 不存在，于是**同一个原因（资产清单取不到）在两边会
 - 数据集端点实测：`/api/manifests` 列出 5 个相册；`/api/albums/album3/photos/<file>`
   200 + `image/jpeg`；带 `Range: bytes=0-9` → 206 + `Content-Range: bytes 0-9/2032828`。
 
-### 3.6 一次**环境导致的** CI 失败（不是本次改动）
+### 3.6 全量 `make ci` 的最后两个红，都不是本次改动
 
-最后一轮 `make ci` 在 `coverage` 步骤退出 1，但**不是代码问题**：
+`make ci` 在 `coverage` 步骤退出 1：**2 failed, 2494 passed, 8 skipped**（42:36），
+覆盖率自身 **93.54%**（门禁 85%）通过。两个失败逐条查过：
 
-- 覆盖率自身 **93.54%**（门禁 85%）**通过**；
-- 2491 passed / 10 skipped / **3 errors**，3 个 error 全在 `apps/api/tests/e2e/`，
-  原因是 `模型端点 http://127.0.0.1:8100/v1 不可达：[Errno 111] Connection refused`；
-- **同一份源码的上一次全量 `make ci` 退出码 0**（那次 8100 还活着）。
+| 失败 | 性质 |
+|---|---|
+| `tests/e2e/test_assistant_turn.py::test_the_answer_never_leaks_internal_identifiers` | **已知、且用户 2026-09-29 明确决定不修**：qwen3.5-4B 在正文里写 `photo_1` 句柄，`final_guard` 的 `internal_id_leak` 正则（要 `[a-f0-9]{6,}` 后缀）盖不住。判为模型问题，与本次改动无关 |
+| `tests/e2e/test_visual_search.py::test_qdrant_ranking_matches_the_exact_scan_on_the_authoritative_store` | **显存 OOM**：`onnxruntime::BFCArena Failed to allocate memory for requested buffer of size 2359296`——进程内的 Chinese-CLIP ONNX 视觉嵌入器在 GPU 上分不出 2.3 MB |
 
-8100 的日志显示它在当天 13:53 于 llama.cpp 内部崩溃（`server_queue::yield_to_queue`
-的栈回溯），不是 S9 记录过的「干净退出」。**复跑全量门禁需要先把它拉起来**——
-它的启动参数不在 runbook 里（`docs/runbooks/153-services.md` 只写「见部署脚本」），
-所以没有自行重启。
+**第二条的账**（2026-10-05 实测，卡 24576 MiB）：
 
-顺带发现：**8091（1.0 生产 API）自 2026-09-29 19:05 起就是 dead**（systemd
-`sentrix-api.service`，被 SIGTERM 终止），与本次改动无关，已单独上报。
+| 占用 | MiB |
+|---|---|
+| ninfer-serve 18100（**GoQuark，另一个项目**） | 7150 |
+| llama-server 8100（本次才拉起来，之前是死的） | 7070 |
+| WeMM sidecar 8102 | 4892 |
+| 1.0 API 8091 | 2262 |
+| 2.0 API 8191 | 976 |
+| **空闲** | **1723** |
 
+三个模型服务就占 19.1 GB，e2e 要在同一个进程里再加载 ONNX 模型时已经没地方了。
+
+**注意：即使停掉 ninfer，`make ci` 也不会全绿**——第一条按用户的决定就是不修的。
+所以「全绿」在这个部署形态下不是可达的门槛，本次验收不以它为准。
+
+**同一份源码的一次全量 `make ci` 是退出 0 的**（当天早些时候，那时 ninfer 还没起、
+8100 还活着）。这也是为什么本次的 2 个红可以判为环境而非代码：**改动集合没有变过**。
+
+### 3.7 顺带修好的一处环境问题（8102 攥着 4.3 GB 显存）
+
+排查 8100 起不来时发现：**8102 的 WeMM sidecar 起的时候没设 `PYTORCH_CUDA_ALLOC_CONF`**，
+PyTorch 的缓存分配器把峰值水位一直攥着不还给驱动。它自带的 `GET /stats`（就是为这件事
+写的）给出分解：
+
+| | 重启前 | 带 `expandable_segments:True` 重启后 |
+|---|---|---|
+| `reserved_mib`（分配器高水位） | 9526 | **5204** |
+| `max_allocated_mib`（峰值活张量） | 8187 | 5190 |
+| `allocated_mib`（权重本身） | 5200 | 5190 |
+
+**腾出约 4.3 GB**，8100 随即起来了。`allocated` 那 5190 MiB 降不动——2.72B 参数在 bf16
+下的权重就是这么大。
+
+**峰值来自哪**：`_encode` 本来就是逐条编码，但**没限制图像分辨率**——实测一张 2 MB 的
+照片会让 `reserved` 从 5252 涨到 6752。**没有采用「限制分辨率」这个做法**：那会改变
+嵌入向量，与库里已存的向量口径不一致，用户在 1.0 验过的 WeMM 检索结论就作废了。
+
+那条环境变量目前只是这一次启动带的，**持久化要改拉起它的脚本**（不在任何仓库里）。
+
+### 3.8 一处我先报错了的事实（留档）
+
+排查过程中我曾报「8091（1.0 生产 API）已停 6 天」——**错的**。依据是
+`systemctl is-active sentrix-api.service` 回 `inactive`，加上一次**没包含 8091 的** `ss` grep。
+实际上那个 systemd unit 确实自 2026-09-29 起就是 dead，但有人手动起了一个进程，
+**一直在跑且健康**（`/api/memory-spaces` 回 200）。用户 2026-10-05 确认「知道了，我自己处理」。
+结论：**判断一个服务在不在，要看端口/探活，不能只看 systemd 状态**。
