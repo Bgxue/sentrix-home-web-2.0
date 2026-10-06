@@ -21,6 +21,9 @@ install: ## 建 venv 并安装全部依赖
 	# tests）与三个 arch 脚本会一起报「模块不存在」，而那种红指向的是环境而不是代码。
 	$(PIP) install -q -e apps/photobench
 	cd apps/web && npm ci
+	# PhotoBench 前端是**第三个 npm 包**（apps/web 是第二个）。同一条理由：不装它，
+	# 下面那条 photobench-web-check 会在「找不到 tsc」上红，而那种红指向的是环境不是代码。
+	cd apps/photobench/web && npm ci
 
 lint: ## ruff 检查
 	.venv/bin/ruff check apps/api/src apps/api/tests apps/photobench/src apps/photobench/tests scripts
@@ -87,7 +90,7 @@ check-docs: ## 文档防腐校验
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
 # coverage 本身跑的就是全量测试，所以链上不再单列 test——同一套测试不必跑两遍。
 # web-check 排在链尾：后端检查更快、失败信息更直接，前端构建最慢也最该放在最后。
-ci: lint format-check typecheck arch photobench-check check-docs coverage web-check ## CI 门禁
+ci: lint format-check typecheck arch photobench-check check-docs coverage web-check photobench-web-check ## CI 门禁
 	@echo "ci: 全部通过"
 
 # 前端门禁。类型检查必须用 `tsc -b`，不能用 `tsc --noEmit`：apps/web/tsconfig.json 是
@@ -112,6 +115,16 @@ web-check: ## 前端门禁：tsc -b + oxlint + vitest + vite build
 	cd apps/web && npx vitest run
 	cd apps/web && npx vite build
 
+photobench-web-check: ## PhotoBench 前端门禁：同 web-check 四步
+	@test -d apps/photobench/web/node_modules || { echo "缺少 apps/photobench/web/node_modules，请先跑 make install"; exit 1; }
+	# 与 web-check 逐条同源，包括那条 `--force`：`tsc -b` 的增量检查只在「它已经知道的
+	# 文件被改动」时触发，**新加一个匹配 include 的源文件不会让它重建**，于是那个文件
+	# 根本不被类型检查。F7 就是这么带着三个类型错误进过仓库的。
+	cd apps/photobench/web && npx tsc -b --force
+	cd apps/photobench/web && npx oxlint
+	cd apps/photobench/web && npx vitest run
+	cd apps/photobench/web && npx vite build
+
 dev: ## 起 2.0 API（8191）
 	$(PY) -m uvicorn --factory sentrix.main:create_app --host 0.0.0.0 --port 8191 --app-dir apps/api/src
 
@@ -122,3 +135,6 @@ photobench-dev: ## 起 2.0 PhotoBench（8772）
 
 web-dev: ## 起 2.0 Web（4274）
 	cd apps/web && npm run dev -- --port 4274
+
+photobench-web-dev: ## 起 PhotoBench 前端（4276）
+	cd apps/photobench/web && npm run dev
