@@ -8,13 +8,14 @@
 // `lib/format.ts` 移植（1.0 :334 / :1402 / :1444 / :1447），这里 import 复用，
 // 不重复定义，避免两份 callType 各自漂移。
 //
-// 两处 1.0 的辅助函数不在本切片（:1340-1809）内，但上面的函数依赖它们。
-// 并行切片已落地，改为 import 权威实现，不在本模块复制：
-//   - `conversationTurns`  权威在 `lib/evidence.ts`（1.0 :611）
-//   - `itemTimingBreakdown` 权威在 `lib/details.ts`（1.0 :2122）
+// 1.0 的辅助函数 `conversationTurns` 不在本切片（:1340-1809）内，但上面的函数依赖它。
+// 其权威实现在 `lib/evidence.ts`（1.0 :611），这里 import 复用，不在本模块复制。
+//
+// `itemTimingBreakdown`（1.0 :2122-2133）本就是被本模块的时延归因消费的，权威实现已移入
+// 本模块（见下方「时延归因」段）；`lib/details.ts` 不再持有它，依赖由此单向
+// `details.ts → trace.ts`，原先 trace ↔ details 的双向 import 消除。
 
 import type { MediaLike } from "../api/media.ts";
-import { itemTimingBreakdown } from "./details.ts";
 import { conversationTurns } from "./evidence.ts";
 import { average, callType, callTypeLabel, fmtMs } from "./format";
 
@@ -440,9 +441,35 @@ export function latencySegmentTitle(segment: LatencySegment): string {
 }
 
 /**
+ * 1.0 `:2122-2133`。`wall_clock_ms` / `model_ms` / `judge_ms` 各有各的回退源。
+ *
+ * 本次从 `lib/details.ts` 移入本模块（它本就是被 trace 时延计算消费的），实现逐字未改。
+ */
+export function itemTimingBreakdown(item: unknown): {
+  wall_clock_ms: unknown;
+  agent_wall_ms: unknown;
+  model_ms: unknown;
+  tool_ms: unknown;
+  judge_ms: unknown;
+  other_ms: unknown;
+} {
+  const i = dict(item);
+  const saved = dict(i.timing_breakdown);
+  const modelMs = saved.model_ms ?? dict(i.llm_summary).total_ms_sum ?? null;
+  return {
+    wall_clock_ms: saved.wall_clock_ms ?? i.wall_clock_ms ?? null,
+    agent_wall_ms: saved.agent_wall_ms ?? null,
+    model_ms: modelMs,
+    tool_ms: saved.tool_ms ?? null,
+    judge_ms: saved.judge_ms ?? i.judge_ms ?? null,
+    other_ms: saved.other_ms ?? null,
+  };
+}
+
+/**
  * 1.0 `:1614-1640` —— 整条时间线：各 Agent Loop + Judge + Judge 排队 + 未归因差额。
  *
- * 注意 1.0 的 `itemTimingBreakdown`（`lib/details.ts`，1.0 `:2122-2133`）**不返回**
+ * 注意 1.0 的 `itemTimingBreakdown`（本模块，1.0 `:2122-2133`）**不返回**
  * `judge_queue_wait_ms`，因此下面的 Judge 排队分支永远不触发 —— 1.0 既有行为，照搬、不修。
  */
 export function qaLatencySegments(item: unknown): LatencySegment[] {

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   deliveryBreakdown,
   guardSummary,
-  itemTimingBreakdown,
   openImageTarget,
   phaseErrorDetails,
   phaseErrorSummary,
@@ -14,6 +13,8 @@ import {
   snapshotSummary,
   toolPerformanceRows,
 } from "./details.ts";
+// `itemTimingBreakdown` 的权威实现已从 details.ts 移入 trace.ts（消除模块环），用例不变。
+import { itemTimingBreakdown } from "./trace.ts";
 
 describe("toolPerformanceRows（1.0 :2065-2068）", () => {
   it("把 summary.tool_performance 摊成带 name 的行", () => {

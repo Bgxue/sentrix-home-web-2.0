@@ -4,7 +4,7 @@
  *
  *   `toolPerformanceRows`(:2065) / `deliveryBreakdown`(:2069) / `shortHash`(:2079) /
  *   `snapshotSummary`(:2080) / `guardSummary`(:2092) / 局部 `normalizedTerminationReason`(:2107) /
- *   `itemTimingBreakdown`(:2122) / `retrievalChannelRows`(:2134) / `phaseSummary`(:2153) /
+ *   `retrievalChannelRows`(:2134) / `phaseSummary`(:2153) /
  *   `phaseErrorDetails`(:2182) / `phaseErrorSummary`(:2188) / `openImage` 的纯半(:2194) /
  *   `pipelineMetricRows`(:2199)。
  *
@@ -19,6 +19,10 @@
  *
  * **`retrievalChannelRows` 依赖 1.0 的 `itemToolTrace`(:1503)**：权威实现在 `lib/trace.ts`，
  * 这里 import 复用，不再放文件私有副本。
+ *
+ * **`itemTimingBreakdown`(:2122-2133) 不在本模块**：它的权威实现已移到 `lib/trace.ts`
+ * （trace 的时延归因直接消费它），本模块若需要则从那里 import，保证依赖单向
+ * `details.ts → trace.ts`。
  */
 import { fmtDate, fmtMemory, fmtSeconds, phaseSeconds } from "./format.ts";
 import { itemToolTrace } from "./trace.ts";
@@ -146,29 +150,7 @@ export function guardSummary(item: unknown): GuardSummary {
   };
 }
 
-// ── 1.0 :2122-2152 计时 / 检索通道 ─────────────────────────────────────
-
-/** 1.0 `:2122-2133`。`wall_clock_ms` / `model_ms` / `judge_ms` 各有各的回退源。 */
-export function itemTimingBreakdown(item: unknown): {
-  wall_clock_ms: unknown;
-  agent_wall_ms: unknown;
-  model_ms: unknown;
-  tool_ms: unknown;
-  judge_ms: unknown;
-  other_ms: unknown;
-} {
-  const i = dict(item);
-  const saved = dict(i.timing_breakdown);
-  const modelMs = saved.model_ms ?? dict(i.llm_summary).total_ms_sum ?? null;
-  return {
-    wall_clock_ms: saved.wall_clock_ms ?? i.wall_clock_ms ?? null,
-    agent_wall_ms: saved.agent_wall_ms ?? null,
-    model_ms: modelMs,
-    tool_ms: saved.tool_ms ?? null,
-    judge_ms: saved.judge_ms ?? i.judge_ms ?? null,
-    other_ms: saved.other_ms ?? null,
-  };
-}
+// ── 1.0 :2134-2152 检索通道 ────────────────────────────────────────────
 
 /** `retrievalChannelRows` 的一行。 */
 export interface RetrievalChannelRow {

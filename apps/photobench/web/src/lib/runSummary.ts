@@ -1,7 +1,8 @@
 // 移植自 1.0 `services/photobench/frontend/src/App.vue`（只读，唯一权威）。
 // 覆盖：`averageMetric`(:375-378) / `nearestRankPercentile`(:379-383) /
-// `microMetrics`(:403-412) / `macroMetrics`(:413-425) / `effectiveRunSummary`(:426-547)，
-// 以及 `effectiveRunSummary` 依赖的 `itemCallMetrics`(:1335-1339) 与 `itemLlmSummary`(:1406-1419)。
+// `microMetrics`(:403-412) / `macroMetrics`(:413-425) / `effectiveRunSummary`(:426-547)。
+// `effectiveRunSummary` 依赖的 `itemCallMetrics`(:1335-1339) 与 `itemLlmSummary`(:1406-1419)
+// 权威实现已在 `lib/trace.ts`（1.0 逐字移植），这里 import 复用，不再放文件私有副本。
 //
 // 核心口径（逐字段保留，**不要**简化）：
 //   先信后端已存的 `run.summary` 里的字段，缺失（`??`）才用 `run.items` 现算——
@@ -17,6 +18,8 @@
 
 import { mediaRefs } from "../api/media.ts";
 import { average as averageMetric } from "./format.ts";
+import { itemCallMetrics, itemLlmSummary } from "./trace.ts";
+import type { ItemLlmSummary } from "./trace.ts";
 import type { Run, RunSummary } from "../api/types.ts";
 
 /** 1.0 的无类型记录：`saved` / `item` / `call` 都按它读。 */
@@ -67,30 +70,6 @@ export function macroMetrics(items: readonly Loose[], prefix: string): Retrieval
   return { precision: averageMetric(values.map((row) => row.precision)), recall: averageMetric(values.map((row) => row.recall)), f1: averageMetric(values.map((row) => row.f1)), metricCount: values.length };
 }
 
-/** 1.0 `:1335-1339`。 */
-function itemCallMetrics(item: Loose): Loose[] {
-  return Array.isArray(item?.model_call_metrics)
-    ? item.model_call_metrics.filter((metric: unknown) => metric && typeof metric === "object")
-    : [];
-}
-
-/** 1.0 `:1406-1419`。每题模型调用的汇总，无调用回 `null`。 */
-function itemLlmSummary(item: Loose): Record<string, number | null> | null {
-  const calls = itemCallMetrics(item);
-  if (!calls.length) return null;
-  const saved = item?.llm_summary || {};
-  const numeric = (key: string, fallback: number | null): number | null => Number.isFinite(Number(saved[key])) ? Number(saved[key]) : fallback;
-  return {
-    call_count: numeric("call_count", calls.length),
-    streamed_count: numeric("streamed_count", calls.filter((call) => call.streamed === true).length),
-    ttft_ms_avg: numeric("ttft_ms_avg", averageMetric(calls.map((call) => call.ttft_ms))),
-    total_ms_sum: numeric("total_ms_sum", calls.reduce((sum, call) => sum + (Number(call.total_ms) || 0), 0)),
-    prompt_tokens_total: numeric("prompt_tokens_total", calls.reduce((sum, call) => sum + (Number(call.prompt_tokens) || 0), 0)),
-    completion_tokens_total: numeric("completion_tokens_total", calls.reduce((sum, call) => sum + (Number(call.completion_tokens) || 0), 0)),
-    tokens_per_second_avg: numeric("tokens_per_second_avg", averageMetric(calls.map((call) => call.tokens_per_second))),
-  };
-}
-
 /** 1.0 `:426-547`。 */
 export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const saved = (run?.summary || {}) as Loose;
@@ -122,14 +101,14 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const completion = items.map((item) => item.agent_stability?.completed_within_steps).filter((value) => typeof value === "boolean");
   const agentTaskLatencies = items.map((item) => Number(item.timing_breakdown?.agent_wall_ms)).filter(Number.isFinite);
   const agentLoopCounts = items.map((item) => {
-    const calls = itemCallMetrics(item);
+    const calls: Loose[] = itemCallMetrics(item);
     return calls.some((call) => call.call_type)
       ? calls.filter((call) => ["agent", "recovery"].includes(call.call_type)).length
       : null;
   }).filter(Number.isFinite);
   const dist = { ...(saved.judge_distribution || {}) };
   if (!Object.keys(saved.judge_distribution || {}).length) scores.forEach((score) => { dist[String(score)] = (dist[String(score)] || 0) + 1; });
-  const llm = items.map(itemLlmSummary).filter((item): item is Record<string, number | null> => Boolean(item));
+  const llm = items.map(itemLlmSummary).filter((item): item is ItemLlmSummary => Boolean(item));
   const allCalls = items.flatMap(itemCallMetrics);
   const callTokenCounts = allCalls.map((call) => {
     const prompt = Number(call.preflight_prompt_tokens ?? call.prompt_tokens);
