@@ -1,14 +1,57 @@
 /**
- * 「评测运行」视图的占位。真正的配置区、run 列表、run 详情、逐题结果、
- * 关键帧分析、记忆有效性、遥测图由后续切片替换这里（1.0 模板 `App.vue:2844-3674`）。
+ * 「评测运行」视图：把 `RunsTable`（1.0 `:2989-3037`）与 `RunDetail`（1.0 `:3039-` 起）
+ * 组成完整视图。数据全部来自 `useRuns`（它内部已组装 `useRunDetail`，见其文件头注释），
+ * 本组件不自己再调 `useRunDetail`、不发请求。
  *
- * 占位保留 1.0 的 class（`section`）与标题，好让样式文件一接入就有落点。
+ * 1.0 里这两块是 `<main class="app-shell">` 下的兄弟节点（中间没有包装层），所以这里
+ * 返回 fragment，不加多余 DOM。
  */
+import { useRuns } from "../../hooks/useRuns.ts";
+import { RunDetail } from "./RunDetail.tsx";
+import { RunsTable } from "./RunsTable.tsx";
+
 export function RunsView() {
+  const runs = useRuns();
+
   return (
-    <section className="section" data-testid="runs-view" aria-label="评测运行">
-      <h2>评测运行</h2>
-      <p>配置、运行列表与逐题结果由后续切片接入。</p>
-    </section>
+    <>
+      <RunsTable
+        runs={runs.runs}
+        runPage={runs.runPage}
+        activeRunId={runs.activeRunId}
+        onSelectRun={runs.selectRun}
+        onDeleteRun={(run) => {
+          void runs.deleteRun(run);
+        }}
+        onChangeRunPage={runs.changeRunPage}
+        regionRef={runs.runsRegionRef}
+      />
+      <RunDetail
+        activeRun={runs.activeRun}
+        detailRef={runs.runDetailRef}
+        exportScores={runs.exportScores}
+        onExportScoresChange={runs.setExportScores}
+        onExportTraces={runs.exportTraces}
+        onExportSftTraces={runs.exportSftTraces}
+        rejudge={{
+          activeRejudge: runs.activeRejudge,
+          judgePromptKinds: runs.judgePromptKinds,
+          activePromptKind: runs.activePromptKind,
+          onSwitchPromptKind: runs.switchPromptKind,
+          rejudgePrompt: runs.rejudgePrompt,
+          onRejudgePromptChange: runs.setRejudgePrompt,
+          onResetPrompt: runs.resetJudgePrompt,
+          canRejudge: runs.canRejudge,
+          rejudgeSubmitting: runs.rejudgeSubmitting,
+          rejudgeConfirmation: runs.rejudgeConfirmation,
+          onRequestRejudge: runs.requestRejudge,
+          onConfirmRejudge: () => {
+            void runs.confirmRejudge();
+          },
+          onCancelRejudge: runs.cancelRejudge,
+          rejudgePercent: runs.rejudgePercent,
+        }}
+      />
+    </>
   );
 }

@@ -1,0 +1,109 @@
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../api/client.ts", () => ({ api: vi.fn(), post: vi.fn() }));
+
+import { api } from "../../api/client.ts";
+import type { Run } from "../../api/types.ts";
+import { useRuns } from "../../hooks/useRuns.ts";
+import { RunsView } from "./RunsView.tsx";
+
+// 这一组测的是 RunsView 直接消费的数据层 `useRuns`（视图与它同一来源）：
+//   - 导出 URL 的分数参数（1.0 `exportTraces` / 最老备份 `exportSftTraces`）；
+//   - `deleteRun` 的可注入 `confirm`：确认/取消对数据的影响必须不同。
+
+const apiMock = vi.mocked(api);
+
+function emptyPage() {
+  return {
+    runs: [] as Run[],
+    page: 1,
+    page_size: 20,
+    total: 0,
+    pages: 1,
+    has_previous: false,
+    has_next: false,
+    active_count: 0,
+  };
+}
+
+beforeEach(() => {
+  apiMock.mockReset();
+  apiMock.mockImplementation(async (path: string) => {
+    if (path.startsWith("/runs?")) return emptyPage();
+    return {};
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe("RunsView 装配", () => {
+  it("渲染评测记录表与详情空态", () => {
+    render(<RunsView />);
+    expect(screen.getByText("评测记录")).not.toBeNull();
+    expect(screen.getByText("点击上方列表中的某条记录查看详情")).not.toBeNull();
+  });
+});
+
+describe("导出 URL 的分数参数", () => {
+  it("0/1/2 三种勾选组合生成三个不同的 URL", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const { result } = renderHook(() => useRuns());
+    await act(async () => {
+      result.current.selectRun({ run_id: "r1" });
+    });
+
+    const combos: Array<[string[], string]> = [
+      [["0"], "/api/runs/r1/export-trace?scores=0"],
+      [["1"], "/api/runs/r1/export-trace?scores=1"],
+      [["1", "2"], "/api/runs/r1/export-trace?scores=1,2"],
+    ];
+    for (const [scores, expected] of combos) {
+      act(() => result.current.setExportScores(scores));
+      act(() => result.current.exportTraces());
+      expect(openSpy).toHaveBeenLastCalledWith(expected, "_blank");
+    }
+    const urls = openSpy.mock.calls.map((call) => call[0]);
+    expect(new Set(urls).size).toBe(3);
+  });
+
+  it("导出 SFT JSON 走 /export-sft，分数参数与勾选一致", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const { result } = renderHook(() => useRuns());
+    await act(async () => {
+      result.current.selectRun({ run_id: "r1" });
+    });
+
+    act(() => result.current.setExportScores(["1", "2"]));
+    act(() => result.current.exportSftTraces());
+
+    expect(openSpy).toHaveBeenCalledWith("/api/runs/r1/export-sft?scores=1,2", "_blank");
+  });
+});
+
+describe("deleteRun 的可注入 confirm", () => {
+  it("confirm 返回 false 不删（零请求）；返回 true 才真删（DELETE + 重载列表）", async () => {
+    const { result } = renderHook(() => useRuns());
+    await act(async () => {
+      result.current.selectRun({ run_id: "r1" });
+    });
+    apiMock.mockClear();
+
+    await act(async () => {
+      await result.current.deleteRun({ run_id: "r1" }, () => false);
+    });
+    expect(apiMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.deleteRun({ run_id: "r1" }, () => true);
+    });
+    const calls = apiMock.mock.calls;
+    expect(
+      calls.some(([path, options]) => path === "/runs/r1" && (options as { method?: string })?.method === "DELETE"),
+    ).toBe(true);
+    expect(calls.some(([path]) => String(path).startsWith("/runs?page="))).toBe(true);
+  });
+});

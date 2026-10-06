@@ -1,0 +1,280 @@
+/**
+ * 评测配置区外壳。逐行移植 1.0 `App.vue:2861-2987` 的
+ * `<section class="section config-section">`。
+ *
+ * 拆成四块：本文件（外壳 + 任务范围 + 评测服务）、`ReuseBasePicker`、`ModelServicePanel`、
+ * `StartActions`。**1.0 的 DOM 层级保持不变**（`.config-groups` → `.config-group` →
+ * `.config-grid`），因为 `photobench.css` 的选择器是逐行移植来的，层级一变样式就散。
+ *
+ * 状态全部来自 hooks（`useConfig` / `useModelEndpoint` / `useReuseMode`）与组合层持有的
+ * `selectedAlbum` / `selectedQa` / `selectedModels` / 启动动作；这里只做展示与转发，
+ * **不发任何请求**。少了 1.0 `:2845-2856` 的 arbiter 面板——端点在 S9 已删，是死 UI
+ * （`docs/refactor/s10-deviations.md` §3）。
+ */
+import type { useConfig } from "../../hooks/useConfig.ts";
+import type { useReuseMode } from "../../hooks/useReuseMode.ts";
+import { ModelServicePanel, type CloudModelProfile, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
+import { ReuseBasePicker } from "./ReuseBasePicker.tsx";
+import { StartActions, type StartActionsProps } from "./StartActions.tsx";
+import { albumCountLabel, qaOptionsFor, RUN_MODES_UI, runModeMeta } from "./rules.ts";
+
+type ConfigApi = ReturnType<typeof useConfig>;
+type ReuseApi = ReturnType<typeof useReuseMode>;
+
+/** 1.0 `selectedAlbum` / `selectedQa` 两个 ref（`:223` / `:229`）不在三个 hook 里，由组合层注入。 */
+export interface ConfigAlbumProps {
+  selectedAlbum: string;
+  setSelectedAlbum: (album: string) => void;
+  selectedQa: string;
+  setSelectedQa: (qa: string) => void;
+}
+
+export interface ConfigSectionProps {
+  connection: Pick<
+    ConfigApi,
+    | "config"
+    | "manifests"
+    | "sentrixUrl"
+    | "setSentrixUrl"
+    | "judgeUrl"
+    | "setJudgeUrl"
+    | "judgeModel"
+    | "setJudgeModel"
+    | "judgeApiKey"
+    | "setJudgeApiKey"
+    | "setJudgeApiKeyDirty"
+    | "markConnectionConfigDirty"
+    | "connectionConfigState"
+    | "connectionConfigMessage"
+    | "saveConnectionConfig"
+  >;
+  /**
+   * 模型服务面板的输入。`cloudModelProfile` 由本组件从 `config` 推出来再注入
+   * （1.0 `:17-20` 的兜底默认在这个组件里），所以组合层不用管它。
+   */
+  model: Omit<ModelServicePanelProps, "cloudModelProfile">;
+  reuse: Pick<
+    ReuseApi,
+    | "runMode"
+    | "onModeChange"
+    | "reuseBases"
+    | "selectedReuseBaseId"
+    | "setSelectedReuseBaseId"
+    | "memorySpacesLoading"
+    | "scopeAlbumHint"
+    | "existingScopeId"
+  >;
+  album: ConfigAlbumProps;
+  start: StartActionsProps;
+  /** 1.0 `error`（`:286`）。 */
+  error: string;
+}
+
+/** `runtime_config` 里评测服务那一格读到的两个键（1.0 `:2909`）。用 `type` 以便从 `Record<string, unknown>` 断言。 */
+type JudgeApiKeyState = {
+  judge_api_key_set?: unknown;
+  judge_api_key_hint?: unknown;
+};
+
+export function ConfigSection({
+  connection,
+  model,
+  reuse,
+  album,
+  start,
+  error,
+}: ConfigSectionProps) {
+  const meta = runModeMeta(reuse.runMode);
+  const qaOptions = qaOptionsFor(connection.manifests, album.selectedAlbum);
+
+  // 1.0 `:17-20`：`config?.cloud_model_profile || {...}`（整对象兜底，不逐字段补）。
+  const cloudModelProfile: CloudModelProfile = connection.config?.cloud_model_profile
+    ? (connection.config.cloud_model_profile as CloudModelProfile)
+    : {
+        id: "big_model",
+        label: "big_model（云端 API）",
+        source: "cloud_api",
+        available: true,
+        model: "deepseek-v4.1-flash",
+      };
+
+  const runtimeConfig = (connection.config?.runtime_config || {}) as JudgeApiKeyState;
+
+  // 1.0 `:2866`：保存时模型服务三个字段由 `useModelEndpoint` 持有，这里读出来一起提交，
+  // 保存成功后的回写仍走那个 hook 的 `applySavedConnection`（1.0 `:2448-2459`）。
+  const onSaveConnection = () => {
+    void connection.saveConnectionConfig(
+      {
+        vllmManagerUrl: model.vllmManagerUrl,
+        modelEndpoint: model.modelEndpoint,
+        endpointModel: model.selectedEndpointModel,
+      },
+      { onModelConfigSaved: model.applySavedConnection },
+    );
+  };
+
+  return (
+    <section className="section config-section">
+      <div className="section-head">
+        <h2>评测配置</h2>
+        <div className="section-head-actions">
+          {start.hasRunning && <span className="live-badge">实时更新中</span>}
+          <button
+            className="btn ghost compact"
+            type="button"
+            disabled={connection.connectionConfigState === "saving"}
+            onClick={onSaveConnection}
+          >
+            {connection.connectionConfigState === "saving" ? "保存中…" : "保存测评配置"}
+          </button>
+          <span className={`config-save-status state-${connection.connectionConfigState}`}>
+            {connection.connectionConfigMessage}
+          </span>
+        </div>
+      </div>
+      <div className="config-groups">
+        <div className="config-group">
+          <div className="config-group-head">
+            <div>
+              <strong>任务范围</strong>
+              <span>选择本次要构建或测评的数据范围</span>
+            </div>
+          </div>
+          <div className="config-grid config-grid-scope">
+            <label>
+              工作模式
+              <select
+                value={reuse.runMode}
+                disabled={start.suiteRunning || start.hasRunning}
+                onChange={(event) => reuse.onModeChange(event.target.value)}
+              >
+                {RUN_MODES_UI.map((mode) => (
+                  <option key={mode.id} value={mode.id}>
+                    {mode.label}
+                  </option>
+                ))}
+              </select>
+              <span className="config-help mode-hint">{meta.hint}</span>
+            </label>
+            {reuse.runMode !== "reuse" && (
+              <label>
+                照片
+                <select
+                  value={album.selectedAlbum}
+                  onChange={(event) => album.setSelectedAlbum(event.target.value)}
+                >
+                  {connection.manifests.map((manifest) => (
+                    <option key={manifest.album_id} value={manifest.album_id}>
+                      {manifest.album_name} ({albumCountLabel(manifest)})
+                    </option>
+                  ))}
+                </select>
+                {reuse.runMode === "build" && (
+                  <span className="config-help">图片、视频与身份来源，处理后相册保留</span>
+                )}
+              </label>
+            )}
+            {reuse.runMode === "reuse" && (
+              <ReuseBasePicker
+                reuseBases={reuse.reuseBases}
+                selectedReuseBaseId={reuse.selectedReuseBaseId}
+                onSelectReuseBase={reuse.setSelectedReuseBaseId}
+                memorySpacesLoading={reuse.memorySpacesLoading}
+                scopeAlbumHint={reuse.scopeAlbumHint}
+              />
+            )}
+            {reuse.runMode !== "build" && (
+              <label>
+                QA 数据集
+                <select
+                  value={album.selectedQa}
+                  onChange={(event) => album.setSelectedQa(event.target.value)}
+                >
+                  {qaOptions.map((qa) => (
+                    <option key={qa} value={qa}>
+                      {qa}
+                    </option>
+                  ))}
+                </select>
+                {reuse.runMode === "reuse" && (
+                  <span className="config-help">题目与对照随所选现有相册自动匹配</span>
+                )}
+              </label>
+            )}
+          </div>
+        </div>
+        <div className="config-group">
+          <div className="config-group-head">
+            <div>
+              <strong>评测服务</strong>
+              <span>配置 Sentrix 后端、Judge 评分服务及认证信息</span>
+            </div>
+          </div>
+          <div className="config-grid config-grid-judge">
+            <label>
+              Sentrix 后端
+              <input
+                type="text"
+                value={connection.sentrixUrl}
+                placeholder="例如 127.0.0.1:8091"
+                onChange={(event) => {
+                  connection.setSentrixUrl(event.target.value);
+                  connection.markConnectionConfigDirty();
+                }}
+              />
+            </label>
+            <label>
+              Judge 服务
+              <input
+                type="text"
+                value={connection.judgeUrl}
+                placeholder="例如 192.168.1.65:1234/v1"
+                onChange={(event) => {
+                  connection.setJudgeUrl(event.target.value);
+                  connection.markConnectionConfigDirty();
+                }}
+              />
+            </label>
+            <label>
+              Judge 模型
+              <input
+                type="text"
+                value={connection.judgeModel}
+                placeholder="例如 qwen3.5-4b-mlx"
+                onChange={(event) => {
+                  connection.setJudgeModel(event.target.value);
+                  connection.markConnectionConfigDirty();
+                }}
+              />
+              <span className="config-help">Judge 请求使用此 model 字段。</span>
+            </label>
+            <label>
+              Judge API key
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={connection.judgeApiKey}
+                placeholder="留空表示不使用或保留已保存值"
+                onChange={(event) => {
+                  connection.setJudgeApiKey(event.target.value);
+                  connection.setJudgeApiKeyDirty(true);
+                  connection.markConnectionConfigDirty();
+                }}
+              />
+              <span className="config-help">
+                仅保存到评测编排器本机环境变量；
+                {runtimeConfig.judge_api_key_set
+                  ? `已配置（${String(runtimeConfig.judge_api_key_hint)}）`
+                  : "当前未配置"}
+                。
+              </span>
+            </label>
+          </div>
+        </div>
+        <ModelServicePanel {...model} cloudModelProfile={cloudModelProfile} />
+      </div>
+      <StartActions {...start} />
+      {error && <p className="error">{error}</p>}
+    </section>
+  );
+}
