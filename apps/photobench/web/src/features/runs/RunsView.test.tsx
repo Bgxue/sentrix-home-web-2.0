@@ -40,9 +40,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** 组合层（`App.tsx`）持有 `useRuns`；视图只接它的数据层。 */
+function Harness() {
+  const runs = useRuns();
+  return <RunsView runs={runs} judgeModel="" saveJudgePrompt={() => {}} />;
+}
+
 describe("RunsView 装配", () => {
   it("渲染评测记录表与详情空态", () => {
-    render(<RunsView />);
+    render(<Harness />);
     expect(screen.getByText("评测记录")).not.toBeNull();
     expect(screen.getByText("点击上方列表中的某条记录查看详情")).not.toBeNull();
   });

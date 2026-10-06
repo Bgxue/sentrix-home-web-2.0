@@ -87,3 +87,40 @@ describe("QaResults · 筛选表单的 9 个条件", () => {
     await waitFor(() => expect(screen.queryByText("电池续航够吗")).toBeNull());
   });
 });
+
+// 缺口 2：`activeRun?.rejudge` 必须接进 `useQaPage` 的 `activeRejudge`，否则
+// `visibleQaItems`（1.0 `:355-364`）的「重评进行中」过滤不生效。两条夹具给出不同答案。
+describe("QaResults · activeRejudge 过滤（1.0 visibleQaItems :355-364）", () => {
+  // 两条题的 judge 都来自上一轮（`rj0`），本轮重评是 `rj1` → 都该被过滤掉。
+  const STALE_ITEMS = [
+    { index: 1, question: "第一题", judge: { rejudge_id: "rj0", status: "completed" } },
+    { index: 2, question: "第二题", judge: { rejudge_id: "rj0", status: "completed" } },
+  ];
+
+  beforeEach(() => {
+    mockApi.mockImplementation(() =>
+      Promise.resolve({ items: STALE_ITEMS, page: 1, page_size: 20, total: 2, pages: 1 }),
+    );
+  });
+
+  it("重评进行中且本轮暂无结果：全部被过滤 → 显示等待首条结果的提示", async () => {
+    render(
+      <QaResults
+        activeRun={{
+          run_id: "run1",
+          status: "running",
+          rejudge: { status: "running", rejudge_id: "rj1", completed: 0, total: 2 },
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("正在等待本轮第一条 Judge 评分结果…")).not.toBeNull();
+  });
+
+  it("没有进行中的重评：两条题都在（不显示等待提示）", async () => {
+    render(<QaResults activeRun={{ run_id: "run1", status: "running", rejudge: null }} />);
+
+    await screen.findByText("展开逐题结果（2 条）");
+    expect(screen.queryByText("正在等待本轮第一条 Judge 评分结果…")).toBeNull();
+  });
+});

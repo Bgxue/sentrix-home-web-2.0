@@ -14,10 +14,10 @@
  *      才挂载、切回 runs 即卸载，和 1.0「每次点 tab 都重载」一致。
  *   2. `sentrixUrl` / `manifests` 在 1.0 是全局 ref（配置层 / `init()`），2.0 归组合层；
  *      本切片以 **props** 接收（`App.tsx` 仍以 `<QaBrowserView />` 空参渲染）。
- *   3. 1.0 的 `lightbox` 是 app 根级的共享元素（`:3767-3772`，runs 视图也用）。本切片
- *      把它放在视图内（`components/` 不可动，根级共享件归组合层），点击 GT 图弹出。
+ *   3. 1.0 的 `lightbox` 是 app 根级的共享元素（`:3767-3772`，runs 视图也用）；2.0 由
+ *      组合层（`App.tsx`）持有，本切片把点击目标经 `onOpenMedia` 上抛，不再自己渲染一份。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import type { ManifestSummary } from "../../api/types.ts";
 import { useQaBrowser } from "../../hooks/useQaBrowser.ts";
@@ -29,11 +29,12 @@ export interface QaBrowserViewProps {
   sentrixUrl?: string;
   /** 1.0 `manifests`：相册下拉的数据源。组合层从 `useConfig` 注入。 */
   manifests?: ManifestSummary[];
+  /** 点击 GT 图片时上抛给组合层的共享灯箱（1.0 `:3767` 的根级元素）。 */
+  onOpenMedia?: (target: { url: string; name: string }) => void;
 }
 
-export function QaBrowserView({ sentrixUrl = "", manifests = [] }: QaBrowserViewProps = {}) {
+export function QaBrowserView({ sentrixUrl = "", manifests = [], onOpenMedia }: QaBrowserViewProps = {}) {
   const qa = useQaBrowser({ sentrixUrl, manifests });
-  const [lightbox, setLightbox] = useState<{ url: string; name: string } | null>(null);
 
   // 1.0 `:2842` 在切到本视图时调 loadQaBrowser；挂载触发即等价。依赖只钉相册 / 题集：
   // 1.0 的两个 `@change`（`:3687` / `:3690`）也只在这两者变化时重载，sentrixUrl 变化不重载。
@@ -92,20 +93,11 @@ export function QaBrowserView({ sentrixUrl = "", manifests = [] }: QaBrowserView
               key={item.qa_id || idx}
               item={item}
               index={idx}
-              onOpenMedia={(url, name) => setLightbox({ url, name })}
+              onOpenMedia={(url, name) => onOpenMedia?.({ url, name })}
             />
           ))}
         </div>
       )}
-
-      {lightbox ? (
-        <div className="lightbox" onClick={() => setLightbox(null)}>
-          <div>
-            <img src={lightbox.url} alt={lightbox.name} />
-            <p>{lightbox.name}</p>
-          </div>
-        </div>
-      ) : null}
     </section>
   );
 }

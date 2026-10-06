@@ -16,6 +16,7 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    {/* 1.0 的 `loading` 从 true 起、`init()` 完成才置 false（`App.vue:267` / `:2759`）。 */}
+    <App initialLoading />
   </StrictMode>,
 );

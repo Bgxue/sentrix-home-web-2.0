@@ -7,11 +7,14 @@
  * `qaPageSize`/`qaFilters` 的移植）。本组件只负责：
  *   - 把 `resultsRef` 挂到 `#qa-results` 对应的元素上（`changeQaPage` 用它滚回顶部）；
  *   - 组装筛选表单（8 个下拉 + 搜索）与分页控件；
- *   - 逐条渲染 `QaItemCard`，并把「JUDGE 输入弹窗」「图片灯箱」两个视图内状态管起来。
+ *   - 逐条渲染 `QaItemCard`，并把「JUDGE 输入弹窗」这个视图内状态管起来。
  *
  * 人工复核（1.0 `:3457` / `:3665`）的草稿态在 1.0 由 run 详情层 `loadActiveRun`(`:2296`) 装载、
  * `saveReviews`(`:2338`) 写回，**不在 `useQaPage`**；这里按可选 props 接收，缺省时结构照旧、
  * 交互为空操作（接线归 runs 组合层）。
+ *
+ * **图片灯箱**：1.0 的 `.lightbox` 是 app 根级的单例元素（`:3767-3772`，QA 浏览视图也用），
+ * 所以这里不再自己渲染一份，改成把点击目标经 `onOpenMedia` 上抛给组合层持有的共享灯箱。
  */
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
@@ -44,6 +47,11 @@ export interface QaResultsProps {
   reviewSaving?: boolean;
   /** 1.0 `saveReviews`。 */
   onSaveReviews?: () => void;
+  /**
+   * 点击图片时上抛给组合层的**共享**灯箱（1.0 `:3767` 的根级元素，两个视图共用）。
+   * 缺省时为无操作（与 1.0 的灯箱是根级、本切片不持有状态一致）。
+   */
+  onOpenMedia?: (target: { url: string; name: string }) => void;
 }
 
 export function QaResults({
@@ -53,6 +61,7 @@ export function QaResults({
   onReviewChange,
   reviewSaving = false,
   onSaveReviews,
+  onOpenMedia,
 }: QaResultsProps) {
   const activeRunId = activeRun?.run_id ?? null;
   const activeRejudge = activeRun?.rejudge ?? null;
@@ -75,7 +84,6 @@ export function QaResults({
   } = useQaPage({ activeRunId, activeRejudge });
 
   const [judgeItem, setJudgeItem] = useState<RunItemDetail | null>(null);
-  const [lightbox, setLightbox] = useState<{ url: string; name: string } | null>(null);
 
   // 切 run（含首次挂载）后回第 1 页重拉：1.0 由 `loadActiveRun({resetPage})` 触发。
   // 最新 loader 存进 ref（在 effect 里写，不在渲染期写），effect 只依赖 activeRunId。
@@ -94,7 +102,7 @@ export function QaResults({
 
   const openImage = (media: MediaLike): void => {
     const target = openImageTarget(media);
-    if (target) setLightbox(target);
+    if (target) onOpenMedia?.(target);
   };
 
   // 同一元素被两个 ref 需要：`useQaPage` 的 `resultsRef`（切页回顶）与组合层的
@@ -283,14 +291,6 @@ export function QaResults({
           </div>
         )}
       </details>
-      {lightbox && (
-        <div className="lightbox" onClick={() => setLightbox(null)}>
-          <div>
-            <img src={lightbox.url} alt={lightbox.name} />
-            <p>{lightbox.name}</p>
-          </div>
-        </div>
-      )}
       {judgeItem && <JudgeInputModal item={judgeItem} onClose={() => setJudgeItem(null)} />}
     </section>
   );
