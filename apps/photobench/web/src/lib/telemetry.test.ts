@@ -1,0 +1,375 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  aggregateMetricRows,
+  comparableMemoryProfile,
+  gpuMetricRows,
+  gpuMetricsView,
+  itemCallMetrics,
+  keyMetricRows,
+  liveTelemetryPhaseRows,
+  liveTelemetryRows,
+  memoryProfileRows,
+  recallMetricRows,
+  telemetryChart,
+  telemetryHistory,
+  telemetryLiveState,
+  telemetryProcessList,
+  telemetrySampleCount,
+  tokenDistributionCount,
+  tokenDistributionRows,
+} from "./telemetry.ts";
+
+// 夹具要点：让「按历史采样聚合」与「按 live.latest/peak 回退」两种口径给出不同答案；
+// 让缺字段的几种回退（`-` / `0` / `未提供` / `未标注范围`）互不相同。
+
+describe("gpuMetricsView (:857-935)", () => {
+  it("有 ≥20 个历史采样时：peak=max、mean=算术平均、p95=floor(n*0.95) 位（不是 max）", () => {
+    const history = Array.from({ length: 21 }, (_, i) => ({ gpu_utilization_pct: i + 1 }));
+    const run = {
+      status: "running",
+      phases: { gpu_metrics: { source: "nvidia_smi", samples_count: 21, gpu_utilization_pct: {} } },
+      telemetry_live: { samples_count: 21, history },
+    };
+    const view = gpuMetricsView(run);
+    // 1..21：mean=11，peak=21，sorted[floor(21*0.95)]=sorted[19]=20
+    expect(view.gpu_utilization_pct).toEqual({ peak: 21, mean: 11, p95: 20 });
+  });
+
+  it("采样数 <20 时 p95 退化为 max（与 ≥20 口径不同）", () => {
+    const history = [{ gpu_utilization_pct: 10 }, { gpu_utilization_pct: 20 }, { gpu_utilization_pct: 30 }];
+    const run = {
+      status: "running",
+      phases: { gpu_metrics: { source: "nvidia_smi", samples_count: 3, gpu_utilization_pct: {} } },
+      telemetry_live: { samples_count: 3, history, latest: { gpu_utilization_pct: 99 }, peak: { gpu_utilization_pct: 100 } },
+    };
+    const view = gpuMetricsView(run);
+    // 有历史就用历史，不理会 latest=99：mean=20
+    expect(view.gpu_utilization_pct).toEqual({ peak: 30, mean: 20, p95: 30 });
+  });
+
+  it("历史为空时退回 live.latest/peak（mean 取 latest，peak/p95 取 peak）", () => {
+    const run = {
+      status: "running",
+      telemetry_source: "nvidia_smi",
+      telemetry_live: { samples_count: 5, latest: { gpu_utilization_pct: 5 }, peak: { gpu_utilization_pct: 9 } },
+    };
+    const view = gpuMetricsView(run);
+    expect(view.gpu_utilization_pct).toEqual({ mean: 5, peak: 9, p95: 9 });
+    expect(view.samples_count).toBe(5);
+    expect(view.source).toBe("nvidia_smi");
+  });
+
+  it("相位里已有的聚合（带 peak）不被历史覆盖", () => {
+    const run = {
+      status: "running",
+      phases: { gpu_metrics: { samples_count: 3, gpu_utilization_pct: { peak: 7, mean: 3, p95: 6 } } },
+      telemetry_live: { samples_count: 3, history: [{ gpu_utilization_pct: 1 }, { gpu_utilization_pct: 2 }, { gpu_utilization_pct: 3 }] },
+    };
+    expect(gpuMetricsView(run).gpu_utilization_pct).toEqual({ peak: 7, mean: 3, p95: 6 });
+  });
+
+  it("done 相位保留原值，不重算", () => {
+    const run = { status: "completed", phases: { gpu_metrics: { status: "done", samples_count: 3, temperature_c: { peak: 55 } } } };
+    const view = gpuMetricsView(run);
+    expect(view.partial).toBe(false);
+    expect(view.temperature_c).toEqual({ peak: 55 });
+  });
+});
+
+describe("liveTelemetryRows (:941-991)", () => {
+  it("非 apple：缺字段回 `-`、`0` 保留为 `0.00%`、KV 缺字段各有专门文案", () => {
+    const run = {
+      status: "running",
+      current_phase: "qa_eval",
+      telemetry_live: {
+        source: "nvidia_smi",
+        samples_count: 4,
+        latest: { model_process_memory_used_mib: 2048, gpu_utilization_pct: 0 },
+        peak: {},
+      },
+    };
+    const rows = liveTelemetryRows(run);
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("当前阶段")).toEqual(["当前阶段", "QA 评测", "已采样 4 次"]);
+    expect(byLabel.get("主模型 GPU 显存")?.[1]).toBe("2.00 GiB");
+    expect(byLabel.get("主模型 RAM")?.[1]).toBe("-");
+    // 0 不是缺字段：回 "0.00%"，不是 "-"
+    expect(byLabel.get("GPU 利用率")?.[1]).toBe("0.00%");
+    // 峰值在 peak 为空时回退到 latest（两处口径一致）
+    expect(byLabel.get("GPU 利用率")?.[2]).toBe("峰值 0.00%");
+    expect(byLabel.get("KV Cache")?.[1]).toBe("未提供");
+    expect(byLabel.get("KV Cache")?.[2]).toBe("当前框架未暴露运行时 KV 指标");
+    // system_memory_scope 缺失 -> 未标注范围（不是 宿主机全部进程）
+    expect(byLabel.get("整机 RAM")?.[2]).toContain("未标注范围");
+    expect(byLabel.get("GPU 温度")?.[1]).toBe("-");
+  });
+
+  it("peak 非空时生效；整机 RAM scope 命中回 宿主机全部进程；KV 有值时给数值", () => {
+    const run = {
+      status: "completed",
+      telemetry_live: {
+        source: "nvidia_smi",
+        samples_count: 9,
+        latest: { model_process_memory_used_mib: 1024, kv_cache_usage_pct: 50, kv_cache_used_tokens: 128 },
+        peak: { model_process_memory_used_mib: 4096, kv_cache_used_tokens: 256, system_memory_used_mib: 8192 },
+      },
+    };
+    const rows = liveTelemetryRows(run);
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("当前阶段")).toEqual(["当前阶段", "完成", "已采样 9 次"]);
+    expect(byLabel.get("主模型 GPU 显存")).toEqual(["主模型 GPU 显存", "1.00 GiB", "峰值 4.00 GiB · nvidia-smi 按主模型 PID 归因"]);
+    expect(byLabel.get("KV Cache")?.[1]).toBe("50.00%");
+    expect(byLabel.get("KV Cache")?.[2]).toBe("峰值 token 256.00");
+  });
+
+  it("apple_unified 走另一套行；PSS source 改标签", () => {
+    const apple = liveTelemetryRows({ status: "running", telemetry_live: { source: "apple_unified", samples_count: 2, latest: { gpu_utilization_pct: 12 }, peak: {} } });
+    expect(apple[0][0]).toBe("当前阶段");
+    expect(apple.some((row) => row[0] === "主模型 phys_footprint")).toBe(true);
+    const orin = liveTelemetryRows({ status: "running", telemetry_live: { source: "orin_ssh_pss", samples_count: 1, latest: {}, peak: {} } });
+    expect(orin.some((row) => row[0] === "主模型 PSS（Orin UMA）")).toBe(true);
+  });
+});
+
+describe("telemetryLiveState / telemetryHistory / 计数 (:992-1008)", () => {
+  it("非对象/数组当空；history 非数组当空", () => {
+    expect(telemetryLiveState({ telemetry_live: [] })).toEqual({});
+    expect(telemetryLiveState(undefined)).toEqual({});
+    expect(telemetryHistory({ telemetry_live: { history: "x" } })).toEqual([]);
+    expect(telemetryHistory({ telemetry_live: { history: [{ a: 1 }] } })).toEqual([{ a: 1 }]);
+    expect(telemetryProcessList({ telemetry_live: { all_processes: [{ pid: 1 }] } })).toEqual([{ pid: 1 }]);
+    expect(telemetryProcessList({})).toEqual([]);
+  });
+  it("sampleCount 取 samples_count 与历史长度的较大者", () => {
+    expect(telemetrySampleCount({ telemetry_live: { samples_count: 2, history: [1, 2, 3] } })).toBe(3);
+    expect(telemetrySampleCount({ telemetry_live: { samples_count: 7, history: [1] } })).toBe(7);
+    expect(telemetrySampleCount({ telemetry_live: { samples_count: -4 } })).toBe(0);
+  });
+});
+
+describe("telemetryChart (:1011-1026)", () => {
+  it("历史 >=2 直接返回 history", () => {
+    const history = [{ t: 0, phase: "a", memory_used_mib: 1 }, { t: 60, phase: "b", memory_used_mib: 2 }];
+    expect(telemetryChart({ telemetry_live: { history } })).toEqual({ history });
+  });
+
+  it("历史 <2 时用 phase_snapshots 拼相位趋势，并只保留含 _mib 的快照", () => {
+    const run = {
+      telemetry_live: {
+        phase_snapshots: {
+          model_deploy: { latest: { model_process_memory_used_mib: 1024 } },
+          qa_eval: { peak: { system_memory_used_mib: 2048 } },
+          empty_phase: { latest: { gpu_utilization_pct: 5 } },
+        },
+      },
+    };
+    const data = telemetryChart(run);
+    expect(data?.history).toHaveLength(2);
+    expect(data?.history[0]).toMatchObject({ t: 0, phase: "model_deploy", model_process_memory_used_mib: 1024 });
+    expect(data?.history[1]).toMatchObject({ t: 1, phase: "qa_eval", system_memory_used_mib: 2048 });
+  });
+
+  it("两条路都凑不足 2 点回 null", () => {
+    expect(telemetryChart({ telemetry_live: { history: [{ t: 0, memory_used_mib: 1 }] } })).toBeNull();
+    expect(telemetryChart({ telemetry_live: { phase_snapshots: { a: { latest: { gpu_utilization_pct: 5 } } } } })).toBeNull();
+  });
+});
+
+describe("liveTelemetryPhaseRows (:1126-1150)", () => {
+  it("按 source 选模型指标键与标签；peak 缺失时从历史取该相位峰值", () => {
+    const run = {
+      telemetry_source: "nvidia_smi",
+      telemetry_live: {
+        phase_snapshots: {
+          qa_eval: { peak: { model_process_memory_used_mib: 2048, memory_used_mib: 4096, system_memory_used_mib: 8192 }, samples_count: 3 },
+          photo_import: { peak: {}, samples_count: 1 },
+        },
+        history: [
+          { phase: "photo_import", model_process_memory_used_mib: 512 },
+          { phase: "photo_import", model_process_memory_used_mib: 1024 },
+        ],
+      },
+    };
+    const rows = liveTelemetryPhaseRows(run);
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("QA 评测")).toEqual(["QA 评测", "2.00 GiB", "主模型 GPU峰值 · 整卡 4.00 GiB · 整机 RAM 8.00 GiB · 3 次"]);
+    // photo_import 的 peak 没有模型键 -> 从历史取最大值 1024
+    expect(byLabel.get("照片/视频导入")?.[1]).toBe("1.00 GiB");
+  });
+
+  it("apple_unified 用 phys_footprint 键与标签，且被算进 orin 分支", () => {
+    const run = {
+      telemetry_source: "apple_unified",
+      telemetry_live: { phase_snapshots: { qa_eval: { peak: { model_process_system_memory_used_mib: 3072 }, samples_count: 2 } } },
+    };
+    const rows = liveTelemetryPhaseRows(run);
+    expect(rows[0][0]).toBe("QA 评测");
+    expect(rows[0][1]).toBe("3.00 GiB");
+    expect(rows[0][2]).toContain("主模型 phys_footprint峰值");
+  });
+});
+
+describe("comparableMemoryProfile (:1151-1165) —— 可比判据", () => {
+  it("null -> null；replay/pending/gpu_metrics 三档互不相同", () => {
+    expect(comparableMemoryProfile(null)).toBeNull();
+
+    const replay = comparableMemoryProfile({ memory_profile: { method: "vllm_reserved_v1" } });
+    expect(replay?.source).toBe("replay");
+    // 1.0 replay 分支用展开算子把画像字段**摊平**（1.0 遗留，照搬）：method 在顶层，
+    // 而不是像 gpu_metrics 分支那样嵌在 memory_profile 下。
+    expect(replay?.method).toBe("vllm_reserved_v1");
+    expect(replay?.memory_profile).toBeUndefined();
+
+    const pendingNoPhase = comparableMemoryProfile({ summary: { completed: 1, total: 5 } });
+    expect(pendingNoPhase).toMatchObject({ source: "pending", status: "pending", questions_completed: 1, questions_total: 5 });
+
+    const pendingNoProfile = comparableMemoryProfile({ phases: { gpu_metrics: { status: "running" } } });
+    expect(pendingNoProfile).toMatchObject({ source: "pending", status: "running" });
+  });
+
+  it("有 gpu_metrics.memory_profile 才判为可比（source=gpu_metrics），否则不可比（pending）", () => {
+    const comparable = comparableMemoryProfile({
+      summary: { completed: 3, total: 3 },
+      phases: { gpu_metrics: { status: "done", memory_profile: { method: "vllm_reserved_v1" }, model_process_memory_used_mib: { peak: 100 } } },
+    });
+    const notComparable = comparableMemoryProfile({
+      summary: { completed: 3, total: 3 },
+      phases: { gpu_metrics: { status: "done", model_process_memory_used_mib: { peak: 100 } } },
+    });
+    expect(comparable?.source).toBe("gpu_metrics");
+    expect(comparable?.memory_profile).toEqual({ method: "vllm_reserved_v1" });
+    expect(comparable?.model_process_memory_used_mib).toEqual({ peak: 100 });
+    expect(notComparable?.source).toBe("pending");
+    expect(notComparable?.memory_profile).toEqual({});
+  });
+});
+
+describe("memoryProfileRows (:1176-1211) —— 三种 method 分道", () => {
+  it("macos / orin / 默认(vLLM) 首行各不相同", () => {
+    expect(memoryProfileRows({ memory_profile: { method: "macos_unified_memory_v1" } })[0][0]).toBe("内存占用峰值");
+    expect(memoryProfileRows({ memory_profile: { method: "orin_process_pss_uma_v1" } })[0][0]).toBe("进程物理内存峰值（PSS）");
+    expect(memoryProfileRows({ memory_profile: { method: "vllm_reserved_v1" } })[0][0]).toBe("估算工作负载显存");
+  });
+
+  it("orin 的行把 KV 字节数标为不可用", () => {
+    const rows = memoryProfileRows({ memory_profile: { method: "orin_process_pss_uma_v1" } });
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("工作负载内存估算")?.[1]).toBe("不可计算");
+    expect(byLabel.get("KV 实际字节数")?.[1]).toBe("不可用");
+  });
+
+  it("source=gpu_metrics 时末两行换成「评测采样覆盖 / 数据来源」", () => {
+    const gpuRows = memoryProfileRows({ source: "gpu_metrics", questions_completed: 2, questions_total: 4, memory_profile: { method: "vllm_reserved_v1" } });
+    const labels = gpuRows.map((row) => row[0]);
+    expect(labels).toContain("评测采样覆盖");
+    expect(labels).toContain("数据来源");
+
+    const replayRows = memoryProfileRows({ source: "replay", memory_profile: { method: "vllm_reserved_v1" } });
+    const replayLabels = replayRows.map((row) => row[0]);
+    expect(replayLabels).toContain("复测进度");
+    expect(replayLabels).toContain("原测评数据一致性");
+  });
+});
+
+describe("aggregateMetricRows (:1212-1253) / keyMetricRows (:1254-1304)", () => {
+  it("retrieval_metric_scope=all_media 换标签，否则回历史图片口径", () => {
+    const typed = aggregateMetricRows({}, { retrieval_metric_scope: "all_media" });
+    expect(typed[0][0]).toBe("媒体检索 Precision");
+    const historical = aggregateMetricRows({}, {});
+    expect(historical[0][0]).toBe("历史图片检索 Precision");
+    expect(historical[12][1]).toBe("未记录"); // 视频检索 P/R/F1
+  });
+
+  it("吞吐时延 note 区分「实测相位」与「时间线回退」", () => {
+    const measured = aggregateMetricRows({ qa_concurrency: 4 }, { agent_throughput_latency_mode: "measured_agent_phase", agent_phase_completed_count: 10 });
+    expect(measured[5][2]).toContain("实际墙钟");
+    const fallback = aggregateMetricRows({}, { agent_throughput_latency_sample_count: 3, agent_throughput_latency_total_count: 10 });
+    expect(fallback[5][2]).toContain("不能视为实测");
+  });
+
+  it("keyMetricRows 未落盘候选顺序时不补零", () => {
+    const rows = keyMetricRows({}, {});
+    const recall = rows.find((row) => row.label === "工具图片召回率");
+    expect(recall?.value).toBe("未计算");
+    expect(recall?.note).toContain("不补零");
+    const gpuRow = rows.find((row) => row.label === "模型进程显存");
+    expect(gpuRow?.value).toBe("-"); // fmtMemory(undefined)
+  });
+});
+
+describe("recallMetricRows (:1305-1320)", () => {
+  it("无 image_ranking.question_count 回空数组", () => {
+    expect(recallMetricRows({})).toEqual([]);
+    expect(recallMetricRows({ image_ranking: {} })).toEqual([]);
+  });
+  it("有 question_count 时出 9 行，且缺失 K 值回 未计算", () => {
+    const rows = recallMetricRows({ image_ranking: { question_count: 12, r_at_5: 0.5 } });
+    expect(rows).toHaveLength(9);
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("R@5")).toEqual(["R@5", "50.0%", "0 题（GT ≤ 5 张）· 关键指标卡里的主值"]);
+    expect(byLabel.get("mAP")?.[1]).toBe("未计算");
+    expect(byLabel.get("计分题数")?.[1]).toBe("12 题");
+  });
+});
+
+describe("tokenDistributionRows (:1321-1334)", () => {
+  it("字段缺失回 `-`、0 回 `0 token`、.5 落在四舍五入边界上", () => {
+    const rows = tokenDistributionRows({
+      llm_prompt_tokens_max: 0,
+      llm_prompt_tokens_p95: 1024.5, // Math.round -> 1025
+      llm_context_tokens_max: null,
+      llm_completion_tokens_max: NaN,
+    });
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("最大输入 token")?.[1]).toBe("0 token");
+    expect(byLabel.get("P95 输入 token")?.[1]).toBe("1,025 token");
+    expect(byLabel.get("最大总上下文")?.[1]).toBe("-");
+    expect(byLabel.get("最大输出 token")?.[1]).toBe("-");
+  });
+  it("tokenDistributionCount 缺字段回 0（不是 `-`）", () => {
+    expect(tokenDistributionCount({ llm_context_samples_count: 7 })).toBe(7);
+    expect(tokenDistributionCount({})).toBe(0);
+  });
+});
+
+describe("itemCallMetrics (:1335-1339)", () => {
+  it("只保留对象元素；非数组回空", () => {
+    expect(itemCallMetrics({ model_call_metrics: [{ a: 1 }, null, "x", 3, { b: 2 }] })).toEqual([{ a: 1 }, { b: 2 }]);
+    expect(itemCallMetrics({ model_call_metrics: "nope" })).toEqual([]);
+    expect(itemCallMetrics(undefined)).toEqual([]);
+  });
+});
+
+describe("gpuMetricRows (:785-856)", () => {
+  it("默认 NVIDIA 分支 10 行、主指标行带 true、缺字段留 `-`", () => {
+    const rows = gpuMetricRows({ source: "nvidia_smi", samples_count: 3, model_process_memory_used_mib: { mean: 2048, peak: 4096 } });
+    expect(rows).toHaveLength(10);
+    expect(rows[0][0]).toBe("模型进程显存");
+    expect(rows[0][3]).toBe(true);
+    expect(rows[0][1]).toBe("2.00 GiB");
+    expect(rows[0][2]).toContain("峰值 4.00 GiB");
+    // 采不到的项留空，不补 0
+    const clockRow = rows.find((row) => row[0] === "SM 时钟");
+    expect(clockRow?.[1]).toBe("-");
+  });
+
+  it("memory_pressure 分支回另一套行且 thermal 走标签映射", () => {
+    const rows = gpuMetricRows({ memory_pressure: { mean: 2 }, thermal_state: { mean: 3, peak: 1 }, samples_count: 9 });
+    expect(rows).toHaveLength(10);
+    expect(rows[0][0]).toBe("内存压力");
+    expect(rows[0][1]).toBe("2");
+    const thermal = rows.find((row) => row[0] === "散热状态");
+    expect(thermal?.[1]).toBe("critical");
+    expect(thermal?.[2]).toContain("峰值 fair");
+  });
+
+  it("apple_unified / orin 分支行数与首标签不同", () => {
+    const apple = gpuMetricRows({ source: "apple_unified", samples_count: 4, model_process_system_memory_used_mib: { peak: 1024, mean: 512 } });
+    expect(apple).toHaveLength(11);
+    expect(apple[0][0]).toBe("主模型 phys_footprint");
+    const orin = gpuMetricRows({ source: "orin_ssh_pss", samples_count: 4 });
+    expect(orin).toHaveLength(9);
+    expect(orin[0][0]).toBe("Orin 模型进程占用（VmRSS）");
+  });
+});

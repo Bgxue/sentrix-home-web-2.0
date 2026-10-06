@@ -1,0 +1,121 @@
+import { describe, expect, it } from "vitest";
+
+import { effectiveRunSummary, macroMetrics, microMetrics, nearestRankPercentile } from "./runSummary.ts";
+import type { Run } from "../api/types.ts";
+
+// 夹具原则：每一组都要让**两种口径给出不同答案**，否则测不出「照搬了哪一种」。
+// 1.0 参考：`services/photobench/frontend/src/App.vue`（只读权威）。
+
+describe("nearestRankPercentile（1.0 :379-383，nearest-rank 而非线性插值）", () => {
+  const values = [10, 20, 30, 40];
+
+  it("4 点取 p95 = 最大值 40：线性插值会给 38.5，floor 口径会给 30", () => {
+    // ceil(4 * 0.95) - 1 = ceil(3.8) - 1 = 3 → 排序后第 4 个 = 40
+    expect(nearestRankPercentile(values, 0.95)).toBe(40);
+    // 与线性插值明确不同：
+    expect(nearestRankPercentile(values, 0.95)).not.toBe(38.5);
+    expect(nearestRankPercentile(values, 0.95)).not.toBe(30);
+  });
+
+  it("空集 / 全非数回 null", () => {
+    expect(nearestRankPercentile([], 0.95)).toBeNull();
+    expect(nearestRankPercentile(["x", undefined, NaN], 0.95)).toBeNull();
+    // 1.0 的既有怪癖：Number(null)===0 是有限数，故 null 会被当成 0 参与排序，不回 null。
+    expect(nearestRankPercentile([null], 0.95)).toBe(0);
+  });
+});
+
+describe("micro（按题汇总）vs macro（按题平均）必须给出不同答案", () => {
+  // 两题：题1 全中（P=R=F1=1），题2 全不中（P=R=F1=0）。
+  const items = [
+    { media_retrieval_counts: { gt: 1, predicted: 1, matched: 1 } },
+    { media_retrieval_counts: { gt: 3, predicted: 3, matched: 0 } },
+  ];
+
+  it("micro 先累加再算：gt=4，matched=1 → F1=0.25", () => {
+    expect(microMetrics(items, "media").f1).toBeCloseTo(0.25, 10);
+  });
+
+  it("macro 先算每题再平均：F1=(1+0)/2=0.5", () => {
+    expect(macroMetrics(items, "media").f1).toBeCloseTo(0.5, 10);
+  });
+
+  it("两种口径确实不等（否则这条夹具白造）", () => {
+    expect(microMetrics(items, "media").f1).not.toBe(macroMetrics(items, "media").f1);
+  });
+});
+
+describe("effectiveRunSummary：已存 summary 优先于现算（1.0 的 `saved.X ?? 现算`）", () => {
+  // 后端存的值与 items 现算**故意不同**：把 `??` 改成「一律现算」这条必须挂。
+  const run = {
+    run_id: "saved-wins",
+    summary: {
+      completed: 999,
+      total: 111,
+      judge_valid_count: 7,
+      answer_quality_mean: 1.75,
+      retrieval_recall_macro: 0.123,
+      llm_prompt_tokens_p95: 4242,
+    },
+    items: [
+      { answerability: "answerable", judge: { score: 2, consistency_status: "ok" } },
+      { answerability: "answerable", judge: { score: 0, consistency_status: "ok" } },
+    ],
+  } as unknown as Run;
+  const summary = effectiveRunSummary(run);
+
+  it("completed / total / judge_valid_count 用已存值（现算会分别给 2 / 2 / 2）", () => {
+    expect(summary.completed).toBe(999);
+    expect(summary.total).toBe(111);
+    expect(summary.judge_valid_count).toBe(7);
+    expect(summary.completed).not.toBe(2);
+  });
+
+  it("answer_quality_mean 用已存 1.75（现算 (2+0)/2 = 1）", () => {
+    expect(summary.answer_quality_mean).toBe(1.75);
+    expect(summary.answer_quality_mean).not.toBe(1);
+  });
+
+  it("retrieval_recall_macro / llm_prompt_tokens_p95 用已存值", () => {
+    expect(summary.retrieval_recall_macro).toBe(0.123);
+    expect(summary.llm_prompt_tokens_p95).toBe(4242);
+  });
+
+  it("summary 里没有的字段才现算（exact_accuracy = 1/2）", () => {
+    expect(summary.exact_accuracy).toBe(0.5);
+    expect(summary.judge_distribution).toEqual({ "0": 1, "2": 1 });
+  });
+});
+
+describe("effectiveRunSummary：typedRetrieval 分支走 media micro/macro（1.0 :487-488 / :481）", () => {
+  const run = {
+    run_id: "typed",
+    summary: {},
+    items: [
+      {
+        answerability: "answerable",
+        retrieval_media_refs: [{ media_type: "image", media_id: "a.jpg" }],
+        media_retrieval_counts: { gt: 1, predicted: 1, matched: 1 },
+      },
+      {
+        answerability: "answerable",
+        retrieval_media_refs: [{ media_type: "image", media_id: "b.jpg" }],
+        media_retrieval_counts: { gt: 3, predicted: 3, matched: 0 },
+      },
+    ],
+  } as unknown as Run;
+  const summary = effectiveRunSummary(run);
+
+  it("micro 口径 recall = 1/4", () => {
+    expect(summary.retrieval_recall_micro).toBeCloseTo(0.25, 10);
+  });
+
+  it("macro 口径 recall = (1+0)/2", () => {
+    expect(summary.retrieval_recall_macro).toBeCloseTo(0.5, 10);
+  });
+
+  it("scope 标为 all_media，且两种口径不等", () => {
+    expect(summary.retrieval_metric_scope).toBe("all_media");
+    expect(summary.retrieval_recall_micro).not.toBe(summary.retrieval_recall_macro);
+  });
+});
