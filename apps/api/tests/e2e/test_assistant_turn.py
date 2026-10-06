@@ -25,7 +25,7 @@ from PIL import Image
 
 from sentrix.main import create_app
 
-PHOTO_FIXTURES = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+PHOTO_FIXTURES = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 SCOPE = "assistant-album"
 # 只在 8100 上打这么多次模型调用。llama-server 是 --parallel 1，串行排队。

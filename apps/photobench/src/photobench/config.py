@@ -6,10 +6,12 @@
 配置与结果同名。
 
 **三个环境变量是新增的**（1.0 全写死）：``PHOTOBENCH_CONFIG_ROOT`` /
-``PHOTOBENCH_RESULTS_ROOT`` / ``PHOTOBENCH_DATA_ROOT``。理由不是「灵活」，是**迁移期
-必须能指到别处**：2.0 的验收要在真机上列出 1.0 ``results/`` 里那 270 个 run（19 GB，
-不可能拷进仓库），而部署时结果目录也该跟数据盘走。命名与 S9a 的
+``PHOTOBENCH_RESULTS_ROOT`` / ``PHOTOBENCH_DATA_ROOT``。理由不是「灵活」，是**部署参数**：
+结果目录该跟数据盘走、数据集根要能换、配置根要能隔离。命名与 S9a 的
 ``PHOTOBENCH_SYSTEM_PROCESS_*`` 同一族。
+
+（迁移期它们曾被用来指向 1.0 的 ``results/``；2026-10-06 起不再如此——评测历史属
+「旧数据」不迁，见 ``docs/refactor/2026-10-06-eval-data-migration.md``。）
 
 **S9c 又加了五个**（``sentrix_*``）：换模型 = 重启 2.0（裁决③，T923）要 PhotoBench
 知道「2.0 怎么起、起在哪个端口、pid 记在哪」。它们**全是部署参数**，默认值只对

@@ -40,7 +40,7 @@ from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 from sentrix.main import create_app
 
-ALBUM = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+ALBUM = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 # 两个空间：``album1`` 是整册导入（五条用例共用同一个导入形状），``identity-pair`` 是
 # 事件合流那一条构造出来的小相册。分空间而不是分数据库：同一个 app 上并存，互不干扰。

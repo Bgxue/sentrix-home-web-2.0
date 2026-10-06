@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-FIXTURE_DIR = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+FIXTURE_DIR = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 
 @pytest.fixture

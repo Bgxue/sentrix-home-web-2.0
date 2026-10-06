@@ -29,7 +29,7 @@ from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
 from sentrix.main import create_app
 
-PHOTO_FIXTURES = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+PHOTO_FIXTURES = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 SCOPE = "album1"
 
 COLOURS = {"红色": (200, 30, 30), "蓝色": (30, 30, 200), "绿色": (30, 180, 60)}

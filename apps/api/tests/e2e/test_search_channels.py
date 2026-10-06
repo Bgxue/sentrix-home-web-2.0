@@ -1,6 +1,6 @@
 """端到端：整册导入之后，「按真实地名找照片」真的能召回。
 
-夹具与 ``test_album_timeline.py`` 同一份：1.0 仓库里 ``data/album3-v2-source/photos``
+夹具与 ``test_album_timeline.py`` 同一份：本仓库 ``data/album3-v2-source/photos``
 的 **53 张真照片、真 EXIF GPS**，配仓库里那份真 GeoNames / PyGeoCN 数据。合成夹具抓不住
 这一类：地点锚点的值来自**真实反地理编码的结果**，只有真数据才会出现「GeoNames 的
 最近邻点带的是汉字名」这种形状。
@@ -33,7 +33,7 @@ from sentrix.config import Settings
 from sentrix.domain.retrieval import scheme
 from sentrix.main import create_app
 
-ALBUM = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+ALBUM = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 SCOPE = "album1"
 
 

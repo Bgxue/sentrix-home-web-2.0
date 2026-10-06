@@ -1,6 +1,6 @@
 """整册导入端到端：真照片、真 EXIF、真 GeoNames 数据、真 PyGeoCN（设计 §8 的 S4 行）。
 
-夹具是 1.0 仓库里的 ``data/album3-v2-source/photos``（只读）：**53 张真照片、13 个不同
+夹具是 本仓库的 ``data/album3-v2-source/photos``（只读）：**53 张真照片、13 个不同
 的拍摄日期、带真实 EXIF GPS**。合成夹具抓不住的东西它抓得住——S4a 规划阶段就是靠它
 发现了 ``CN.zip`` 里 ``readme.txt`` 排在 ``CN.txt`` 前面、以及 GeoNames 中国记录的
 ``name`` 列是罗马字这两个 bug。
@@ -37,7 +37,7 @@ from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 from sentrix.main import create_app
 
-ALBUM = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+ALBUM = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 EXPECTED_DAYS = {
     "2017-11-05",

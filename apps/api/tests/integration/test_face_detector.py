@@ -34,7 +34,7 @@ from sentrix.infrastructure.models.face_detector import (
     landmark_sanity,
 )
 
-PHOTO_DIR = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+PHOTO_DIR = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 # 实测（2026-09-23，53 张真照片）：142 张脸、46 张照片有人脸、单张最多 19 张。
 # 用例只取前 6 张、把门槛压到远低于实测值——它验的是「链路通不通」，不是「召回率有

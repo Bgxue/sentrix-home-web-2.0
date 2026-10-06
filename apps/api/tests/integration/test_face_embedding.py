@@ -46,7 +46,7 @@ from sentrix.infrastructure.models.face_adapter import (
 )
 from sentrix.infrastructure.models.face_detector import expand_crop
 
-PHOTO_DIR = Path("/home/asus/Github/Sentrix-Home-Web/data/album3-v2-source/photos")
+PHOTO_DIR = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 REAL_RECOGNITION = Path.home() / ".insightface" / MODELS_SUBDIR / DEFAULT_MODEL_NAME / RECOGNITION_WEIGHTS
 
 # 真权重那层取前 10 张。**不是 6**：实测这一册相册的前几张是远景合影，所有候选都小于
