@@ -16,9 +16,16 @@
 
 from __future__ import annotations
 
+import logging
 import threading
+from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
+from starlette.responses import Response
+from starlette.types import Scope
 
 from photobench import __version__
 from photobench.api import errors
@@ -36,6 +43,62 @@ from photobench.config import Settings
 #: 1.0 的 API 前缀就是 ``/api``。改成 ``/api/v1`` 是 S9c · T924——那是「对 2.0 的端点
 #: 适配」那一段（同时要改前端），本切片不动。
 API_PREFIX = "/api"
+
+log = logging.getLogger("photobench.main")
+
+
+@dataclass(frozen=True)
+class WebDist:
+    """前端产物的挂载结果。
+
+    **「收下了但什么都没发生」要看得见**（与 sentrix ``main.py`` 的 ``WebDist``、
+    ``/api/runs`` 响应里的 ``scan`` 字段同一条口径）。dist 不存在时不能抛异常——开发时
+    只跑 vite 是常态；但那个状态下这个进程**没有界面**，所以结果要留在
+    ``app.state.web_dist`` 上、并写一条 warning，而不是悄悄跳过。
+    """
+
+    directory: Path
+    mounted: bool
+
+
+class StaticBuild(StaticFiles):
+    """PhotoBench 的前端产物，直接挂。
+
+    **没有 SPA 回落，这是有意的。** Web 用 react-router，所以它那边的挂载要回落
+    ``index.html``；PhotoBench 前端两个视图用 ``useState`` 切（``web/src/App.tsx``
+    开头写着「没有 URL 语义，所以不引 react-router」），UI 状态不进 URL、不存在深链，
+    未知路径就该 404。
+
+    **抛的是 starlette 的 ``HTTPException``**（同 sentrix ``main.py``）：StaticFiles
+    抛的就是它，而 ``fastapi.HTTPException`` 是它的子类。
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        if scope["method"] not in ("GET", "HEAD"):
+            # 挂载点 ``/`` 会接住所有没被 API 路由匹配的路径，而 StaticFiles 对非
+            # GET/HEAD 一律回 405——那是挂载**之前**没有的行为（那些路径本来 404）。
+            raise HTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
+def _mount_web(app: FastAPI, settings: Settings) -> None:
+    """把前端产物挂到根。**这一句必须是 ``create_app`` 的最后一步**。
+
+    Starlette 按注册顺序匹配、先注册的先赢，而挂载点在 ``/``、会接住一切没被 API
+    匹配的路径——所以 API 路由必须先注册完。这条顺序就是「静态挂载不许吃掉 API 前缀」
+    的实现本身。
+    """
+    directory = settings.web_dist_root
+    if not directory.is_dir():
+        log.warning(
+            "前端产物目录不存在，本进程不提供界面（只有 API）：%s —— 先跑 vite build，"
+            "或用 PHOTOBENCH_WEB_DIST_ROOT 指到产物目录",
+            directory,
+        )
+        app.state.web_dist = WebDist(directory=directory, mounted=False)
+        return
+    app.mount("/", StaticBuild(directory=directory, html=True), name="web")
+    app.state.web_dist = WebDist(directory=directory, mounted=True)
 
 
 def create_app(
@@ -72,6 +135,9 @@ def create_app(
     api.include_router(spaces_routes.router)
     api.include_router(assets_routes.router)
     app.include_router(api)
+
+    # 静态挂载放最后：见 ``_mount_web`` 的注释——顺序就是「不许吃掉 API 前缀」本身。
+    _mount_web(app, settings)
 
     if scan_in_background:
         threading.Thread(

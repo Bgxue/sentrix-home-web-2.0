@@ -15,6 +15,16 @@
 知道「2.0 怎么起、起在哪个端口、pid 记在哪」。它们**全是部署参数**，默认值只对
 「2.0 与 PhotoBench 同机、走 ``make dev``」这一种部署成立——换部署形态就是改这五个
 环境变量，不改代码。这正是把它们抽出来的理由：那套知识不该长在业务逻辑里。
+
+**S11 再加第六个**（``sentrix_service_unit``，T1103）：进程托管形态从裸进程换成
+``systemd --user`` 时，填上单元名（如 ``sentrix-api.service``），重启就走
+``systemctl --user restart``、运行端点读单元的有效环境；留空则维持裸进程那套
+（``SubprocessSentrixProcess``）。**迁移期两种形态都要在**，所以它默认留空——默认
+仍然是「同机 ``make dev``」，与上面五个字段保持一致的口径。
+
+**T1101 还加了一个**（``PHOTOBENCH_WEB_DIST_ROOT``）：前端产物由 PhotoBench 后端自己
+serve（裁决③，「dist 挂到各自的 FastAPI」）。它同样是部署参数，而且**默认允许不
+存在**——开发时只跑 vite、从没构建过 dist。
 """
 
 from __future__ import annotations
@@ -47,6 +57,10 @@ class Settings:
     config_root: Path
     results_root: Path
     data_root: Path
+    #: PhotoBench 前端的构建产物（``apps/photobench/web/dist``，``vite build`` 的产物）。
+    #: 与上面三个根同一条口径——可配，且**允许不存在**（开发时只跑 vite）。默认值必须
+    #: 在 data_root 之后：前三个没有默认值，dataclass 不允许无默认字段跟在有默认字段后面。
+    web_dist_root: Path = APP_ROOT / "web" / "dist"
     #: 2.0 主 API 的健康检查基址（不含 ``/api/v1``）。重启后拿它确认真的起来了。
     sentrix_api_url: str = "http://127.0.0.1:8191"
     #: 2.0 的检出根：启动命令的 ``cwd``（``--app-dir apps/api/src`` 是相对的）。
@@ -59,6 +73,11 @@ class Settings:
     sentrix_pid_file: Path = APP_ROOT / "logs" / "sentrix-process.json"
     #: 2.0 的 stdout/stderr 落在这里（``start_new_session`` + 重定向，**不用 shell**）。
     sentrix_log_path: Path = APP_ROOT / "logs" / "sentrix.log"
+    #: S11 · T1103：托管 2.0 的 ``systemd --user`` 单元名。**留空 = 用裸进程形态**
+    #: （``SubprocessSentrixProcess``，默认，``make dev`` 那条路）；填了就用
+    #: ``SystemdSentrixProcess``——重启走 ``systemctl --user``，运行端点读单元环境。
+    #: 生产（``deploy/systemd/`` 的单元）填 ``sentrix-api.service``。
+    sentrix_service_unit: str = ""
 
     @classmethod
     def load(cls) -> Settings:
@@ -66,6 +85,7 @@ class Settings:
             config_root=_root("PHOTOBENCH_CONFIG_ROOT", APP_ROOT / "config"),
             results_root=_root("PHOTOBENCH_RESULTS_ROOT", APP_ROOT / "results"),
             data_root=_root("PHOTOBENCH_DATA_ROOT", APP_ROOT / "datasets"),
+            web_dist_root=_root("PHOTOBENCH_WEB_DIST_ROOT", APP_ROOT / "web" / "dist"),
             sentrix_api_url=os.environ.get("PHOTOBENCH_SENTRIX_API_URL", "http://127.0.0.1:8191").strip(),
             sentrix_repo_root=_root("PHOTOBENCH_SENTRIX_REPO_ROOT", APP_ROOT.parents[1]),
             sentrix_start_command=os.environ.get(
@@ -73,4 +93,5 @@ class Settings:
             ).strip(),
             sentrix_pid_file=_root("PHOTOBENCH_SENTRIX_PID_FILE", APP_ROOT / "logs" / "sentrix-process.json"),
             sentrix_log_path=_root("PHOTOBENCH_SENTRIX_LOG_PATH", APP_ROOT / "logs" / "sentrix.log"),
+            sentrix_service_unit=os.environ.get("PHOTOBENCH_SENTRIX_SERVICE_UNIT", "").strip(),
         )

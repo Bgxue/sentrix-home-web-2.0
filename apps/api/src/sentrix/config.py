@@ -13,11 +13,22 @@ from typing import Any
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: ``config.py`` 的上四级是 ``sentrix`` → ``src`` → ``api`` → ``apps``，再上一级是仓库根。
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SENTRIX_", extra="forbid")
 
     data_dir: Path = Field(default=Path("data"))
+
+    # Web 的构建产物（``apps/web/dist``，``vite build`` 的产物，``.gitignore`` 里）。
+    # **它是本模块里第二个可配的根，和开头那句「data_dir 是唯一可配的根」是有出入
+    # 的，这是有意的**：那条约束针对**数据**——数据根换掉时索引 / 媒体 / 缓存必须整体
+    # 跟着走，散开配置就会各指一处。dist 不是数据，它是构建出来的只读产物，位置由
+    # 「谁构建、构建到哪」决定，而且**允许不存在**（开发时只跑 vite）。可配是为了让
+    # 「有产物 / 没产物」两种情形都能被摆到门禁里（见 ``main.py`` 的挂载逻辑）。
+    web_dist_dir: Path = Field(default=REPO_ROOT / "apps" / "web" / "dist")
 
     api_port: int = 8191
     api_host: str = "0.0.0.0"
@@ -45,6 +56,7 @@ class Settings(BaseSettings):
 
     def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
+        self.web_dist_dir = self.web_dist_dir.expanduser().resolve()
 
     @computed_field  # type: ignore[prop-decorator]
     @property

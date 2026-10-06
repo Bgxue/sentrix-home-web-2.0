@@ -1,0 +1,25 @@
+# Sentrix Home Web 2.0 PhotoBench 后端（端口 8772，生产时同时 serve 它的前端 dist）。
+#
+# 同 sentrix-api.service：单元在仓库 deploy/systemd/，由 `make install-services` 安装。
+#
+# %h = 当前用户的 home。仓库按约定检出在 ~/Github/sentrix-home-web2.0。
+[Unit]
+Description=Sentrix Home 2.0 PhotoBench (port 8772)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Github/sentrix-home-web2.0
+# 迁移期临时指向：1.0 的 results/ 目录（270 个 run、19 GB，不进 Git）。2.0 自己的
+# apps/photobench/results 是空的，所以真机上必须指过去才能列出那些 run——
+# 这条是从裸进程环境里照搬过来的，不是新加的。（`photobench/config.py` 的
+# PHOTOBENCH_RESULTS_ROOT；缺省值是 APP_ROOT/results。）
+# 迁移完成或换数据盘时改这一行；删掉即回落到 2.0 自己的 results/。
+Environment=PHOTOBENCH_RESULTS_ROOT=/home/asus/Github/Sentrix-Home-Web/services/photobench/results
+# 与 Makefile 的 `photobench-dev` 目标逐字一致。
+ExecStart=%h/Github/sentrix-home-web2.0/.venv/bin/python -m uvicorn --factory photobench.main:create_app --host 0.0.0.0 --port 8772 --app-dir apps/photobench/src
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

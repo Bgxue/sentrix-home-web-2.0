@@ -56,6 +56,7 @@ from photobench.infrastructure.config.files import JsonConfigStore
 from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
 from photobench.infrastructure.deploy.sentrix_process import SubprocessSentrixProcess
+from photobench.infrastructure.deploy.systemd_process import SystemdSentrixProcess
 from photobench.infrastructure.http.client import HttpxJsonClient
 from photobench.infrastructure.http.judge_images import inline_judge_images
 from photobench.infrastructure.results.store import FileResultWriter, FileRunStore
@@ -179,13 +180,28 @@ class Container:
         result_writer: RunResultWriter = FileResultWriter(settings.results_root)
         # 换模型 = 重启 2.0（T923）。健康探测复用同一个 ``JsonHttpClient``——那一层
         # 本来就管「怎么打一个 HTTP 并解 JSON」，不必为部署另造一个。
-        sentrix_process: SentrixProcess = SubprocessSentrixProcess(
-            api_url=settings.sentrix_api_url,
-            start_command=shlex.split(settings.sentrix_start_command),
-            cwd=settings.sentrix_repo_root,
-            pid_file=settings.sentrix_pid_file,
-            log_path=settings.sentrix_log_path,
-            http=http,
+        #
+        # S11 · T1103：托管形态按 ``sentrix_service_unit`` 选。填了单元就走 systemd
+        # （``systemctl --user`` + 单元环境即权威记录）；留空维持裸进程（``make dev``
+        # 那条路，pid 记录 + ``lsof`` 反查）。**两种形态都留着**——迁移期同机既有
+        # ``make dev`` 的开发机、也有 ``systemd --user`` 的部署机，删除任何一种都是
+        # 砍掉一条仍然成立的部署方式。端口类型不变，业务侧（``ensure_endpoint``）
+        # 看不见这个分叉。
+        sentrix_process: SentrixProcess = (
+            SystemdSentrixProcess(
+                api_url=settings.sentrix_api_url,
+                unit=settings.sentrix_service_unit,
+                http=http,
+            )
+            if settings.sentrix_service_unit
+            else SubprocessSentrixProcess(
+                api_url=settings.sentrix_api_url,
+                start_command=shlex.split(settings.sentrix_start_command),
+                cwd=settings.sentrix_repo_root,
+                pid_file=settings.sentrix_pid_file,
+                log_path=settings.sentrix_log_path,
+                http=http,
+            )
         )
 
         def run_execution(request: RunRequest) -> RunExecution:

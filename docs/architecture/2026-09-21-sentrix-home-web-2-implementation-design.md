@@ -136,7 +136,7 @@
 ```text
 apps/web        → /api/v1 → apps/api
 apps/photobench → /api/v1/evaluation → apps/api
-services/model-manager → managed model profiles（2.0 只通过 HTTP 使用）
+1.0 的 8500（model-manager）→ managed model profiles（2.0 只通过 HTTP 使用，自己不建）
 
 apps/api owns:       SQLite、媒体存储、后台作业、模型与向量适配
 apps/photobench owns: 数据集、跑测结果、judge、评测编排
@@ -145,6 +145,8 @@ apps/photobench owns: 数据集、跑测结果、judge、评测编排
 **主产品不得启动、停止或读取 PhotoBench。PhotoBench 不得读取主产品 Python 内部模块、SQLite 文件或日志**——只能使用版本化 HTTP 评测契约。
 
 **2.0 不管理模型进程生命周期**。模型进程、锁、PID、显存采样、LoRA 加载逻辑都不进 2.0 的 API 进程。
+
+**2.0 不建 model-manager**（S11/T1104 明文）：仓库没有 `services/model-manager/`，2.0 也没有任何进程起停它（`apps/api` 全仓零引用 `8500` / `model_manager` / `vllm_manager`）。模型 profile 的权威是 1.0 部署在 153 的 8500（`sentrix-vllm-api.service` --user），2.0 只在需要时**经 HTTP 消费**它：`apps/photobench` 的 `vllm_manager_url`（`application/config/service.py`）与 `vllm_targets.json` 的 `manager_url` 就是这条通路，保留。
 
 ### 2.2 目录结构
 
@@ -190,13 +192,17 @@ sentrix-home-web2.0/
 │   │   └── workers/                显式异步作业入口
 │   ├── web/                        React + TypeScript + Vite
 │   └── photobench/                 评测应用（后端 FastAPI，前端 React/TS）
-├── services/model-manager/         模型 profile 生命周期
 ├── packages/contracts/             openapi + 生成的 TS client
 ├── docs/{architecture,adr,runbooks,refactor}/
 ├── infra/
 ├── scripts/
 └── tests/{unit,contract,integration,e2e}/
 ```
+
+> **更正（S11/T1104）**：上表原列 `services/model-manager/`——**2.0 不建该目录**。依据 §2.1
+> （`:139`/`:147`）：2.0 只通过 HTTP 使用 model-manager，且不管理模型进程生命周期。若补这个目录，
+> 里面能放的（profile 生命周期、锁、PID、显存采样、LoRA 加载）恰好都是 §2.1 明令不进 2.0 的东西，
+> 因此按「不建」处置。详见 `docs/refactor/s11-deviations.md`。
 
 ### 2.3 分层与依赖规则
 
@@ -568,7 +574,7 @@ S0 从 1.0 抄出的行为常量必须**逐条可验证**。这些值只存在�
 | 索引过期 | `data/ann/visual.hnsw` 只有 1,170 条，真实 10,590 条；仅因 Qdrant 优先才未暴露 |
 | 日志不可用 | `logs/sentrix-api-8091.log` 90MB 无时间戳，无法做时间维度分析 |
 | 遥测缺失 | `agent_trajectories.steps_json` 的 `detail` 恒为空对象，无法追溯工具调用 |
-| registry 三处不一致 | 仓库 `configs/…_192_168_0_153.json`(13 profiles) / 部署 `/home/asus/sentrix-vllm/registry.json`(15) / 启动脚本却指向 `…_local_100.json`（100 机器的） |
+| registry 三处不一致 | **1.0 仓库** `configs/sentrix_vllm_registry_192_168_0_153.json`(13) / 部署 `/home/asus/sentrix-vllm/registry.json`(15，**权威**) / `scripts/runtime/start_sentrix_api_8091.sh` 指向 `…_local_100.json`（100 机器的）。2.0 仓库**没有** `configs/`、也不读任何 registry——权威与处置见 `docs/refactor/s11-deviations.md`（S11/T1104 已核实） |
 
 ---
 

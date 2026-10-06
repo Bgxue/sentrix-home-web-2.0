@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration coverage check-docs web-check ci dev photobench-dev web-dev
+.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration coverage check-docs web-check ci dev photobench-dev web-dev install-services start stop restart status
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -138,3 +138,29 @@ web-dev: ## 起 2.0 Web（4274）
 
 photobench-web-dev: ## 起 PhotoBench 前端（4276）
 	cd apps/photobench/web && npm run dev
+
+# S11 · T1102：两个 `systemd --user` 单元。单元文件在仓库 `deploy/systemd/`（与它启
+# 动的代码同源），`install-services` 只做「拷贝 + daemon-reload」——**仓库里那份是
+# 权威**，改完重跑一次即可。不用 `--user` 之外的 sudo：`--user` 单元归当前用户管。
+# 停/起是**每个服务独立**的（两个单元互不依赖），所以下面几个目标对两个单元一起发
+# 命令，单服务操作直接 `systemctl --user {start,stop,restart} sentrix-api`。
+SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
+SERVICE_UNITS := sentrix-api.service sentrix-photobench.service
+
+install-services: ## 装 systemd --user 单元到 ~/.config/systemd/user/（S11）
+	install -d $(SYSTEMD_USER_DIR)
+	install -m 0644 deploy/systemd/sentrix-api.service $(SYSTEMD_USER_DIR)/
+	install -m 0644 deploy/systemd/sentrix-photobench.service $(SYSTEMD_USER_DIR)/
+	systemctl --user daemon-reload
+
+start: ## 起 2.0 两个 --user 服务（8191/8772）
+	systemctl --user start $(SERVICE_UNITS)
+
+stop: ## 停 2.0 两个 --user 服务
+	systemctl --user stop $(SERVICE_UNITS)
+
+restart: ## 重启 2.0 两个 --user 服务
+	systemctl --user restart $(SERVICE_UNITS)
+
+status: ## 看 2.0 两个 --user 服务状态
+	systemctl --user status $(SERVICE_UNITS) --no-pager

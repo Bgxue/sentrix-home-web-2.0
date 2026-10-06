@@ -99,8 +99,10 @@ class ConfigService:
         self.vllm_target_id, self.vllm_targets = self._load_vllm_targets()
 
         self.sentrix_url = self._configured_url(
-            "BENCH_SENTRIX_URL", "sentrix_url", fallback="http://127.0.0.1:8091"
+            "BENCH_SENTRIX_URL", "sentrix_url", fallback="http://127.0.0.1:8191"
         )
+        # 2.0 不建 model-manager：8500 由 1.0 的 sentrix-vllm-api.service 提供，
+        # 这里只是可选的 HTTP 消费（设计文档 §2.1「2.0 不管理模型进程生命周期」）。
         self.vllm_manager_url = self._configured_url("BENCH_VLLM_API_URL", "vllm_manager_url")
         self.model_base_url = self._configured_url("BENCH_VLLM_BASE_URL", "model_base_url")
         # 1.0 ``:345-350``：没配 base_url 时退回默认 target 的地址（去掉尾斜杠）。

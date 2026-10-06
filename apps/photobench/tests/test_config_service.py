@@ -128,7 +128,7 @@ def test_a_broken_runtime_connection_is_swallowed(config_root: Path):
     """1.0 ``:71``：连接配置是运行参数，坏了当空（改错了要能进去改回来）。"""
     (config_root / "runtime_connection.json").write_text("{ not json", encoding="utf-8")
     config = _service(config_root)
-    assert config.sentrix_url == "http://127.0.0.1:8091"  # 兜底
+    assert config.sentrix_url == "http://127.0.0.1:8191"  # 兜底
 
 
 def test_public_judge_providers_never_returns_the_whole_key(config_root: Path):
