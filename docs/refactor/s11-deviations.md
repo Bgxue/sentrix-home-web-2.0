@@ -87,3 +87,77 @@
 ## 5. 门禁
 
 见交付报告正文（原文输出）。
+
+---
+
+## 2. 施工中的偏离与纠正（2026-10-06）
+
+### 2.1 裁决③ 的一个推论：是 **2 个单位**，不是 4 个
+
+验收口径写的是「主 API / **Web** / PhotoBench / model-manager 独立启停」。裁决③（dist 挂到
+各自的 FastAPI）之后，**Web 与主 API 是同一个进程**（PhotoBench 前端与它的后端同理）。
+
+**这不是缩水**，依据在设计文档自己那里——§2.1（`:147`）：
+
+> **2.0 不管理模型进程生命周期**。模型进程、锁、PID、显存采样、LoRA 加载逻辑都不进 2.0 的 API 进程。
+
+所以「model-manager 独立启停」的含义是**它独立于 2.0**——**是要验证的性质，不是要写的功能**。
+已按性质验（见 `2026-10-06-s11-acceptance.md` §2：三个方向都测了）。
+
+### 2.2 **设计文档 `:382` 的 qdrant 症状说法与实测不符**
+
+文档说共享 qdrant 目录会让 2.0「**启动即失败**」。T1105 做了持锁实验：
+
+- 持锁状态下 `create_app()` **照常成功**（returncode 0、mounted=True）；
+- 真实后果是 **向量索引不可用 → 检索降级回 SQLite 全扫**（`retrieve_visual` 吞掉
+  `VectorIndexUnavailable`），且 `backfill_visual_vectors.py` 会失败。
+
+**结论不变**（`qdrant/` 必须独立），但**症状不是启动崩溃**——而这一点很重要：
+「启动即失败」是**看得见**的，「静默降级成全扫」是**看不见**的。runbook §6.1 已按实测写清。
+
+### 2.3 三条我转述错、被核查纠正的
+
+| 我说 | 实际 |
+|---|---|
+| registry 三处，第一处在 **2.0 仓库** | 第一处在 **1.0 仓库**；2.0 仓库**连 `configs/` 都没有** |
+| registry **三处** | **四处**——活着的 8091（裸进程、无 env）落到 `backend/app.py:76` 的 **100 机器路径** |
+| PhotoBench 的 8091 残留**两处** | **三处**——漏了 `config/runtime_connection.example.json`（在 git 里，可分发的那份） |
+
+### 2.4 **T1103 纠正了我对 2.0 行为的误述**
+
+我在任务书里写「失败不中断整轮评测（1.0 的 `gamma_sync` 语义）」——**对 2.0 不成立**。
+`application/run_execution/service.py::_sync_sentrix_endpoint` 在
+`outcome.restarted and not outcome.ok` 时**故意抛**（S9 偏离 §7.3：2.0 重启失败是致命的，
+怕产出「标着 A 模型、其实是 B 模型」的结果）。
+
+我把 1.0 的语义当成了 2.0 的。**T1103 没有改这条规则**，还据此把 systemd 路径的失败
+一律记成 `restarted=True, ok=False`（「已经试图换、没换成」），好让那条致命规则正确触发；
+记成 `restarted=False` 的话，`systemctl` 坏掉时整轮会**静默继续跑错模型**。
+
+### 2.5 一条我以为有风险、实测没风险的
+
+**systemd 单元没有继承旧裸进程的 conda `stmem` 环境**（几十个变量），而 2.0 进程内有
+Chinese-CLIP / ONNX 视觉嵌入器。T1102 判「不必要」，判据是「服务起来了、建库了、探活正常」——
+**但那不加载那些重模型**。我在验收里补了它没做的：**在单元下真跑一次导入**，
+得 `indexed: true` / `placed: true`。⇒ 判断成立，且现在有实测支撑（验收 §5）。
+
+### 2.6 现状缺口：`PHOTOBENCH_SENTRIX_SERVICE_UNIT` **当前没设**
+
+`deploy/` 无命中，8772 进程环境里只有 `PHOTOBENCH_RESULTS_ROOT`。
+⇒ **生产的 PhotoBench 现在走的是裸进程路径，不是 systemd 接管**（T1103 的默认值）。
+runbook §4.1 已标出并给了补法。这是**部署配置**，不是代码缺陷。
+
+### 2.7 一处值得记的坑：`fastapi.HTTPException` 是子类
+
+`fastapi.HTTPException` 继承自 `starlette.exceptions.HTTPException`，而 `StaticFiles`
+抛的是**基类**。T1101 第一版用 `from fastapi import HTTPException` 去 `except` ——
+**一条都接不住**，SPA 回落**整条静默失效**（未知路由仍 404，看起来像「回落没写」）。
+
+### 2.8 我的切分方式**第五次**造成并发写冲突
+
+T1103 覆盖了 `apps/photobench/src/photobench/config.py`，T1101 的 `web_dist_root` 一度丢失
+（表现为 `TypeError: unexpected keyword argument`），它重新合并。已核实两个字段都在。
+
+前四次：纯函数层 8 处同名函数 / `itemMedia` 归属写错 / hooks 层三处重复 /
+两个 agent 改同一个 `RunDetail.tsx`。**根因每次都一样**：我按 1.0 的行号或文件切分，
+而接缝处（共享函数、共享文件）没有先划清楚。
