@@ -631,3 +631,39 @@ def test_the_temporary_preview_is_deleted_after_the_model_sees_it(
 
     assert vision.image_existed_at_call_time() == [True]
     assert not Path(vision.calls[0][0]).exists()
+
+
+# ---- 引用不全的瞬间：跳过它，不拖垮整张照片 -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["cluster_id", "event_id", "observation_id", "face_instance_id"],
+)
+def test_a_moment_missing_a_required_reference_is_skipped(
+    album: Album, db: Database, previews, missing: str
+) -> None:
+    """六个引用列任一为空 → 丢掉这一条，**不抛**。
+
+    ``person_moments`` 那六列是 NOT NULL + 外键，而 ``_text(None)`` 给出的是空串——
+    空串**不享有 NULL 的外键豁免**，INSERT 直接 ``FOREIGN KEY constraint failed``；
+    ``_store`` 的调用方逐张 catch，于是症状是「这批照片静默少了瞬间」，而不是一声响。
+
+    真实数据里这**不是坏数据**：没聚上簇的脸，``face_instances.cluster_id`` 就是空的
+    （1.0 库里 32884 张脸有 19802 张如此；2.0 导入 album3-14 后是 35 张里的 7 张）。
+    该丢的是那一条瞬间，不是那张照片。
+
+    两张脸、模型对两张都回了瞬间：**只有引用不全的那条消失**。若整张照片一起失败，
+    这里会拿到 0 而不是 1——两个数字分得开「跳一条」与「全丢」。
+    """
+    asset_id = album.photo()
+    whole = album.face(asset_id, person_id=PERSON)
+    broken = album.face(asset_id, person_id=OTHER)
+    broken[missing] = None
+    vision = ScriptedVision([reply(moment("P1"), moment("P2"))])
+
+    result = build(db, previews, vision)(scope_id=HOME, selections=[whole, broken])
+
+    assert result.moments == 1
+    assert len(SqliteMomentRepository(db).list_for(person_id=PERSON)) == 1
+    assert SqliteMomentRepository(db).list_for(person_id=OTHER) == []

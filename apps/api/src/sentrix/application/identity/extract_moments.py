@@ -158,15 +158,31 @@ class ExtractMoments:
             person_id = str(info["person_id"])
             if not self._in_scope(scope_id, person_id):
                 continue
-            origin = source.get(str(info.get("face_instance_id")), {})
+            # ``person_moments`` 的六个引用列都是 NOT NULL + 外键，缺一列就落不了库。
+            # 原先这里用 ``_text`` 取值，而它把 ``None`` 给成空串——**空串不享有 NULL
+            # 的外键豁免**，INSERT 抛 ``FOREIGN KEY constraint failed``，``_store`` 的
+            # 调用方逐张 catch，症状于是变成「这批照片静默少了瞬间」而不是一声响。
+            #
+            # 最常见的一种是没聚上簇的脸：``face_instances.cluster_id`` 为空**不是坏
+            # 数据**，是「这张脸还没归属到某个人」的正常状态（1.0 库里 32884 张脸有
+            # 19802 张如此；2.0 导入 album3-14 后 35 张里 7 张）。该丢的是那一条瞬间。
+            refs = {
+                "cluster_id": info.get("cluster_id"),
+                "event_id": info.get("event_id"),
+                "observation_id": info.get("observation_id"),
+                "face_instance_id": info.get("face_instance_id"),
+            }
+            if not all(refs.values()):
+                continue
+            origin = source.get(str(refs["face_instance_id"]), {})
             self._moments.upsert(
                 person_id=person_id,
-                observation_id=_text(info.get("observation_id")),
+                observation_id=str(refs["observation_id"]),
                 prompt_version=PERSON_MOMENT_PROMPT_VERSION,
-                cluster_id=_text(info.get("cluster_id")),
-                event_id=_text(info.get("event_id")),
+                cluster_id=str(refs["cluster_id"]),
+                event_id=str(refs["event_id"]),
                 asset_id=asset_id,
-                face_instance_id=_text(info.get("face_instance_id")),
+                face_instance_id=str(refs["face_instance_id"]),
                 action_text=str(moment.get("action_text") or ""),
                 interaction_target_ids=self._targets(scope_id, label_map, moment),
                 interaction_text=str(moment.get("interaction_text") or ""),
@@ -216,10 +232,6 @@ class ExtractMoments:
 
 def _list(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else []
-
-
-def _text(value: object) -> str:
-    return str(value) if value else ""
 
 
 def _selection(item: Mapping[str, Any]) -> Mapping[str, object] | None:
