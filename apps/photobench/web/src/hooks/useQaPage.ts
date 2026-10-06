@@ -245,6 +245,26 @@ export function useQaPage({ activeRunId, activeRejudge = null }: UseQaPageOption
     await loadQaPage(1);
   }
 
+  /**
+   * 1.0 `:2322-2326`（`loadActiveRun` 的 `resetPage` 分支）：**立刻**清空逐题分页、已加载
+   * 详情与展开项。**不动** `qaFilters` / `qaPageSize`（1.0 同样不清）。`page_size` 沿用
+   * 当前值（1.0 `:2323` 的 `page_size: qaPageSize.value`），不是 `20` 这个初值。
+   */
+  function resetQaState(): void {
+    setQaPage({ items: [], page: 1, page_size: qaPageSizeRef.current, total: 0, pages: 1 });
+    setQaDetails({});
+    setOpenQaItems(new Set());
+  }
+
+  /**
+   * `openChainNode`（1.0 `:1984-2015`）在 `await` 多个 `loadQaDetail` 之后要读**权威**的
+   * 详情/分页；组合层拿到的是渲染快照，异步回来时可能已过期。这里读内部 ref（本就是
+   * 「ref 为权威」的那份）。
+   */
+  function getQaSnapshot(): { page: ItemPage; details: Record<number, RunItemDetail> } {
+    return { page: qaPageRef.current, details: qaDetailsRef.current };
+  }
+
   /** `v-model="qaFilters.x"` 的 React 替身：写单个字段。 */
   function setQaFilter<K extends keyof QaFilters>(key: K, value: QaFilters[K]): void {
     setQaFilters((prev) => ({ ...prev, [key]: value }) as QaFilters);
@@ -278,8 +298,12 @@ export function useQaPage({ activeRunId, activeRejudge = null }: UseQaPageOption
     changeQaPageSize,
     applyQaFilters,
     resetQaFilters,
+    resetQaState,
+    getQaSnapshot,
     setQaFilter,
     setQaFilters,
     setQaPageSize,
   };
 }
+
+export type UseQaPageApi = ReturnType<typeof useQaPage>;

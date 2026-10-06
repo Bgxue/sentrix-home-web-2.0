@@ -30,6 +30,7 @@ import { EXECUTION_PHASES } from "../../lib/constants.ts";
 import { albumName, duration, fmtDate, modelName, qaName, statusLabel } from "../../lib/format.ts";
 import { MemoryLayerPanel } from "../memory/MemoryLayerPanel.tsx";
 import type { MemoryLayerPanelProps } from "../memory/MemoryLayerPanel.tsx";
+import { KeyMetrics } from "./KeyMetrics.tsx";
 import { PhaseList } from "./PhaseList.tsx";
 import { RejudgeCard } from "./RejudgeCard.tsx";
 import type { RejudgeCardProps } from "./RejudgeCard.tsx";
@@ -147,6 +148,7 @@ export function RunDetail({
           ) : null}
           {activeRun.mode !== "build" ? <RejudgeCard {...rejudge} /> : null}
           <PhaseList activeRun={activeRun} />
+          <KeyMetrics run={activeRun} />
           {memory ? <MemoryLayerPanel {...memory} /> : null}
           <h3 className="result-heading">结果指标</h3>
           <div className="result-phase-list">

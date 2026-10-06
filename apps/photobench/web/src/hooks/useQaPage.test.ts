@@ -341,6 +341,47 @@ describe("useQaPage · 筛选与分页", () => {
   });
 });
 
+describe("useQaPage · resetQaState（1.0 :2322-2326）", () => {
+  it("清 qaPage/qaDetails/openQaItems，且**保留** qaFilters/qaPageSize", async () => {
+    route({
+      page: () => pageOf([{ index: 1 }]),
+      detail: (index) => detailOf(index, { score: 1 }),
+    });
+    const { result } = renderHook(() => useQaPage({ activeRunId: "run1" }));
+
+    await act(async () => {
+      await result.current.loadQaPage(1);
+    });
+    await act(async () => {
+      await result.current.toggleQa({ index: 1 });
+    });
+    await act(async () => {
+      result.current.setQaFilter("tag", "夜晚");
+    });
+    await act(async () => {
+      await result.current.changeQaPageSize(50);
+    });
+
+    // 前置：三样都有值，两样非默认。
+    expect(result.current.qaDetails[1]).toBeTruthy();
+    expect([...result.current.openQaItems]).toEqual([1]);
+    expect(result.current.qaFilters.tag).toBe("夜晚");
+    expect(result.current.qaPageSize).toBe(50);
+
+    act(() => {
+      result.current.resetQaState();
+    });
+
+    expect(result.current.qaDetails).toEqual({});
+    expect([...result.current.openQaItems]).toEqual([]);
+    // 1.0 :2323 的 page_size 沿用当前值（不是 20）。
+    expect(result.current.qaPage).toEqual({ items: [], page: 1, page_size: 50, total: 0, pages: 1 });
+    // 这两样 1.0 不清。
+    expect(result.current.qaFilters.tag).toBe("夜晚");
+    expect(result.current.qaPageSize).toBe(50);
+  });
+});
+
 describe("useQaPage · visibleQaItems（1.0 :355-364）", () => {
   it("重评进行中只留本轮的 completed/failed；completed 后不过滤", async () => {
     route({ page: () => pageOf([

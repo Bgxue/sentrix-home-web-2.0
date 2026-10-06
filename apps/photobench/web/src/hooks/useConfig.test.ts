@@ -38,19 +38,10 @@ const CONFIG = {
 
 const MANIFEST = { album_id: "album3", album_name: "A3", face_count: 1, photo_count: 2, video_count: 0, qa_sets: ["compact-10q"] };
 
-const PROMPT_KINDS = {
-  kinds: [
-    { kind: "answer_quality", default: "DEFAULT-AQ", custom: "" },
-    { kind: "task_decision", default: "DEFAULT-TD", custom: "CUSTOM-TD" },
-    { kind: "evidence", default: "DEFAULT-EV", custom: "" },
-  ],
-};
-
 function happyFetch() {
   return vi.fn((url: string, _init?: RequestInit) => {
     if (url.endsWith("/api/config")) return Promise.resolve(jsonResponse(200, CONFIG));
     if (url.endsWith("/api/manifests")) return Promise.resolve(jsonResponse(200, { manifests: [MANIFEST] }));
-    if (url.endsWith("/api/judge-prompts")) return Promise.resolve(jsonResponse(200, PROMPT_KINDS));
     return Promise.reject(new Error(`unexpected url ${url}`));
   });
 }
@@ -61,12 +52,13 @@ afterEach(() => {
 });
 
 describe("useConfig.initConfig", () => {
-  it("拉 config + manifests + judge-prompts，并把配置字段铺开", async () => {
+  it("拉 config + manifests，铺开配置字段，并把 config 对象交给调用方", async () => {
     vi.stubGlobal("fetch", happyFetch());
     const { result } = renderHook(() => useConfig());
 
+    let returned: unknown = null;
     await act(async () => {
-      await result.current.initConfig();
+      returned = await result.current.initConfig();
     });
 
     expect(result.current.loading).toBe(false);
@@ -78,11 +70,59 @@ describe("useConfig.initConfig", () => {
     expect(result.current.vllmTargetId).toBe("t1");
     expect(Object.keys(result.current.vllmTargets)).toEqual(["t1"]);
     expect(result.current.manifests.map((m) => m.album_id)).toEqual(["album3"]);
+    // 1.0 的连接状态：读完配置就是 `saved` / 「已读取配置文件」（不再是 idle）。
     expect(result.current.connectionConfigState).toBe("saved");
     expect(result.current.connectionConfigMessage).toBe("已读取配置文件");
-    // loadJudgePrompts 在 Promise.all 里跑，会把 rejudgePrompt 覆盖成 answer_quality 的草稿。
-    expect(result.current.promptDrafts.task_decision).toBe("CUSTOM-TD");
-    expect(result.current.rejudgePrompt).toBe("DEFAULT-AQ");
+    // config 对象不再恒为 null。
+    expect(result.current.config?.judge_model).toBe("cfg-jm");
+    expect(returned).toBe(result.current.config);
+  });
+
+  it("loadRuns 失败 → manifests **不被赋值**，但配置字段已铺开（1.0 :2751-2757）", async () => {
+    vi.stubGlobal("fetch", happyFetch());
+    const { result } = renderHook(() => useConfig());
+
+    await act(async () => {
+      await result.current.initConfig({ loadRuns: () => Promise.reject(new Error("runs boom")) });
+    });
+
+    // 失败语义：manifests 空。
+    expect(result.current.manifests).toEqual([]);
+    // 但配置字段先于 Promise.all 写好（1.0 原样）。
+    expect(result.current.sentrixUrl).toBe("127.0.0.1:8091");
+    expect(result.current.connectionConfigState).toBe("saved");
+    expect(result.current.error).toBe("runs boom");
+  });
+
+  it("loadProfiles 失败 → 同样中止 manifests（与 /manifests 并发的那条）", async () => {
+    vi.stubGlobal("fetch", happyFetch());
+    const { result } = renderHook(() => useConfig());
+
+    await act(async () => {
+      await result.current.initConfig({ loadProfiles: () => Promise.reject(new Error("profiles boom")) });
+    });
+
+    expect(result.current.manifests).toEqual([]);
+    expect(result.current.error).toBe("profiles boom");
+  });
+
+  it("onConfig 在 loadRuns 之前调用，拿到的是刚拉到的 config", async () => {
+    vi.stubGlobal("fetch", happyFetch());
+    const { result } = renderHook(() => useConfig());
+
+    const seen: unknown[] = [];
+    await act(async () => {
+      await result.current.initConfig({
+        onConfig: (cfg) => seen.push(cfg),
+        loadRuns: () => {
+          seen.push("runs");
+          return Promise.resolve();
+        },
+      });
+    });
+
+    expect(seen[0]).toBe(result.current.config);
+    expect(seen[1]).toBe("runs");
   });
 
   it("config 拉取失败时写 error 并结束 loading（GET 会重试一次）", async () => {
@@ -203,68 +243,66 @@ describe("useConfig.saveConnectionConfig", () => {
   });
 });
 
-describe("useConfig 提示词", () => {
-  it("loadJudgePrompts 是裸 fetch：失败时静默保留默认（与 api() 的失败处理不同）", async () => {
-    const fetchStub = vi.fn().mockRejectedValue(new Error("network down"));
-    vi.stubGlobal("fetch", fetchStub);
-    const { result } = renderHook(() => useConfig());
-
-    await act(async () => {
-      await result.current.loadJudgePrompts();
-    });
-
-    expect(result.current.judgePromptKinds).toEqual([]);
-    expect(result.current.promptDrafts).toEqual({ answer_quality: "", task_decision: "", evidence: "" });
-    expect(result.current.error).toBe("");
-  });
-
-  it("switchPromptKind 换草稿、resetJudgePrompt 回默认值", async () => {
-    vi.stubGlobal("fetch", happyFetch());
-    const { result } = renderHook(() => useConfig());
-
-    await act(async () => {
-      await result.current.loadJudgePrompts();
-    });
-
-    act(() => result.current.switchPromptKind("evidence"));
-    expect(result.current.rejudgePrompt).toBe("DEFAULT-EV");
-    expect(result.current.activePromptKind).toBe("evidence");
-
-    act(() => result.current.setRejudgePrompt("我改过的"));
-    act(() => result.current.resetJudgePrompt());
-    expect(result.current.rejudgePrompt).toBe("DEFAULT-EV");
-    expect(result.current.promptDrafts.evidence).toBe("DEFAULT-EV");
-
-    // 切走再切回读的是草稿（不是 rejudgePrompt 的临时值）。
-    act(() => result.current.switchPromptKind("task_decision"));
-    act(() => result.current.switchPromptKind("evidence"));
-    expect(result.current.rejudgePrompt).toBe("DEFAULT-EV");
-  });
-
-  it("saveJudgePrompt：空串拒绝；非空提交并写进草稿", async () => {
+describe("useConfig.saveJudgePrompt（1.0 :2574-2582）", () => {
+  it("空串拒绝：不提交，alert，返回 false", async () => {
     const fetchStub = vi.fn().mockResolvedValue(jsonResponse(200, { status: "ok" }));
     vi.stubGlobal("fetch", fetchStub);
     const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
     const { result } = renderHook(() => useConfig());
 
+    let ok = true;
     await act(async () => {
-      await result.current.saveJudgePrompt();
+      ok = await result.current.saveJudgePrompt("answer_quality", "   ");
     });
+
+    expect(ok).toBe(false);
     expect(alertSpy).toHaveBeenCalledWith("提示词不能为空");
     expect(fetchStub).not.toHaveBeenCalled();
+  });
 
-    act(() => result.current.setRejudgePrompt("新提示词"));
+  // P1 的核心断言：提交的就是**调用方传入**的 (kind, prompt)，不是某个内部默认值。
+  // 两组「kind + prompt」必须给出不同的请求体——若实现退回读 hook 内部状态（恒为
+  // answer_quality + ""），两组都会红。
+  it("提交的就是传入的 kind/system_prompt（两种组合给出两个不同请求体）", async () => {
+    const fetchStub = vi.fn().mockResolvedValue(jsonResponse(200, { status: "ok" }));
+    vi.stubGlobal("fetch", fetchStub);
+    vi.spyOn(window, "alert").mockImplementation(() => {});
+    const { result } = renderHook(() => useConfig());
+
+    const cases: Array<[string, string]> = [
+      ["answer_quality", "用户刚编辑的回答质量提示词"],
+      ["evidence", "用户刚编辑的证据核验提示词"],
+    ];
+    const bodies: unknown[] = [];
+    for (const [kind, prompt] of cases) {
+      await act(async () => {
+        const ok = await result.current.saveJudgePrompt(kind, prompt);
+        expect(ok).toBe(true);
+      });
+      const [url, init] = fetchStub.mock.calls[fetchStub.mock.calls.length - 1]!;
+      expect(String(url)).toBe("/api/judge-prompts");
+      expect((init as RequestInit).method).toBe("POST");
+      bodies.push(JSON.parse(String((init as RequestInit).body)));
+    }
+    expect(bodies).toEqual([
+      { kind: "answer_quality", system_prompt: "用户刚编辑的回答质量提示词" },
+      { kind: "evidence", system_prompt: "用户刚编辑的证据核验提示词" },
+    ]);
+    expect(fetchStub).toHaveBeenCalledTimes(2);
+  });
+
+  it("保存失败：alert 后端文案并返回 false", async () => {
+    const fetchStub = vi.fn().mockResolvedValue(jsonResponse(400, { error: "boom" }));
+    vi.stubGlobal("fetch", fetchStub);
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
+    const { result } = renderHook(() => useConfig());
+
+    let ok = true;
     await act(async () => {
-      await result.current.saveJudgePrompt();
+      ok = await result.current.saveJudgePrompt("answer_quality", "p");
     });
-    expect(fetchStub).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchStub.mock.calls[0]!;
-    expect(String(url)).toBe("/api/judge-prompts");
-    expect((init as RequestInit).method).toBe("POST");
-    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
-      kind: "answer_quality",
-      system_prompt: "新提示词",
-    });
-    expect(result.current.promptDrafts.answer_quality).toBe("新提示词");
+
+    expect(ok).toBe(false);
+    expect(alertSpy).toHaveBeenCalledWith("保存失败：boom");
   });
 });

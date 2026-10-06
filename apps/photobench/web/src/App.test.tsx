@@ -43,6 +43,8 @@ let failRuns = false;
 
 beforeEach(() => {
   failRuns = false;
+  // jsdom 没实现 scrollIntoView；selectRun → scrollToRunDetail 的 rAF 会调它。
+  Element.prototype.scrollIntoView = vi.fn();
   mockApi.mockReset();
   mockPost.mockReset();
   mockApi.mockImplementation((path: string) => {
@@ -133,6 +135,45 @@ describe("init() 的失败语义（1.0 :2751-2757）", () => {
     await screen.findByText("runs boom");
 
     expect(screen.queryByRole("option", { name: "A3 (1人 / 2图)" })).toBeNull();
+  });
+});
+
+// P2：`RunDetail` 的 `memory` 不接线时整个记忆面板不渲染。这条就是把接好之后
+// 「面板确实在」钉住——删掉组合层对 `memory` 的传参，这条立刻红。
+describe("记忆面板接线（P2 / 1.0 :3147）", () => {
+  it("选中 run 后记忆层级面板渲染出来", async () => {
+    mockApi.mockImplementation((path: string) => {
+      if (path === "/config") return Promise.resolve(CONFIG);
+      if (path === "/manifests") return Promise.resolve({ manifests: [MANIFEST] });
+      if (path.startsWith("/runs?")) {
+        return Promise.resolve({
+          runs: [{ run_id: "runX", status: "done", mode: "reuse" }],
+          page: 1,
+          page_size: 20,
+          total: 1,
+          pages: 1,
+          has_previous: false,
+          has_next: false,
+          active_count: 0,
+        });
+      }
+      if (path.startsWith("/runs/runX/items")) {
+        return Promise.resolve({ items: [], page: 1, page_size: 20, total: 0, pages: 1 });
+      }
+      if (path.startsWith("/runs/runX/reviews")) return Promise.resolve({ reviews: {} });
+      if (path.startsWith("/runs/runX")) return Promise.resolve({ run_id: "runX", status: "done", mode: "reuse" });
+      return Promise.resolve({});
+    });
+
+    const { container } = render(<App />);
+    await screen.findByTestId("runs-view");
+
+    // 点行 = 1.0 的 selectRun（行本身挂 onClick）。
+    const row = container.querySelector(".run-row") as HTMLElement;
+    expect(row).not.toBeNull();
+    fireEvent.click(row);
+
+    expect(await screen.findByText("记忆层级与有效证据链")).not.toBeNull();
   });
 });
 

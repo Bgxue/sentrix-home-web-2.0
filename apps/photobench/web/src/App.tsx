@@ -8,26 +8,32 @@
  * 两处视图切换照搬 1.0：只有 `activeView` 一个状态（`"runs"` / `"qa-browser"`），
  * 没有 URL 语义（计划 §2 裁决），所以不引 react-router。
  *
+ * ## 组合层持有的跨切片状态
+ *
+ * 1. **逐题状态归组合层**（`useQaPage`）。1.0 是单组件，`qaDetails` 同时喂「QA 逐题结果」
+ *    与记忆面板；2.0 拆 hook 后若各自持有一份，记忆面板的「已展开轨迹」永远为空。所以
+ *    这里起**唯一一个** `useQaPage` 实例，同时传给 `QaResults` 与 `RunDetail` 的记忆面板。
+ *    `useRuns` 需要它的 `loadQaPage` / `resetQaState`，但 `activeRunId` 又由 `useRuns`
+ *    提供——用 `qaRef` 打破这个环（thunk 在调用时读 ref，那时 `qa` 已建好）。
+ *
  * ## init() 与 1.0 的三处已知出入（都有原因，逐条登记在报告里）
  *
- * 1. **未调用 `useConfig.initConfig()`**：1.0 的 `init()` 把「配置字段」与「`loadJudgePrompts`
- *    + `/manifests` + `loadRuns(1)` + `loadProfiles()`」放进**同一个** `try`，其中四条并发、
- *    任一条失败都会跳过 `manifests.value = ...`（`:2751-2757`）。而 `initConfig` 把
- *    `manifests` 的赋值封在自己的 `Promise.all` 里、且自己吞异常，组合层无法让 `loadRuns`
- *    的失败中止那次赋值；`initConfig` 也不返回拉到的 config 对象（`applyConfig` 需要它）。
- *    所以这里直接按 1.0 的四条重写：配置字段经 `useConfig` 暴露的 setter 写入，
- *    `manifests` 由组合层持有（这正是 1.0 的失败语义所在）。
- * 2. **`loadRuns(1)` 先 await，再并发其余三条**：`useModelEndpoint.loadProfiles` 读的是
- *    React state（1.0 读同步 `ref`），`applyConfig` 刚写入的模型字段在同一轮闭包里读不到。
- *    先 await 一次网络请求，让那次写入完成一次渲染，再用 `modelApiRef` 取最新闭包。
- * 3. **`connectionConfigState` / `connectionConfigMessage` 停在初值**：这两个字段只在
- *    `initConfig` 里被写成 `"saved"` / `"已读取配置文件"`，而 `useConfig` 没有暴露写入口。
- *    只是初始文案差异；`markConnectionConfigDirty` 的抑制窗口靠 `setLoading(false)` 恢复。
+ * 1. **配置编排走 `useConfig.initConfig({ onConfig, loadRuns, loadProfiles })`**：
+ *    1.0 的 `init()` 把「配置字段」与「`loadJudgePrompts` + `/manifests` + `loadRuns(1)` +
+ *    `loadProfiles()`」放进**同一个** `try`，任一条失败都会跳过 `manifests.value = ...`
+ *    （`:2751-2757`）。`initConfig` 以 options 收这三条不属于配置切片的 loader，把它自己
+ *    的 `/manifests` 赋值留在同一个错误边界内；`loadRuns` 的失败仍会中止赋值。
+ * 2. **`loadRuns(1)` 先 await，再并发其余**：`useModelEndpoint.loadProfiles` 读的是
+ *    React state（1.0 读同步 `ref`），`onConfig` 里 `applyConfig` 刚写入的模型字段在同一轮
+ *    闭包里读不到。先 await 一次网络请求，让那次写入完成一次渲染，再用 `modelApiRef` 取最新闭包。
+ * 3. **`loadJudgePrompts` 换到运行详情侧**：1.0 只有一份提示词状态；2.0 里 `RejudgeCard`
+ *    绑的是 `useRunDetail` 那份，所以 init 调 `runs.loadJudgePrompts()`（不再是
+ *    `useConfig` 那份）。它自己吞异常（1.0 的裸 fetch + catch 原样），不影响 `manifests`
+ *    的失败语义。
  */
 import { useEffect, useRef, useState } from "react";
 
 import { api, post } from "./api/client.ts";
-import type { BenchConfig, ManifestPage, ManifestSummary } from "./api/types.ts";
 import { Lightbox } from "./components/Lightbox.tsx";
 import type { LightboxTarget } from "./components/Lightbox.tsx";
 import { Loading } from "./components/Loading.tsx";
@@ -40,8 +46,14 @@ import { QaResults } from "./features/qa/QaResults.tsx";
 import { RunsView } from "./features/runs/RunsView.tsx";
 import { useConfig } from "./hooks/useConfig.ts";
 import { useModelEndpoint } from "./hooks/useModelEndpoint.ts";
+import { useQaPage } from "./hooks/useQaPage.ts";
+import type { UseQaPageApi } from "./hooks/useQaPage.ts";
 import { useReuseMode } from "./hooks/useReuseMode.ts";
 import { useRuns } from "./hooks/useRuns.ts";
+import { openImageTarget } from "./lib/details.ts";
+import { chainDetailFor } from "./lib/graphs.ts";
+import type { ChainDetail, ChainMedia, GraphLayer, GraphNode } from "./lib/graphs.ts";
+import { effectiveRunSummary } from "./lib/runSummary.ts";
 
 export interface AppProps {
   /**
@@ -69,25 +81,29 @@ export function App({ initialLoading = false }: AppProps) {
     setSelectedModels,
     onDirty: configApi.markConnectionConfigDirty,
   });
-  const runs = useRuns();
-  /**
-   * 1.0 `config` 与 `manifests`（`:22` 一带）。组合层持有：`init()` 里 `manifests` 的赋值
-   * 必须是四条 `Promise.all` 之后才发生（1.0 `:2751-2757` 的失败语义），而 `useConfig.initConfig`
-   * 把赋值封在自己那个吞异常的 `Promise.all` 里，无法被 `loadRuns` 的失败中止。
-   */
-  const [config, setConfig] = useState<BenchConfig | null>(null);
-  const [manifests, setManifests] = useState<ManifestSummary[]>([]);
+
+  // 打破「useRuns 要 qa 的 loader、qa 要 useRuns 的 activeRunId」这个环：thunk 在调用时
+  // 读 ref（loadActiveRun / 轮询 / saveReviews 都是异步发生后触发，那时 qa 已建好）。
+  const qaRef = useRef<UseQaPageApi | null>(null);
+  const runs = useRuns({
+    loadQaPage: (page) => qaRef.current?.loadQaPage(page) ?? Promise.resolve(),
+    resetQaState: () => qaRef.current?.resetQaState(),
+  });
+  /** 逐题状态唯一实例；`QaResults` 与记忆面板共享（见文件头 1）。 */
+  const qa = useQaPage({ activeRunId: runs.activeRunId, activeRejudge: runs.activeRejudge });
+  qaRef.current = qa;
+
   const [selectedAlbum, setSelectedAlbum] = useState("album3-14");
   const [selectedQa, setSelectedQa] = useState("compact-10q");
   const reuseApi = useReuseMode({
-    manifests,
+    manifests: configApi.manifests,
     runs: runs.runs,
     sentrixUrl: configApi.sentrixUrl,
     selectedQa,
     setSelectedAlbum,
     setSelectedQa,
     judgeProviderId: configApi.judgeProviderId,
-    judgeProviders: (config?.judge_providers || []) as Array<Record<string, unknown>>,
+    judgeProviders: (configApi.config?.judge_providers || []) as Array<Record<string, unknown>>,
     judgeModel: configApi.judgeModel,
     setJudgeUrl: configApi.setJudgeUrl,
     setJudgeModel: configApi.setJudgeModel,
@@ -101,6 +117,8 @@ export function App({ initialLoading = false }: AppProps) {
   const [loading, setLoading] = useState(initialLoading);
   /** init() 是否已跑完（`loading` 的初值可被 `initialLoading=false` 关掉，不能拿它当判据）。 */
   const [initDone, setInitDone] = useState(false);
+  /** 1.0 `chainDetail` ref（`:281`）：记忆面板点开节点后置位。 */
+  const [chainDetail, setChainDetail] = useState<ChainDetail | null>(null);
 
   // `loadProfiles` 读的是 state；init 里 `applyConfig` 刚写的值在同一轮闭包读不到。
   // 用 ref 存最新一次渲染的 API，等一次 await（loadRuns 的网络往返）后再取。
@@ -120,51 +138,27 @@ export function App({ initialLoading = false }: AppProps) {
     void (async () => {
       let modelEndpoint = "";
       try {
-        // 1.0 :2734-2750：配置字段。
-        const cfg = await api<BenchConfig>("/config");
-        setConfig(cfg);
-        const targets = cfg.vllm_targets || {};
-        const targetId = cfg.default_vllm_target_id || Object.keys(targets)[0] || "";
-        configApi.setVllmTargetId(targetId);
-        const target = targets[targetId] || {};
-        const runtimeConfig = (cfg.runtime_config || {}) as Record<string, unknown>;
-        configApi.setSentrixUrl(firstString(runtimeConfig.sentrix_url, cfg.default_sentrix_url));
-        configApi.setJudgeUrl(firstString(runtimeConfig.judge_url, cfg.default_judge_url));
-        configApi.setJudgeModel(firstString(runtimeConfig.judge_model, cfg.judge_model));
-        configApi.setJudgeApiKey("");
-        configApi.setJudgeApiKeyDirty(false);
-        configApi.setRejudgePrompt(firstString(cfg.custom_judge_prompt, cfg.judge_prompt));
-        const providers = (cfg.judge_providers || []) as Array<Record<string, unknown>>;
-        configApi.setJudgeProviderId(
-          firstString(runtimeConfig.judge_provider_id, cfg.default_judge_provider_id, providers[0]?.id),
-        );
-        // 1.0 :2738-2741：模型服务字段（归 useModelEndpoint）。
-        modelApi.applyConfig(cfg);
-        modelEndpoint = firstString(
-          runtimeConfig.model_base_url,
-          cfg.default_vllm_model_base_url,
-          target.model_base_url,
-        );
-
-        // 1.0 :2751-2757 的四条。loadRuns 先 await（见文件头 2），其余三条并发。
-        await runs.loadRuns(1);
-        const managerUrl = firstString(
-          runtimeConfig.vllm_manager_url,
-          target.manager_url,
-          cfg.default_vllm_api_url,
-        );
-        const [, manifestPayload] = await Promise.all([
-          configApi.loadJudgePrompts(),
-          api<ManifestPage>("/manifests"),
-          managerUrl.trim() ? modelApiRef.current.loadProfiles() : Promise.resolve(),
-        ]);
-        setManifests(manifestPayload.manifests || []);
-      } catch (e) {
-        configApi.setError((e as Error).message || "读取配置失败");
+        await configApi.initConfig({
+          // 1.0 :2738-2741：模型服务字段（归 useModelEndpoint）+ model endpoint。
+          onConfig: (cfg) => {
+            modelApi.applyConfig(cfg);
+            const runtimeConfig = (cfg.runtime_config || {}) as Record<string, unknown>;
+            const targets = cfg.vllm_targets || {};
+            const targetId = cfg.default_vllm_target_id || Object.keys(targets)[0] || "";
+            const target = targets[targetId] || {};
+            modelEndpoint = firstString(
+              runtimeConfig.model_base_url,
+              cfg.default_vllm_model_base_url,
+              target.model_base_url,
+            );
+          },
+          // 1.0 :2751-2757 的四条：loadRuns 先串行 await（见文件头 2），其余并发。
+          loadRuns: () => runs.loadRuns(1),
+          loadProfiles: () => modelApiRef.current.loadProfiles(),
+        });
+        // 1.0 :2751 的 loadJudgePrompts —— 唯一真相在运行详情侧（见文件头 3）。
+        await runs.loadJudgePrompts();
       } finally {
-        // 1.0 的 `loading` 是全局的；2.0 拆开后配置段那份也要落下，否则
-        // `markConnectionConfigDirty` 的抑制窗口永不释放（useConfig 的 loading 从 true 起）。
-        configApi.setLoading(false);
         setLoading(false);
         setInitDone(true);
       }
@@ -252,6 +246,53 @@ export function App({ initialLoading = false }: AppProps) {
     await runs.loadActiveRun();
   };
 
+  /** 1.0 `openChainNode`（`:1984-2015`）：先并发补拉当前页所有详情，再算弹窗数据。 */
+  const openChainNode = (mode: string, layer: GraphLayer, node: GraphNode): void => {
+    const current = qaRef.current;
+    if (!current) return;
+    const indices = (current.qaPage.items || [])
+      .map((summary) => summary.index)
+      .filter((index): index is number => index != null);
+    void Promise.allSettled(indices.map((index) => current.loadQaDetail(index))).then(() => {
+      const latest = qaRef.current;
+      if (!latest) return;
+      // await 之后要读**权威**的详情/分页（渲染快照可能过期）。
+      const snapshot = latest.getQaSnapshot();
+      setChainDetail(
+        chainDetailFor({
+          mode,
+          layer,
+          node,
+          page: snapshot.page,
+          details: snapshot.details,
+          albumId: runs.activeRun?.album_id,
+        }),
+      );
+    });
+  };
+
+  // 记忆面板的数据（1.0 `:3147-3284`）。1.0 在 `activeRun` 为假时不进详情区，这里同形。
+  const memory = runs.activeRun
+    ? {
+        run: runs.activeRun,
+        manifests: configApi.manifests,
+        qaDetails: qa.qaDetails,
+        qaPageItems: qa.qaPage.items ?? [],
+        memoryEffectiveness: runs.memoryEffectiveness,
+        keyframeAnalysis: runs.keyframeAnalysis,
+        keyframeAnalysisLoading: runs.keyframeAnalysisLoading,
+        keyframeAnalysisError: runs.keyframeAnalysisError,
+        summary: effectiveRunSummary(runs.activeRun),
+        chainDetail,
+        onOpenChainNode: openChainNode,
+        onCloseChainDetail: () => setChainDetail(null),
+        onOpenImage: (media: ChainMedia) => {
+          const target = openImageTarget(media);
+          if (target) setLightbox(target);
+        },
+      }
+    : undefined;
+
   if (loading) {
     return <Loading />;
   }
@@ -263,7 +304,7 @@ export function App({ initialLoading = false }: AppProps) {
         {activeView === "runs" ? (
           <>
             <ConfigSection
-              connection={{ ...configApi, config, manifests }}
+              connection={{ ...configApi, config: configApi.config, manifests: configApi.manifests }}
               model={{ ...modelApi, selectedModels, setSelectedModels }}
               reuse={reuseApi}
               album={{ selectedAlbum, setSelectedAlbum, selectedQa, setSelectedQa }}
@@ -283,18 +324,29 @@ export function App({ initialLoading = false }: AppProps) {
             <RunsView
               runs={runs}
               judgeModel={configApi.judgeModel}
-              saveJudgePrompt={() => {
-                void configApi.saveJudgePrompt();
+              memory={memory}
+              saveJudgePrompt={(kind, prompt) => {
+                void (async () => {
+                  // 保存的是运行详情侧那份（用户刚编辑的）；成功后写回它的草稿
+                  // （1.0 `saveJudgePrompt` 末尾的 `promptDrafts[kind] = prompt`）。
+                  const ok = await configApi.saveJudgePrompt(kind, prompt);
+                  if (ok) runs.setPromptDrafts((prev) => ({ ...prev, [kind]: prompt.trim() }));
+                })();
               }}
             />
             <QaResults
               activeRun={runs.activeRun}
+              qa={qa}
               resultRef={runs.runDetailRef}
               reviewFor={runs.reviewFor}
               onReviewChange={(summary, patch) => runs.setReview(String(summary.qa_id || ""), patch)}
               reviewSaving={runs.reviewSaving}
               onSaveReviews={() => {
-                void runs.saveReviews();
+                void (async () => {
+                  await runs.saveReviews();
+                  // 1.0 `saveReviews`（`:2338`）末尾重拉当前页。
+                  await qa.loadQaPage();
+                })();
               }}
               onOpenMedia={setLightbox}
             />
@@ -302,7 +354,7 @@ export function App({ initialLoading = false }: AppProps) {
         ) : (
           <QaBrowserView
             sentrixUrl={configApi.sentrixUrl}
-            manifests={manifests}
+            manifests={configApi.manifests}
             onOpenMedia={setLightbox}
           />
         )}

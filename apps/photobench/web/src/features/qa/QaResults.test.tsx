@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Run } from "../../api/types.ts";
@@ -6,11 +7,31 @@ import type { Run } from "../../api/types.ts";
 const { mockApi } = vi.hoisted(() => ({ mockApi: vi.fn() }));
 vi.mock("../../api/client.ts", () => ({ api: mockApi, post: vi.fn() }));
 
+import { useQaPage } from "../../hooks/useQaPage.ts";
 import { QaResults } from "./QaResults.tsx";
 
 afterEach(cleanup);
 
 const RUN: Run = { run_id: "run1", album_id: "album3", status: "completed", rejudge: null };
+
+/**
+ * `QaResults` 现在只消费组合层传入的 `qa`（1.0 是单组件，状态天然共享）。测试用这个
+ * harness 复刻组合层的最小职责：起一个 `useQaPage`，切 run 时回第 1 页重拉
+ * （对应 `App.tsx` 里 `useRuns` 的 `loadQaPage`）。口径与 `RunsView.test.tsx` 的
+ * `Harness`（起 `useRuns`）一致。
+ */
+function Harness({ activeRun }: { activeRun: Run }) {
+  const activeRunId = activeRun?.run_id ?? null;
+  const qa = useQaPage({ activeRunId, activeRejudge: activeRun?.rejudge ?? null });
+  const loadRef = useRef(qa.loadQaPage);
+  useEffect(() => {
+    loadRef.current = qa.loadQaPage;
+  });
+  useEffect(() => {
+    if (activeRunId) void loadRef.current(1);
+  }, [activeRunId]);
+  return <QaResults activeRun={activeRun} qa={qa} />;
+}
 
 const FACETS = {
   task_types: ["event_memory_qa"],
@@ -62,7 +83,7 @@ function setSelect(placeholderOption: string, value: string): void {
 
 describe("QaResults · 筛选表单的 9 个条件", () => {
   it("只有 8 个下拉 + 搜索全部命中才出现结果；少一个就不出现", async () => {
-    render(<QaResults activeRun={RUN} />);
+    render(<Harness activeRun={RUN} />);
     await screen.findByText("展开逐题结果（0 条）");
 
     fireEvent.change(screen.getByPlaceholderText("搜索题号或问题"), { target: { value: "电池" } });
@@ -105,7 +126,7 @@ describe("QaResults · activeRejudge 过滤（1.0 visibleQaItems :355-364）", (
 
   it("重评进行中且本轮暂无结果：全部被过滤 → 显示等待首条结果的提示", async () => {
     render(
-      <QaResults
+      <Harness
         activeRun={{
           run_id: "run1",
           status: "running",
@@ -118,7 +139,7 @@ describe("QaResults · activeRejudge 过滤（1.0 visibleQaItems :355-364）", (
   });
 
   it("没有进行中的重评：两条题都在（不显示等待提示）", async () => {
-    render(<QaResults activeRun={{ run_id: "run1", status: "running", rejudge: null }} />);
+    render(<Harness activeRun={{ run_id: "run1", status: "running", rejudge: null }} />);
 
     await screen.findByText("展开逐题结果（2 条）");
     expect(screen.queryByText("正在等待本轮第一条 Judge 评分结果…")).toBeNull();

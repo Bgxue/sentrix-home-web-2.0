@@ -12,6 +12,7 @@
  * 所以这里返回 fragment，不加多余 DOM。
  */
 import type { UseRunsApi } from "../../hooks/useRuns.ts";
+import type { MemoryLayerPanelProps } from "../memory/MemoryLayerPanel.tsx";
 import { RunDetail } from "./RunDetail.tsx";
 import { RunsTable } from "./RunsTable.tsx";
 
@@ -20,11 +21,17 @@ export interface RunsViewProps {
   runs: UseRunsApi;
   /** 配置切片的 `judgeModel`；`RejudgeCard` 缺省显示 `-`（1.0 `judgeModel || '-'`）。 */
   judgeModel: string;
-  /** 配置切片的 `saveJudgePrompt()`；不接则「保存提示词」按钮无作用。 */
-  saveJudgePrompt: () => void;
+  /**
+   * 配置切片的 `saveJudgePrompt(kind, prompt)`。**显式收参**：组合层用运行详情侧
+   * （`useRunDetail`）的 `activePromptKind` / `rejudgePrompt` 去调它——1.0 只有一份
+   * 提示词状态，保存的就该是用户刚编辑的那份。
+   */
+  saveJudgePrompt: (kind: string, prompt: string) => void;
+  /** 记忆面板（1.0 `:3147-3284`）的数据；不传则整个面板不渲染。 */
+  memory?: MemoryLayerPanelProps;
 }
 
-export function RunsView({ runs, judgeModel, saveJudgePrompt }: RunsViewProps) {
+export function RunsView({ runs, judgeModel, saveJudgePrompt, memory }: RunsViewProps) {
   return (
     <>
       <RunsTable
@@ -44,6 +51,7 @@ export function RunsView({ runs, judgeModel, saveJudgePrompt }: RunsViewProps) {
         onExportScoresChange={runs.setExportScores}
         onExportTraces={runs.exportTraces}
         onExportSftTraces={runs.exportSftTraces}
+        memory={memory}
         rejudge={{
           activeRejudge: runs.activeRejudge,
           judgePromptKinds: runs.judgePromptKinds,
@@ -52,7 +60,7 @@ export function RunsView({ runs, judgeModel, saveJudgePrompt }: RunsViewProps) {
           rejudgePrompt: runs.rejudgePrompt,
           onRejudgePromptChange: runs.setRejudgePrompt,
           judgeModel,
-          onSavePrompt: saveJudgePrompt,
+          onSavePrompt: () => saveJudgePrompt(runs.activePromptKind, runs.rejudgePrompt),
           onResetPrompt: runs.resetJudgePrompt,
           canRejudge: runs.canRejudge,
           rejudgeSubmitting: runs.rejudgeSubmitting,

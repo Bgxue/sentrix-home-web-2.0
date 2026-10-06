@@ -127,6 +127,41 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
   });
 });
 
+describe("resetQaState / loadQaPage 接线（1.0 :2322-2331）", () => {
+  function mountWithQa() {
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === "/runs/r1") return runDetail();
+      if (path === "/runs/r1/reviews") return { reviews: {} };
+      if (path.endsWith("/keyframe-analysis")) return {};
+      if (path.endsWith("/memory-effectiveness")) return {};
+      throw new Error(`不该请求：${path}`);
+    });
+    const ref: ActiveRunIdRef = { current: "r1" };
+    const resetQaState = vi.fn();
+    const loadQaPage = vi.fn(async (_page?: number) => {});
+    const hook = renderHook(() =>
+      useRunDetail({ activeRunId: "r1", activeRunIdRef: ref, setError: () => {}, resetQaState, loadQaPage }),
+    );
+    return { ...hook, resetQaState, loadQaPage };
+  }
+
+  it("resetPage:true 调 resetQaState 且 loadQaPage(1)；不带 resetPage 时不 reset", async () => {
+    const { result, resetQaState, loadQaPage } = mountWithQa();
+
+    await act(async () => {
+      await result.current.loadActiveRun({ resetPage: true });
+    });
+    expect(resetQaState).toHaveBeenCalledTimes(1);
+    expect(loadQaPage).toHaveBeenCalledWith(1);
+
+    await act(async () => {
+      await result.current.loadActiveRun();
+    });
+    expect(resetQaState).toHaveBeenCalledTimes(1); // 没再 reset
+    expect(loadQaPage).toHaveBeenLastCalledWith(undefined); // 当前页
+  });
+});
+
 describe("exportTraces / exportSftTraces（1.0 :2567 / backup :1401）", () => {
   it("window.open 带正确的 scores 参数", () => {
     const openSpy = vi.spyOn(window, "open").mockReturnValue(null);

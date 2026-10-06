@@ -1,34 +1,32 @@
 /**
  * PhotoBench 评测配置 hook —— 逐行移植 1.0 `App.vue` 的配置区：
  *
- *   - `init()`（`:2731-2767`）的**配置部分**（`GET /api/config`、`GET /api/manifests`、
- *     `loadJudgePrompts`，以及各连接字段的初值）
+ *   - `init()`（`:2731-2767`）的**配置部分**（`GET /api/config`、`GET /api/manifests`，
+ *     以及各连接字段的初值）
  *   - `saveConnectionConfig`（`:2419-2464`）
  *   - `markConnectionConfigDirty`（`:2414-2418`）
- *   - `loadJudgePrompts`（`:2467-2476`）/ `switchPromptKind`（`:2477`）/
- *     `resetJudgePrompt`（`:2481`）/ `saveJudgePrompt`（`:2574`）
+ *   - `saveJudgePrompt`（`:2574-2582`）
+ *
+ * **提示词状态不在这里**：1.0 只有一份 `rejudgePrompt` / `activePromptKind` /
+ * `promptDrafts`（`:253` / `:252` / `:254`）。2.0 拆 hook 时这份状态的唯一真相落在
+ * `useRunDetail`（`RejudgeCard` 绑的就是它）。本 hook 只保留 `saveJudgePrompt`，
+ * 且**显式收参** `(kind, prompt)`，不再自己持有一份恒为默认值的副本。
  *
  * **边界**（与并行 hook 的分工，1.0 里它们全在一个组件里）：
  *   - 换模型 / 模型服务探活（`loadProfiles` / `loadCurrentModel` / `test-model`）在
  *     `useModelEndpoint`；`init()` 里对模型字段的赋值由那边的 `applyConfig()` 负责。
- *   - run 列表、`init()` 末尾的 run 选中与轮询在 `useRuns`。
+ *   - run 列表、`init()` 末尾的 run 选中与轮询在 `useRuns`；`loadJudgePrompts` 在
+ *     `useRunDetail`（提示词那份状态所在）。
  *   - 复用的三个 `watch` 在 `useReuseMode`。
  *
  * 因此 1.0 `:2751` 那个把 `loadRuns` / `loadProfiles` 一起拉进来的 `Promise.all` 在此
- * **只保留配置自己那两条**；组合层要按 1.0 的并行关系把其余 loader 一起发起。
+ * **只保留配置自己那一条**（`/manifests`）；其余 loader 由组合层以 options 注入，
+ * 好让 `loadRuns` 的失败仍能中止 `manifests` 赋值（1.0 `:2751-2757` 的失败语义）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, post } from "../api/client.ts";
 import type { BenchConfig, ManifestPage, ManifestSummary } from "../api/types.ts";
-
-/** `GET /api/judge-prompts` 的一条（`config.public_judge_prompts()`，1.0 :2465 `promptKindMeta`）。 */
-export interface JudgePromptKind {
-  kind: string;
-  custom?: string;
-  default?: string;
-  [key: string]: unknown;
-}
 
 /** `config.judge_providers[]` 的一条（1.0 :256 只读 `id` / `url` / `model`）。 */
 export interface JudgeProvider {
@@ -62,6 +60,21 @@ export interface SaveConnectionHooks {
   onModelConfigSaved: (runtimeConfig: Record<string, unknown>) => void | Promise<void>;
 }
 
+/**
+ * `initConfig` 里那三条不属于本 hook 的 loader / 回调（都是 1.0 `init()` 的一部分），
+ * 由组合层注入：
+ *   - `onConfig`：拿到 config、铺开配置字段之后、`loadRuns` 之前调用（组合层在这里
+ *     `applyConfig` 并算出 model endpoint）；
+ *   - `loadRuns`：1.0 `:2751` 的四条之一；**它的失败必须跳过 `manifests` 赋值**
+ *     （1.0 把它们放进同一个 `Promise.all`）；
+ *   - `loadProfiles`：1.0 `:2751` 的四条之一；与 `/manifests` 并发，失败同样跳过赋值。
+ */
+export interface InitConfigOptions {
+  onConfig?: (config: BenchConfig) => void;
+  loadRuns?: () => Promise<unknown>;
+  loadProfiles?: () => Promise<unknown>;
+}
+
 /** 保存状态机的取值（1.0 是一个自由字符串 ref，这里收窄成联合类型）。 */
 export type ConnectionState = "idle" | "saving" | "saved" | "dirty" | "error";
 
@@ -83,14 +96,6 @@ export function useConfig() {
   const [judgeApiKey, setJudgeApiKey] = useState("");
   const [judgeApiKeyDirty, setJudgeApiKeyDirty] = useState(false);
   const [judgeProviderId, setJudgeProviderId] = useState("");
-  const [rejudgePrompt, setRejudgePrompt] = useState("");
-  const [judgePromptKinds, setJudgePromptKinds] = useState<JudgePromptKind[]>([]);
-  const [activePromptKind, setActivePromptKind] = useState("answer_quality");
-  const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({
-    answer_quality: "",
-    task_decision: "",
-    evidence: "",
-  });
   const [connectionConfigState, setConnectionConfigState] = useState<ConnectionState>("idle");
   const [connectionConfigMessage, setConnectionConfigMessage] = useState("");
   // 1.0 `:267` 的 `loading` 从 `true` 起，`init()` 的 `finally` 置 `false`。它是全局
@@ -98,20 +103,12 @@ export function useConfig() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // 回调要读最新值又不想进依赖（会传给 useModelEndpoint / useReuseMode），用 ref 镜像。
-  // `loadingRef` 用 effect 同步（1.0 的 `loading` 是同步 ref，React 的 state 不是）；
-  // `draftsRef` 由 `writeDrafts` 单点维护，无需再在渲染期同步。
+  // `loadingRef` 用 effect 同步（1.0 的 `loading` 是同步 ref，React 的 state 不是）。
   const loadingRef = useRef(loading);
-  const draftsRef = useRef(promptDrafts);
   const savingRef = useRef(false);
   useEffect(() => {
     loadingRef.current = loading;
   }, [loading]);
-
-  const writeDrafts = useCallback((next: Record<string, string>) => {
-    draftsRef.current = next;
-    setPromptDrafts(next);
-  }, []);
 
   /** 1.0 `:2414-2418`。 */
   const markConnectionConfigDirty = useCallback(() => {
@@ -120,56 +117,27 @@ export function useConfig() {
     setConnectionConfigMessage("有未保存修改");
   }, []);
 
-  /** 1.0 `:2467-2476`。 */
-  const loadJudgePrompts = useCallback(async () => {
-    try {
-      // 1.0 `:2469` 是**裸 `fetch`**，不走统一错误处理（没有超时 / 重试 / `{error}` 解析）
-      // ——照搬，这是 1.0 一处已知的不一致（`loadMemorySpaces` 同样）。
-      const data = (await fetch("/api/judge-prompts").then((r) => r.json())) as {
-        kinds?: JudgePromptKind[];
-      };
-      const kinds = data.kinds || [];
-      setJudgePromptKinds(kinds);
-      const next = { ...draftsRef.current };
-      for (const meta of kinds) next[meta.kind] = meta.custom || meta.default || "";
-      writeDrafts(next);
-      setRejudgePrompt(next.answer_quality || "");
-    } catch {
-      /* keep defaults from config（1.0 `:2475` 原样） */
-    }
-  }, [writeDrafts]);
-
-  /** 1.0 `:2477-2480`。 */
-  const switchPromptKind = useCallback((kind: string) => {
-    setActivePromptKind(kind);
-    setRejudgePrompt(draftsRef.current[kind] || "");
-  }, []);
-
-  /** 1.0 `:2481-2485`。 */
-  const resetJudgePrompt = useCallback(() => {
-    const meta = judgePromptKinds.find((k) => k.kind === activePromptKind) || null;
-    const value = meta?.default || config?.judge_prompt || "";
-    writeDrafts({ ...draftsRef.current, [activePromptKind]: value });
-    setRejudgePrompt(value);
-  }, [judgePromptKinds, activePromptKind, config, writeDrafts]);
-
-  /** 1.0 `:2574-2582`。 */
-  const saveJudgePrompt = useCallback(async () => {
-    const prompt = rejudgePrompt.trim();
-    if (!prompt) {
+  /**
+   * 1.0 `:2574-2582`。**显式收参**：唯一真相是运行详情侧（`useRunDetail`）的
+   * `rejudgePrompt` / `activePromptKind`，组合层用那边的值调它。
+   * 返回是否保存成功——组合层据此把新值写回运行详情侧的草稿
+   * （1.0 的 `promptDrafts[activePromptKind] = prompt`）。
+   */
+  const saveJudgePrompt = useCallback(async (kind: string, prompt: string): Promise<boolean> => {
+    const trimmed = prompt.trim();
+    if (!trimmed) {
       window.alert("提示词不能为空");
-      return;
+      return false;
     }
     try {
-      await post("/judge-prompts", { kind: activePromptKind, system_prompt: prompt });
-      writeDrafts({ ...draftsRef.current, [activePromptKind]: prompt });
-      window.alert(
-        `已保存「${PROMPT_KIND_LABELS[activePromptKind] || activePromptKind}」提示词，重新评分与后续评测将使用它`,
-      );
+      await post("/judge-prompts", { kind, system_prompt: trimmed });
+      window.alert(`已保存「${PROMPT_KIND_LABELS[kind] || kind}」提示词，重新评分与后续评测将使用它`);
+      return true;
     } catch (e) {
       window.alert("保存失败：" + (e as Error).message);
+      return false;
     }
-  }, [rejudgePrompt, activePromptKind, writeDrafts]);
+  }, []);
 
   /**
    * 1.0 `:2419-2464`。模型服务字段（`vllm_manager_url` / `model_base_url` /
@@ -228,8 +196,13 @@ export function useConfig() {
     [sentrixUrl, judgeUrl, judgeModel, judgeApiKey, judgeApiKeyDirty, judgeProviderId],
   );
 
-  /** 1.0 `:2731-2767` 的配置部分（run 选中 / 轮询 / 模型探活不在这里）。 */
-  const initConfig = useCallback(async () => {
+  /**
+   * 1.0 `:2731-2767` 的配置部分（run 选中 / 轮询 / 模型探活不在 `useConfig`，由组合层
+   * 经 options 注入）。**保留 1.0 的失败语义**：`loadRuns`（1.0 与 `/manifests` 同在一个
+   * `Promise.all`）一失败，`manifests` 就不被赋值。返回拉到的 config（组合层拿它做
+   * `applyConfig` 与 model endpoint —— 1.0 里它们是同一个函数作用域内的局部变量）。
+   */
+  const initConfig = useCallback(async (options: InitConfigOptions = {}): Promise<BenchConfig | null> => {
     setLoading(true);
     try {
       const cfg = await api<BenchConfig>("/config");
@@ -244,24 +217,29 @@ export function useConfig() {
       setJudgeModel(runtimeConfig.judge_model || cfg.judge_model || "");
       setJudgeApiKey("");
       setJudgeApiKeyDirty(false);
-      setRejudgePrompt(cfg.custom_judge_prompt || cfg.judge_prompt || "");
       const providers = (cfg.judge_providers || []) as JudgeProvider[];
       setJudgeProviderId(
         runtimeConfig.judge_provider_id || cfg.default_judge_provider_id || providers[0]?.id || "",
       );
       setConnectionConfigState("saved");
       setConnectionConfigMessage("已读取配置文件");
-      const [, manifestPayload] = await Promise.all([
-        loadJudgePrompts(),
+      options.onConfig?.(cfg);
+      // 1.0 `:2751-2757`：这几条任一失败都跳过 `manifests.value = ...`。`loadRuns` 先串行
+      // await（2.0 的一处时序适配，见 App.tsx 文件头），`loadProfiles` 与 `/manifests` 并发。
+      await options.loadRuns?.();
+      const [manifestPayload] = (await Promise.all([
         api<ManifestPage>("/manifests"),
-      ]);
+        options.loadProfiles?.() ?? Promise.resolve(),
+      ])) as [ManifestPage, unknown];
       setManifests(manifestPayload.manifests || []);
+      return cfg;
     } catch (e) {
       setError((e as Error).message || "读取配置失败");
+      return null;
     } finally {
       setLoading(false);
     }
-  }, [loadJudgePrompts]);
+  }, []);
 
   return {
     config,
@@ -281,11 +259,6 @@ export function useConfig() {
     setJudgeApiKeyDirty,
     judgeProviderId,
     setJudgeProviderId,
-    rejudgePrompt,
-    setRejudgePrompt,
-    judgePromptKinds,
-    activePromptKind,
-    promptDrafts,
     connectionConfigState,
     connectionConfigMessage,
     loading,
@@ -293,9 +266,6 @@ export function useConfig() {
     error,
     setError,
     markConnectionConfigDirty,
-    loadJudgePrompts,
-    switchPromptKind,
-    resetJudgePrompt,
     saveJudgePrompt,
     saveConnectionConfig,
     initConfig,

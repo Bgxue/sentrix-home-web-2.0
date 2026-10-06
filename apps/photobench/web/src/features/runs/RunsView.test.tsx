@@ -1,4 +1,5 @@
-import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { useEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../api/client.ts", () => ({ api: vi.fn(), post: vi.fn() }));
@@ -13,6 +14,16 @@ import { RunsView } from "./RunsView.tsx";
 //   - `deleteRun` 的可注入 `confirm`：确认/取消对数据的影响必须不同。
 
 const apiMock = vi.mocked(api);
+
+function jsonResponse(status: number, body: unknown) {
+  const text = JSON.stringify(body);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => text,
+    json: async () => JSON.parse(text),
+  };
+}
 
 function emptyPage() {
   return {
@@ -37,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -87,6 +99,66 @@ describe("导出 URL 的分数参数", () => {
     act(() => result.current.exportSftTraces());
 
     expect(openSpy).toHaveBeenCalledWith("/api/runs/r1/export-sft?scores=1,2", "_blank");
+  });
+});
+
+// P1：`saveJudgePrompt` 必须拿到**运行详情侧**（用户刚编辑的）那份提示词，而不是某个
+// hook 内部恒为默认值的副本。这里走完整链路：RejudgeCard → RunsView → 组合层回调。
+describe("保存提示词用的是用户编辑的那份（P1）", () => {
+  const PROMPT_KINDS = {
+    kinds: [
+      { kind: "answer_quality", default: "AQ-DEFAULT", custom: "" },
+      { kind: "evidence", default: "EV-DEFAULT", custom: "" },
+    ],
+  };
+
+  function PromptHarness({ onSave }: { onSave: (kind: string, prompt: string) => void }) {
+    const runs = useRuns();
+    const started = useRef(false);
+    useEffect(() => {
+      if (started.current) return;
+      started.current = true;
+      void runs.loadJudgePrompts();
+      runs.selectRun({ run_id: "r1", mode: "reuse", status: "done" });
+    }, [runs]);
+    return <RunsView runs={runs} judgeModel="jm" saveJudgePrompt={onSave} />;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/api/judge-prompts")) return Promise.resolve(jsonResponse(200, PROMPT_KINDS));
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+  });
+
+  it("编辑后点保存：回调收到的是编辑后的值 + 当前 kind", async () => {
+    const onSave = vi.fn();
+    render(<PromptHarness onSave={onSave} />);
+
+    const textarea = await screen.findByRole("textbox");
+    expect((textarea as HTMLTextAreaElement).value).toBe("AQ-DEFAULT");
+
+    fireEvent.change(textarea, { target: { value: "我编辑过的回答质量提示词" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存提示词" }));
+
+    expect(onSave).toHaveBeenCalledWith("answer_quality", "我编辑过的回答质量提示词");
+  });
+
+  it("切到证据核验后再保存：kind 与草稿都跟着切", async () => {
+    const onSave = vi.fn();
+    render(<PromptHarness onSave={onSave} />);
+    await screen.findByRole("textbox");
+
+    fireEvent.click(screen.getByRole("button", { name: /证据核验/ }));
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("EV-DEFAULT");
+    fireEvent.change(textarea, { target: { value: "证据核验改过" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存提示词" }));
+
+    expect(onSave).toHaveBeenCalledWith("evidence", "证据核验改过");
   });
 });
 

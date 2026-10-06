@@ -3,8 +3,11 @@
  * `<section id="qa-results" class="qa-results-section">`：
  * 头部（计数 + 分页 + 每页条数）→ `<details class="qa-results-body">`（筛选表单 + 列表 + 底部分页）。
  *
- * 状态全部来自 `hooks/useQaPage`（1.0 `qaPage`/`qaDetails`/`openQaItems`/`loadingQaItems`/
- * `qaPageSize`/`qaFilters` 的移植）。本组件只负责：
+ * 状态来自组合层传入的 `qa`（`hooks/useQaPage` 的实例；1.0 `qaPage`/`qaDetails`/
+ * `openQaItems`/`loadingQaItems`/`qaPageSize`/`qaFilters` 的移植）——组合层持有它，
+ * 因为 `RunDetail` 的记忆面板要用**同一份** `qaDetails`。切 run 的重置/重拉由组合层
+ * 经 `useRuns` 的 `resetQaState`/`loadQaPage` 触发（1.0 `loadActiveRun({resetPage})`）。
+ * 本组件只负责：
  *   - 把 `resultsRef` 挂到 `#qa-results` 对应的元素上（`changeQaPage` 用它滚回顶部）；
  *   - 组装筛选表单（8 个下拉 + 搜索）与分页控件；
  *   - 逐条渲染 `QaItemCard`，并把「JUDGE 输入弹窗」这个视图内状态管起来。
@@ -16,7 +19,7 @@
  * **图片灯箱**：1.0 的 `.lightbox` 是 app 根级的单例元素（`:3767-3772`，QA 浏览视图也用），
  * 所以这里不再自己渲染一份，改成把点击目标经 `onOpenMedia` 上抛给组合层持有的共享灯箱。
  */
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import type { RefObject } from "react";
 
 import type { MediaLike } from "../../api/media.ts";
@@ -24,7 +27,7 @@ import type { Run, RunItemDetail, RunItemSummary } from "../../api/types.ts";
 import { openImageTarget } from "../../lib/details.ts";
 import { esc, modelName } from "../../lib/format.ts";
 import { attributionLabel } from "../../lib/trace.ts";
-import { useQaPage } from "../../hooks/useQaPage.ts";
+import type { UseQaPageApi } from "../../hooks/useQaPage.ts";
 
 import { JudgeInputModal } from "./JudgeInputModal.tsx";
 import { QaItemCard } from "./QaItemCard.tsx";
@@ -33,6 +36,11 @@ import type { QaPageView, ReviewDraft } from "./qaShared.ts";
 export interface QaResultsProps {
   /** 1.0 `activeRun`。取其 `run_id` / `rejudge` / `album_id` / `status`。 */
   activeRun: Run | null;
+  /**
+   * 逐题状态。**由组合层持有**（`useQaPage`）——它必须与 `RunDetail` 的记忆面板共享同一份
+   * `qaDetails`，所以不能在本组件内部再起一个 hook 实例（1.0 是单组件、天然共享）。
+   */
+  qa: UseQaPageApi;
   /**
    * 1.0 `runDetailRef`（`App.vue:2372`，由 `useRuns` 定义）——`scrollToRunDetail` 滚动的
    * 锚点就是 `#qa-results`。组合层把那个 ref 传进来，与 `useQaPage` 的 `resultsRef`
@@ -56,6 +64,7 @@ export interface QaResultsProps {
 
 export function QaResults({
   activeRun,
+  qa,
   resultRef,
   reviewFor,
   onReviewChange,
@@ -63,7 +72,6 @@ export function QaResults({
   onSaveReviews,
   onOpenMedia,
 }: QaResultsProps) {
-  const activeRunId = activeRun?.run_id ?? null;
   const activeRejudge = activeRun?.rejudge ?? null;
   const {
     qaPage,
@@ -74,26 +82,15 @@ export function QaResults({
     qaFilters,
     visibleQaItems,
     resultsRef,
-    loadQaPage,
     toggleQa,
     changeQaPage,
     changeQaPageSize,
     applyQaFilters,
     resetQaFilters,
     setQaFilter,
-  } = useQaPage({ activeRunId, activeRejudge });
+  } = qa;
 
   const [judgeItem, setJudgeItem] = useState<RunItemDetail | null>(null);
-
-  // 切 run（含首次挂载）后回第 1 页重拉：1.0 由 `loadActiveRun({resetPage})` 触发。
-  // 最新 loader 存进 ref（在 effect 里写，不在渲染期写），effect 只依赖 activeRunId。
-  const loadQaPageRef = useRef(loadQaPage);
-  useEffect(() => {
-    loadQaPageRef.current = loadQaPage;
-  });
-  useEffect(() => {
-    if (activeRunId) void loadQaPageRef.current(1);
-  }, [activeRunId]);
 
   const page = qaPage as QaPageView;
   const facets = page.facets ?? {};
