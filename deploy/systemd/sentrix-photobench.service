@@ -15,6 +15,10 @@ WorkingDirectory=%h/Github/sentrix-home-web2.0
 # 的缺省值 APP_ROOT/results 就是 2.0 自己的 apps/photobench/results，写死它反而多一处
 # 会漂的配置。空目录是安全的：FileRunStore.iter_entries 在 root 不存在时直接返回空
 # （`infrastructure/results/store.py`），不会抛。
+# 让 PhotoBench 通过 systemd 管 8191，而不是走裸进程路径（S11 §4.1 的补法）。
+# 不设的后果：它会 lsof 反查 pid、SIGTERM、再 Popen 一个 make dev——而 8191 归
+# systemd 管时那个新进程绑不上端口，8191 直接不可用（2026-10-07 实测）。
+Environment=PHOTOBENCH_SENTRIX_SERVICE_UNIT=sentrix-api.service
 # 与 Makefile 的 `photobench-dev` 目标逐字一致。
 ExecStart=%h/Github/sentrix-home-web2.0/.venv/bin/python -m uvicorn --factory photobench.main:create_app --host 0.0.0.0 --port 8772 --app-dir apps/photobench/src
 Restart=on-failure
