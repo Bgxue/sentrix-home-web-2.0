@@ -269,7 +269,10 @@ def test_video_import_reads_metadata_and_records_the_probe():
     assert probe.browser_preview_path == "/derived/preview.mp4"
     # 拍摄时间/GPS 接到与 EXIF 同一条路上：否则视频的 captured_at 只会是导入时刻。
     asset = assets.get(result.asset_id)
-    assert asset.captured_at == datetime(2026, 8, 2, 6, 55, 56, tzinfo=UTC)
+    # 视频/音频的时间来自 ffprobe，带偏移；落库前统一转成本地 naive
+    # （与 1.0 存的 `2017-09-27 11:36:15` 同口径，见 domain/media/models.py）。
+    expected = datetime.fromisoformat("2026-08-02T06:55:56+00:00").astimezone().replace(tzinfo=None)
+    assert asset.captured_at == expected
     assert asset.captured_location == GpsPoint(22.4846, 114.5438)
 
 
@@ -449,7 +452,10 @@ def test_audio_import_reads_metadata_and_records_the_probe():
     assert audios.probes[result.asset_id].metadata is AUDIO_METADATA
     # 拍摄时间/GPS 接到与 EXIF/视频同一条路上：否则音频的 captured_at 只会是导入时刻。
     asset = assets.get(result.asset_id)
-    assert asset.captured_at == datetime(2026, 8, 2, 6, 55, 56, tzinfo=UTC)
+    # 视频/音频的时间来自 ffprobe，带偏移；落库前统一转成本地 naive
+    # （与 1.0 存的 `2017-09-27 11:36:15` 同口径，见 domain/media/models.py）。
+    expected = datetime.fromisoformat("2026-08-02T06:55:56+00:00").astimezone().replace(tzinfo=None)
+    assert asset.captured_at == expected
     assert asset.captured_location == GpsPoint(22.4846, 114.5438)
 
 
