@@ -61,7 +61,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def test_get_runs_lists_the_scan_result(client: TestClient):
-    response = client.get("/api/runs")
+    response = client.get("/api/v1/runs")
     assert response.status_code == 200
     body = response.json()
     assert [run["run_id"] for run in body["runs"]] == ["run-a"]
@@ -71,13 +71,13 @@ def test_get_runs_lists_the_scan_result(client: TestClient):
 
 def test_a_bad_page_number_is_a_400_with_the_1_0_message(client: TestClient):
     """1.0 ``:7652`` 的 ``ValueError("page and page_size must be integers")`` → 400。"""
-    response = client.get("/api/runs?page=x")
+    response = client.get("/api/v1/runs?page=x")
     assert response.status_code == 400
     assert response.json() == {"error": "page and page_size must be integers"}
 
 
 def test_get_run_returns_the_state_without_items(client: TestClient):
-    body = client.get("/api/runs/run-a").json()
+    body = client.get("/api/v1/runs/run-a").json()
     assert body["item_count"] == 1
     assert "items" not in body
     assert body["summary"]["answer_quality_mean"] == 2.0
@@ -85,21 +85,21 @@ def test_get_run_returns_the_state_without_items(client: TestClient):
 
 def test_an_unknown_run_is_a_404_in_the_1_0_shape(client: TestClient):
     """1.0 ``:7757``：``{"error": str(KeyError)}`` —— ``str(KeyError("nope"))`` 带引号。"""
-    response = client.get("/api/runs/nope")
+    response = client.get("/api/v1/runs/nope")
     assert response.status_code == 404
     assert response.json() == {"error": "'nope'"}
 
 
 def test_get_run_items_paginates(client: TestClient):
-    body = client.get("/api/runs/run-a/items").json()
+    body = client.get("/api/v1/runs/run-a/items").json()
     assert body["total"] == 1
     assert body["items"][0]["qa_id"] == "q1"
     assert body["facets"]["task_types"] == []
 
 
 def test_get_run_item_by_index(client: TestClient):
-    assert client.get("/api/runs/run-a/items/0").json()["item"]["qa_id"] == "q1"
-    assert client.get("/api/runs/run-a/items/9").status_code == 404
+    assert client.get("/api/v1/runs/run-a/items/0").json()["item"]["qa_id"] == "q1"
+    assert client.get("/api/v1/runs/run-a/items/9").status_code == 404
 
 
 def test_reviews_route_accepts_a_write_on_a_finished_run(client: TestClient):
@@ -107,8 +107,8 @@ def test_reviews_route_accepts_a_write_on_a_finished_run(client: TestClient):
 
     空 ``reviews`` 是合法的——它保存的是「这批评审现在是空的」，返回 ``saved`` 计数。
     """
-    assert client.get("/api/runs/run-a/reviews").json() == {"reviews": {}}
-    response = client.post("/api/runs/run-a/reviews", json={"reviews": {}})
+    assert client.get("/api/v1/runs/run-a/reviews").json() == {"reviews": {}}
+    response = client.post("/api/v1/runs/run-a/reviews", json={"reviews": {}})
     assert response.status_code == 200
     assert response.json()["saved"] == 0
 
@@ -119,20 +119,20 @@ def test_the_write_routes_are_mounted(client: TestClient):
     ``POST /api/runs`` 落到 album 校验上（fixture 的 datasets 是空的）→ 400；
     ``cancel`` 对一个不在跑的 run 返回「没取消」而不是 404；``resume`` 明确 501。
     """
-    start = client.post("/api/runs", json={})
+    start = client.post("/api/v1/runs", json={})
     assert start.status_code == 400
     assert "manifest not found" in start.json()["error"]
-    cancel = client.post("/api/runs/run-a/cancel")
+    cancel = client.post("/api/v1/runs/run-a/cancel")
     assert cancel.status_code == 200
     assert cancel.json()["cancelled"] is False
-    assert client.post("/api/runs/run-a/resume").status_code == 501
-    assert client.post("/api/cancel-active").json()["total"] == 0
-    assert client.delete("/api/runs/run-a").json() == {"deleted": True, "run_id": "run-a"}
-    assert client.get("/api/runs/run-a").status_code == 404
+    assert client.post("/api/v1/runs/run-a/resume").status_code == 501
+    assert client.post("/api/v1/cancel-active").json()["total"] == 0
+    assert client.delete("/api/v1/runs/run-a").json() == {"deleted": True, "run_id": "run-a"}
+    assert client.get("/api/v1/runs/run-a").status_code == 404
 
 
 def test_get_config_exposes_the_effective_values(client: TestClient):
-    body = client.get("/api/config").json()
+    body = client.get("/api/v1/config").json()
     assert body["default_sentrix_url"] == "http://sentrix:8191"
     assert body["default_vllm_target_id"] == "local"
     assert body["default_judge_provider_id"] == "cloud"
@@ -143,13 +143,13 @@ def test_get_config_exposes_the_effective_values(client: TestClient):
     assert body["judge_prompt"].startswith("你是通用对话任务的回答质量评测员")
     assert body["custom_judge_prompt"] is None
     assert body["evidence_judge_enabled"] is False
-    kinds = {entry["kind"] for entry in client.get("/api/judge-prompts").json()["kinds"]}
+    kinds = {entry["kind"] for entry in client.get("/api/v1/judge-prompts").json()["kinds"]}
     assert kinds == {"answer_quality", "task_decision", "evidence"}
 
 
 def test_post_config_persists_and_answers_in_the_1_0_shape(client: TestClient):
     response = client.post(
-        "/api/config",
+        "/api/v1/config",
         json={
             "sentrix_url": "http://new:8191",
             "judge_url": "http://j2/v1",
@@ -161,18 +161,20 @@ def test_post_config_persists_and_answers_in_the_1_0_shape(client: TestClient):
     assert response.status_code == 200
     assert response.json()["saved"] is True
     assert response.json()["runtime_config"]["sentrix_url"] == "http://new:8191"
-    assert client.get("/api/config").json()["default_sentrix_url"] == "http://new:8191"
+    assert client.get("/api/v1/config").json()["default_sentrix_url"] == "http://new:8191"
 
 
 def test_post_config_rejects_an_unknown_provider_with_a_400(client: TestClient):
-    response = client.post("/api/config", json={"judge_model": "m", "judge_provider_id": "nope"})
+    response = client.post("/api/v1/config", json={"judge_model": "m", "judge_provider_id": "nope"})
     assert response.status_code == 400
     assert "unknown judge provider" in response.json()["error"]
 
 
 def test_post_config_with_a_broken_body_is_treated_as_empty(client: TestClient):
     """1.0 ``_payload``（``:7523``）：坏 JSON 当空对象，然后落到字段校验上。"""
-    response = client.post("/api/config", content=b"{ not json", headers={"Content-Type": "application/json"})
+    response = client.post(
+        "/api/v1/config", content=b"{ not json", headers={"Content-Type": "application/json"}
+    )
     assert response.status_code == 400
     # 空对象落到第一道校验上（1.0 的校验顺序：sentrix_url 先于 judge_model）。
     assert response.json()["error"] == "Sentrix URL must be a host:port or HTTP(S) URL"
@@ -180,14 +182,14 @@ def test_post_config_with_a_broken_body_is_treated_as_empty(client: TestClient):
 
 def test_current_model_get_says_use_post(client: TestClient):
     """1.0 ``:7530``。"""
-    response = client.get("/api/current-model")
+    response = client.get("/api/v1/current-model")
     assert response.status_code == 405
     assert response.json() == {"error": "current-model requires POST"}
 
 
 def test_profiles_without_a_manager_is_not_an_error(client: TestClient):
     """Manager 没配是 ``status: not_applicable``，不是 4xx——1.0 ``:5069``。"""
-    response = client.post("/api/profiles", json={"vllm_target_id": "local"})
+    response = client.post("/api/v1/profiles", json={"vllm_target_id": "local"})
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "not_applicable"
@@ -200,7 +202,7 @@ def test_profiles_without_a_manager_is_not_an_error(client: TestClient):
 def test_no_route_serves_the_two_dead_endpoints(client: TestClient):
     """**T922 的机械凭据：2.0 的服务面里没有这两条路。**
 
-    ``/api/arbiter/status`` 与 ``/api/ingest-batches/{id}/cancel`` 在 1.0 主 API 里
+    ``/api/v1/arbiter/status`` 与 ``/api/v1/ingest-batches/{id}/cancel`` 在 1.0 主 API 里
     都不存在（arbiter 零命中；ingest-batches 只有 POST/GET/complete）。1.0 的
     PhotoBench 轮询它们、被 ``except Exception`` 吞成静默 404，占了 8091 流量的 17%。
 

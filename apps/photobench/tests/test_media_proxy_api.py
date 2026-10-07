@@ -84,9 +84,9 @@ def _stream(**overrides: object) -> tuple[HttpStream, list[bool]]:
 
 
 def test_asset_proxy_rejects_an_id_with_a_slash(client: TestClient):
-    """``/api/assets/a/b/file`` 在 1.0 是 400（id 里有 ``/``），不是 404。"""
+    """``/api/v1/assets/a/b/file`` 在 1.0 是 400（id 里有 ``/``），不是 404。"""
     sentrix = _with_sentrix(client, None)
-    response = client.get("/api/assets/a/b/file")
+    response = client.get("/api/v1/assets/a/b/file")
     assert response.status_code == 400
     assert response.json() == {"error": "invalid asset id"}
     assert sentrix.calls == []
@@ -95,7 +95,7 @@ def test_asset_proxy_rejects_an_id_with_a_slash(client: TestClient):
 def test_asset_proxy_forwards_range_headers_and_status(client: TestClient):
     stream, closed = _stream()
     sentrix = _with_sentrix(client, stream)
-    response = client.get("/api/assets/asset-1/file", headers={"Range": "bytes=0-3"})
+    response = client.get("/api/v1/assets/asset-1/file", headers={"Range": "bytes=0-3"})
     assert sentrix.calls == [("asset-1", "bytes=0-3")]
     assert response.status_code == 206
     assert response.content == b"ABCD"
@@ -110,7 +110,7 @@ def test_asset_proxy_keeps_the_upstream_error_code(client: TestClient):
     """上游错误**保留状态码**，只把 body 换成 1.0 那句。"""
     stream, closed = _stream(status_code=503, headers={}, body=iter([]))
     _with_sentrix(client, stream)
-    response = client.get("/api/assets/asset-1/file")
+    response = client.get("/api/v1/assets/asset-1/file")
     assert response.status_code == 503
     assert response.json() == {"error": "asset proxy failed: 503"}
     assert closed == [True]

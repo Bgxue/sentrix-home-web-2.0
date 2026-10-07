@@ -92,7 +92,7 @@ def _with_inference(client: TestClient, inference: FakeInference) -> None:
 def test_test_model_probes_the_endpoint_once(client: TestClient):
     inference = FakeInference(models=["gemma"])
     _with_inference(client, inference)
-    response = client.post("/api/test-model", json={"model_base_url": "http://endpoint:8100"})
+    response = client.post("/api/v1/test-model", json={"model_base_url": "http://endpoint:8100"})
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
@@ -119,7 +119,7 @@ def test_test_model_without_a_served_model_is_a_400(client: TestClient):
     """
     inference = FakeInference(models=["a", "b"])
     _with_inference(client, inference)
-    response = client.post("/api/test-model", json={"model_base_url": "http://endpoint:8100"})
+    response = client.post("/api/v1/test-model", json={"model_base_url": "http://endpoint:8100"})
     assert response.status_code == 400
     assert response.json() == {"error": "select a model before testing the endpoint"}
     assert inference.chat_payloads == []
@@ -129,7 +129,7 @@ def test_test_model_rejects_an_endpoint_that_returns_no_choices(client: TestClie
     """1.0 原文是 ``no completion choices``（不是 ``complete``）——照抄，别改字。"""
     inference = FakeInference(models=["gemma"], choices=[])
     _with_inference(client, inference)
-    response = client.post("/api/test-model", json={"model_base_url": "http://endpoint:8100"})
+    response = client.post("/api/v1/test-model", json={"model_base_url": "http://endpoint:8100"})
     assert response.status_code == 400
     assert response.json() == {"error": "model endpoint returned no completion choices"}
     assert len(inference.chat_payloads) == 1

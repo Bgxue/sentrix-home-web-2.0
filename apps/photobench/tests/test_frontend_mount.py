@@ -2,7 +2,7 @@
 
 PhotoBench 前端**没有 router**（两个视图用 ``useState`` 切，见 ``web/src/App.tsx``），
 所以这里**没有 SPA 回落**：未知路径就是 404。夹具让两种口径给出不同答案——同一个 dist
-里 ``/`` 回 index.html、``assets/app.js`` 发文件、``/api/runs`` 走 API。
+里 ``/`` 回 index.html、``assets/app.js`` 发文件、``/api/v1/runs`` 走 API。
 """
 
 from __future__ import annotations
@@ -80,10 +80,10 @@ def test_the_static_mount_does_not_shadow_the_api_prefix(tmp_path: Path, dist: P
     """挂载点在 ``/``、会接住一切没被 API 匹配的路径：命中的走 JSON，未命中的也仍是 404。"""
     client = build(tmp_path, dist)
 
-    runs = client.get("/api/runs")
+    runs = client.get("/api/v1/runs")
     assert runs.status_code == 200
     assert runs.json()["total"] == 0
-    assert client.get("/api/nope").status_code == 404
+    assert client.get("/api/v1/nope").status_code == 404
 
 
 def test_the_static_mount_is_registered_after_the_api_routes(tmp_path: Path, dist: Path):

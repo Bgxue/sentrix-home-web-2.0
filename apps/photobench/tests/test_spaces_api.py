@@ -100,7 +100,7 @@ def _with_http(client: TestClient, responses: dict[str, object]) -> FakeJsonHttp
 
 def test_memory_spaces_forwards_to_the_configured_url_and_builds_reuse_bases(client: TestClient):
     http = _with_http(client, {"memory-spaces": {"spaces": [SPACE]}})
-    body = client.get("/api/memory-spaces").json()
+    body = client.get("/api/v1/memory-spaces").json()
     assert body["spaces"] == [SPACE]
     assert http.calls[0][0] == "http://configured:8191/api/v1/memory-spaces"
     assert body["reuse_bases"] == [
@@ -121,7 +121,7 @@ def test_memory_spaces_honours_the_sentrix_url_parameter(client: TestClient):
     """调用方可以把这一条指向别的 Sentrix。**参数被忽略时这条会红**——默认那台的
     主机名与参数给的（``http://elsewhere:9999``）刻意不同。"""
     http = _with_http(client, {"memory-spaces": {"spaces": []}})
-    client.get("/api/memory-spaces", params={"sentrix_url": "http://elsewhere:9999/"})
+    client.get("/api/v1/memory-spaces", params={"sentrix_url": "http://elsewhere:9999/"})
     assert http.calls[0][0] == "http://elsewhere:9999/api/v1/memory-spaces"
 
 
@@ -132,14 +132,14 @@ def test_memory_spaces_accepts_both_envelope_keys(client: TestClient):
     ``items`` 那个——一次装两个只会让两个断言都跑在同一个假件上，其中一条永远是空的。
     """
     spaces = _with_http(client, {"memory-spaces": {"spaces": [SPACE]}})
-    assert client.get("/api/memory-spaces").json()["spaces"] == [SPACE]
+    assert client.get("/api/v1/memory-spaces").json()["spaces"] == [SPACE]
     items = _with_http(client, {"memory-spaces": {"items": [SPACE]}})
-    assert client.get("/api/memory-spaces").json()["spaces"] == [SPACE]
+    assert client.get("/api/v1/memory-spaces").json()["spaces"] == [SPACE]
     assert len(spaces.calls) == 1 and len(items.calls) == 1
 
 
 def test_memory_spaces_sorts_newest_first(client: TestClient):
     older = {**SPACE, "id": "scope-0", "name": "old", "created_at": "2025-01-01T00:00:00+08:00"}
     _with_http(client, {"memory-spaces": {"spaces": [older, SPACE]}})
-    body = client.get("/api/memory-spaces").json()
+    body = client.get("/api/v1/memory-spaces").json()
     assert [space["id"] for space in body["spaces"]] == ["scope-1", "scope-0"]

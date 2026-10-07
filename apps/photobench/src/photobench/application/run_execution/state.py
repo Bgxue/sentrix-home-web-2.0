@@ -180,29 +180,54 @@ class RunState:
         self._persist_thread.start()
 
     def _persist_loop(self) -> None:
-        """1.0 ``:2056``：合并短窗口内的请求，**在锁外**做深拷贝与磁盘 IO。"""
-        while True:
-            with self._persist_condition:
-                while self._persist_written >= self._persist_requested and not self._persist_stopping:
-                    self._persist_condition.wait()
-                if self._persist_stopping and self._persist_written >= self._persist_requested:
-                    return
-                self._persist_condition.wait(timeout=self.debounce)
-                target = self._persist_requested
-                stored = copy.deepcopy(self.data)
-            writer = self._writer
-            if writer is None:  # start_persist_writer 保证了非空；这里只为类型收窄
-                return
-            try:
-                writer.write_snapshot(self.run_id, stored)
-            except Exception as exc:  # noqa: BLE001 —— 写失败要能被下一个 wait=True 的调用看见
+        """1.0 ``:2056``：合并短窗口内的请求，**在锁外**做磁盘 IO。
+
+        **整条循环包在 ``try`` 里，``finally`` 负责唤醒等待者。** 2026-10-07 实测：
+        深拷贝那一步原先在 ``try`` 之外，它一抛异常线程就**静默死掉**，而
+        ``persist(wait=True)`` 还等在条件变量上——run 于是永远收不了尾（卡在
+        486/487、栈里连 persist 线程都看不到）。
+        「线程没起来」有防护（``persist`` 里那条 ``_persist_thread is None`` 分支），
+        **「线程中途死了」没有**，而后者更隐蔽：``_persist_thread is not None`` 依然成立，
+        所有空值防护全部失效。
+        """
+        try:
+            while True:
                 with self._persist_condition:
-                    self._persist_error = exc
+                    while self._persist_written >= self._persist_requested and not self._persist_stopping:
+                        self._persist_condition.wait()
+                    if self._persist_stopping and self._persist_written >= self._persist_requested:
+                        return
+                    self._persist_condition.wait(timeout=self.debounce)
+                    target = self._persist_requested
+                    try:
+                        stored = copy.deepcopy(self.data)
+                    except Exception as exc:  # noqa: BLE001 —— 与写失败同一个出口
+                        self._persist_error = exc
+                        self._persist_written = max(self._persist_written, target)
+                        self._persist_condition.notify_all()
+                        continue
+                writer = self._writer
+                if writer is None:  # start_persist_writer 保证了非空；这里只为类型收窄
+                    return
+                try:
+                    writer.write_snapshot(self.run_id, stored)
+                except Exception as exc:  # noqa: BLE001 —— 写失败要能被下一个 wait=True 的调用看见
+                    with self._persist_condition:
+                        self._persist_error = exc
+                        self._persist_written = max(self._persist_written, target)
+                        self._persist_condition.notify_all()
+                    continue
+                with self._persist_condition:
                     self._persist_written = max(self._persist_written, target)
                     self._persist_condition.notify_all()
-                continue
+        finally:
+            # 线程无论怎么退出，都不能让等着的调用者永远等下去。
+            # 正常收尾（``_persist_stopping``）不算错——那是 stop_persist_writer 要的结局。
             with self._persist_condition:
-                self._persist_written = max(self._persist_written, target)
+                if not self._persist_stopping and self._persist_error is None:
+                    self._persist_error = RuntimeError(
+                        "persist writer exited before writing the requested snapshot"
+                    )
                 self._persist_condition.notify_all()
 
     def persist(self, wait: bool = False) -> None:
@@ -228,6 +253,10 @@ class RunState:
             if not wait:
                 return
             while self._persist_written < target:
+                # 循环里也要查 ``_persist_error``：写线程中途死掉时它会带着错误唤醒
+                # 我们（见 ``_persist_loop`` 的 finally），只查进入那一次是醒不过来的。
+                if self._persist_error is not None:
+                    raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")
                 self._persist_condition.wait()
             if self._persist_error is not None:
                 raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")

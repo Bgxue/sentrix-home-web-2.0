@@ -199,7 +199,7 @@ class _CancelOnListAssets(FakeSentrixClient):
 
 
 def test_cancel_never_calls_a_remote_batch_endpoint():
-    """1.0 的 ``_cancel_remote_batch``（``:2264``）打 ``/api/ingest-batches/{id}/cancel``
+    """1.0 的 ``_cancel_remote_batch``（``:2264``）打 ``/api/v1/ingest-batches/{id}/cancel``
     ——**1.0 与 2.0 都不存在的死端点**，1.0 那边还被 ``except Exception`` 吞成静默 404。
 
     2.0 的导入是**同步**的（``POST /api/v1/imports`` 一个请求跑完整条链），既没有批量

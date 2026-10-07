@@ -105,7 +105,7 @@ def test_manifests_lists_only_albums_with_a_usable_manifest(client: TestClient):
     （缺 ``album_id``）与 ``no-manifest`` 必须**不在**其中——把 ``manifest["album_id"]``
     换成 ``.get``、或去掉那个 ``except``，它们就会冒出来。
     """
-    body = client.get("/api/manifests").json()
+    body = client.get("/api/v1/manifests").json()
     assert [item["album_id"] for item in body["manifests"]] == ["album-a", "album-b", "missing-qa"]
     album_a = body["manifests"][0]
     assert album_a["album_name"] == "甲相册"
@@ -114,14 +114,14 @@ def test_manifests_lists_only_albums_with_a_usable_manifest(client: TestClient):
 
 
 def test_manifest_detail_is_the_raw_manifest_not_the_summary(client: TestClient):
-    body = client.get("/api/manifests/album-a").json()
+    body = client.get("/api/v1/manifests/album-a").json()
     assert body["album_id"] == "album-a"
     # 详情返回的是 manifest 原文：有 faces，没有摘要才有的 face_count。
     assert "faces" in body and "face_count" not in body
 
 
 def test_an_unknown_manifest_is_a_404_with_the_1_0_message(client: TestClient):
-    response = client.get("/api/manifests/nope")
+    response = client.get("/api/v1/manifests/nope")
     assert response.status_code == 404
     assert response.json() == {"error": "not found"}
 
@@ -132,21 +132,21 @@ def test_an_unknown_manifest_is_a_404_with_the_1_0_message(client: TestClient):
 def test_qa_dataset_requires_both_parameters(client: TestClient):
     """1.0 ``:7690``：缺一个就 400，文案固定（前端按它提示）。"""
     for query in ("", "?album_id=album-a", "?qa_set=qa-1"):
-        response = client.get(f"/api/qa-dataset{query}")
+        response = client.get(f"/api/v1/qa-dataset{query}")
         assert response.status_code == 400
         assert response.json() == {"error": "album_id and qa_set are required"}
 
 
 def test_qa_dataset_reports_the_three_missing_things_apart(client: TestClient):
     """相册 / qa_set / qa 文件是三条不同的 404——前端对它们的提示不同。"""
-    album = client.get("/api/qa-dataset?album_id=nope&qa_set=qa-1")
+    album = client.get("/api/v1/qa-dataset?album_id=nope&qa_set=qa-1")
     assert (album.status_code, album.json()) == (404, {"error": "album not found"})
 
-    qa_set = client.get("/api/qa-dataset?album_id=album-a&qa_set=qa-不存在")
+    qa_set = client.get("/api/v1/qa-dataset?album_id=album-a&qa_set=qa-不存在")
     assert (qa_set.status_code, qa_set.json()) == (404, {"error": "qa_set not found"})
 
     # ``missing-qa`` 的 manifest 指着一个盘上不存在的 jsonl。
-    missing = client.get("/api/qa-dataset?album_id=missing-qa&qa_set=qa-1")
+    missing = client.get("/api/v1/qa-dataset?album_id=missing-qa&qa_set=qa-1")
     assert (missing.status_code, missing.json()) == (404, {"error": "qa file not found"})
 
 
@@ -165,7 +165,7 @@ def test_qa_dataset_resolves_media_against_sentrix(client: TestClient):
             "assets": {"items": [{"id": "asset-1", "file_name": "pic.jpg", "media_type": "image"}]},
         },
     )
-    response = client.get("/api/qa-dataset?album_id=album-a&qa_set=qa-1&sentrix_url=http://sentrix:8191")
+    response = client.get("/api/v1/qa-dataset?album_id=album-a&qa_set=qa-1&sentrix_url=http://sentrix:8191")
     assert response.status_code == 200
     body = response.json()
     assert body["album_id"] == "album-a" and body["qa_set"] == "qa-1"
@@ -195,7 +195,7 @@ def test_qa_dataset_without_media_refs_does_not_touch_sentrix(client: TestClient
     假件在没预设任何 URL 时会直接失败——所以这条同时证明了「没有发请求」。
     """
     http = _with_http(client, {})
-    body = client.get("/api/qa-dataset?album_id=album-a&qa_set=qa-plain").json()
+    body = client.get("/api/v1/qa-dataset?album_id=album-a&qa_set=qa-plain").json()
     assert body["media_resolution"] == {
         "status": "no_media",
         "resolved_count": 0,
@@ -209,7 +209,7 @@ def test_qa_dataset_survives_an_unreachable_sentrix(client: TestClient):
     """主 API 连不上是**状态**（``sentrix_unavailable``），不是 500。1.0 也是如此。"""
     http = _with_http(client, {})
     http.fail_with = RuntimeError("HTTP 502 Bad Gateway: boom")
-    body = client.get("/api/qa-dataset?album_id=album-a&qa_set=qa-1").json()
+    body = client.get("/api/v1/qa-dataset?album_id=album-a&qa_set=qa-1").json()
     assert body["media_resolution"]["status"] == "sentrix_unavailable"
     assert body["media_resolution"]["error"] == "HTTP 502 Bad Gateway: boom"
     assert body["media_resolution"]["missing_count"] == 1
@@ -219,7 +219,7 @@ def test_qa_dataset_survives_an_unreachable_sentrix(client: TestClient):
 
 
 def test_album_media_serves_the_file(client: TestClient):
-    response = client.get("/api/albums/album-a/photos/pic.jpg")
+    response = client.get("/api/v1/albums/album-a/photos/pic.jpg")
     assert response.status_code == 200
     assert response.content == b"PIC"
     assert response.headers["content-type"] == "image/jpeg"
@@ -231,7 +231,7 @@ def test_album_media_blocks_a_traversal_in_the_file_name(client: TestClient):
     **断言的是「没读到」而不是「没返回 200」**：一个不拦的实现会把 TOP SECRET 发回来，
     而那才是这条用例要拦的事。
     """
-    response = client.get("/api/albums/album-a/photos/..%2F..%2F..%2Fsecret.txt")
+    response = client.get("/api/v1/albums/album-a/photos/..%2F..%2F..%2Fsecret.txt")
     assert response.status_code == 404
     assert response.json() == {"error": "media not found"}
     assert b"TOP SECRET" not in response.content
@@ -244,11 +244,11 @@ def test_album_media_blocks_a_collection_that_is_not_whitelisted(client: TestCli
     那条请求根本到不了路由——那样测的就不是白名单了。
     """
     for coll in ("secret", "%2E%2E", "%2E%2E%2F%2E%2E"):
-        response = client.get(f"/api/albums/album-a/{coll}/pic.jpg")
+        response = client.get(f"/api/v1/albums/album-a/{coll}/pic.jpg")
         assert response.status_code == 404
         assert response.json() == {"error": "media not found"}
 
 
 def test_album_media_is_404_when_the_file_is_absent(client: TestClient):
-    response = client.get("/api/albums/album-a/photos/nope.jpg")
+    response = client.get("/api/v1/albums/album-a/photos/nope.jpg")
     assert (response.status_code, response.json()) == (404, {"error": "media not found"})
