@@ -50,6 +50,9 @@ T1102 实测：对两个服务各 `kill -9` 主进程 → **8 秒后 systemd 自
 | `8772 /api/config` | 200 `application/json` |
 | `8772 /api/runs` | 191 个 run（扫的是 1.0 的 results） |
 
+> **2026-10-07 补注**：上表的路径写于当时，PhotoBench 的前缀当日是 `/api`。2026-10-07 完成 T924 后改为 **`/api/v1`**——上表里的 `/api/config`、`/api/runs` 现在是 `/api/v1/config`、`/api/v1/runs`。本表保持原样作为当时的记录。
+
+
 ## 5. 一条我以为有风险、实测没风险的
 
 **systemd 单元没有继承旧裸进程的 conda `stmem` 环境**（几十个变量），而 2.0 进程内

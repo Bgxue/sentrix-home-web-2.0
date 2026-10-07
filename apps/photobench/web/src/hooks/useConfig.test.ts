@@ -40,8 +40,8 @@ const MANIFEST = { album_id: "album3", album_name: "A3", face_count: 1, photo_co
 
 function happyFetch() {
   return vi.fn((url: string, _init?: RequestInit) => {
-    if (url.endsWith("/api/config")) return Promise.resolve(jsonResponse(200, CONFIG));
-    if (url.endsWith("/api/manifests")) return Promise.resolve(jsonResponse(200, { manifests: [MANIFEST] }));
+    if (url.endsWith("/api/v1/config")) return Promise.resolve(jsonResponse(200, CONFIG));
+    if (url.endsWith("/api/v1/manifests")) return Promise.resolve(jsonResponse(200, { manifests: [MANIFEST] }));
     return Promise.reject(new Error(`unexpected url ${url}`));
   });
 }
@@ -175,7 +175,7 @@ describe("useConfig.saveConnectionConfig", () => {
     const onModelConfigSaved = vi.fn();
     const savedRuntime = { sentrix_url: "saved-s", judge_url: "saved-j", judge_model: "saved-m", vllm_manager_url: "saved-vm", model_base_url: "saved-ep", endpoint_model: "saved-em" };
     fetchStub.mockImplementation((url: string, _init?: RequestInit) => {
-      if (url.endsWith("/api/config")) return Promise.resolve(jsonResponse(200, { saved: true, runtime_config: savedRuntime }));
+      if (url.endsWith("/api/v1/config")) return Promise.resolve(jsonResponse(200, { saved: true, runtime_config: savedRuntime }));
       return Promise.reject(new Error(`unexpected url ${url}`));
     });
 
@@ -280,7 +280,7 @@ describe("useConfig.saveJudgePrompt（1.0 :2574-2582）", () => {
         expect(ok).toBe(true);
       });
       const [url, init] = fetchStub.mock.calls[fetchStub.mock.calls.length - 1]!;
-      expect(String(url)).toBe("/api/judge-prompts");
+      expect(String(url)).toBe("/api/v1/judge-prompts");
       expect((init as RequestInit).method).toBe("POST");
       bodies.push(JSON.parse(String((init as RequestInit).body)));
     }

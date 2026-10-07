@@ -64,11 +64,11 @@ describe("ChainDetailModal · 证据链节点弹窗（1.0 :3773-3795）", () => 
 
     const image = document.querySelector(".chain-detail-media img") as HTMLImageElement;
     expect(image).not.toBeNull();
-    expect(image?.getAttribute("src")).toBe("/api/assets/asset-1/file");
+    expect(image?.getAttribute("src")).toBe("/api/v1/assets/asset-1/file");
 
     const video = document.querySelector(".chain-detail-media video") as HTMLVideoElement;
     expect(video).not.toBeNull();
-    expect(video?.getAttribute("src")).toBe("/api/assets/asset-2/file");
+    expect(video?.getAttribute("src")).toBe("/api/v1/assets/asset-2/file");
   });
 
   it("点缩略图走 onOpenImage，不关闭弹窗；点背景关闭", () => {

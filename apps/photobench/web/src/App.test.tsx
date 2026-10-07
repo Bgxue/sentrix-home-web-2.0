@@ -69,7 +69,7 @@ beforeEach(() => {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
-      if (url.endsWith("/api/judge-prompts")) return Promise.resolve(jsonResponse(200, { kinds: [] }));
+      if (url.endsWith("/api/v1/judge-prompts")) return Promise.resolve(jsonResponse(200, { kinds: [] }));
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     }),
   );

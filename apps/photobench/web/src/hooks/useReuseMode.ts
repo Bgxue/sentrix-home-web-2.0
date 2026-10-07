@@ -96,7 +96,7 @@ export function useReuseMode(options: UseReuseModeOptions) {
       // 1.0 `:2507` 是**裸 `fetch`**，不走统一错误处理——照搬（与 `loadJudgePrompts` 同，
       // 是 1.0 的一处已知不一致）。
       const data = (await fetch(
-        `/api/memory-spaces?sentrix_url=${encodeURIComponent(sentrixUrl)}`,
+        `/api/v1/memory-spaces?sentrix_url=${encodeURIComponent(sentrixUrl)}`,
       ).then((r) => r.json())) as MemorySpacesResponse;
       setMemorySpaces(data.spaces || []);
       setReuseBases(data.reuse_bases || []);
@@ -166,7 +166,7 @@ export function useReuseMode(options: UseReuseModeOptions) {
       setSelectedAlbum(base.album_id);
       const manifest = manifests.find((item) => item.album_id === base.album_id);
       // ⚠️ 照搬 1.0 `:2544` 的**已知缺陷**：1.0 的 manifest.qa_sets 是对象，而 2.0
-      // `/api/manifests` 返回的是**数组**（types.ts `ManifestSummary.qa_sets: string[]`）。
+      // `/api/v1/manifests` 返回的是**数组**（types.ts `ManifestSummary.qa_sets: string[]`）。
       // `Object.keys([...])` 得到 `["0","1",…]`，于是 `options.includes(selectedQa)`
       // 永远匹配不到真实题集名，`selectedQa` 会被写成 `"0"`。**不修**——只在报告里登记。
       const qaSetOptions = Object.keys(

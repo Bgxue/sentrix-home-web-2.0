@@ -9,10 +9,10 @@
  * 只是把「从哪读相册」的入口显式化。
  *
  * **媒体来源的取舍口径照搬 1.0 的两处，不合并**：
- *   - `imageUrl`（:553）：有 `asset_id` 就走 `/api/assets/{id}/file`（按资产 id，最准）；
+ *   - `imageUrl`（:553）：有 `asset_id` 就走 `/api/v1/assets/{id}/file`（按资产 id，最准）；
  *     否则回落到结果里已经带上的 `media_url`。
  *   - `albumLocalUrl` / `decorateMedia`（:624 / :646）：从**文件名**按相册路径拼
- *     `/api/albums/{album}/{photos|videos|faces}/{file}`（按相册布局，是回退口径）。
+ *     `/api/v1/albums/{album}/{photos|videos|faces}/{file}`（按相册布局，是回退口径）。
  * 两条路的取舍条件不同，合并会把「按 id 有」和「按路径拼」混成一件事。
  */
 

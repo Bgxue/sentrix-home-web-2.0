@@ -173,13 +173,13 @@ describe("exportTraces / exportSftTraces（1.0 :2567 / backup :1401）", () => {
     act(() => {
       result.current.exportTraces();
     });
-    expect(openSpy).toHaveBeenCalledWith("/api/runs/r1/export-trace?scores=1,2", "_blank");
+    expect(openSpy).toHaveBeenCalledWith("/api/v1/runs/r1/export-trace?scores=1,2", "_blank");
 
     openSpy.mockClear();
     act(() => {
       result.current.exportSftTraces();
     });
-    expect(openSpy).toHaveBeenCalledWith("/api/runs/r1/export-sft?scores=1,2", "_blank");
+    expect(openSpy).toHaveBeenCalledWith("/api/v1/runs/r1/export-sft?scores=1,2", "_blank");
   });
 
   it("默认评分是 0,1,2（1.0 :2487）", () => {
@@ -188,7 +188,7 @@ describe("exportTraces / exportSftTraces（1.0 :2567 / backup :1401）", () => {
     act(() => {
       result.current.exportTraces();
     });
-    expect(openSpy).toHaveBeenCalledWith("/api/runs/r1/export-trace?scores=0,1,2", "_blank");
+    expect(openSpy).toHaveBeenCalledWith("/api/v1/runs/r1/export-trace?scores=0,1,2", "_blank");
   });
 
   it("一个都没勾选时不下载，改为提示", () => {

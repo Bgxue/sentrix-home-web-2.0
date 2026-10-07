@@ -39,7 +39,7 @@ afterEach(() => {
 describe("useModelEndpoint.loadCurrentModel", () => {
   it("先带 model 失败 → 清空选择再裸调一次（去重试就会红）", async () => {
     const fetchStub = vi.fn((url: string, init?: RequestInit) => {
-      if (url.endsWith("/api/current-model")) {
+      if (url.endsWith("/api/v1/current-model")) {
         const body = JSON.parse(String(init?.body));
         if (body.model) return Promise.resolve(jsonResponse(400, { error: "model not found" }));
         return Promise.resolve(jsonResponse(200, { served_models: ["m1"], served_model_name: "m1" }));

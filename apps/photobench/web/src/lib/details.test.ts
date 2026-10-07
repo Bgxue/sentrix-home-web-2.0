@@ -363,13 +363,13 @@ describe("phaseErrorDetails / phaseErrorSummary（1.0 :2182-2193）", () => {
 describe("openImageTarget（1.0 :2194 纯半）", () => {
   it("有 asset_id 走 /assets/{id}/file", () => {
     expect(openImageTarget({ asset_id: "abc/def", file_name: "x.jpg" })).toEqual({
-      url: "/api/assets/abc%2Fdef/file",
+      url: "/api/v1/assets/abc%2Fdef/file",
       name: "x.jpg",
     });
   });
   it("无 asset_id 时用 media_url；名字回退 image_id 再回 图片", () => {
-    expect(openImageTarget({ media_url: "/api/albums/a/photos/x.jpg" })).toEqual({
-      url: "/api/albums/a/photos/x.jpg",
+    expect(openImageTarget({ media_url: "/api/v1/albums/a/photos/x.jpg" })).toEqual({
+      url: "/api/v1/albums/a/photos/x.jpg",
       name: "图片",
     });
     expect(openImageTarget({ media_url: "/m.jpg", image_id: "img-1" })?.name).toBe("img-1");

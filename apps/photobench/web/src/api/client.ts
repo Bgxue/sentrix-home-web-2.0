@@ -3,7 +3,7 @@
  *
  * 三处**不能想当然**的地方，都有依据：
  *
- *   1. `BASE = "/api"`，**不是 `/api/v1`**。PhotoBench 是独立包，前缀在
+ *   1. `BASE = "/api/v1"`，与主 API 同前缀（T924，2026-10-07）。PhotoBench 是独立包，前缀在
  *      `apps/photobench/src/photobench/main.py` 的 `API_PREFIX` 单点定义；
  *      `/api/v1` 是主产品（`apps/api`）的，两者不能混。**也刻意不复用
  *      `apps/web/src/shared/api/client.ts`**——那个 `BASE="/api/v1"` 且按 sentrix 的
@@ -14,11 +14,11 @@
  *      与超时（`AbortError`）都可重试，业务错误（4xx）不重试。
  *
  * 调用方传**相对路径**（`"/runs"`），`BASE` 在这里拼一次——1.0 的调用点四处重复写
- * `"/api/..."`，前缀一改就得全改；`media.ts` 也 import 这个 `BASE` 拼 `<img>` 地址。
+ * `"/api/v1/..."`，前缀一改就得全改；`media.ts` 也 import 这个 `BASE` 拼 `<img>` 地址。
  */
 
 /** PhotoBench 自己的前缀（`main.py` 的 `API_PREFIX`）。 */
-export const BASE = "/api";
+export const BASE = "/api/v1";
 
 export interface ApiOptions extends RequestInit {
   /** 单次请求的超时（毫秒）。默认 10000，与 1.0 相同。 */

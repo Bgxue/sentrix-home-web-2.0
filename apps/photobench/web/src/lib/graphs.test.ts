@@ -347,7 +347,7 @@ describe("chainDetailMedia", () => {
     };
     const media = chainDetailMedia(item, [], "album-a");
     expect(media).toHaveLength(12);
-    expect(media[0]).toMatchObject({ media_id: "gt-0.png", media_url: "/api/albums/album-a/photos/gt-0.png" });
+    expect(media[0]).toMatchObject({ media_id: "gt-0.png", media_url: "/api/v1/albums/album-a/photos/gt-0.png" });
     expect(media.map((m) => m.media_id)).toEqual(Array.from({ length: 12 }, (_, i) => `gt-${i}.png`));
     expect(media.map((m) => m.media_id)).not.toContain("gt-12.png");
   });

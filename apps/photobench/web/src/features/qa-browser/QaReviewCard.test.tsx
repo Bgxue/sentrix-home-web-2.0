@@ -36,7 +36,7 @@ describe("QaReviewCard · GT 媒体与问答气泡（1.0 App.vue:3703-3745）", 
     expect(container.querySelector(".qa-review-layout")?.className).not.toContain("no-evidence");
 
     const img = container.querySelector(".gt-image-button img") as HTMLImageElement | null;
-    expect(img?.getAttribute("src")).toBe("/api/assets/asset-1/file");
+    expect(img?.getAttribute("src")).toBe("/api/v1/assets/asset-1/file");
 
     // 问答气泡：题干在用户侧，参考回答在 GT 侧。
     expect(container.querySelector(".user-bubble")?.textContent).toContain("谁在厨房？");

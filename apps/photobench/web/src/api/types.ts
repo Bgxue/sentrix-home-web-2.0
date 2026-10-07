@@ -44,7 +44,7 @@ export interface MediaRef {
 // 阶段与进度
 // ---------------------------------------------------------------------------
 
-/** `phases.<key>.progress`；键取自一次真实 run 的 `qa_eval`（`/api/runs` 实测）。 */
+/** `phases.<key>.progress`；键取自一次真实 run 的 `qa_eval`（`/api/v1/runs` 实测）。 */
 export interface PhaseProgress {
   total?: number;
   completed?: number;
@@ -131,7 +131,7 @@ export interface RejudgeTask {
   [key: string]: unknown;
 }
 
-/** 一条 run。字段来自 `/api/runs` 实测响应（2026-10-06，8771）。 */
+/** 一条 run。字段来自 `/api/v1/runs` 实测响应（2026-10-06，8771）。 */
 export interface Run {
   run_id: string;
   /** `full` / `reuse` / `build`（`RUN_MODES_UI` `:2540`）。 */
@@ -175,7 +175,7 @@ export interface RunPage {
   has_previous: boolean;
   has_next: boolean;
   active_count: number;
-  /** 后台扫描 270 个 run 时的进度字段（`/api/runs` 的 `scan`）。 */
+  /** 后台扫描 270 个 run 时的进度字段（`/api/v1/runs` 的 `scan`）。 */
   scan?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -210,7 +210,7 @@ export interface TaskJudge {
   [key: string]: unknown;
 }
 
-/** 一行逐题摘要（`/api/runs/{id}/items` 的 `items[]`）。 */
+/** 一行逐题摘要（`/api/v1/runs/{id}/items` 的 `items[]`）。 */
 export interface RunItemSummary {
   index: number;
   qa_id?: string;
@@ -246,7 +246,7 @@ export interface RetrievalCounts {
   [key: string]: unknown;
 }
 
-/** 一题的完整记录（`/api/runs/{id}/items/{index}` 的 `item`）。 */
+/** 一题的完整记录（`/api/v1/runs/{id}/items/{index}` 的 `item`）。 */
 export interface RunItemDetail extends RunItemSummary {
   conversation?: ConversationTurn[];
   conversation_id?: string;

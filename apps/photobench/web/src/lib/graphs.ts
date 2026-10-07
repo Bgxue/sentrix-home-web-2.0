@@ -72,7 +72,7 @@ function decorateMedia(values: readonly unknown[], albumId?: string): Dict[] {
     const collection = video ? "videos" : /^faceid_[^/]+\.(?:jpe?g|png|webp)$/i.test(file) ? "faces" : "photos";
     const mediaFile = video && !/\.mp4$/i.test(file) ? `${file}.mp4` : file;
     const local = album && mediaFile
-      ? `/api/albums/${encodeURIComponent(album)}/${collection}/${encodeURIComponent(mediaFile)}`
+      ? `/api/v1/albums/${encodeURIComponent(album)}/${collection}/${encodeURIComponent(mediaFile)}`
       : "";
     return local ? { ...img, media_type: video ? "video" : img.media_type || "image", media_url: local } : img;
   });

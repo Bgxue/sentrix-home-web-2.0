@@ -24,7 +24,7 @@ describe("toolRecallMedia vs itemEvidenceMedia：两条口径必须分开（1.0 
 
   it("候选有、交付无 → toolRecallMedia 给出候选", () => {
     const recall = toolRecallMedia(candidateOnly, ALBUM);
-    expect(recall.map((m) => m.media_url)).toEqual(["/api/albums/alb1/photos/a.jpg"]);
+    expect(recall.map((m) => m.media_url)).toEqual(["/api/v1/albums/alb1/photos/a.jpg"]);
   });
 
   it("候选有、交付无 → itemEvidenceMedia 回**空**，绝不回落到候选", () => {
@@ -33,7 +33,7 @@ describe("toolRecallMedia vs itemEvidenceMedia：两条口径必须分开（1.0 
 
   it("同一夹具下 itemMedia（交付口径 E）**会**回落到候选窗口——与 itemEvidenceMedia 不同", () => {
     expect(itemMedia(candidateOnly, ALBUM).map((m) => m.media_url)).toEqual([
-      "/api/albums/alb1/photos/a.jpg",
+      "/api/v1/albums/alb1/photos/a.jpg",
     ]);
   });
 
@@ -43,18 +43,18 @@ describe("toolRecallMedia vs itemEvidenceMedia：两条口径必须分开（1.0 
       retrieved_candidate_media: [{ media_id: "album1/photos/c.jpg", media_type: "image" }],
     };
     expect(itemEvidenceMedia(both, ALBUM).map((m) => m.media_url)).toEqual([
-      "/api/albums/alb1/photos/p.jpg",
+      "/api/v1/albums/alb1/photos/p.jpg",
     ]);
     expect(toolRecallMedia(both, ALBUM).map((m) => m.media_url)).toEqual([
-      "/api/albums/alb1/photos/c.jpg",
+      "/api/v1/albums/alb1/photos/c.jpg",
     ]);
   });
 
   it("retrieved_file_names 也能撑起候选，但仍不进交付", () => {
     const namesOnly = { retrieved_file_names: ["n1.jpg", "n2.jpg"] };
     expect(toolRecallMedia(namesOnly, ALBUM).map((m) => m.media_url)).toEqual([
-      "/api/albums/alb1/photos/n1.jpg",
-      "/api/albums/alb1/photos/n2.jpg",
+      "/api/v1/albums/alb1/photos/n1.jpg",
+      "/api/v1/albums/alb1/photos/n2.jpg",
     ]);
     expect(itemEvidenceMedia(namesOnly, ALBUM)).toEqual([]);
   });
@@ -67,12 +67,12 @@ describe("itemEvidenceMedia（1.0 :703-711）", () => {
         { predicted_media: [{ media_id: "album1/photos/p.jpg", media_type: "image" }] },
         ALBUM,
       ).map((m) => m.media_url),
-    ).toEqual(["/api/albums/alb1/photos/p.jpg"]);
+    ).toEqual(["/api/v1/albums/alb1/photos/p.jpg"]);
   });
 
   it("predicted_file_names 走 decorateMedia 补 URL", () => {
     expect(itemEvidenceMedia({ predicted_file_names: ["n.jpg"] }, ALBUM).map((m) => m.media_url)).toEqual([
-      "/api/albums/alb1/photos/n.jpg",
+      "/api/v1/albums/alb1/photos/n.jpg",
     ]);
   });
 
@@ -91,7 +91,7 @@ describe("itemMedia gt 分支（1.0 :660-676）", () => {
       gt_media: [{ media_id: "album1/photos/g.jpg", media_type: "image" }],
       retrieval_image_ids: ["x.jpg"],
     };
-    expect(itemMedia(item, ALBUM, true).map((m) => m.media_url)).toEqual(["/api/albums/alb1/photos/g.jpg"]);
+    expect(itemMedia(item, ALBUM, true).map((m) => m.media_url)).toEqual(["/api/v1/albums/alb1/photos/g.jpg"]);
   });
 
   it("gt_images 只在没有 retrieval_media_refs 时用", () => {
@@ -100,9 +100,9 @@ describe("itemMedia gt 分支（1.0 :660-676）", () => {
       retrieval_media_refs: [{ media_id: "album1/photos/r.jpg", media_type: "image" }],
     };
     // 有 retrieval_media_refs → 不用 gt_images，改由 mediaRefs 合成
-    expect(itemMedia(withRefs, ALBUM, true).map((m) => m.media_url)).toEqual(["/api/albums/alb1/photos/r.jpg"]);
+    expect(itemMedia(withRefs, ALBUM, true).map((m) => m.media_url)).toEqual(["/api/v1/albums/alb1/photos/r.jpg"]);
     const withoutRefs = { gt_images: [{ media_id: "album1/photos/gi.jpg", media_type: "image" }] };
-    expect(itemMedia(withoutRefs, ALBUM, true).map((m) => m.media_url)).toEqual(["/api/albums/alb1/photos/gi.jpg"]);
+    expect(itemMedia(withoutRefs, ALBUM, true).map((m) => m.media_url)).toEqual(["/api/v1/albums/alb1/photos/gi.jpg"]);
   });
 });
 

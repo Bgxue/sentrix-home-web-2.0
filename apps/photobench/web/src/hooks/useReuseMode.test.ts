@@ -118,7 +118,7 @@ describe("useReuseMode.loadMemorySpaces", () => {
     });
 
     expect(String(fetchStub.mock.calls[0]![0])).toBe(
-      "/api/memory-spaces?sentrix_url=127.0.0.1%3A8091",
+      "/api/v1/memory-spaces?sentrix_url=127.0.0.1%3A8091",
     );
     expect(result.current.reuse.memorySpaces.map((s) => s.id)).toEqual(["s1"]);
     expect(result.current.reuse.reuseBases.map((b) => b.base_id)).toEqual(["b1"]);

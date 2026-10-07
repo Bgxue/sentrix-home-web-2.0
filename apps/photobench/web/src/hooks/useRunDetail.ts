@@ -46,7 +46,7 @@ export interface ReviewDraft {
 
 export type ReviewDrafts = Record<string, ReviewDraft>;
 
-/** `/api/judge-prompts` 返回的 `kinds[]` 一条（1.0 `promptKindMeta` `:2466`）。 */
+/** `/api/v1/judge-prompts` 返回的 `kinds[]` 一条（1.0 `promptKindMeta` `:2466`）。 */
 export interface PromptKindMeta {
   kind?: string;
   custom?: string;
@@ -272,7 +272,7 @@ export function useRunDetail(options: RunDetailOptions) {
 
   /**
    * 1.0 `:2567`。下载走浏览器（`window.open`），**不走 `api()`**，所以是
-   * `/api/...` 字面量而不是 client 的相对路径。`exportSftTraces` 同形（backup `:1401`）。
+   * `/api/v1/...` 字面量而不是 client 的相对路径。`exportSftTraces` 同形（backup `:1401`）。
    */
   const exportTraces = useCallback(() => {
     const runId = activeRunIdRef.current;
@@ -282,7 +282,7 @@ export function useRunDetail(options: RunDetailOptions) {
       return;
     }
     window.open(
-      `/api/runs/${encodeURIComponent(runId)}/export-trace?scores=${exportScores.join(",")}`,
+      `/api/v1/runs/${encodeURIComponent(runId)}/export-trace?scores=${exportScores.join(",")}`,
       "_blank",
     );
   }, [activeRunIdRef, exportScores, emit]);
@@ -296,7 +296,7 @@ export function useRunDetail(options: RunDetailOptions) {
       return;
     }
     window.open(
-      `/api/runs/${encodeURIComponent(runId)}/export-sft?scores=${exportScores.join(",")}`,
+      `/api/v1/runs/${encodeURIComponent(runId)}/export-sft?scores=${exportScores.join(",")}`,
       "_blank",
     );
   }, [activeRunIdRef, exportScores, emit]);
@@ -307,7 +307,7 @@ export function useRunDetail(options: RunDetailOptions) {
    */
   const loadJudgePrompts = useCallback(async () => {
     try {
-      const data = (await fetch("/api/judge-prompts").then((response) => response.json())) as {
+      const data = (await fetch("/api/v1/judge-prompts").then((response) => response.json())) as {
         kinds?: PromptKindMeta[];
       };
       const kinds = data.kinds || [];

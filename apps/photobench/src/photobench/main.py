@@ -40,9 +40,9 @@ from photobench.api.routes import suites as suites_routes
 from photobench.bootstrap.container import Container
 from photobench.config import Settings
 
-#: 1.0 的 API 前缀就是 ``/api``。改成 ``/api/v1`` 是 S9c · T924——那是「对 2.0 的端点
-#: 适配」那一段（同时要改前端），本切片不动。
-API_PREFIX = "/api"
+#: 1.0 的 API 前缀是 ``/api``，2.0 改成 ``/api/v1``（S9c · T924，2026-10-07 完成）。
+#: 与主 API（``apps/api``）同前缀——PhotoBench 是独立发行包，这一份是它自己的常量。
+API_PREFIX = "/api/v1"
 
 log = logging.getLogger("photobench.main")
 

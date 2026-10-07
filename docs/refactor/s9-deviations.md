@@ -173,10 +173,10 @@ PhotoBench 是**第二个发行包**，另起 `scripts/export_photobench_openapi
 
 | # | 项 | 状态 |
 |---|---|---|
-| 1 | **T924：PhotoBench 自己的路由前缀 `/api` → `/api/v1`** | **未做。** 用户 2026-10-04 的口径把 T921/T924 一起当成「已完成」，但实测 `main.py` 的 `API_PREFIX` 仍是 `/api`（原始注释写着「改成 /api/v1 是 S9c · T924……本切片不动」）。改它要与前端同步（1.0 前端按 `/api` 写死），**前端一行不动是 S10 的范围**，所以这里不动它、如实登记。 |
+| 1 | **T924：PhotoBench 自己的路由前缀 `/api` → `/api/v1`** | ~~未做~~ → **2026-10-07 做掉了。** 当时不做的唯一理由是「前端一行不动是 S10 的范围」——S10 完成后条件就具备了。改动：后端 `API_PREFIX`、前端 `BASE`、49 处 URL 字面量（含测试期望）、vite 代理、`packages/contracts/openapi/photobench.yaml` 重新生成。实测 `/api/v1/runs` 200 / 旧前缀 404。**注意 import 路径里也含 `/api/` 字样（`from "../api/client.ts"`），批量替换必须只匹配「引号紧跟 `/api/`」的 URL 形态**——第一版正则没区分，把 80 个文件的模块路径改成了 `../api/v1/…`，被 `tsc` 当場抓住。 |
 | 2 | `start_memory_profile` 的换模型同步 | 见 §7.3「没做的」。 |
 | 3 | 1.0 的 8 个测试文件（约 71 KB） | **没有照搬**。2.0 的用例是重写（假件对象而非 `unittest.mock` patch 目标），覆盖主链、judge、遥测、写侧。 |
 | 4 | `results/` 的 447 MB 单文件问题（T914） | **量过、有结论**（扫描比解析慢 8 倍），真机验收的 run 只有 21 KB，没有在真实大文件上再压。 |
 | 5 | 前端 | **一行没动**（S10 的范围）。 |
-| 6 | `POST /api/v1/imports` 的「先种过身份必然 500」缺陷 | 不在 S9 范围，**未修**（§2 第 3 条）。 |
+| 6 | `POST /api/v1/imports` 的「先种过身份必然 500」缺陷 | ~~未修~~ → **2026-10-07 修了**（commit `f10cfb5`）。当时判「不在 S9 范围」，真机验收用「先预热 scope 让导入全程去重」绕过；2026-10-07 跑 PhotoBench 评测时同一个缺陷（`person_moments` 外键）变成硬失败——`photo_import` 阶段 500、整轮评测失败，绕不过去了。修法：`extract_moments._store` 里四个必填引用列任一为空就跳过那一条瞬间。 |
 | 7 | method-reachability 的五方法盲区 | **未修**（修它要换判据，不在本切片）；`restart` / `running_endpoint` 两个新端口方法**不在盲区里**（实现类在 `infrastructure/`，按位置被排除，端口名唯一且被 `application/deploy` 属性访问）。 |

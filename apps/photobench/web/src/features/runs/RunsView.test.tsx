@@ -75,9 +75,9 @@ describe("导出 URL 的分数参数", () => {
     });
 
     const combos: Array<[string[], string]> = [
-      [["0"], "/api/runs/r1/export-trace?scores=0"],
-      [["1"], "/api/runs/r1/export-trace?scores=1"],
-      [["1", "2"], "/api/runs/r1/export-trace?scores=1,2"],
+      [["0"], "/api/v1/runs/r1/export-trace?scores=0"],
+      [["1"], "/api/v1/runs/r1/export-trace?scores=1"],
+      [["1", "2"], "/api/v1/runs/r1/export-trace?scores=1,2"],
     ];
     for (const [scores, expected] of combos) {
       act(() => result.current.setExportScores(scores));
@@ -98,7 +98,7 @@ describe("导出 URL 的分数参数", () => {
     act(() => result.current.setExportScores(["1", "2"]));
     act(() => result.current.exportSftTraces());
 
-    expect(openSpy).toHaveBeenCalledWith("/api/runs/r1/export-sft?scores=1,2", "_blank");
+    expect(openSpy).toHaveBeenCalledWith("/api/v1/runs/r1/export-sft?scores=1,2", "_blank");
   });
 });
 
@@ -128,7 +128,7 @@ describe("保存提示词用的是用户编辑的那份（P1）", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string) => {
-        if (url.endsWith("/api/judge-prompts")) return Promise.resolve(jsonResponse(200, PROMPT_KINDS));
+        if (url.endsWith("/api/v1/judge-prompts")) return Promise.resolve(jsonResponse(200, PROMPT_KINDS));
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       }),
     );
