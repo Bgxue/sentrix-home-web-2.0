@@ -136,5 +136,5 @@ rsync -ain --checksum ~/Github/Sentrix-Home-Web/data/album3-v2-source/ data/albu
 
 # 8772 现在读的是哪
 systemctl --user show sentrix-photobench -p Environment
-curl -s http://127.0.0.1:8772/api/manifests | head -c 200
+curl -s http://127.0.0.1:8772/api/v1/manifests | head -c 200
 ```

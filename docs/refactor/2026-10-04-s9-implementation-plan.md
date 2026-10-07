@@ -822,6 +822,8 @@ aggregate            done   0.0s
 |---|---|
 | A. 重启路径（用真的 `SubprocessSentrixProcess`） | **真跑**：8191 从 8100 重启到标记端点 8199；旧 pid 消失、新 pid 在听、`/api/v1/health` 200、**`/proc/<新pid>/environ` 的 `SENTRIX_VLM_BASE_URL = 8199`** |
 | B. 一轮评测 | **真跑**：起 PhotoBench 8772 → `POST /api/runs`（model_base_url=8100）→ `model_deploy` 发现 2.0 正指着 8199，**在 run 内把它重启回 8100**（`gamma_sync = {ok:true, restarted:true, endpoint:8100, previous_endpoint:8199, pid:86759}`）→ 导入 / 处理 / 两道题走真模型（8100 的 llama-server）→ 判分也真打 8100 |
+> **2026-10-07 补注**：本文里的 `POST /api/runs` 等路径写于当时，PhotoBench 的前缀当日是 `/api`。T924 之后是 **`/api/v1`**。本行保持原样作为当时的记录。
+
 | C. 收尾核对 | **真跑**：8191 最终指着 8100，健康 200 |
 | 单元用例 | **全假件**（352 条），不碰网络、不起真进程 |
 | judge 打分 | **真跑**（8100 的 llama-server）：`judge_valid_count=2`、`answer_quality_mean=2.0`、`exact_accuracy=1.0` |

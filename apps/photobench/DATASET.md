@@ -18,8 +18,8 @@
 
 | 路径 | 是什么 | 进 Git | 谁读 |
 |---|---|---|---|
-| `apps/photobench/datasets/` | **评测夹具**（本文档）——问题、答案、照片 | 否 | 8772 的 `/api/manifests`、`/api/datasets` |
-| `apps/photobench/results/` | **评测结果**（当前为空） | 否 | 8772 的 `/api/runs` |
+| `apps/photobench/datasets/` | **评测夹具**（本文档）——问题、答案、照片 | 否 | 8772 的 `/api/v1/manifests`、`/api/v1/datasets` |
+| `apps/photobench/results/` | **评测结果**（当前为空） | 否 | 8772 的 `/api/v1/runs` |
 | `<仓库根>/data/` | **主产品的数据空间**，另含两个黄金样本夹具 | 否（`/data/`） | 8191；e2e 用例读其中的夹具 |
 
 第三行的两个夹具（主夹具 `album3-v2-source`、第二夹具 `household-benchmark-source`）
