@@ -46,8 +46,19 @@ DEFAULT_PROFILE = TurnProfile(
     # 1.0 runtime.py:1895 的硬收敛。实测小模型会反复改 query 重搜，把工具预算耗光后
     # 以空答案收场（e8c9d4 的 35 题里 52%）；收敛到 1 次后逼它翻页或直接作答。
     max_search_calls=1,
-    # 1.0 budget_manager.py:17。一轮总共一次精读，inspect_photo 与 read_photo_text 共用。
-    max_inspections=1,
+    # 1.0 生产 profile 的值：``PROFILES["goal_driven_candidate"].max_inspections = 3``
+    # （``backend/agent_runtime/profile.py``）。**不是** ``budget_manager.py:17`` 的
+    # dataclass 默认值 1 —— 那个只在没有 profile 覆盖时才生效，而 1.0 的
+    # ``start_sentrix_api_8091.sh:66`` 明确设了 ``SENTRIX_AGENT_PROFILE=goal_driven_candidate``。
+    #
+    # 2.0 一开始抄成 1，真机 487 题的后果：一轮只能精读一张图，而 233 个
+    # ``answered_with_gap`` 里未满足的需求集中在 ``visible_text``(103) 与
+    # ``delivered_photo``(82)——都是要看多张图细节的类型。1.0 干净完成 96.7%，2.0 22.2%。
+    #
+    # ``inspect_photo`` 与 ``read_photo_text`` 都是 ``cost_class=EXPENSIVE``，共用一个
+    # 计数器（1.0 亦然）。注意它约束的是**一轮总共几次**，不是「同一张图几次」——
+    # 后者是工具描述里那句劝告，两者不是一回事。
+    max_inspections=3,
     wall_time_s=180.0,
     final_reserve_s=10.0,
 )

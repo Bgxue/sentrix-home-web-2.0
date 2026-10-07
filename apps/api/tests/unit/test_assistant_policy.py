@@ -11,6 +11,7 @@ import pytest
 
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import ToolCall
+from sentrix.domain.assistant.profile import DEFAULT_PROFILE
 from sentrix.domain.assistant.task_state import ToolCallRecord
 from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
 from sentrix.domain.assistant.tools import TOOL_SPECS, TOOLS_BY_NAME, openai_tools
@@ -243,9 +244,12 @@ def test_denied_calls_do_not_consume_the_tool_budget(make_state):
 # ---- 精读预算（T123/T124 共用）------------------------------------------------------
 #
 # 1.0 的 ``inspect_photo`` 与 ``read_photo_text`` 都是 ``cost_class="expensive"``，
-# 共用 ``BudgetState.inspections`` 一个计数器，上限 ``max_inspections = 1``
-# （``budget_manager.py:17``）。所以这条约束是「**一轮总共只能精读一张图一次**」，
-# 不是「每个工具各一次」——下面第三条用例钉的就是这一句。
+# 共用 ``BudgetState.inspections`` 一个计数器。上限取 **1.0 生产 profile 的值**：
+# ``PROFILES["goal_driven_candidate"].max_inspections``（``agent_runtime/profile.py``），
+# 而 1.0 的 ``start_sentrix_api_8091.sh:66`` 设了 ``SENTRIX_AGENT_PROFILE=`` 那个名字。
+# **不是** ``budget_manager.py:17`` 的 dataclass 默认值——那个只在没有 profile 覆盖时生效。
+# 所以这条约束是「**一轮总共能精读几张**」，不是「每个工具各几次」——
+# 下面第三条用例钉的就是这一句。
 #
 # **这一件现在没有生产使用者**：S6 的两个昂贵工具（T123 的 ``inspect_photo`` 与
 # T124 的 ``read_photo_text``）还没落地。所以这里用 ``monkeypatch`` 往注册表里塞一个
@@ -275,19 +279,24 @@ def use_expensive_tools(monkeypatch, *names: str) -> None:
 
 
 def test_an_expensive_tool_is_denied_once_the_budget_is_spent(make_state, monkeypatch):
-    """第一次放行，第二次拒——上限是 1。"""
+    """预算之内的每一次都放行，**超出 profile 上限**的那一次才拒。
+
+    次数按 ``DEFAULT_PROFILE.max_inspections`` 走而不是写死——上限本身由
+    ``test_the_profile_carries_the_1_0_inspection_limit`` 单独钉住。
+    """
     use_expensive_tools(monkeypatch, "inspect_photo")
     state = make_state()
     policy = ToolPolicy()
 
-    first = policy.decide(call("inspect_photo", asset_handle="photo_1"), state)
-    assert first.action is not ToolAction.DENY, "第一次精读必须放行"
-    state.record(ToolCallRecord(call_id="c1", tool="inspect_photo", signature="x", status="ok"))
+    for index in range(DEFAULT_PROFILE.max_inspections):
+        allowed = policy.decide(call("inspect_photo", asset_handle=f"photo_{index}"), state)
+        assert allowed.action is not ToolAction.DENY, f"第 {index + 1} 次精读必须放行"
+        state.record(ToolCallRecord(call_id=f"c{index}", tool="inspect_photo", signature="x", status="ok"))
 
-    second = policy.decide(call("inspect_photo", asset_handle="photo_2"), state)
+    denied = policy.decide(call("inspect_photo", asset_handle="photo_x"), state)
 
-    assert second.action is ToolAction.DENY
-    assert second.code == "inspection_budget_exhausted"
+    assert denied.action is ToolAction.DENY
+    assert denied.code == "inspection_budget_exhausted"
 
 
 @pytest.mark.parametrize(
@@ -301,7 +310,7 @@ def test_the_inspection_budget_is_shared_across_the_two_expensive_tools(
     make_state, monkeypatch, first, second
 ):
     """**这条是 T123/T124 共用的依据。** 精读一次之后，**另一个**昂贵工具也一样被拒——
-    1.0 里它们共用一个 ``inspections`` 计数器（``budget_manager.py:17``）。
+    1.0 里它们共用一个 ``inspections`` 计数器（上限见 profile）。
 
     **两个方向都要断言，一个方向是不够的**：只测「先 inspect 再 read」的话，
     把计数写成「按工具名数 inspect_photo」也照样绿——因为那次记录正好就是
@@ -311,7 +320,10 @@ def test_the_inspection_budget_is_shared_across_the_two_expensive_tools(
     use_expensive_tools(monkeypatch, "inspect_photo", "read_photo_text")
     state = make_state()
     policy = ToolPolicy()
-    state.record(ToolCallRecord(call_id="c1", tool=first, signature="x", status="ok"))
+    # 用**同一个**工具记满预算，再看**另一个**昂贵工具是否也被拒——
+    # 这才是「共用计数器」的判据。
+    for index in range(DEFAULT_PROFILE.max_inspections):
+        state.record(ToolCallRecord(call_id=f"c{index}", tool=first, signature="x", status="ok"))
 
     decision = policy.decide(call(second, asset_handle="photo_1"), state)
 
@@ -375,14 +387,23 @@ def test_the_two_budgets_report_different_codes(make_state, monkeypatch):
     )
 
     inspection_gone = make_state()
-    inspection_gone.record(ToolCallRecord(call_id="c1", tool="inspect_photo", signature="x", status="ok"))
+    for index in range(DEFAULT_PROFILE.max_inspections):
+        inspection_gone.record(
+            ToolCallRecord(call_id=f"c{index}", tool="inspect_photo", signature="x", status="ok")
+        )
     assert policy.decide(call("inspect_photo", asset_handle="photo_2"), inspection_gone).code == (
         "inspection_budget_exhausted"
     )
 
 
 def test_the_profile_carries_the_1_0_inspection_limit():
-    """断言的是那个**具体的数 1**：1.0 ``budget_manager.py:17`` 的 ``max_inspections``。"""
+    """断言的是那个**具体的数 3**：1.0 生产 profile 的 ``max_inspections``。
+
+    **这条要写死数字，不能跟随实现** —— 它守的正是「1.0 到底给几次精读」。
+    2.0 一开始抄成了 ``budget_manager.py:17`` 的 dataclass 默认值 1，真机 487 题上
+    的后果是：一轮只能精读一张图，而 233 个 ``answered_with_gap`` 里未满足的需求
+    集中在 ``visible_text``(103) 与 ``delivered_photo``(82)——都是要看多张图细节的类型。
+    1.0 干净完成 96.7%，2.0 只有 22.2%。"""
     from sentrix.domain.assistant.profile import DEFAULT_PROFILE
 
-    assert DEFAULT_PROFILE.max_inspections == 1
+    assert DEFAULT_PROFILE.max_inspections == 3
