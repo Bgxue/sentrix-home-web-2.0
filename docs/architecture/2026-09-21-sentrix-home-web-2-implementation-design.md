@@ -564,8 +564,11 @@ S0 从 1.0 抄出的行为常量必须**逐条可验证**。这些值只存在�
 |---|---|
 | 死端点 404 循环 | `benchmark_orchestrator.py:739` 调 `{sentrix_url}/api/arbiter/status`，该端点在主 API 上**从不存在**；158,555 次全部 404，占 8091 流量 17% |
 | 前端轮询代替 SSE | `GET /api/assistant/turn/{id}` 轮询 668,490 次，占流量 73% |
+| ↳ **实测更正（2026-10-07）** | **这 668k 次轮询的调用方不是浏览器，是评测机。** 2.0 前端已走 SSE（`apps/web/src/features/assistant/useTurnStream.ts` 用 `EventSource`，仅在 `onerror` 时回退轮询）；但 photobench 的 `wait_for_assistant_turn` 用 `time.sleep` 轮询（`EventSource` 对它不可用），所以轮询端点作为**公开契约被有意保留**（`apps/api/src/sentrix/api/routes/assistant.py:17-31` 的 docstring 记了这次改判）。佐证：那批轮询是十几个 turn_id 交替、无 UI 流量（`s3-deviations.md` §4 问 3）。**「前端用轮询」这一条已修复；「668k 轮询流量」没有被消除，因为它本来就不来自前端。** |
 | 规划器调用失败 | `planner_call_error` 1,974 次 |
+| ↳ **实测更正（2026-10-07）：本行「修复」的表述不成立。** 2.0 **移植并保留**了 `GoalPlanner`（`apps/api/src/sentrix/application/assistant/goal_planner.py:12` 自述「这是 1.0 的失败原因之一，2.0 保留它」），只是把它重新定性为**传输故障**、文案分岔到「模型服务不可用」。实跑仍出现：20261006-224324 那个 run 的 16 个 turn 里 `termination_reason` 分布为 `{answered:6, answered_with_gap:5, step_budget_exhausted:3, planner_blocked:2}`。**它是「保留」不是「修复」。** |
 | 零工具调用 | 29%（7,389 / 25,112）的 turn 未调用任何工具 |
+| ↳ **实测（2026-10-07）：部分修复。** 1.0 的结构性入口被堵死了 —— `domain/assistant/intent.py:41-44` 的 `MIN_REQUIREMENTS = 1`，注释直指「1.0 实测 29.3% 的回合零工具调用，JIT 提示词正是靠『当前没有待确认的证据需求』把它们放过去的」。但**结果仍在**：同一批实跑 16 个 turn 里 4 个零 `stage="action"`（25%），只是现在会被标成 `answered_with_gap` / `planner_blocked`。2.0 的 `TerminationReason.NO_TOOL_CALL_STOPPED` **全仓未被 raise**（只在 `emergency.py:72` 的文案映射表里），即没有专门拦截零工具调用的机制。 |
 | 轨迹未正常收尾 | `termination_reason` 为 `None` 的有 11,304 条 |
 | 模型请求失败 | `llama-server` 返回 `400 System message must be at the beginning` |
 | 静默吞错 | `pipeline.py:358` 调用不存在的 `store.auto_confirm_clusters()`，被 `except Exception: pass` 吞掉，是恒空的空操作 |
