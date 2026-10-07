@@ -39,7 +39,13 @@ from sentrix.domain.identity.models import (
     FaceDetection,
     pending_cluster_name,
 )
-from sentrix.domain.identity.ports import EntityRepository, FaceRepository
+from sentrix.domain.identity.ports import (
+    EntityRepository,
+    FaceDetector,
+    FaceEnroller,
+    FaceRepository,
+    PreparedFaces,
+)
 from sentrix.domain.media.ports import AssetRepository
 from sentrix.domain.retrieval.ports import VectorRecord, VectorRepository
 from sentrix.domain.retrieval.scheme import VISUAL_SPACE
@@ -338,3 +344,27 @@ class EnrollFace:
             face_instance_id=instance_id,
             confidence=confidence,
         )
+
+
+class EnrollFaces(FaceEnroller):
+    """导入链上的人脸两段式：``prepare`` 只检测，``commit`` 做匹配与全部写库。
+
+    ``EnrollFace`` 是**单张脸**的用例；这一层包住「一张图 → 若干张脸」的循环与
+    检测本身。拆开是因为 ``detect`` 是这一段里唯一能离开串行侧的活：匹配读的是
+    同 scope 的候选簇，而那些簇是同批前一张照片刚写进去的——把它挪到并行侧会把
+    同一个人的两张照片各建一个 pending 簇，**不报错**。
+    """
+
+    def __init__(self, *, detector: FaceDetector, enroll: EnrollFace) -> None:
+        self._detector = detector
+        self._enroll = enroll
+
+    def prepare(self, path: str) -> PreparedFaces:
+        """只检测（本地 ONNX，可并行）。空表是有效结论——这张图确实没有脸。"""
+        return PreparedFaces(detections=tuple(self._detector.detect(path)))
+
+    def commit(self, asset_id: str, observation_id: str, prepared: PreparedFaces) -> int:
+        """匹配 + 建簇 + 实例 / 原型 / 向量 / 提及。**全部写库都在这里。**"""
+        for face in prepared.detections:
+            self._enroll.enroll(asset_id, observation_id, face)
+        return len(prepared.detections)

@@ -198,8 +198,35 @@ class VisualIndexOutcome:
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedVisual:
+    """视觉索引「两段式」的第一段产物：**只有计算，没有写库**。
+
+    ``vector`` 非空表示这一段真的算出了要写的向量；空表示第二段没有东西可写，
+    ``skip_reason`` 说明为什么（不是图片 / 已经索引过 / 嵌入不可用）。
+
+    单列一层，是因为导入链要把「嵌入」与「写向量」拆到两个线程上：嵌入是一次到
+    8102 的往返（慢、可并行），写向量必须按序发生——事件归属要读它，
+    ``score_event_candidate`` 的 ``visual_boost`` 与 ``split_guard`` 都读
+    ``memory_vectors``。
+    """
+
+    vector: tuple[float, ...] = ()
+    skip_reason: str = ""
+
+
 class AssetVisualIndexer(Protocol):
-    """把一张 Asset 变成视觉记忆。导入用例依赖它，不依赖具体的嵌入器/索引。"""
+    """把一张 Asset 变成视觉记忆。导入用例依赖它，不依赖具体的嵌入器/索引。
+
+    ``prepare`` / ``commit`` 是**同一次索引的两段**，``index`` 是它们的复合：
+    ``index(asset)`` 与 ``commit(asset, prepare(asset))`` 逐字等价。分开是为了让
+    导入链把第一段放进并行侧——它不写库，因此不受「视觉向量先于事件归属」那条
+    顺序约束的管；写库的第二段必须留在串行侧按序发生。
+    """
+
+    def prepare(self, asset: Asset) -> PreparedVisual: ...
+
+    def commit(self, asset: Asset, prepared: PreparedVisual) -> VisualIndexOutcome: ...
 
     def index(self, asset: Asset) -> VisualIndexOutcome: ...
 

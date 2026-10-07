@@ -86,6 +86,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sentrix.domain.identity.ports import FaceEnroller, PreparedFaces
 from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
 from sentrix.domain.media.ports import (
     AssetObserver,
@@ -96,6 +97,7 @@ from sentrix.domain.media.ports import (
     MediaStorage,
     MetadataReader,
     ObservationRepository,
+    ObservationSemantics,
     VideoMetadataReader,
     VideoProbe,
     VideoRepository,
@@ -103,7 +105,7 @@ from sentrix.domain.media.ports import (
     audio_mime_type,
 )
 from sentrix.domain.places.ports import AssetPlaceIndex
-from sentrix.domain.retrieval.ports import AssetVisualIndexer, LexicalIndex
+from sentrix.domain.retrieval.ports import AssetVisualIndexer, LexicalIndex, PreparedVisual
 from sentrix.domain.spaces.ports import SpaceRepository
 
 log = logging.getLogger("sentrix.media.import_assets")
@@ -177,6 +179,40 @@ class ProcessedAsset:
     entity_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class StagedImport:
+    """``ImportAssets.stage`` 的产物：一张**已经落库**的资产，与后半段要的账。
+
+    拆出这一层是为了让整册导入把 ``prepare_image`` 放进线程池：资产行必须先在
+    串行侧写好（``commit_image`` 与 ``EnrollFaces`` 都要按 id 取它），而三段推理
+    不需要。``stage`` → ``prepare_image`` → ``finish`` 与直接调 ``execute`` 逐字等价。
+    """
+
+    asset: Asset
+    media_type: MediaType
+    video_probe: VideoProbe | None = None
+    audio_probe: AudioProbe | None = None
+    video_started: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedImage:
+    """一张图的全部模型推理结果（``prepare_image`` 的产物、``commit_image`` 的输入）。
+
+    **零写库。** 三段重活分别是视觉嵌入（8102）、语义观察（8100，最多 3 次调用）、
+    人脸检测（本地 ONNX）。把它们挪到串行提交之外，是整册导入唯一的提速来源：
+    写库与顺序约束一条都不在这里，全在 ``commit_image``。
+
+    字段为 ``None`` 表示**该协作者没接线**，不是「算出来是空」——后者有自己的
+    表示（``PreparedVisual.skip_reason`` / 空检测表）。合并了这两种，
+    「这台机器没有嵌入能力」与「这张图是空的」就分不开了。
+    """
+
+    visual: PreparedVisual | None = None
+    semantics: ObservationSemantics | None = None
+    faces: PreparedFaces | None = None
+
+
 def _new_id(prefix: str) -> str:
     import uuid
 
@@ -195,7 +231,7 @@ class ImportAssets:
         place_indexer: AssetPlaceIndex | None = None,
         observer: AssetObserver | None = None,
         event_assigner: Callable[[Observation], str] | None = None,
-        face_enroller: Callable[[Asset, Observation], int] | None = None,
+        face_enroller: FaceEnroller | None = None,
         fact_maintainer: Callable[[Observation], tuple[str, ...]] | None = None,
         text_indexer: Callable[[Observation, str | None], int] | None = None,
         # 非人物实体抽取（S6 T127）。**入参带 event_id**：1.0 ``pipeline.py:336`` 在事件
@@ -247,6 +283,26 @@ class ImportAssets:
         self._clock = clock
 
     def execute(self, request: ImportRequest) -> ImportResult:
+        """一次完整导入：落库 + 推理 + 写库。**行为与拆分前逐字一致。**
+
+        单张上传走它。整册导入（``ImportAlbum``）把 ``stage`` / ``prepare_image`` /
+        ``finish`` 分开调，好把中间那段推理放进线程池——见 ``StagedImport``。
+        """
+        staged = self.stage(request)
+        if isinstance(staged, ImportResult):
+            return staged
+        return self.finish(staged, self.prepare_image(staged.asset))
+
+    def stage(self, request: ImportRequest) -> StagedImport | ImportResult:
+        """前半段（**串行、按序**）：去重 → 落盘 → 元数据探测 → 建资产行。
+
+        去重命中时直接返回 ``ImportResult``——那条路只重跑幂等的那两步，没有可并行的
+        一段。返回 ``StagedImport`` 时**资产行已经落库**：``finish`` 那半段（含
+        ``EnrollFaces``）要按 id 取它，而 ``prepare_image`` 只用得到路径与 id。
+
+        这一步留在主线程的理由与提交一样：它写库，而且「先到先落库」决定了
+        ``find_by_hash`` 的去重结果。
+        """
         # 空间行排在最前：簇列表内连它，没有它这次导入在审阅页上等于没发生。
         # 放在去重判断**之前**——去重命中同样是一条「这个 scope 被用到了」的证据。
         self._ensure_space(request.scope_id)
@@ -262,7 +318,7 @@ class ImportAssets:
                 media_type=existing.media_type,
                 status=existing.status,
                 deduplicated=True,
-                indexed=self._index_visual(existing),
+                indexed=self._reindex_visual(existing),
                 placed=self._index_place(existing),
             )
 
@@ -340,7 +396,23 @@ class ImportAssets:
         if audio_probe is not None and self._audio_repository is not None:
             self._audio_repository.save_probe(asset.id, audio_probe)
 
-        processed = self.process_image(asset)
+        return StagedImport(
+            asset=asset,
+            media_type=media_type,
+            video_probe=video_probe,
+            audio_probe=audio_probe,
+            video_started=video_started,
+        )
+
+    def finish(self, staged: StagedImport, prepared: PreparedImage) -> ImportResult:
+        """后半段（**串行、且必须按整册的扫描顺序**）：图片流水线 → 抽帧 → 汇总。
+
+        写库与全部顺序约束都在这里（``commit_image`` 的 docstring 列了每一条）。
+        ``prepared`` 是 ``prepare_image(staged.asset)`` 的结果，可以来自别的线程——
+        它只带推理产物，不带任何需要先落库的 id。
+        """
+        asset = staged.asset
+        processed = self.commit_image(asset, prepared)
         # 场景抽取排在图片流水线**之后**：它自己会再建一批资产与观察（关键帧），
         # 先跑会把派生物的数混进「这次导入」的结果里。
         video_scenes = self._extract_video_scenes(asset)
@@ -348,15 +420,19 @@ class ImportAssets:
         # 整个视频阶段的秒数落库**排在场景抽取之后**：1.0 的 ``video_processing_seconds``
         # 覆盖的是「探测 → 图片流水线 → 抽帧建场景」整段（``processor.py:205/420``），
         # 而场景抽取是最后一步，所以只能等它跑完再写。**探测失败也写**——那一段确实跑过了。
-        if video_probe is not None and self._video_repository is not None and video_started is not None:
+        if (
+            staged.video_probe is not None
+            and self._video_repository is not None
+            and staged.video_started is not None
+        ):
             self._video_repository.save_processing_seconds(
-                asset.id, round((self._clock() - video_started).total_seconds(), 3)
+                asset.id, round((self._clock() - staged.video_started).total_seconds(), 3)
             )
 
         return ImportResult(
             asset_id=asset.id,
             observation_id=processed.observation_id,
-            media_type=media_type,
+            media_type=staged.media_type,
             status=asset.status,
             deduplicated=False,
             indexed=processed.indexed,
@@ -367,28 +443,40 @@ class ImportAssets:
             fact_ids=processed.fact_ids,
             faces=processed.faces,
             text_rows=processed.text_rows,
-            video_probed=video_probe is not None and video_probe.metadata is not None,
+            video_probed=staged.video_probe is not None and staged.video_probe.metadata is not None,
             video_scenes=video_scenes,
-            audio_probed=audio_probe is not None and audio_probe.metadata is not None,
+            audio_probed=staged.audio_probe is not None and staged.audio_probe.metadata is not None,
         )
 
-    def process_image(self, asset: Asset, *, forced_event_id: str | None = None) -> ProcessedAsset:
-        """把一张**已经落库的图片资产**走完整条图片流水线。
+    def prepare_image(self, asset: Asset) -> PreparedImage:
+        """跑完这张图需要的**全部模型推理**，**不碰任何仓储**。
 
-        **为什么是公开方法。** 视频派生的关键帧走的就是这一条（S8b T513，对应 1.0
-        ``video/processor.py:188`` 的 ``pipeline.process(keyframe_id, ...)``），所以它
-        不能埋在 ``execute`` 里——那一半要负责去重、落盘、探测，关键帧三样都不需要。
-        不另写一遍的理由是下面每一步的顺序都是硬约束（见模块注释里的顺序表）：
-        两处各写一遍迟早有一处漏一步，而漏掉的那一步**不报错**，只是算错。
+        与 ``commit_image`` 的分界就是「写不写库」：这一段能离开串行侧，那一段不能。
+        每一路推理各自的媒体类型闸门与早退结论由它自己的 ``prepare`` 负责
+        （``IndexAssetVisual`` / ``ObserveAsset`` / ``EnrollFaces``），这里只把没接线
+        的协作者留成 ``None``——「协作者没接」与「算出来是空」必须分得开。
+        """
+        return PreparedImage(
+            visual=self._visual_indexer.prepare(asset) if self._visual_indexer is not None else None,
+            semantics=self._observer.prepare(asset) if self._observer is not None else None,
+            faces=self._face_enroller.prepare(asset.path) if self._face_enroller is not None else None,
+        )
 
-        ``forced_event_id`` 不为空时**跳过事件候选打分**，把这条观察直接挂到那条事件上
-        （1.0 ``pipeline.py:333`` 的 ``attach_observation_to_event``）。关键帧属于它那一
-        秒的源片场景，让 6 小时窗去替它挑事件会把它折进某张同时段的照片——那是错的，
-        而且不报错。
+    def commit_image(
+        self, asset: Asset, prepared: PreparedImage, *, forced_event_id: str | None = None
+    ) -> ProcessedAsset:
+        """把 ``prepare_image`` 的结果按**既有顺序**写进库，返回各步的结果。
+
+        顺序是硬约束，逐条理由在模块注释里：地点 → 视觉向量 → 观察 → 语义富集 →
+        人脸登记 → 事件归属 → 文本向量 → 实体 → 事实 → 词法投影。
+
+        **这一段必须串行、且按整册的扫描顺序调用。** ``_assign_event`` 读的是同 scope
+        的全部活动事件与它们的向量 / 提及，其中包含同批前几张照片刚写进去的那些；
+        打乱顺序会改变「折进哪个事件」的结果，而它**不报错**。
         """
         now = self._clock()
         placed = self._index_place(asset)
-        indexed = self._index_visual(asset)
+        indexed = self._index_visual(asset, prepared)
 
         observation = Observation(
             id=_new_id("obs"),
@@ -402,8 +490,8 @@ class ImportAssets:
         )
         self._observations.add(observation)
 
-        observation = self._observe(asset, observation) or observation
-        faces = self._enroll_faces(asset, observation)
+        observation = self._observe(asset, observation, prepared) or observation
+        faces = self._enroll_faces(asset, observation, prepared)
         event_id = self._assign_event(observation, forced_event_id)
         # 文本向量**必须在事件归并之后**：1.0 ``pipeline.py:324`` 的注释
         # 「Update the same vector with its final event link after selection」。
@@ -425,6 +513,26 @@ class ImportAssets:
             faces=faces,
             text_rows=text_rows,
         )
+
+    def process_image(self, asset: Asset, *, forced_event_id: str | None = None) -> ProcessedAsset:
+        """把一张**已经落库的图片资产**走完整条图片流水线：准备 + 提交。
+
+        **为什么是公开方法。** 视频派生的关键帧走的就是这一条（S8b T513，对应 1.0
+        ``video/processor.py:188`` 的 ``pipeline.process(keyframe_id, ...)``），所以它
+        不能埋在 ``execute`` 里——那一半要负责去重、落盘、探测，关键帧三样都不需要。
+        不另写一遍的理由是下面每一步的顺序都是硬约束（见模块注释里的顺序表）：
+        两处各写一遍迟早有一处漏一步，而漏掉的那一步**不报错**，只是算错。
+
+        单张上传与关键帧**各只有一张图**，没有可并行的一批，所以它们走这条一条龙的
+        路（与拆分前逐字一致）；整册导入（``ImportAlbum``）分开调两半——把
+        ``prepare_image`` 放进线程池，``commit_image`` 留在主线程按序执行。
+
+        ``forced_event_id`` 不为空时**跳过事件候选打分**，把这条观察直接挂到那条事件上
+        （1.0 ``pipeline.py:333`` 的 ``attach_observation_to_event``）。关键帧属于它那一
+        秒的源片场景，让 6 小时窗去替它挑事件会把它折进某张同时段的照片——那是错的，
+        而且不报错。
+        """
+        return self.commit_image(asset, self.prepare_image(asset), forced_event_id=forced_event_id)
 
     def _extract_video_scenes(self, asset: Asset) -> int:
         """导入一个视频之后建场景（S8b T512），返回建起来的场景数。
@@ -515,10 +623,21 @@ class ImportAssets:
             return
         self._spaces.ensure(scope_id, scope_id)
 
-    def _index_visual(self, asset: Asset) -> bool:
+    def _reindex_visual(self, asset: Asset) -> bool:
+        """去重路径专用：整段跑一遍（``index`` = prepare + commit）。
+
+        去重命中时只重跑幂等的那几步（视觉向量 + 地点），而且**只有一张图**，
+        没有可并行的一批，所以这里不需要拆两半——直接走复合的那一个方法。
+        """
         if self._visual_indexer is None:
             return False
         return self._visual_indexer.index(asset).indexed
+
+    def _index_visual(self, asset: Asset, prepared: PreparedImage) -> bool:
+        """写视觉向量。**必须排在事件归属之前**——归属要读它（模块注释第 1 条）。"""
+        if self._visual_indexer is None or prepared.visual is None:
+            return False
+        return self._visual_indexer.commit(asset, prepared.visual).indexed
 
     def _index_text(self, observation: Observation, event_id: str | None) -> int:
         """写文本向量，返回写了几行。与 ``_index_visual`` / ``_index_place`` 同形：
@@ -538,16 +657,21 @@ class ImportAssets:
             return False
         return self._place_indexer.index(asset)
 
-    def _observe(self, asset: Asset, observation: Observation) -> Observation | None:
+    def _observe(self, asset: Asset, observation: Observation, prepared: PreparedImage) -> Observation | None:
+        """写回语义。**必须排在事件归属之前**——归属的锚点读 place/event_type/objects。"""
         if self._observer is None:
             return None
-        return self._observer.observe(asset, observation)
+        return self._observer.commit(observation, prepared.semantics)
 
-    def _enroll_faces(self, asset: Asset, observation: Observation) -> int:
-        """登记这张图里检出的每一张脸。**必须排在事件归并之前**，理由见模块注释第 4 条。"""
-        if self._face_enroller is None:
+    def _enroll_faces(self, asset: Asset, observation: Observation, prepared: PreparedImage) -> int:
+        """登记这张图里检出的每一张脸。**必须排在事件归并之前**，理由见模块注释第 4 条。
+
+        **匹配与建簇都在这一段**，不只是检测：它们读同 scope 的候选簇，而那些簇是
+        同批前一张照片刚写进去的。能挪到并行侧的只有 ``prepare`` 里那一次 ``detect``。
+        """
+        if self._face_enroller is None or prepared.faces is None:
             return 0
-        return self._face_enroller(asset, observation)
+        return self._face_enroller.commit(asset.id, observation.id, prepared.faces)
 
     def _assign_event(self, observation: Observation, forced_event_id: str | None) -> str | None:
         if forced_event_id is not None:

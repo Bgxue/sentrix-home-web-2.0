@@ -244,7 +244,19 @@ class AssetObserver(Protocol):
 
     与 ``AssetVisualIndexer`` / ``AssetPlaceIndex`` 同构：导入用例依赖这个抽象，
     不依赖具体的观察器与仓储。
+
+    ``prepare`` / ``commit`` 是同一件事的两段（与 ``AssetVisualIndexer`` 同形）：
+    ``prepare`` 只打模型（最贵的一步、可并行），``commit`` 才写回观察，
+    ``observe`` 是两者的复合。
     """
+
+    def prepare(self, asset: Asset) -> ObservationSemantics | None:
+        """只打模型（8100，最多 3 次调用），**不写回观察**。"""
+        ...
+
+    def commit(self, observation: Observation, semantics: ObservationSemantics | None) -> Observation | None:
+        """把观察结果写回。``semantics`` 为空就什么都不写——模型不可用不是导入失败。"""
+        ...
 
     def observe(self, asset: Asset, observation: Observation) -> Observation | None: ...
 

@@ -69,9 +69,11 @@ def _stub_import(monkeypatch: pytest.MonkeyPatch, result: AlbumImportResult) -> 
     requests: list[AlbumImportRequest] = []
 
     class _StubImportAlbum:
-        def __init__(self, *, importer: object, summarize_event: object = None) -> None:
+        def __init__(self, *, importer: object, summarize_event: object = None, workers: int = 1) -> None:
             self._importer = importer
             self._summarize_event = summarize_event
+            # 并发宽度与这条契约无关：这一组测的是批次跑完之后那一段 insights 收尾。
+            self._workers = workers
 
         def execute(self, request: AlbumImportRequest) -> AlbumImportResult:
             requests.append(request)

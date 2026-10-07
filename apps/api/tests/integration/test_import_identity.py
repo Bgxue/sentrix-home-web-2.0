@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from sentrix.application.identity.enroll_face import EnrollFace
+from sentrix.application.identity.enroll_face import EnrollFace, EnrollFaces
 from sentrix.application.identity.seed_identity import (
     SEED_SUMMARY,
     NoSeedFacesError,
@@ -28,6 +28,7 @@ from sentrix.application.identity.seed_identity import (
     SeedInstanceNotFoundError,
     SeedPhoto,
 )
+from sentrix.application.media.import_album import AlbumImportRequest, ImportAlbum
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.domain.identity.models import FaceDetection
 from sentrix.domain.media.models import GpsPoint
@@ -185,6 +186,22 @@ def add_confirmed_person_with_cluster(
 # ---- 导入路径：人脸先于事件 --------------------------------------------------------
 
 
+class RecordingFaceEnroller(EnrollFaces):
+    """把「人脸那一步发生了」记进 ``order``。
+
+    **记在 ``commit``**：``prepare`` 那一次检测不写库，顺序约束管的是匹配与写提及
+    那一步。内部就是真的 ``EnrollFaces``，所以「匹配读的是库里已有的簇」也真跑。
+    """
+
+    def __init__(self, *, detector, enroll, order) -> None:  # noqa: ANN001
+        super().__init__(detector=detector, enroll=enroll)
+        self._order = order
+
+    def commit(self, asset_id, observation_id, prepared):  # noqa: ANN001, ANN201
+        self._order.append("faces")
+        return super().commit(asset_id, observation_id, prepared)
+
+
 def test_a_matching_face_is_already_a_mention_when_the_event_is_decided(
     tmp_path: Path, seeded_db: Database, repos: dict[str, Any]
 ) -> None:
@@ -206,13 +223,6 @@ def test_a_matching_face_is_already_a_mention_when_the_event_is_decided(
     order: list[str] = []
     mentions_when_deciding: list[int] = []
 
-    def enroll_faces(asset, observation) -> int:  # noqa: ANN001
-        order.append("faces")
-        faces = detector.detect(asset.path)
-        for item in faces:
-            enroll.enroll(asset.id, observation.id, item)
-        return len(faces)
-
     def assign_event(observation) -> str:  # noqa: ANN001
         order.append("events")
         with seeded_db.connect() as connection:
@@ -228,7 +238,7 @@ def test_a_matching_face_is_already_a_mention_when_the_event_is_decided(
         observations=repos["observations"],
         storage=FakeStorage(tmp_path),
         metadata=FakeMetadata(),
-        face_enroller=enroll_faces,
+        face_enroller=RecordingFaceEnroller(detector=detector, enroll=enroll, order=order),
         event_assigner=assign_event,
     )
     result = importer.execute(
@@ -256,6 +266,54 @@ def test_the_face_enroller_is_optional(tmp_path: Path, seeded_db: Database, repo
 
     assert result.faces == 0
     assert result.event_id == "evt_1"
+
+
+def test_two_photos_of_one_person_land_in_one_cluster(
+    tmp_path: Path, seeded_db: Database, repos: dict[str, Any]
+) -> None:
+    """**人脸那一段不能整段挪到并行侧。** 能并行的只有 ``prepare`` 里那一次检测。
+
+    两张同一个人的照片走整册导入：第二张必须在**第一张已经写进库的簇**上匹配成功。
+    匹配与建簇读的是同 scope 的候选簇，而那些簇是同批前一张照片刚写进去的——整段
+    并行时两张互相看不见，会给同一个人各建一个簇。而那**不报错**：审阅页上只是多出
+    一个「待命名成员」，没人会把它和一次并发改动联系起来。
+    """
+    matched = unit(1.0)
+    enroll = EnrollFace(
+        faces=repos["faces"],
+        entities=repos["entities"],
+        vectors=repos["vectors"],
+        assets=repos["assets"],
+    )
+    detector = StubDetector({"one.jpg": [face(matched)], "two.jpg": [face(matched)]})
+    importer = ImportAssets(
+        assets=repos["assets"],
+        observations=repos["observations"],
+        storage=FakeStorage(tmp_path),
+        metadata=FakeMetadata(),
+        face_enroller=EnrollFaces(detector=detector, enroll=enroll),
+        event_assigner=lambda observation: "evt_1",
+    )
+    album = tmp_path / "same-person"
+    album.mkdir()
+    # **内容必须不同**：导入按内容 SHA-256 去重，两份一样的字节会让第二张走
+    # 去重路径，根本进不了人脸那一段（这条用例就白写了）。
+    for name in ("one.jpg", "two.jpg"):
+        (album / name).write_bytes(name.encode())
+
+    result = ImportAlbum(importer=importer, workers=2).execute(
+        AlbumImportRequest(scope_id=SCOPE, directory=str(album))
+    )
+
+    assert result.imported == 2
+    assert _cluster_count(seeded_db) == 1, "两张照片各建了一个簇——人脸那一段被整段并行化了"
+
+
+def _cluster_count(db: Database) -> int:
+    """直接数库里的簇——不经簇列表那条内连 ``memory_spaces`` 的读路径。"""
+    with db.connect() as connection:
+        row = connection.execute("SELECT COUNT(*) FROM face_clusters WHERE scope_id = ?", (SCOPE,)).fetchone()
+    return int(row[0])
 
 
 # ---- 身份预置 ----------------------------------------------------------------------

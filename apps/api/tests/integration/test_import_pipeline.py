@@ -14,7 +14,7 @@ import pytest
 
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.domain.media.models import GpsPoint, MediaType, Observation
-from sentrix.domain.retrieval.ports import VisualIndexOutcome
+from sentrix.domain.retrieval.ports import PreparedVisual, VisualIndexOutcome
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.assets import (
     SqliteAssetRepository,
@@ -50,13 +50,26 @@ class Recorder:
 
 
 class RecordingVisualIndexer:
+    """两段式（``AssetVisualIndexer``）。
+
+    **"visual" 记在 ``commit``**：那一步才是写向量，顺序约束管的正是它。记在
+    ``prepare`` 会让「视觉向量先于事件归属」那条断言失去意义——``prepare`` 无论顺序
+    怎么排都在 ``commit`` 之前。
+    """
+
     def __init__(self, recorder: Recorder, *, indexed: bool = True) -> None:
         self._recorder = recorder
         self._indexed = indexed
 
-    def index(self, asset) -> VisualIndexOutcome:  # noqa: ANN001
+    def prepare(self, asset) -> PreparedVisual:  # noqa: ANN001
+        return PreparedVisual(vector=(1.0,))
+
+    def commit(self, asset, prepared) -> VisualIndexOutcome:  # noqa: ANN001
         self._recorder.order.append("visual")
         return VisualIndexOutcome(indexed=self._indexed, mirrored=self._indexed)
+
+    def index(self, asset) -> VisualIndexOutcome:  # noqa: ANN001
+        return self.commit(asset, self.prepare(asset))
 
 
 class RecordingPlaceIndexer:
@@ -73,12 +86,20 @@ class RecordingPlaceIndexer:
 
 
 class RecordingObserver:
+    """两段式（``AssetObserver``）。**"observe" 记在 ``commit``**——那是写回观察的一步。"""
+
     def __init__(self, recorder: Recorder) -> None:
         self._recorder = recorder
 
-    def observe(self, asset, observation: Observation) -> Observation | None:  # noqa: ANN001
+    def prepare(self, asset) -> None:  # noqa: ANN001
+        return None
+
+    def commit(self, observation, semantics) -> Observation | None:  # noqa: ANN001
         self._recorder.order.append("observe")
         return None
+
+    def observe(self, asset, observation) -> Observation | None:  # noqa: ANN001
+        return self.commit(observation, self.prepare(asset))
 
 
 class RecordingLexicalIndex:

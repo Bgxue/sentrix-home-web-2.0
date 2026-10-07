@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from sentrix.application.identity.enroll_face import EnrollFace
+from sentrix.application.identity.enroll_face import EnrollFace, EnrollFaces
 from sentrix.application.media.import_album import AlbumImportRequest, ImportAlbum
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.domain.identity.models import FaceDetection
@@ -104,18 +104,12 @@ def build_importer(db: Database, repos: dict[str, Any], tmp_path: Path, *, with_
     )
     detector = OneFaceDetector()
 
-    def enroll_faces(asset, observation) -> int:  # noqa: ANN001
-        faces = detector.detect(asset.path)
-        for item in faces:
-            enroll.enroll(asset.id, observation.id, item)
-        return len(faces)
-
     collaborators: dict[str, Any] = {
         "assets": repos["assets"],
         "observations": repos["observations"],
         "storage": FakeStorage(tmp_path),
         "metadata": FakeMetadata(),
-        "face_enroller": enroll_faces,
+        "face_enroller": EnrollFaces(detector=detector, enroll=enroll),
     }
     if with_spaces:
         collaborators["spaces"] = repos["spaces"]

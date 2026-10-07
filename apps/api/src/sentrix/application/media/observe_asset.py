@@ -14,7 +14,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from sentrix.domain.media.models import Asset, MediaType, Observation
-from sentrix.domain.media.ports import AssetObserver, ObservationRepository, VlmObserver
+from sentrix.domain.media.ports import (
+    AssetObserver,
+    ObservationRepository,
+    ObservationSemantics,
+    VlmObserver,
+)
 
 
 class ObserveAsset(AssetObserver):
@@ -22,10 +27,18 @@ class ObserveAsset(AssetObserver):
         self._observer = observer
         self._observations = observations
 
-    def observe(self, asset: Asset, observation: Observation) -> Observation | None:
+    def prepare(self, asset: Asset) -> ObservationSemantics | None:
+        """第一段：只打模型。**不写库**，所以它可以离开串行侧（见 ``AssetObserver``）。"""
         if asset.media_type is not MediaType.IMAGE:
             return None
-        semantics = self._observer.observe(Path(asset.path))
+        return self._observer.observe(Path(asset.path))
+
+    def commit(self, observation: Observation, semantics: ObservationSemantics | None) -> Observation | None:
+        """第二段：写回。``semantics`` 为空就什么都不写。"""
         if semantics is None:
             return None
         return self._observations.enrich(observation.id, semantics=semantics)
+
+    def observe(self, asset: Asset, observation: Observation) -> Observation | None:
+        """两段的复合。**行为与拆分前逐字一致。"""
+        return self.commit(observation, self.prepare(asset))

@@ -2,8 +2,13 @@
 
 对应 1.0 ``pipeline.process_batch`` 与批量导入端点的时序，三条性质来自 1.0 的实测：
 
-- **串行**：单卡 3090 上视觉嵌入与 VLM 观察吃同一块 GPU（规划时实测约 5.7GB / 24GB）。
-  并发打 8100/8101 只会把队列排到超时，不会更快，而且会把显存推到别的进程失败。
+- **两段式：推理并行、提交串行。** 1.0 的批量路径本来就是 4 个 worker
+  （``app.py:483`` 的 ``ThreadPoolExecutor``，实测 ``effective_workers: 4``、11.78 秒/张），
+  而 2.0 原先逐张串行（实测 49.1 秒/张，49.1 ÷ 4 ≈ 12.3）。原先这里写的是「串行是产品
+  约束」，被这两组数直接否掉：全过程 GPU 88% 忙，差距就是并行度。
+  **并行的只有推理**（``ImportAssets.prepare_image``：视觉嵌入 / VLM 观察 / 人脸检测），
+  提交仍按 ``sorted(paths)`` 串行——事件归属读的是同批前几张刚写进去的事件、向量与
+  提及，**提交顺序是语义的一部分**（见 ``ImportAssets.commit_image``）。
 - **可恢复**：一张失败不中断整批，失败的文件名与原因随结果一起返回。重跑同一批时
   已导入的照片走 SHA-256 去重（只重跑视觉向量与地点，不重复建事件，见 ``ImportAssets``）。
 - **每张最多 3 次模型调用**：那个上限属于观察器（首轮 / 补全 / 中文化，见
@@ -30,10 +35,17 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sentrix.application.media.import_assets import ImportAssets, ImportRequest
+from sentrix.application.media.import_assets import (
+    ImportAssets,
+    ImportRequest,
+    ImportResult,
+    PreparedImage,
+    StagedImport,
+)
 
 log = logging.getLogger("sentrix.media.import_album")
 
@@ -55,6 +67,11 @@ AUDIO_SUFFIXES = frozenset({".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"})
 SCAN_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES | AUDIO_SUFFIXES
 
 DEFAULT_ALBUM_LIMIT = 200
+
+# 预取窗口的默认宽度 = 同时在飞的推理数。
+# **1 就是「不并行」**：单张、或者模型端点只有单槽时（``SENTRIX_ALBUM_WORKERS=1``）
+# 退回原先的逐张路径，行为与拆分前一致。路由按 ``Settings.album_workers`` 传。
+DEFAULT_ALBUM_WORKERS = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +109,10 @@ class ImportAlbum:
         *,
         importer: ImportAssets,
         summarize_event: Callable[[str], object] | None = None,
+        workers: int = DEFAULT_ALBUM_WORKERS,
     ) -> None:
         self._importer = importer
+        self._workers = max(1, int(workers))
         # 不传就退化成纯导入（与 ``ImportAssets`` 的其余可选协作者同一个形状）：
         # 事件留在 ``待总结事件`` / ``待判断`` 两个占位值上，与 1.0 没跑收尾时一样。
         self._summarize_event = summarize_event
@@ -109,29 +128,65 @@ class ImportAlbum:
 
         imported = deduplicated = events = lexical_terms = 0
         event_ids: list[str] = []
-        failures: list[AlbumFailure] = []
-        for path in paths:
-            try:
-                result = self._importer.execute(
-                    ImportRequest(
-                        scope_id=request.scope_id,
-                        file_name=path.name,
-                        content_type=None,
-                        content=path.read_bytes(),
+        # 按**下标**归集失败，最后按序输出——原先逐张跑时它们天然是路径序，
+        # 现在 stage 与 finish 两处都可能失败，混着 append 会把顺序打乱。
+        failures: dict[int, AlbumFailure] = {}
+        staged: dict[int, StagedImport | ImportResult | None] = {}
+        pending: dict[int, Future[PreparedImage]] = {}
+        next_submit = 0
+        next_finish = 0
+
+        with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="sentrix-album") as pool:
+            while next_finish < len(paths):
+                # 预取：串行地「落库 + 起一次推理」。窗口按**下标距离**算，不按在飞的
+                # 任务数——去重命中的那些不进池，按任务数算会让整册都是去重时一次把
+                # 全部文件读进内存。
+                while next_submit < len(paths) and next_submit - next_finish < self._workers:
+                    index = next_submit
+                    next_submit += 1
+                    try:
+                        outcome = self._importer.stage(self._request_for(request, paths[index]))
+                    except Exception as error:  # 一张失败不中断整批——整册导入是几小时的事
+                        staged[index] = None
+                        failures[index] = AlbumFailure(
+                            file_name=paths[index].name, reason=f"{type(error).__name__}: {error}"
+                        )
+                        continue
+                    staged[index] = outcome
+                    if isinstance(outcome, StagedImport):
+                        pending[index] = pool.submit(self._importer.prepare_image, outcome.asset)
+
+                # **按 ``sorted(paths)`` 的顺序提交，不能用完成序。** 事件归属读的是同 scope
+                # 的活动事件与它们的向量 / 提及，其中包含同批前几张照片刚写进去的那些；
+                # 换一个顺序会改变「折进哪个事件」的结果，而它**不报错**。
+                index = next_finish
+                next_finish += 1
+                # 换一个名字：``outcome`` 在预取那一段里已被推成非 None 的类型。
+                ready = staged.pop(index)
+                if ready is None:
+                    continue
+                future = pending.pop(index, None)
+                try:
+                    if future is None:
+                        assert isinstance(ready, ImportResult)
+                        result = ready
+                    else:
+                        assert isinstance(ready, StagedImport)
+                        result = self._importer.finish(ready, future.result())
+                except Exception as error:
+                    failures[index] = AlbumFailure(
+                        file_name=paths[index].name, reason=f"{type(error).__name__}: {error}"
                     )
-                )
-            except Exception as error:  # 一张失败不中断整批——整册导入是几小时的事
-                failures.append(AlbumFailure(file_name=path.name, reason=f"{type(error).__name__}: {error}"))
-                continue
-            if result.deduplicated:
-                deduplicated += 1
-            else:
-                imported += 1
-            if result.event_id is not None:
-                events += 1
-                if result.event_id not in event_ids:  # 保序去重：一个事件只总结一次
-                    event_ids.append(result.event_id)
-            lexical_terms += result.lexical_terms
+                    continue
+                if result.deduplicated:
+                    deduplicated += 1
+                else:
+                    imported += 1
+                if result.event_id is not None:
+                    events += 1
+                    if result.event_id not in event_ids:  # 保序去重：一个事件只总结一次
+                        event_ids.append(result.event_id)
+                lexical_terms += result.lexical_terms
 
         return AlbumImportResult(
             scope_id=request.scope_id,
@@ -141,7 +196,17 @@ class ImportAlbum:
             events=events,
             lexical_terms=lexical_terms,
             summarized=self._summarize_events(event_ids),
-            failures=tuple(failures),
+            failures=tuple(failures[index] for index in sorted(failures)),
+        )
+
+    @staticmethod
+    def _request_for(request: AlbumImportRequest, path: Path) -> ImportRequest:
+        """磁盘上的一张图 → 一次导入请求。整册导入没有 upload 的 content-type 可依。"""
+        return ImportRequest(
+            scope_id=request.scope_id,
+            file_name=path.name,
+            content_type=None,
+            content=path.read_bytes(),
         )
 
     def _summarize_events(self, event_ids: list[str]) -> int:

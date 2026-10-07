@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
-from sentrix.application.identity.enroll_face import EnrollFace
+from sentrix.application.identity.enroll_face import EnrollFace, EnrollFaces
 from sentrix.application.media.extract_video_scenes import ExtractVideoScenes
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
@@ -207,30 +207,29 @@ def _build_importer(
     )
 
 
-def _face_enroller(container: Container) -> Callable[[Asset, Observation], int]:
-    """人脸登记：检测 → 在线匹配，逐张脸走一遍 ``EnrollFace``。
+def _face_enroller(container: Container) -> EnrollFaces:
+    """人脸登记：检测 → 在线匹配。**两段式**（``EnrollFaces``）。
 
     **它必须排在事件归并之前**——1.0 在 ``pipeline.py:316-320`` 用注释钉过这件事：
     与已确认的人相像的脸会在这一步写下 ``entity_mentions``，而事件归并的
-    ``person_score`` 读的正是它。顺序写在 ``ImportAssets.execute`` 里，这里只负责接。
+    ``person_score`` 读的正是它。顺序写在 ``ImportAssets.commit_image`` 里，
+    这里只负责接。
+
+    **能并行的是 ``prepare`` 那一次检测，不是匹配**：匹配读同 scope 的候选簇，
+    而那些簇是同批前一张照片刚写进去的（``FaceEnroller`` 的 docstring）。
 
     权重没装的机器上 ``detect`` 返回空表，这条链路整个不生效——**不需要在这里判空**：
     让它自然地「没有脸」比在这里分叉出第二条路径更省事，也更难写错。
     """
-    enroll = EnrollFace(
-        faces=container.face_repository,
-        entities=container.entity_repository,
-        vectors=container.vector_repository,
-        assets=container.asset_repository,
+    return EnrollFaces(
+        detector=container.face_detector,
+        enroll=EnrollFace(
+            faces=container.face_repository,
+            entities=container.entity_repository,
+            vectors=container.vector_repository,
+            assets=container.asset_repository,
+        ),
     )
-
-    def run(asset: Asset, observation: Observation) -> int:
-        faces = container.face_detector.detect(asset.path)
-        for face in faces:
-            enroll.enroll(asset.id, observation.id, face)
-        return len(faces)
-
-    return run
 
 
 def _text_indexer(container: Container) -> Callable[[Observation, str | None], int]:

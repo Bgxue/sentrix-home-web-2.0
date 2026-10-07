@@ -143,6 +143,7 @@ def import_album(
     album = ImportAlbum(
         importer=build_import_assets(container, observe=True),
         summarize_event=_summarize_event(container).execute,
+        workers=container.settings.album_workers,
     )
     try:
         result = album.execute(

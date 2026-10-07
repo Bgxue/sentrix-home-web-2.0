@@ -13,6 +13,7 @@ property 时，mypy 的 ``arg-type`` 不允许一个只读 property 去满足「
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -71,6 +72,34 @@ class FaceDetector(Protocol):
     def detect_identity_photo(self, path: str) -> Sequence[FaceDetection]:
         """预置照片的检测：检不出就放大重试，再检不出就把整张图当成一张脸。"""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedFaces:
+    """人脸检测（GPU）的产物，``FaceEnroller.commit`` 的输入。
+
+    空 ``detections`` 是**有效值**——它说的是「这张图确实没有脸」，与「这张图
+    没检测过」不是一回事：后者在 ``ImportAssets`` 那侧由 ``None`` 表达。
+    """
+
+    detections: tuple[FaceDetection, ...] = ()
+
+
+class FaceEnroller(Protocol):
+    """人脸链的两段式（与 ``AssetVisualIndexer`` 同形）。
+
+    ``prepare`` 只做检测——那是这一段里唯一能离开写库事务边界的东西；匹配与建簇
+    必须留在 ``commit``：它读的是**同 scope 的候选簇**，而那些簇是同批前一张照片
+    刚写进去的。顺序反了不报错，只是同一个人的两张照片各建一个簇。
+
+    两个方法都只收 id 与路径，不收 Asset / Observation：这一层不需要它们的其余
+    字段，多收一个就等于多一条可以改 scope 的入口（``EnrollFace`` 的 scope 只能
+    从 asset 读，那条纪律在它自己那一层）。
+    """
+
+    def prepare(self, path: str) -> PreparedFaces: ...
+
+    def commit(self, asset_id: str, observation_id: str, prepared: PreparedFaces) -> int: ...
 
 
 class FaceRepository(Protocol):

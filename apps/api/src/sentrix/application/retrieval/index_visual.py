@@ -20,6 +20,7 @@ from sentrix.domain.media.models import Asset, MediaType
 from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.ports import (
     AssetVisualIndexer,
+    PreparedVisual,
     VectorIndex,
     VectorIndexUnavailable,
     VectorRecord,
@@ -45,9 +46,14 @@ class IndexAssetVisual(AssetVisualIndexer):
         self._vectors = vectors
         self._index = index
 
-    def index(self, asset: Asset) -> VisualIndexOutcome:
+    def prepare(self, asset: Asset) -> PreparedVisual:
+        """第一段：**只算不写**。幂等判据（``has_vector``）也在这一段——它是一次读。
+
+        每一条早退在 ``commit`` 里都有一一对应的 ``VisualIndexOutcome``，所以
+        两段合起来与原先的单段逐字等价。
+        """
         if asset.media_type is not MediaType.IMAGE:
-            return VisualIndexOutcome(indexed=False, reason="not_an_image")
+            return PreparedVisual(skip_reason="not_an_image")
 
         if self._vectors.has_vector(
             space=scheme.VISUAL_SPACE,
@@ -56,17 +62,28 @@ class IndexAssetVisual(AssetVisualIndexer):
             model_name=self._embedder.model_id,
         ):
             # 幂等：重复导入同一张图不该再跑一次推理。
-            return VisualIndexOutcome(indexed=True, mirrored=True, reason="already_indexed")
+            return PreparedVisual(skip_reason="already_indexed")
 
         vector = self._embedder.embed_image(Path(asset.path))
         if not vector:
             # 到这里说明适配器已经 log.exception 过了；这里只负责不让它变成一次
             # 「导入成功但没有向量」的静默成功。
-            return VisualIndexOutcome(indexed=False, reason="embedding_unavailable")
-        if len(vector) != self._embedder.dimension:
+            return PreparedVisual(skip_reason="embedding_unavailable")
+        return PreparedVisual(vector=tuple(float(value) for value in vector))
+
+    def commit(self, asset: Asset, prepared: PreparedVisual) -> VisualIndexOutcome:
+        """第二段：嵌入之外的全部——建记录、写权威存储、镜像派生索引。
+
+        **写库只在这一半**，所以它必须留在串行侧（见 ``AssetVisualIndexer``）。
+        """
+        if prepared.skip_reason:
+            # ``already_indexed`` 是「早就有」，与「刚写上」必须分得开。
+            copied = prepared.skip_reason == "already_indexed"
+            return VisualIndexOutcome(indexed=copied, mirrored=copied, reason=prepared.skip_reason)
+        if len(prepared.vector) != self._embedder.dimension:
             return VisualIndexOutcome(
                 indexed=False,
-                reason=f"dimension_mismatch:{len(vector)}!={self._embedder.dimension}",
+                reason=f"dimension_mismatch:{len(prepared.vector)}!={self._embedder.dimension}",
             )
 
         record = VectorRecord(
@@ -75,12 +92,16 @@ class IndexAssetVisual(AssetVisualIndexer):
             source_type=SOURCE_TYPE,
             source_id=asset.id,
             model_name=self._embedder.model_id,
-            vector=tuple(float(value) for value in vector),
+            vector=tuple(float(value) for value in prepared.vector),
             metadata={"file_name": asset.file_name},
         )
         self._vectors.upsert(record)
         mirrored, reason = self._mirror(record)
         return VisualIndexOutcome(indexed=True, mirrored=mirrored, reason=reason)
+
+    def index(self, asset: Asset) -> VisualIndexOutcome:
+        """两段的复合。**行为与拆分前逐字一致**；不需要并行的调用方用它。"""
+        return self.commit(asset, self.prepare(asset))
 
     def _mirror(self, record: VectorRecord) -> tuple[bool, str]:
         """把同一条向量写进派生索引。只吞 ``VectorIndexUnavailable``——那是预期内的失败。

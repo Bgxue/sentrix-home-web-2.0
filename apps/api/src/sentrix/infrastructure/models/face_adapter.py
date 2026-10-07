@@ -34,6 +34,7 @@ insightface 的两个模块会话在 ``_build_analysis`` 里逐个读、独立�
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from pathlib import Path
@@ -61,6 +62,8 @@ from sentrix.infrastructure.models.onnx_runtime import (
     provider_chain,
     require_requested_providers,
 )
+
+log = logging.getLogger(__name__)
 
 # 身份向量走 buffalo_l 的 w600k_r50：1.0 的两个返回分支都把 ``embedding_model`` 写死成
 # 它（``face_embeddings.py`` 的 AdaFace 那条路在 1.0 是死代码，见证据 1）。
@@ -243,7 +246,14 @@ class FaceAdapter:
             # 「人脸是可选能力」不覆盖这一条：它说的是依赖装错了，不是这台机器没有 GPU。
             # 吞掉它，下一个看到的仍然是「导入很慢 / 一张脸都没有」那个外表（第 111 条）。
             raise
-        except Exception as error:  # 人脸是可选能力，不该让整条导入链失败
+        except Exception as error:
+            # 人脸是可选能力，不该让整条导入链失败——**但这个兜底要留痕**。
+            # 2026-10-07 实测：整册导入并行化后，`self._detector.detect()`（RetinaFace 的
+            # ONNX 会话）被多个 worker 并发调用时抛异常，全部落进这里被吞掉，于是 14 张
+            # 照片零张脸，而导入报告是 `imported: 14, failures: []`。那种「导入成功、
+            # 人脸全丢」没有任何外部迹象，只有日志能拆穿。
+            # 「没装权重」在更上面的 `if not self.available` 已经早退，不走这里。
+            log.warning("face detect failed for %s: %s", path, error)
             self.error = str(error)
             return []
 
