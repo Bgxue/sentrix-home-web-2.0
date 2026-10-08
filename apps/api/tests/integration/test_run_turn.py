@@ -14,6 +14,7 @@ import pytest
 
 from sentrix.application.assistant.manage_conversations import ManageConversations
 from sentrix.application.assistant.run_turn import (
+    STALLED_NUDGE,
     RunTurn,
     TurnAlreadyClaimedError,
     TurnNotFoundError,
@@ -479,6 +480,80 @@ def test_a_leaked_internal_identifier_is_never_delivered(env):
     assert "photo_1" not in result.answer
 
 
+def test_a_hard_block_is_visible_in_the_trace(env):
+    """硬拦也要留一条 guard 事件——在此之前它一条都不发。
+
+    truth 级的门禁有 ``kind="guard"`` 的事件，硬拦分支没有；于是被硬拦的回合在轨迹里
+    既看不到触发了哪条规则，也看不到被打回的那段原文。实测那两道 ``guard_blocked``
+    因此完全不可诊断。**用户看的文案里不该出现规则码，但轨迹里必须有。**
+    """
+    _conversations, turns, conversation, _db = env
+    leak = "这张是 photo_1，asset_9f3a21b7c4。"
+    model = ScriptedModel([tool_call("search_memories", "c1", query="海边"), final(leak), final(leak)])
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    hard = [event for event in turns.events_after(turn_id, 0) if (event.payload or {}).get("hard")]
+    assert hard, "硬拦必须留下一条可归因的事件"
+    assert hard[0].payload["code"] == "internal_id_leak"
+    assert hard[0].kind == "guard"
+
+
+# ---- 需求的收尾记账：分清「没去取」与「取了没取到」 --------------------------
+
+
+def test_an_unattempted_requirement_says_so(env):
+    """声明了却**从头到尾没去取**的需求，收尾必须写 ``not_attempted``，不是空串。
+
+    1.0 与 2.0 此前都留空串，于是结果里分不出两种缺陷。实测 ``visible_text`` 有 155 道
+    开着，其中 **147 道（95%）没调用过 ``read_photo_text``**——那不是检索失败，是
+    **规划与执行脱节**，与「取了没取到」的修法完全不同。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([tool_call("search_memories", "c1", query="海边"), final("找到了。")])
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    by_type = {item["evidence_type"]: item for item in result.requirements}
+    assert by_type["photo_set"]["status"] == "satisfied"
+    assert by_type["delivered_photo"]["status"] == "open"
+    assert by_type["delivered_photo"]["unmet_reason"] == "not_attempted"
+
+
+def test_an_attempted_but_unmet_requirement_says_attempt_failed(env):
+    """**取过但没取到**是另一回事，写 ``attempt_failed``。
+
+    两条路径必须给出不同的词，否则「规划脱节」会被读成「工具不行」。
+    """
+    _conversations, _turns, conversation, _db = env
+    no_text = ToolOutcome(
+        observation={"failure_reason": "no_text_detected"},
+        model_visible={"error": "no_text_detected"},
+        failure_reason="no_text_detected",
+    )
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            tool_call("read_photo_text", "c2", result_set_id="rs_1", asset_handle="photo_1"),
+            final("照片里读不到文字。"),
+        ],
+        planner=planner_reply("photo_set", "visible_text"),
+    )
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, "read_photo_text": no_text})
+    run_turn = build(env, model, toolbox)
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    by_type = {item["evidence_type"]: item for item in result.requirements}
+    assert by_type["visible_text"]["status"] == "open"
+    assert by_type["visible_text"]["unmet_reason"] == "attempt_failed"
+
+
 # ---- 收敛与预算 --------------------------------------------------------------
 
 
@@ -500,6 +575,71 @@ def test_a_second_search_is_refused_and_the_model_is_told_to_page(env):
     assert [name for name, _ in toolbox.calls] == ["search_memories"]
     refusals = [event for event in turns.events_after(turn_id, 0) if event.status.value == "denied"]
     assert refusals and "get_result_page" in refusals[0].text
+
+
+def test_a_model_stuck_on_failing_tools_is_told_to_answer(env):
+    """连续几轮一条有用的结果都没拿到，主循环要给一次「收口」的提醒。
+
+    **为什么护栏必须在循环这一层**：被拒的调用不推进任务、不占工具额度，**只烧模型步**
+    （循环是「问一次模型 → 跑它要的工具 → 再问一次」，被拒也要走完这一圈）。工具层的
+    每一条判据都拦不住它，因为**每一次被拒在它自己看来都是对的**——这是活性问题。
+
+    实测 762 次被拒里有 51% 之后模型继续试同一个工具，426 步是「整步全被拒」，
+    占全部 2667 步的 16%。
+    """
+    _conversations, _turns, conversation, _db = env
+    failing = ToolOutcome(
+        observation={"failure_reason": "file_unavailable"},
+        model_visible={"error": "file_unavailable"},
+        failure_reason="file_unavailable",
+    )
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            tool_call("inspect_photo", "c2", result_set_id="rs_1", question="是什么"),
+            tool_call("inspect_photo", "c3", result_set_id="rs_1", question="是什么"),
+            final("只能确认检索到两张海边的照片。"),
+        ]
+    )
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, "inspect_photo": failing})
+    run_turn = build(env, model, toolbox)
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "只能确认检索到两张海边的照片。"
+    nudged = [call for call in model.calls if any(STALLED_NUDGE in message.content for message in call)]
+    assert nudged, "连续两轮白跑之后必须给一次提醒"
+
+
+def test_the_stall_reminder_is_given_only_once(env):
+    """提醒**只给一次**（``block_guard_code`` 的既有口径）——真推不动时由 ``can_step()`` 兜底。"""
+    _conversations, _turns, conversation, _db = env
+    failing = ToolOutcome(
+        observation={"failure_reason": "file_unavailable"},
+        model_visible={"error": "file_unavailable"},
+        failure_reason="file_unavailable",
+    )
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            tool_call("inspect_photo", "c2", result_set_id="rs_1", question="是什么"),
+            tool_call("inspect_photo", "c3", result_set_id="rs_1", question="是什么"),
+            tool_call("inspect_photo", "c4", result_set_id="rs_1", question="是什么"),
+            tool_call("inspect_photo", "c5", result_set_id="rs_1", question="是什么"),
+        ]
+    )
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, "inspect_photo": failing})
+    run_turn = build(env, model, toolbox)
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.termination_reason is TerminationReason.STEP_BUDGET_EXHAUSTED
+    # 提醒进了对话之后**会一直在**后续每一次模型调用的历史里，所以不能跨调用求和；
+    # 要看的是「同一次调用的消息里它只出现一次」——那才说明只加过一次。
+    per_call = [sum(1 for message in call if STALLED_NUDGE in message.content) for call in model.calls]
+    assert max(per_call) == 1, f"提醒只能被加进对话一次，实际每轮出现 {per_call}"
 
 
 def test_a_repeated_identical_call_is_replayed_not_re_executed(env):

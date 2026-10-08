@@ -95,6 +95,21 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 # 提醒一次，再空就按 ``PARSE_FAILURE`` 收尾，用确定性兜底把已有证据说清楚。
 PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
 
+# 连续几轮工具调用一条有用的结果都没拿到时，给模型的一次提醒。
+#
+# **为什么不能在工具层解决**：被拒的调用不推进任务、不占工具额度，**只烧模型步**
+# （``run_turn`` 的循环是「问一次模型 → 跑它要的工具 → 再问一次」，被拒也要走完这一圈）。
+# 实测 762 次被拒里有 51% 之后模型继续试同一个工具，426 步是「整步全被拒」——占全部
+# 2667 步的 16%。工具层的每一条判据都拦不住这个，因为**每一次被拒在它自己看来都是对的**。
+# 这是循环级的活性问题，所以护栏也在循环这一层。
+STALLED_NUDGE = (
+    "你连续几轮调用的工具都没有返回可用的结果。请立即基于已经取到的内容作答；"
+    "确实拿不到的就如实说明拿不到。不要再调用刚刚被拒绝过的工具。"
+)
+
+# 连续几轮全白跑之后提醒。取 2：一轮是偶发（某张图刚好读不到字），两轮就是卡住了。
+STALLED_ROUNDS_BEFORE_NUDGE = 2
+
 # 规划失败的收尾文案有两条，**按失败原因分岔**（用户 2026-09-25 裁决二）。合成一条是有害的：
 # 把「端点挂了」说成「规划不出来」，用户会以为是自己问得不好，于是换个问法接着问；而该做
 # 的事是去看那个端点。这正是 2.0 助手在 8100 被换成 vLLM 之后的表现——真因（``404 The model
@@ -179,6 +194,8 @@ class _Session:
     l2_unverified_reason: str = ""
     # 门禁拦下时写给模型的提醒，由主循环作为一条 user 消息加回去。
     pending_reminder: str = ""
+    # 连续几轮「一条有用的结果都没拿到」。见 ``_converse`` 的护栏。
+    stalled_rounds: int = 0
 
 
 class RunTurn:
@@ -308,6 +325,15 @@ class RunTurn:
                     session.state.finish(TerminationReason.MODEL_ERROR)
                     answer = emergency.clarify_answer(TerminationReason.MODEL_ERROR)
 
+        # 收尾前给还开着的需求补上真实原因：**是试过没拿到，还是根本没试**。
+        # 必须在最后一次 ``as_payload()`` 之前——它同时喂给落库与返回值。
+        attempted: set[EvidenceType] = set()
+        for call_record in session.state.records:
+            spec = TOOLS_BY_NAME.get(call_record.tool)
+            if spec is not None:
+                attempted.update(spec.satisfies)
+        session.ledger.mark_unmet(attempted=attempted)
+
         reason = session.state.termination_reason or session.state.finish(TerminationReason.MODEL_ERROR)
         status = _status_for(reason)
         self._publish(
@@ -401,6 +427,7 @@ class RunTurn:
 
             messages.append(ChatMessage(ChatRole.ASSISTANT, reply.content, tool_calls=reply.tool_calls))
             terminal = next((call for call in reply.tool_calls if call.name == FINAL_ANSWER_TOOL), None)
+            productive = False
             for call in reply.tool_calls:
                 if call.name == FINAL_ANSWER_TOOL:
                     # 终止动作不进 ``_run_tool``：它不检索也不读库，交付与作答在同一步里
@@ -416,7 +443,8 @@ class RunTurn:
                         )
                     )
                     continue
-                text, attachments, empty = self._run_tool(session, call)
+                text, attachments, empty, got_something = self._run_tool(session, call)
+                productive = productive or got_something
                 session.delivered = session.delivered.merge(attachments)
                 session.search_returned_nothing = session.search_returned_nothing or empty
                 messages.append(ChatMessage(ChatRole.TOOL, text, tool_call_id=call.call_id))
@@ -426,6 +454,26 @@ class RunTurn:
                 if answer is not None:
                     return answer
                 messages.append(ChatMessage(ChatRole.USER, session.pending_reminder))
+                continue
+
+            # 循环级的活性护栏：连续几轮一条有用的结果都没拿到，就该让模型收口。
+            # 提醒**只给一次**（``block_guard_code`` 的既有口径），再犯就照走——
+            # 不能因为模型不改就一直转，``can_step()`` 是最后一道闸。
+            session.stalled_rounds = 0 if productive else session.stalled_rounds + 1
+            if session.stalled_rounds >= STALLED_ROUNDS_BEFORE_NUDGE and state.block_guard_code(
+                "stalled_on_denials"
+            ):
+                self._publish(
+                    session,
+                    state.emit(
+                        ProgressStage.RECOVERING,
+                        ProgressStatus.RUNNING,
+                        "连续几轮工具调用都没有结果，让它基于已有内容作答…",
+                        kind="guard",
+                        payload={"code": "stalled_on_denials"},
+                    ),
+                )
+                messages.append(ChatMessage(ChatRole.USER, STALLED_NUDGE))
                 continue
 
     def _finish_with_final_answer(
@@ -574,6 +622,21 @@ class RunTurn:
         if verdict.hard:
             # 1.0 ``runtime.py:2784-2791``：硬拦不重试，直接走确定性兜底——把内部标识或
             # 别人的相册交付给用户是安全边界，不给第二次机会。
+            #
+            # **硬拦也要发一条事件。** 在此之前它一条都不发（truth 级在下面有
+            # ``kind="guard"``，硬拦没有），于是被硬拦的回合在轨迹里既看不到触发了哪条
+            # 规则、也看不到被打回的那段原文——实测那两道题因此完全不可诊断。
+            # 用户看的文案里不该出现规则码，但**轨迹里必须有**。
+            self._publish(
+                session,
+                state.emit(
+                    ProgressStage.RECOVERING,
+                    ProgressStatus.DENIED,
+                    "回答触及安全边界，本轮不再由模型作答。",
+                    kind="guard",
+                    payload={"code": verdict.code, "hard": True},
+                ),
+            )
             state.finish(TerminationReason.GUARD_BLOCKED)
             return self._stop(session, TerminationReason.GUARD_BLOCKED)
 
@@ -633,8 +696,12 @@ class RunTurn:
         session.pending_reminder = verdict.reminder
         return True
 
-    def _run_tool(self, session: _Session, call: ToolCall) -> tuple[str, tuple[Attachment, ...], bool]:
-        """执行一次工具调用，返回 ``(发回模型的 JSON, 本次交付, 检索是否为空)``。"""
+    def _run_tool(self, session: _Session, call: ToolCall) -> tuple[str, tuple[Attachment, ...], bool, bool]:
+        """执行一次工具调用，返回 ``(发回模型的 JSON, 本次交付, 检索是否为空, 有没有拿到东西)``。
+
+        最后那一格是给主循环数「模型是不是卡住了」用的：被拒、执行失败、拿到空结果，
+        都不算拿到了东西。**它不参与任何工具自己的判据**，只回答「这一轮白跑了吗」。
+        """
         state = session.state
         decision = self._policy.decide(call, state)
 
@@ -653,6 +720,7 @@ class RunTurn:
                 json.dumps({"error": decision.code, "message": decision.reason}, ensure_ascii=False),
                 (),
                 False,
+                False,
             )
 
         if decision.action is ToolAction.REPLAY:
@@ -666,7 +734,8 @@ class RunTurn:
                 )
             )
             self._tool_event(session, call, ProgressStatus.OK, decision.reason, "tool_result")
-            return json.dumps(dict(decision.replay), ensure_ascii=False), (), False
+            # 回放**算拿到了东西**：模型手上多了一份（它刚问过的）结果，不算白跑。
+            return json.dumps(dict(decision.replay), ensure_ascii=False), (), False, True
 
         self._tool_event(session, call, ProgressStatus.RUNNING, f"正在执行 {call.name}…", "model_action")
         outcome = self._toolbox.execute(
@@ -709,6 +778,7 @@ class RunTurn:
             json.dumps(dict(outcome.model_visible), ensure_ascii=False),
             outcome.attachments,
             is_empty_result(outcome),
+            outcome.ok,
         )
 
     # ---- 装配与辅助 ---------------------------------------------------------

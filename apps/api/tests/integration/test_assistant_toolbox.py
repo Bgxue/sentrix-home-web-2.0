@@ -24,7 +24,7 @@ from sentrix.application.retrieval.retrieve_text_ann import RetrieveTextAnn
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import PersonProfile, PersonRelationship
-from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType
+from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES
 from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.ports import VectorRecord
@@ -282,6 +282,60 @@ def test_a_page_past_the_end_is_empty_not_an_error(toolbox):
 
     assert outcome.ok
     assert outcome.model_visible["preview"] == []
+
+
+def test_the_preview_carries_where_who_and_what(toolbox, migrations_ready_db):
+    """每条 preview 必须带上**地点、人物、画面描述**——回答「这张照片是什么」的全靠它们。
+
+    1.0 的 ``_preview_entry`` 给了模型 14 个字段，其中这三个是核心；它的
+    ``search_memories`` 描述里还专门写了一句「单张照片的地点、时间、人物直接在
+    preview 里读，**不要为此再调用其他工具**」。
+
+    2.0 的 ``_preview`` 是 S3 写的，那时这三样在 2.0 还不存在；S4 加了地点、S5 加了
+    人物与语义，**没有一个切片回头把它加宽**。后果是模型无法从检索结果判断"这张是不是
+    我要找的"，只能逐张 ``inspect_photo``——地点类题平均调 6.63 次工具而 1.0 是 1.83，
+    错率 38.7% → 75.3%。
+
+    反向断言（``people`` 为空、``place`` 为空的另一条）见本文件另一条用例：
+    键必须**恒在**，空值是「这张图没记录到」，缺键是「字段没给我们」。
+    """
+    observations = SqliteObservationRepository(migrations_ready_db)
+    observations.add(
+        Observation(
+            id="obs_1",
+            scope_id=SCOPE,
+            asset_id="asset_0",
+            source_type="image",
+            captured_at=datetime(2019, 8, 1, tzinfo=UTC),
+            confidence=0.9,
+            created_at=NOW,
+            updated_at=NOW,
+            caption="海边两个人合影",
+            place="浙江省杭州市萧山区",
+            people=("妈妈",),
+        )
+    )
+
+    outcome = run(toolbox, "search_memories", query="海边")
+
+    entry = outcome.model_visible["preview"][0]
+    assert entry["place"] == "浙江省杭州市萧山区"
+    assert entry["people"] == ["妈妈"]
+    assert entry["evidence_summary"] == "海边两个人合影"
+
+
+def test_the_preview_keys_are_always_present(toolbox):
+    """没有观察行时三个键**仍然在**，值取空。
+
+    空串的意思与「字段没给我们」不是一回事：前者是「这张图确实没记录到地点」，
+    后者会让模型以为这条链路坏了、转头去调 ``inspect_photo`` 试探。
+    """
+    outcome = run(toolbox, "search_memories", query="海边")
+
+    entry = outcome.model_visible["preview"][0]
+    assert entry["place"] == ""
+    assert entry["people"] == []
+    assert entry["evidence_summary"] == ""
 
 
 # ---- 交付：终止动作上的一个字段，不是一次工具调用 ---------------------------

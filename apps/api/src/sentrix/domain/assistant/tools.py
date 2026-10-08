@@ -79,7 +79,10 @@ SEARCH_MEMORIES = ToolSpec(
     name="search_memories",
     description=(
         "按内容词检索家庭照片（人/物/场景/衣着/颜色/地点特征）。"
-        "返回一个结果集摘要，其中 preview 是排在最前的几张，每条带 handle 与拍摄时间。"
+        "返回一个结果集摘要，其中 preview 是排在最前的几张。"
+        "每条 preview 自带 captured_at（拍摄时间）/ place（拍摄地点）/ people（已确认人物）/ "
+        "evidence_summary（画面描述）——**单张照片的地点、时间、人物直接在 preview 里读，"
+        "不要为此再调用其他工具**。"
         "一次对话只需要检索一次；要看更多候选用 get_result_page 翻页，不要改词重搜。"
         "要把照片展示给用户，在 final_answer 的 selected_image_handles 里填这些 handle。"
     ),
@@ -150,12 +153,21 @@ FINAL_ANSWER = ToolSpec(
                 "maxItems": 6,
             },
         },
-        ["answer"],
+        # **``selected_image_handles`` 是必填的，这是一个 1.0 做不到的收紧。**
+        #
+        # 1.0 的交付字段长在模型的正文 JSON 里，dict 缺键不报错——实测它的 final 动作
+        # 有 **239/487（49%）** 根本不带这个字段，而零交付的 210 道里 82% 是"候选里
+        # 已经有正确答案、模型却没选"。2.0 走标准 JSON Schema，可以把"交不交图"变成
+        # 一个**必须显式回答**的问题：不交就写 ``[]``。
+        #
+        # 允许空数组是这条收紧能成立的前提（见 ``tool_policy`` 里「缺」的判据）：
+        # 产品口径是「模型没选 → 交付为空合法」，不是「必须至少交一张」。
+        ["answer", "selected_image_handles"],
     ),
     # **声明了 ``DELIVERED_PHOTO``，但 ``run_turn`` 只在真的交出图时才销账**：
     # 「声明要交付」与「交付了」不是一回事，一张都没交时销账会让那一轮假装不缺证据。
     satisfies=(EvidenceType.DELIVERED_PHOTO,),
-    required=("answer",),
+    required=("answer", "selected_image_handles"),
 )
 
 GET_PERSON_PROFILE = ToolSpec(
@@ -281,7 +293,12 @@ INSPECT_PHOTO = ToolSpec(
         "复核已检索照片的视觉细节（物体/衣着/颜色/场景）。"
         "asset_handle 使用 search_memories preview 里的 handle（photo_1…），可省略（默认用预览第一张）。"
         "当前 handle 不含目标时换下一张（photo_2、photo_3…）复核，同一张图最多复核一次，不要反复检查同一张。"
-        "昂贵，默认每轮最多 1 次。"
+        # **这里刻意不写具体次数。** 1.0（与本文件此前）写的是「默认每轮最多 1 次」，
+        # 而生产 profile 的额度是 3——**指示与现实矛盾**，模型只能靠撞墙发现边界，
+        # 每撞一次烧一个模型步（实测这类拒绝 309 次）。次数是会随 profile 变的运行时
+        # 事实，schema 是静态的；把它写在 schema 里就注定要漂。真实额度改由
+        # ``ToolPolicy`` 在拒绝时按 ``state.profile`` 现渲染。
+        "昂贵：本轮有次数上限，超出的调用会被拒绝，那时请基于已看过的内容作答。"
     ),
     parameters=_object_schema(
         {
@@ -343,17 +360,22 @@ READ_PHOTO_TEXT = ToolSpec(
     ),
     # 1.0 ``tools.py:2768`` 的 ``produces_evidence=("visible_text",)``。
     satisfies=(EvidenceType.VISIBLE_TEXT,),
-    # **两处与 1.0 不同，都是「这条路径变了」的直接后果，不是偏好：**
+    # **一处与 1.0 不同：不收 ``question``。** 1.0 的 ``required_inputs`` 里有它，而它
+    # 在 1.0 唯一的用途是决定要不要对小模型的结果做一次补偿重识别
+    # （``_HARD_VALUE_QUESTION_RE``，``ocr_tool.py:584-593``）。2.0 这条路不重识别，
+    # 那个参数没有任何用处——收一个用不上的参数只会让模型多花几个 token 去填它。
     #
-    # 1. **不收 ``question``。** 1.0 的 ``required_inputs`` 里有它，而它在 1.0 唯一的
-    #    用途是决定要不要对小模型的结果做一次补偿重识别（``_HARD_VALUE_QUESTION_RE``，
-    #    ``ocr_tool.py:584-593``）。2.0 这条路不重识别，那个参数没有任何用处——
-    #    收一个用不上的参数只会让模型多花几个 token 去填它。
-    # 2. **``cost_class`` 是 CHEAP，不是 1.0 的 ``expensive``。** 1.0 标昂贵是因为它
-    #    真的跑一次 OCR 引擎（CPU 推理）；2.0 读的是一列已落库的文本，代价与翻一页
-    #    差不多。照抄 ``expensive`` 会让它**吃掉 ``inspect_photo`` 那唯一一次精读预算**
-    #    ——一次免费的读库把一次真模型调用挤掉，那是纯损失。
+    # **``cost_class`` 回到 1.0 的 ``EXPENSIVE``。** S6/T124 曾把它降成 ``CHEAP``，
+    # 理由是"2.0 读的是已落库的一列文本，照抄 expensive 会吃掉 ``inspect_photo``
+    # 的精读预算"。**那条理由的前提是 ``max_inspections = 1``。** 现在是 3，而代价
+    # 变成了实测的这一面：CHEAP 的工具**不受任何单轮次数约束**，只受 6 次工具总预算
+    # 管——连读 6 张就把工具预算与模型步一起用光（`album3v4-026` 连调 6 次）。
+    #
+    # 恢复昂贵之后两者共用「每轮 3 次照片级取证」，这不是两件事被硬凑到一起：
+    # 它们本来就是同一件事——**对某一张照片做一次取证**。1.0 的 ``budget_unit="image"``
+    # 说的就是这句话。
     required=("result_set_id",),
+    cost_class=CostClass.EXPENSIVE,
 )
 
 

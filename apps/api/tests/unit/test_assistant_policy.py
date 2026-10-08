@@ -253,9 +253,9 @@ def test_denied_calls_do_not_consume_the_tool_budget(make_state):
 # 所以这条约束是「**一轮总共能精读几张**」，不是「每个工具各几次」——
 # 下面第三条用例钉的就是这一句。
 #
-# **这一件现在没有生产使用者**：S6 的两个昂贵工具（T123 的 ``inspect_photo`` 与
-# T124 的 ``read_photo_text``）还没落地。所以这里用 ``monkeypatch`` 往注册表里塞一个
-# 假的昂贵工具——它测的是**机制**，机制在工具落地前就该是对的。
+# 下面这一组用 ``monkeypatch`` 往注册表里塞**假的**昂贵工具：它测的是机制本身，
+# 不依赖生产上到底是哪几个工具标了昂贵——那个集合会变（``read_photo_text`` 就在
+# 2026-10-08 从 CHEAP 改回了 EXPENSIVE，见本文件末尾那一组）。
 
 
 def expensive_spec(name: str):
@@ -409,3 +409,157 @@ def test_the_profile_carries_the_1_0_inspection_limit():
     from sentrix.domain.assistant.profile import DEFAULT_PROFILE
 
     assert DEFAULT_PROFILE.max_inspections == 3
+
+
+# ---- 照片级取证：计费口径、告示与「卡住」的判据 -----------------------------
+#
+# 这一组的每一条都来自 20261007 那一轮 487 题的实测：123 道 ``step_budget_exhausted``
+# 里 102 道判 0、2 分一道没有；762 次工具调用被拒；被拒之后有 51% 的回合继续试同一个
+# 工具。
+
+
+def test_read_photo_text_costs_a_photo_slot_like_1_0():
+    """``read_photo_text`` 回到 ``EXPENSIVE``，与 ``inspect_photo`` 共用「每轮 3 次照片级取证」。
+
+    S6/T124 曾把它降成 ``CHEAP``，理由是「读的是已落库的一列文本，照抄 expensive 会
+    吃掉 ``inspect_photo`` 的精读预算」——**那条理由的前提是 ``max_inspections = 1``**。
+    现在是 3，而代价翻到了另一面：``CHEAP`` 的工具**不受任何单轮次数约束**，只受 6 次
+    工具总预算管，连读 6 张就把工具预算与模型步一起用光（``album3v4-026`` 连调 6 次
+    ``read_photo_text`` 后一无所获，收尾是一句兜底文案）。
+
+    两者共用这笔账不是硬凑：它们本来就是同一件事——**对某一张照片做一次取证**。
+    1.0 的 ``budget_unit="image"`` 说的就是这句话。
+    """
+    from sentrix.domain.assistant.tools import CostClass
+
+    assert TOOLS_BY_NAME["read_photo_text"].cost_class is CostClass.EXPENSIVE
+
+
+def test_reading_a_fourth_photo_is_denied(make_state):
+    """连读第 4 张被拒——这是「每轮 3 次」在 ``read_photo_text`` 上的落点。"""
+    state = make_state()
+    policy = ToolPolicy()
+    for index in range(DEFAULT_PROFILE.max_inspections):
+        allowed = policy.decide(
+            call("read_photo_text", result_set_id="rs_1", asset_handle=f"photo_{index}"), state
+        )
+        assert allowed.action is not ToolAction.DENY, f"第 {index + 1} 张必须放行"
+        state.record(
+            ToolCallRecord(call_id=f"c{index}", tool="read_photo_text", signature=f"s{index}", status="ok")
+        )
+
+    denied = policy.decide(call("read_photo_text", result_set_id="rs_1", asset_handle="photo_9"), state)
+
+    assert denied.action is ToolAction.DENY
+    assert denied.code == "inspection_budget_exhausted"
+
+
+def test_the_inspection_denial_states_the_real_limit(make_state):
+    """拒绝文案里的次数必须**现取 profile**，不能写死。
+
+    原来写的是「一轮最多精读一张图」，而 ``max_inspections`` 是 3。额度从 1 改成 3 时
+    只改了值、没改文案，模型于是被一个**与现实矛盾**的告示误导：它按「必须换下一张」
+    的指示继续调，撞墙后告示还说"最多一张"，只能靠试错发现真实边界——实测这类拒绝
+    309 次，每次撞墙烧一个模型步。
+    """
+    from dataclasses import replace
+
+    state = make_state()
+    for index in range(DEFAULT_PROFILE.max_inspections):
+        state.record(
+            ToolCallRecord(call_id=f"c{index}", tool="inspect_photo", signature=f"s{index}", status="ok")
+        )
+
+    decision = ToolPolicy().decide(call("inspect_photo", result_set_id="rs_1", question="这是什么"), state)
+
+    assert decision.code == "inspection_budget_exhausted"
+    assert str(DEFAULT_PROFILE.max_inspections) in decision.reason
+    assert "一轮最多精读一张图" not in decision.reason
+
+    # 换个 profile，文案跟着换——这才叫「现取」。
+    tight = make_state(profile=replace(DEFAULT_PROFILE, max_inspections=1))
+    tight.record(ToolCallRecord(call_id="c0", tool="inspect_photo", signature="s0", status="ok"))
+    assert (
+        "最多 1 次"
+        in ToolPolicy().decide(call("inspect_photo", result_set_id="rs_1", question="这是什么"), tight).reason
+    )
+
+
+def test_a_stuck_tool_is_refused_before_the_budget_code(make_state):
+    """「别再用同一个工具重试」必须**排在预算检查之前**。
+
+    预算一旦用尽，每次调用都会命中同一个预算码返回——排在它后面的 ``repeated_failure``
+    于是**永远走不到**。实测 309 次 ``inspection_budget_exhausted`` 而
+    ``repeated_failure`` 只 24 次：顺序反了，这条规则等于不存在。
+
+    判据也不该要求「同一个失败原因」（那是「同一种错别再犯」），而该问**这个工具是不是
+    已经卡住了**：预算类拒绝每次的原因都完全合法，可连试六次就是卡住。
+    """
+    state = make_state()
+    for index in range(DEFAULT_PROFILE.max_inspections):
+        state.record(
+            ToolCallRecord(call_id=f"ok{index}", tool="inspect_photo", signature=f"s{index}", status="ok")
+        )
+    policy = ToolPolicy()
+
+    # 两次死磕：都被预算拒，每次记一条 denied。
+    for index in range(2):
+        denied = policy.decide(call("inspect_photo", result_set_id="rs_1", question="这是什么"), state)
+        assert denied.code == "inspection_budget_exhausted"
+        state.record(
+            ToolCallRecord(
+                call_id=f"d{index}",
+                tool="inspect_photo",
+                signature=f"d{index}",
+                status="denied",
+                failure_reason=denied.code,
+            )
+        )
+
+    stuck = policy.decide(call("inspect_photo", result_set_id="rs_1", question="这是什么"), state)
+
+    assert stuck.code == "repeated_failure"
+    assert "换一个动作" in stuck.reason
+
+
+def test_a_denied_call_does_not_reset_the_stuck_counter(make_state):
+    """被拒**不是成功**，不能把「卡住」的计数清零。
+
+    反向用例：如果 ``trailing_failures`` 把 ``denied`` 也算成功，这条护栏就永远不触发。
+    """
+    state = make_state()
+    state.record(ToolCallRecord(call_id="c1", tool="read_photo_text", signature="a", status="denied"))
+    state.record(ToolCallRecord(call_id="c2", tool="read_photo_text", signature="b", status="denied"))
+
+    assert state.trailing_failures("read_photo_text") == 2
+
+
+def test_the_delivery_field_is_required_in_the_schema_the_model_sees():
+    """``final_answer.selected_image_handles`` 必须是 **JSON Schema 上的必填项**。
+
+    1.0 的交付字段长在正文 JSON 里，dict 缺键不报错——实测它的 final 动作有
+    **239/487（49%）** 根本不带这个字段，而零交付的 210 道里 82% 是"候选里已经有正确
+    答案、模型却没选"。标准 JSON Schema 可以把「这一轮交不交图」变成**必须显式回答**
+    的问题，这是 1.0 的结构做不到的。
+    """
+    schema = TOOLS_BY_NAME["final_answer"].as_openai_tool()["function"]["parameters"]
+
+    assert "selected_image_handles" in schema["required"]
+    assert schema["properties"]["selected_image_handles"]["maxItems"] == 6
+
+
+def test_an_empty_delivery_list_is_not_a_missing_argument(make_state):
+    """``[]`` 是「这一轮不交图」这个**有效答案**，不是「参数缺失」。
+
+    原来的判据是 ``not arguments.get(name)``，空数组也是 falsy——那会把必填字段变成
+    「必须交至少一张图」，而产品口径恰恰是「模型没选 → 交付为空合法，不做回填」。
+    """
+    decision = ToolPolicy().decide(
+        call("final_answer", answer="没有找到能确认的照片。", selected_image_handles=[]), make_state()
+    )
+
+    assert decision.action is not ToolAction.DENY
+
+    absent = ToolPolicy().decide(call("final_answer", answer="没有找到能确认的照片。"), make_state())
+
+    assert absent.code == "missing_argument"

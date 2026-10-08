@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -163,6 +163,22 @@ class EvidenceLedger:
                 item.unmet_reason = reason
                 blocked.append(item.id)
         return tuple(blocked)
+
+    def mark_unmet(self, *, attempted: Collection[EvidenceType]) -> None:
+        """收尾时给还开着的需求补一个**能区分两种缺陷**的原因。
+
+        1.0 与 2.0 此前都留空串，于是结果里分不出「取过但没取到」与「声明了根本没去取」。
+        实测 ``visible_text`` 有 155 道开着，其中 **147 道从头到尾没调用过
+        ``read_photo_text``**——那不是检索失败，是**规划与执行脱节**。两种缺陷的修法
+        完全不同，指标上就必须分得开。
+
+        只填没填过的：``block()`` 写下的具体原因（工具自己说了这类证据本轮拿不到）
+        比这两句泛化的话更准。
+        """
+        for item in self.requirements:
+            if item.status is RequirementStatus.SATISFIED or item.unmet_reason:
+                continue
+            item.unmet_reason = "attempt_failed" if item.evidence_type in attempted else "not_attempted"
 
     def as_payload(self) -> Sequence[Mapping[str, Any]]:
         """进 ``progress`` 事件与轨迹的投影。"""

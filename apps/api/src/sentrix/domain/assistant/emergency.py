@@ -77,7 +77,11 @@ _REASON_LABEL: dict[TerminationReason, str] = {
     # 超时 / 模型名对不上 / 服务端 400），用户据此该去看那个端点——「模型不可用」听着像
     # 模型能力不行，与规划那条要分开的那个理由是同一条（用户 2026-09-25 裁决二）。
     TerminationReason.MODEL_ERROR: "模型服务不可用",
-    TerminationReason.GUARD_BLOCKED: "回答未通过事实校验",
+    # **不是「事实校验」。** ``GUARD_BLOCKED`` 只在 ``verdict.hard`` 时产生，而硬拦集合
+    # （``final_guard.HARD_GUARD_CODES``）是 ``internal_id_leak`` / ``table_name_leak`` /
+    # ``viewer_escape`` / ``write_not_allowed``——**四条全是安全与边界**，与"事实对不对"
+    # 无关。原来是「回答未通过事实校验」，用户看到的是对失败原因的一句误导。
+    TerminationReason.GUARD_BLOCKED: "回答触及了安全边界",
     TerminationReason.CANCELLED: "已取消",
 }
 

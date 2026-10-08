@@ -10,7 +10,9 @@
 - ``search_memories`` 每回合最多 1 次（``runtime.py:1895``）。1.0 的实现有个边界漏洞：
   拦截条件里带了 ``and turn.budget.can_model_step()``，预算耗尽后拦截失效，**第二次
   search 会被真的执行**。这里把计数与预算分开，不存在这个短路。
-- 同工具同失败原因连续 2 次 → 拦下并逼模型换动作（``runtime.py:3013``）。
+- 同一工具连续 2 次没成功（失败或被拒，**不问原因**）→ 拦下并逼模型换动作
+  （``runtime.py:3013`` 数的是「同一种失败原因」；这里的判据更宽，理由见 ``decide`` 里
+  那段注释——预算类拒绝每次的原因都合法，但连试六次就是卡住）。
 - 完全相同的调用走缓存回放，不重复执行、不计预算（``runtime.py:3035``）。
 - 预算耗尽 → 拒绝（``tool_policy.py:37``）。
 """
@@ -26,7 +28,8 @@ from sentrix.domain.assistant.models import ToolArgumentError, ToolCall
 from sentrix.domain.assistant.task_state import TaskState
 from sentrix.domain.assistant.tools import TOOLS_BY_NAME, CostClass
 
-# 同工具同失败原因连续几次之后强制换动作。
+# 同一工具连续几次没成功之后强制换动作。**数的是「没成功」，不是「同一个失败原因」**：
+# 预算类拒绝每次的原因都完全合法，可连试六次就是卡住，而每次烧一个模型步。
 MAX_CONSECUTIVE_FAILURES = 2
 
 
@@ -69,7 +72,13 @@ class ToolPolicy:
                 action=ToolAction.DENY, code="bad_arguments", reason=f"参数不是合法 JSON：{error}"
             )
 
-        missing = [name for name in spec.required if not arguments.get(name)]
+        # **「缺」的判据是「键不在 / 是 null / 是空串」，不是「falsy」。**
+        #
+        # 原来的写法是 ``not arguments.get(name)``，于是**空数组也算缺**。这对
+        # ``final_answer.selected_image_handles`` 是错的：``[]`` 是模型在明确回答
+        # 「这一轮不交图」，那是一个有效的答案；把它判成「参数缺失」会让必填字段
+        # 变成「必须交至少一张图」，而 1.0 的交付口径恰恰是**不做回填、空交付合法**。
+        missing = [name for name in spec.required if arguments.get(name) is None or arguments.get(name) == ""]
         if missing:
             return ToolDecision(
                 action=ToolAction.DENY,
@@ -97,6 +106,27 @@ class ToolPolicy:
                 replay=cached.model_visible,
             )
 
+        # **「别再拿同一个工具重试」排在所有预算检查之前。**
+        #
+        # 这条顺序是有代价的实测教训：预算一旦用尽，每次调用都会命中同一个预算码返回，
+        # 于是排在后面的 ``repeated_failure`` **永远走不到**——实测 309 次
+        # ``inspection_budget_exhausted`` 而 ``repeated_failure`` 只 24 次。顺序反了，
+        # 规则等于不存在。
+        #
+        # 判据用 ``trailing_failures``（**不管失败原因**）而不是 ``consecutive_failures``：
+        # 后者要求「同一种错别犯第二次」，而这里问的是另一个问题——**这个工具是不是已经
+        # 卡住了**。预算类拒绝每次的原因都完全合法，但连试六次就是卡住。
+        if state.trailing_failures(call.name) >= MAX_CONSECUTIVE_FAILURES:
+            return ToolDecision(
+                action=ToolAction.DENY,
+                code="repeated_failure",
+                reason=(
+                    f"{call.name} 已经连续 {MAX_CONSECUTIVE_FAILURES + 1} 次没有成功"
+                    "（被预算拒绝或本身失败），再调用也不会有不同结果。"
+                    "换一个动作，或者基于已经取到的内容作答。"
+                ),
+            )
+
         if call.name == "search_memories" and state.search_calls >= state.profile.max_search_calls:
             return ToolDecision(
                 action=ToolAction.DENY,
@@ -122,28 +152,15 @@ class ToolPolicy:
             return ToolDecision(
                 action=ToolAction.DENY,
                 code="inspection_budget_exhausted",
+                # **次数从 ``state.profile`` 现渲染，不写死。** 这里原本写的是
+                # 「一轮最多精读一张图」，而生产 profile 的额度是 3——额度从 1 改成 3
+                # 时只改了值、没改文案，模型于是被一个与现实矛盾的告示误导，只能靠撞墙
+                # 发现边界（实测这类拒绝 309 次）。会随 profile 变的数字不该出现在常量里。
                 reason=(
-                    "本轮的精读预算已经用完（一轮最多精读一张图）。"
-                    "请基于已经看过的内容作答，不要反复检查同一张照片。"
+                    f"本轮的照片级取证额度已经用完（每轮最多 {state.profile.max_inspections} 次，"
+                    "精读与读字共用）。请基于已经看过的内容作答，不要反复检查同一张照片。"
                 ),
             )
-
-        for record in reversed(state.records):
-            if record.tool != call.name:
-                continue
-            if (
-                record.failure_reason
-                and state.consecutive_failures(call.name, record.failure_reason) >= MAX_CONSECUTIVE_FAILURES
-            ):
-                return ToolDecision(
-                    action=ToolAction.DENY,
-                    code="repeated_failure",
-                    reason=(
-                        f"{call.name} 已经用同样的方式失败 {MAX_CONSECUTIVE_FAILURES} 次"
-                        f"（{record.failure_reason}），换一个动作，不要重试。"
-                    ),
-                )
-            break
 
         return ToolDecision(
             action=ToolAction.EXECUTE,

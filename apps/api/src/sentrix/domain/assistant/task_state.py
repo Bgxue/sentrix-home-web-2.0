@@ -194,16 +194,19 @@ class TaskState:
         """
         return any(record.signature == signature and record.status == "replayed" for record in self.records)
 
-    def consecutive_failures(self, tool: str, reason: str) -> int:
-        """同一工具、同一失败原因**连续**出现了几次。
+    def trailing_failures(self, tool: str) -> int:
+        """该工具**最近连续几次没有成功**——失败与被拒都算。
 
-        1.0 是 ``runtime.py:3013-3027`` 的一段裸循环，上限 2 之后拦下并逼模型换动作。
+        1.0 数的是「同一工具、同一失败原因」（``runtime.py:3013-3027``）：那条判据回答的
+        是「同一种错别再犯第二次」。这里问的是另一个问题——**这个工具是不是已经卡住了**。
+        预算类拒绝每次的原因都完全合法（``inspection_budget_exhausted`` 出现多少次都是
+        对的），可模型连试六次就是卡住，而它每试一次烧一个模型步。
+
+        只看**队尾的连续段**：中间夹了别的工具就不算连续。
         """
         count = 0
         for record in reversed(self.records):
-            if record.tool != tool:
-                break
-            if record.failure_reason != reason:
+            if record.tool != tool or record.status == "ok":
                 break
             count += 1
         return count

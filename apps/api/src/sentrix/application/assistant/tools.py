@@ -243,11 +243,34 @@ class AssistantToolbox:
         return ToolOutcome(observation=observation, model_visible=model_visible)
 
     def _preview(self, handle: str, asset_id: str) -> Mapping[str, Any]:
+        """一条候选在**模型眼里**的样子。
+
+        **这四个字段是下限，不是一份随手列的清单。** 1.0 的 ``_preview_entry``
+        （``agent_runtime/tools.py:590-615``）给模型 14 个字段，其中 ``place`` /
+        ``people`` / ``evidence_summary`` 三个是回答「这张照片在哪、有谁、是什么」
+        的全部依据；它的 ``search_memories`` 描述里还专门写了一句
+        「单张照片的地点、时间、人物**直接在 preview 里读，不要为此再调用其他工具**」。
+
+        2.0 的 ``_preview`` 是 S3（Task 40）写的，那时这三样在 2.0 还不存在。S4 加了
+        地点、S5 加了人物与语义——**没有一个切片回头把它加宽**。后果是可测的：模型
+        无法从检索结果判断"这张是不是我要找的"，只能逐张 ``inspect_photo``。地点类题
+        平均调用工具 6.63 次、``inspect_photo`` 用掉 308 次，而 1.0 同题分别是
+        1.83 次与 55 次；地点类错率 38.7% → 75.3%。
+
+        读**最新一条观察**（1.0 也是 ``updated_at DESC LIMIT 1``）。没有观察时三个字段
+        留空——空串的意思是「这张图没有记录到」，与「字段没给我们」是两回事，所以键
+        恒在。
+        """
         asset = self._assets.get(asset_id)
+        observations = self._observations.list_by_asset(asset_id)
+        latest = observations[0] if observations else None
         return {
             "handle": handle,
             "file_name": asset.file_name if asset else "",
             "captured_at": asset.captured_at.isoformat() if asset and asset.captured_at else "",
+            "place": latest.place if latest else "",
+            "people": list(latest.people) if latest else [],
+            "evidence_summary": latest.caption if latest else "",
         }
 
     # ---- 交付（终止动作上的一个字段）-----------------------------------------

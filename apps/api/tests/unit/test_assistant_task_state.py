@@ -150,26 +150,40 @@ def test_replayed_is_false_until_a_replay_is_recorded():
     assert state.replayed("s") is True
 
 
-def test_consecutive_failures_stops_at_a_different_tool():
+def test_trailing_failures_counts_a_stuck_tool_and_stops_at_a_success():
+    """卡住 = **队尾连续没成功**，失败与被拒都算，**不问原因**。
+
+    预算类拒绝每次的原因都完全合法（``inspection_budget_exhausted`` 出现多少次都是对的），
+    但模型连试六次就是卡住——而它每试一次烧一个模型步。所以这条判据不能要求「同一个原因」。
+    """
     state = make_state()
     state.record(
         ToolCallRecord(
-            call_id="c1", tool="search_memories", signature="a", status="error", failure_reason="empty_query"
+            call_id="c1",
+            tool="inspect_photo",
+            signature="a",
+            status="error",
+            failure_reason="no_text_detected",
         )
     )
     state.record(
         ToolCallRecord(
-            call_id="c2", tool="search_memories", signature="b", status="error", failure_reason="empty_query"
-        )
-    )
-    state.record(
-        ToolCallRecord(
-            call_id="c3", tool="get_result_page", signature="c", status="error", failure_reason="empty_query"
+            call_id="c2",
+            tool="inspect_photo",
+            signature="b",
+            status="denied",
+            failure_reason="inspection_budget_exhausted",
         )
     )
 
-    assert state.consecutive_failures("search_memories", "empty_query") == 0
-    assert state.consecutive_failures("get_result_page", "empty_query") == 1
+    # 两次失败，原因不同，仍然算连续。
+    assert state.trailing_failures("inspect_photo") == 2
+    # 别的工具插在队尾，就不算这个工具的连续了。
+    assert state.trailing_failures("search_memories") == 0
+
+    # 一次成功把计数清零。
+    state.record(ToolCallRecord(call_id="c3", tool="inspect_photo", signature="c", status="ok"))
+    assert state.trailing_failures("inspect_photo") == 0
 
 
 def test_finish_records_the_reason_and_closes_the_phase():
