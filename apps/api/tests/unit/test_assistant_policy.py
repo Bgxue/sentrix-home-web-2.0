@@ -24,12 +24,14 @@ def call(name: str, **arguments: object) -> ToolCall:
 
 
 def test_the_tool_list_is_exactly_what_ships():
-    """S3 四个 + S6 的 ``query_memory_facts``（T121）、``query_photo_people``（T122）
-    与 ``inspect_photo``（T123）。
+    """七个取证工具 + 一个终止动作。
 
-        **这是一个逐字断言的清单，不是 ``>= 4``。** 工具多一个少一个都会改变模型看到的
-        契约，而「多了一个没人注意的工具」正是那种不会报错、只会让模型偶尔调错东西的改动。
-        清单变了就必须在这里显式改一次。
+    **这是一个逐字断言的清单，不是 ``>= 4``。** 工具多一个少一个都会改变模型看到的
+    契约，而「多了一个没人注意的工具」正是那种不会报错、只会让模型偶尔调错东西的改动。
+    清单变了就必须在这里显式改一次。
+
+    ``final_answer`` 是终止动作而不是取证工具：交付是它上面的一个字段
+    （1.0 ``runtime.py:309`` 的 ``final`` 动作），所以它排在最末。
     """
     assert [spec.name for spec in TOOL_SPECS] == [
         "search_memories",
@@ -38,8 +40,8 @@ def test_the_tool_list_is_exactly_what_ships():
         "inspect_photo",
         "read_photo_text",
         "get_result_page",
-        "get_original_photos",
         "get_person_profile",
+        "final_answer",
     ]
 
 
@@ -50,7 +52,7 @@ def test_every_tool_declares_the_evidence_it_satisfies():
     在 2.0 的落点就是这张显式的绑定表。
     """
     assert TOOLS_BY_NAME["search_memories"].satisfies == (EvidenceType.PHOTO_SET,)
-    assert TOOLS_BY_NAME["get_original_photos"].satisfies == (EvidenceType.DELIVERED_PHOTO,)
+    assert TOOLS_BY_NAME["final_answer"].satisfies == (EvidenceType.DELIVERED_PHOTO,)
     assert TOOLS_BY_NAME["get_person_profile"].satisfies == (EvidenceType.PERSON_PROFILE,)
 
 

@@ -29,6 +29,7 @@ from sentrix.domain.assistant.final_guard import (
 from sentrix.domain.assistant.models import TerminationReason
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE
 from sentrix.domain.assistant.task_state import TaskState, ToolCallRecord
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL
 
 DESCRIPTIONS = {
     EvidenceType.PHOTO_SET: "从相册里取到与问题相关的照片。",
@@ -71,9 +72,10 @@ def search_record(total: int, *, has_more: bool = False, call_id: str = "call_se
 
 
 def deliver_record(delivered: int = 2, call_id: str = "call_deliver") -> ToolCallRecord:
+    """一次带交付的终止动作。交付是 ``final_answer`` 上的字段，不是一次独立调用。"""
     return ToolCallRecord(
         call_id=call_id,
-        tool="get_original_photos",
+        tool=FINAL_ANSWER_TOOL,
         signature=call_id,
         status="ok",
         observation={"result_set_id": "rs_1", "delivered": delivered, "rejected": []},

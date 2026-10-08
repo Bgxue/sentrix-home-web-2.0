@@ -23,7 +23,8 @@ class EvidenceType(StrEnum):
     1.0 的九类公共证据里，S3 只需要三类：
 
     - ``photo_set``：取到了一组候选照片（``search_memories`` / ``get_result_page``）；
-    - ``delivered_photo``：把其中某几张标记为「要交付给用户」（``get_original_photos``）；
+    - ``delivered_photo``：把其中某几张标记为「要交付给用户」（``final_answer`` 的
+      ``selected_image_handles`` 字段）；
     - ``person_profile``：读到了已确认人物的档案（``get_person_profile``）。
 
     1.0 的一个真实缺口正好在 ``delivered_photo`` 这一格：``completion.py`` 有

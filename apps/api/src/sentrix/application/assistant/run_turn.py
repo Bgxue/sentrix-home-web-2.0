@@ -45,17 +45,17 @@ from sentrix.application.assistant.tools import (
     is_empty_result,
 )
 from sentrix.domain.assistant import emergency
-from sentrix.domain.assistant.evidence_ledger import EvidenceLedger
+from sentrix.domain.assistant.evidence_ledger import EvidenceLedger, EvidenceType
 from sentrix.domain.assistant.final_guard import FinalGuard, GuardFacts, answered_with_gap
 from sentrix.domain.assistant.models import (
     Attachment,
     ChatMessage,
     ChatRole,
-    ModelReply,
     ProgressEvent,
     ProgressStage,
     ProgressStatus,
     TerminationReason,
+    ToolArgumentError,
     ToolCall,
     TurnRecord,
     TurnStatus,
@@ -70,7 +70,7 @@ from sentrix.domain.assistant.ports import (
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
 from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
-from sentrix.domain.assistant.tools import TOOL_SPECS, TOOLS_BY_NAME
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOL_SPECS, TOOLS_BY_NAME
 from sentrix.domain.errors import DomainError
 
 log = logging.getLogger("sentrix.assistant.run_turn")
@@ -81,7 +81,10 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 
 规则：
 - 需要照片证据时必须先调用工具，不要凭印象回答。
-- 用户说「给我看看 / 我想看」时，必须调用 get_original_photos 把照片交出去，只回一段文字不算交付。
+- 回答必须用 final_answer 收尾，不要直接输出正文结束本轮。
+- 只要这一轮取到了照片、而用户问的又是关于这些照片的事（看看、是哪张、有没有…），
+  就要在 final_answer 的 selected_image_handles 里填上**确实要展示给用户**的那几张，
+  最多 6 张；只取到候选不算交付。搜索返回的全部候选不要整批塞进去。
 - 工具没给到的信息就说不知道，不要编造。
 - handle（photo_1 这类）只在调用工具时使用，不要写进给用户的回答里。
 - 用户用中文提问，就用中文回答。"""
@@ -385,28 +388,132 @@ class RunTurn:
                 return self._stop(session, TerminationReason.MODEL_ERROR, detail=detail)
 
             if not reply.wants_tools:
-                answer = self._judge_answer(session, messages, reply)
+                # 正文收尾仍然有效，只是它交不出图——交付是 ``final_answer`` 上的字段，
+                # 正文里根本没有那个字段。**不在这里逼模型改用终止动作**：原生协议的默认
+                # 收尾就是一条消息，每轮为它多烧一个模型步，等于把「独立交付动作」那一步
+                # 原样搬了个地方，而这一版要修的正是那一步。改用终止动作交给提示词与
+                # 工具表去推动；真推不动时，账本会把这一轮如实标成带缺口。
+                answer = self._judge_answer(session, messages, reply.content)
                 if answer is not None:
                     return answer
                 messages.append(ChatMessage(ChatRole.USER, session.pending_reminder))
                 continue
 
             messages.append(ChatMessage(ChatRole.ASSISTANT, reply.content, tool_calls=reply.tool_calls))
+            terminal = next((call for call in reply.tool_calls if call.name == FINAL_ANSWER_TOOL), None)
             for call in reply.tool_calls:
+                if call.name == FINAL_ANSWER_TOOL:
+                    # 终止动作不进 ``_run_tool``：它不检索也不读库，交付与作答在同一步里
+                    # 完成。但仍然要回一条 tool 消息——带了 tool_calls 却不给配对结果，
+                    # 严格 chat template 的端点会直接 400。
+                    messages.append(
+                        ChatMessage(
+                            ChatRole.TOOL,
+                            # 措辞取「收到」而不是「已采纳」：门禁可能随后把它打回，
+                            # 那时模型会带着提醒再来一次，说「已采纳」就是在骗它。
+                            json.dumps({"received": True}, ensure_ascii=False),
+                            tool_call_id=call.call_id,
+                        )
+                    )
+                    continue
                 text, attachments, empty = self._run_tool(session, call)
                 session.delivered = session.delivered.merge(attachments)
                 session.search_returned_nothing = session.search_returned_nothing or empty
                 messages.append(ChatMessage(ChatRole.TOOL, text, tool_call_id=call.call_id))
 
-    def _judge_answer(
-        self, session: _Session, messages: Sequence[ChatMessage], reply: ModelReply
+            if terminal is not None:
+                answer = self._finish_with_final_answer(session, messages, terminal)
+                if answer is not None:
+                    return answer
+                messages.append(ChatMessage(ChatRole.USER, session.pending_reminder))
+                continue
+
+    def _finish_with_final_answer(
+        self, session: _Session, messages: Sequence[ChatMessage], call: ToolCall
     ) -> str | None:
+        """终止动作：交付与作答**在同一步里**完成。
+
+        这是 1.0 ``runtime.py:309`` 的 ``{"action":"final","answer":...,"selected_image_handles":[...]}``
+        在原生 tool-calling 下的等价物。1.0 的实测是：``get_original_photos`` 这个独立工具
+        在生产上被调用 **0 次**，239 道图片题全部走这个字段；把它做成一次单独的工具调用
+        只会多花一个模型步，而模型并没有因此更愿意交付。
+
+        **它不走 ``_run_tool``**：那条路是检索与读库，要过 ``ToolPolicy`` 的工具预算；
+        收尾不该是一个「预算用完就被拒」的动作——模型步快耗尽时，它更需把话说完、把已经
+        取到的图交出去。1.0 也是这个形状：``final`` 是动作，不是工具。
+
+        返回 ``None`` 表示这一轮的答案被拦下（调用方把提醒写进对话后继续循环）。
+        """
+        state = session.state
+        try:
+            arguments = call.parse()
+        except ToolArgumentError:
+            state.record(
+                ToolCallRecord(
+                    call_id=call.call_id,
+                    tool=call.name,
+                    signature=call.name,
+                    status="error",
+                    failure_reason="bad_arguments",
+                )
+            )
+            self._publish(
+                session,
+                state.emit(
+                    ProgressStage.RECOVERING,
+                    ProgressStatus.RUNNING,
+                    "收尾动作的参数无法解析，再问一次…",
+                    kind="guard",
+                    payload={"code": "bad_arguments"},
+                ),
+            )
+            session.pending_reminder = "final_answer 的参数不是合法 JSON，请重新调用一次。"
+            return None
+
+        answer = str(arguments.get("answer") or "").strip()
+        raw_handles = arguments.get("selected_image_handles")
+        handles = (
+            [item for item in raw_handles if isinstance(item, str)] if isinstance(raw_handles, list) else []
+        )
+
+        outcome = self._toolbox.deliver(state.current_result_set_id or "", handles, scope_id=state.scope_id)
+        # **交付整体替换，不是累加**（失败时也替换成空）。1.0 是
+        # ``turn.selected_image_handles = ...``——最后那个 final 说了算；累加会让一次被
+        # 门禁打回的答案留下的图，混进后来那次没选图的交付里。
+        session.delivered = DeliveredPhotos(items=outcome.attachments)
+        if outcome.attachments:
+            session.ledger.satisfy(EvidenceType.DELIVERED_PHOTO, call_id=call.call_id)
+
+        state.record(
+            ToolCallRecord(
+                call_id=call.call_id,
+                tool=call.name,
+                signature=state.signature(call.name, arguments),
+                status="ok" if outcome.ok else "error",
+                failure_reason=outcome.failure_reason,
+                observation=outcome.observation,
+                model_visible=outcome.model_visible,
+            )
+        )
+        self._tool_event(
+            session,
+            call,
+            ProgressStatus.OK if outcome.ok else ProgressStatus.DENIED,
+            _tool_status_text(call.name, outcome),
+            "tool_result" if outcome.ok else "tool_error",
+        )
+        # 交付失败**不打断作答**：图交不出去是这一轮的缺口，不是这一轮不能回答。1.0 也是
+        # 这样——``_normalize_selected_image_handles`` 把认不出来的 handle 直接丢掉，
+        # 从不因此拒绝那个 final。
+        return self._judge_answer(session, messages, answer)
+
+    def _judge_answer(self, session: _Session, messages: Sequence[ChatMessage], answer: str) -> str | None:
         """返回 ``None`` 表示这次不是最终回答（继续循环），返回字符串表示最终答案。
 
         被门禁拦下时返回 ``None`` 并把提醒写进对话——调用方负责 ``continue``。
         """
         state = session.state
-        answer = reply.content.strip()
+        answer = answer.strip()
         if not answer:
             # 1.0 的 ``parse_retries``：输出不可用就带着原因再问一次，用完次数才收尾。
             if state.block_guard_code("parse_failure"):
@@ -681,8 +788,9 @@ def _tool_status_text(name: str, outcome: ToolOutcome) -> str:
     if name in {"search_memories", "get_result_page"}:
         total = int(outcome.observation.get("total") or 0)
         return f"结果集里共有 {total} 张候选照片。" if total else "这次检索没有匹配到照片。"
-    if name == "get_original_photos":
-        return f"已把 {outcome.observation.get('delivered', 0)} 张照片交给用户。"
+    if name == FINAL_ANSWER_TOOL:
+        delivered = int(outcome.observation.get("delivered") or 0)
+        return f"已把 {delivered} 张照片交给用户。" if delivered else "已给出回答。"
     if name == "get_person_profile":
         return "已读取人物档案。" if outcome.observation.get("found") else "没有这位人物的档案。"
     if name == "read_photo_text":

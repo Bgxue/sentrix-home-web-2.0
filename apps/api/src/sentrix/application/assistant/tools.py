@@ -4,6 +4,11 @@
 ``_get_result_page`` 2044、``_get_original_photos`` 1966、``_get_person_profile`` 2651、
 ``_query_photo_people`` 2555）。
 
+**交付不在这里的工具表里。** 1.0 的 ``get_original_photos`` 工具在生产上被调用 **0 次**
+——239 道图片题全部靠 ``final`` 动作的 ``selected_image_handles`` 字段交付。2.0 一度把它
+做成必须单独调用的一次工具，代价是多一个模型步、而模型并没有因此更愿意交付；现在按
+1.0 的形状收回到终止动作的字段上（``deliver()`` 只被收尾分支调用，不接 ``execute()``）。
+
 **每个工具产出两份投影，这是本模块最重要的设计。** 1.0 在 handler 与模型之间夹了两层
 过滤（``ToolPolicy._sanitize`` 的键白名单 + ``runtime.py:131-180`` 的
 ``_model_visible_observation``），当时没有人解释为什么需要两层。原因在 ``runtime.py:116``
@@ -129,8 +134,6 @@ class AssistantToolbox:
             return self._inspect_photo(arguments, scope_id=scope_id, question=question)
         if name == "read_photo_text":
             return self._read_photo_text(arguments, scope_id=scope_id)
-        if name == "get_original_photos":
-            return self._deliver(arguments, scope_id=scope_id)
         if name == "get_person_profile":
             return self._person(arguments, scope_id=scope_id)
         if name == "query_memory_facts":
@@ -247,16 +250,22 @@ class AssistantToolbox:
             "captured_at": asset.captured_at.isoformat() if asset and asset.captured_at else "",
         }
 
-    # ---- get_original_photos ------------------------------------------------
+    # ---- 交付（终止动作上的一个字段）-----------------------------------------
 
-    def _deliver(self, arguments: Mapping[str, Any], *, scope_id: str) -> ToolOutcome:
-        result_set = self._result_sets.get(str(arguments.get("result_set_id") or ""))
+    def deliver(self, result_set_id: str, handles: Sequence[Any], *, scope_id: str) -> ToolOutcome:
+        """把终止动作里的 ``selected_image_handles`` 解成可打开的附件。
+
+        **它不是一次工具调用**：调用方是 ``run_turn`` 的收尾分支，交付与作答在同一步里
+        完成（1.0 ``runtime.py:309`` 的 ``final`` 动作字段）。走 ``execute()`` 那条路
+        等于把它重新变成一次独立的工具调用——那正是这一版要修掉的东西。
+        """
+        result_set = self._result_sets.get(result_set_id)
         if result_set is None:
             return _failure("unknown_result_set", "结果集不存在。请先调用 search_memories。")
         if result_set.scope_id != scope_id:
             return _failure("scope_mismatch", "这个结果集不属于当前相册。")
 
-        raw_handles = arguments.get("handles")
+        raw_handles = handles
         if not isinstance(raw_handles, (list, tuple)) or not raw_handles:
             return _failure("missing_handle", 'handles 必须是非空的 handle 数组，例如 ["photo_1"]。')
 
@@ -663,9 +672,9 @@ def is_empty_result(outcome: ToolOutcome) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class DeliveredPhotos:
-    """本回合累计交付的照片。只由模型**显式**调用 ``get_original_photos`` 产生——
-    1.0 的交付口径（``runtime.py:1404``）明确不做回填：「模型没选、或答案本就没有依据图
-    （拒答/闲聊）→ 交付为空，这是合法状态」。"""
+    """本回合累计交付的照片。只由模型在终止动作里**显式**填的 ``selected_image_handles``
+    产生——1.0 的交付口径（``runtime.py:1404``）明确不做回填：「模型没选、或答案本就没有
+    依据图（拒答/闲聊）→ 交付为空，这是合法状态」。"""
 
     items: tuple[Attachment, ...] = field(default_factory=tuple)
 

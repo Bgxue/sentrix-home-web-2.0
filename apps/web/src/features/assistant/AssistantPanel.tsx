@@ -14,8 +14,9 @@ interface Exchange {
 /**
  * 助手对话。问一句「给我看看在海边的照片」，回答下面就是能直接点开的照片。
  *
- * 交付的照片只来自后端 ``complete`` 帧里的 ``attachments``——那是**模型显式调用
- * get_original_photos 交出去的那些**。前端不自己从候选里挑图，也不做任何相关性判断。
+ * 交付的照片只来自后端 ``complete`` 帧里的 ``attachments``——那是**模型在终止动作
+ * （``final_answer``）的 ``selected_image_handles`` 字段里显式选的那些**。前端不自己从
+ * 候选里挑图，也不做任何相关性判断。
  */
 export function AssistantPanel({
   conversationId,

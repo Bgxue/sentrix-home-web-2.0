@@ -284,14 +284,32 @@ def test_a_page_past_the_end_is_empty_not_an_error(toolbox):
     assert outcome.model_visible["preview"] == []
 
 
-# ---- get_original_photos ----------------------------------------------------
+# ---- 交付：终止动作上的一个字段，不是一次工具调用 ---------------------------
+
+
+def deliver(toolbox, result_set_id: str, handles: list[str]):
+    build, _result_sets = toolbox
+    return build.deliver(result_set_id, handles, scope_id=SCOPE)
+
+
+def test_the_terminal_action_is_not_reachable_as_a_tool(toolbox):
+    """``final_answer`` 不进 ``execute``——它是终止动作，不是一次工具调用。
+
+    走工具那条路会让两件事同时发生：它受工具预算管辖（预算用完就拒收尾），并且它重新
+    变成「作答之外的一步」——1.0 的实测正是后者：``get_original_photos`` 这个独立工具在
+    生产上被调用 0 次，239 道图片题全部走 final 字段。
+    """
+    outcome = run(toolbox, "final_answer", answer="在海边拍的。", selected_image_handles=[])
+
+    assert not outcome.ok
+    assert outcome.failure_reason == "unknown_tool"
 
 
 def test_delivery_turns_handles_into_openable_attachments(toolbox):
     search = run(toolbox, "search_memories", query="海边")
     result_set_id = search.model_visible["result_set_id"]
 
-    outcome = run(toolbox, "get_original_photos", result_set_id=result_set_id, handles=["photo_1"])
+    outcome = deliver(toolbox, result_set_id, ["photo_1"])
 
     assert outcome.ok
     assert [item.asset_id for item in outcome.attachments] == ["asset_0"]
@@ -304,7 +322,7 @@ def test_delivery_rejects_a_handle_outside_the_result_set(toolbox):
     search = run(toolbox, "search_memories", query="海边")
     result_set_id = search.model_visible["result_set_id"]
 
-    outcome = run(toolbox, "get_original_photos", result_set_id=result_set_id, handles=["photo_7"])
+    outcome = deliver(toolbox, result_set_id, ["photo_7"])
 
     assert not outcome.ok
     assert outcome.failure_reason == "bad_handle"
@@ -316,14 +334,14 @@ def test_delivery_needs_an_explicit_handle_list(toolbox):
     search = run(toolbox, "search_memories", query="海边")
     result_set_id = search.model_visible["result_set_id"]
 
-    outcome = run(toolbox, "get_original_photos", result_set_id=result_set_id)
+    outcome = deliver(toolbox, result_set_id, [])
 
     assert not outcome.ok
     assert outcome.failure_reason == "missing_handle"
 
 
 def test_delivery_requires_a_known_result_set(toolbox):
-    outcome = run(toolbox, "get_original_photos", result_set_id="rs_nope", handles=["photo_1"])
+    outcome = deliver(toolbox, "rs_nope", ["photo_1"])
 
     assert not outcome.ok
     assert outcome.failure_reason == "unknown_result_set"

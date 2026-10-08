@@ -31,7 +31,7 @@ from sentrix.domain.assistant.models import (
     TurnStatus,
 )
 from sentrix.domain.assistant.ports import ModelServiceError
-from sentrix.domain.assistant.tools import TOOL_SPECS
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOL_SPECS
 from sentrix.infrastructure.persistence.repositories.conversations import (
     SqliteConversationRepository,
 )
@@ -109,6 +109,17 @@ class StubToolbox:
         # 假件都得收**——少一个就在运行时 TypeError，而它会被吞成 ``model_error``，
         # 看起来像模型的问题。
         self.calls.append((name, dict(arguments)))
+        return self._stubbed(name)
+
+    def deliver(self, result_set_id: str, handles: Sequence[str], *, scope_id: str) -> ToolOutcome:
+        # **交付走的是 ``deliver`` 而不是 ``execute``**——它是终止动作 ``final_answer``
+        # 上的一个字段，不是一次工具调用。假件必须收这个形参，理由与 ``execute`` 那段
+        # 相同：少一个就是运行时 ``TypeError``，而它会被吞成 ``model_error``，
+        # 看起来像模型的问题。
+        self.calls.append((FINAL_ANSWER_TOOL, {"result_set_id": result_set_id, "handles": list(handles)}))
+        return self._stubbed(FINAL_ANSWER_TOOL)
+
+    def _stubbed(self, name: str) -> ToolOutcome:
         outcome = self._outcomes.get(name)
         if outcome is None:
             return ToolOutcome(
@@ -128,6 +139,19 @@ def tool_call(name: str, call_id: str, **arguments: object) -> ModelReply:
         content="",
         finish_reason="tool_calls",
         tool_calls=(ToolCall(call_id=call_id, name=name, arguments_json=json.dumps(arguments)),),
+    )
+
+
+def final_call(answer: str, *handles: str, call_id: str = "c_final") -> ModelReply:
+    """终止动作：**交付是它上面的一个字段**（1.0 ``runtime.py:309`` 的 ``final`` 动作）。
+
+    与 ``final()``（正文收尾）是两回事：正文里没有那个字段，交付必然为空。
+    """
+    return tool_call(
+        FINAL_ANSWER_TOOL,
+        call_id,
+        answer=answer,
+        selected_image_handles=list(handles),
     )
 
 
@@ -235,15 +259,19 @@ def start(run_turn, conversation) -> str:
 
 
 def test_the_full_loop_retrieves_delivers_and_answers(env):
+    """交付与作答在**同一步**里完成——这就是 1.0 的 ``final`` 动作形状。
+
+    1.0 的 ``get_original_photos`` 这个独立工具在生产上被调用 0 次，239 道图片题全部走
+    final 字段。这里钉住的正是那条通道：检索一步，终止动作一步，没有第三步。
+    """
     conversations, turns, conversation, _db = env
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
-            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_1", "photo_2"]),
-            final("这是你要的两张海边照片。"),
+            final_call("这是你要的两张海边照片。", "photo_1", "photo_2"),
         ]
     )
-    toolbox = StubToolbox({"search_memories": SEARCH_OK, "get_original_photos": DELIVER_OK})
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, FINAL_ANSWER_TOOL: DELIVER_OK})
     run_turn = build(env, model, toolbox)
     turn_id = start(run_turn, conversation)
 
@@ -278,14 +306,13 @@ def test_progress_events_are_persisted_in_order(env):
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
-            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_1"]),
-            final("给你。"),
+            final_call("给你。", "photo_1"),
         ]
     )
     toolbox = StubToolbox(
         {
             "search_memories": SEARCH_OK,
-            "get_original_photos": ToolOutcome(
+            FINAL_ANSWER_TOOL: ToolOutcome(
                 observation={"result_set_id": "rs_1", "delivered": 1, "rejected": []},
                 model_visible={"result_set_id": "rs_1", "delivered": 1, "rejected": []},
                 attachments=(Attachment(handle="photo_1", asset_id="asset_1", file_name="a.jpg"),),
@@ -382,14 +409,14 @@ def test_answering_without_delivering_is_answered_with_a_gap(env):
 
 
 def test_a_delivery_that_delivers_nothing_ends_with_a_gap(env):
-    """交付工具一张都没交出去时，1.0 的门禁**不会**拦——缺口由账本如实标出来。
+    """交付一张都没交出去时，1.0 的门禁**不会**拦——缺口由账本如实标出来。
 
-    这条测试同时说明一件事：1.0 的 ``delivery_contradiction`` 在 S3 的工具形状下够不着。
-    它要求 ``delivered_count`` 是**整数 0**（真的调过交付工具、且它返回 0 张），而 S3 的
-    ``get_original_photos`` 在交不出去时返回的是失败（``bad_handle``），记录的
-    ``status`` 是 ``error``，``GuardFacts.from_state`` 会跳过它、``delivered_count``
-    保持 ``None``。规则照搬了，触发它的输入还没出现——与 ``all_requested_but_has_more``
-    缺 ``result_mode`` 是同一类情况。
+    这条测试同时说明一件事：1.0 的 ``delivery_contradiction`` 在 2.0 的形状下够不着。
+    它要求 ``delivered_count`` 是**整数 0**（真的交付过、且它返回 0 张），而 2.0 的
+    ``deliver`` 在交不出去时返回的是失败（``bad_handle``），记录的 ``status`` 是
+    ``error``，``GuardFacts.from_state`` 会跳过它、``delivered_count`` 保持 ``None``。
+    规则照搬了，触发它的输入还没出现——与 ``all_requested_but_has_more`` 缺
+    ``result_mode`` 是同一类情况。
     """
     _conversations, _turns, conversation, _db = env
     empty_delivery = ToolOutcome(
@@ -400,17 +427,19 @@ def test_a_delivery_that_delivers_nothing_ends_with_a_gap(env):
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
-            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_9"]),
-            final("我找到了两张海边的照片，但没能把原图交出来。"),
+            # 终止动作带着一个不在结果集里的 handle 收尾：交付失败，但**不打断作答**
+            # ——1.0 的 ``_normalize_selected_image_handles`` 也是把认不出来的 handle
+            # 直接丢掉，从不因此拒绝那个 final。
+            final_call("我找到了两张海边的照片，但没能把原图交出来。", "photo_9"),
         ]
     )
-    toolbox = StubToolbox({"search_memories": SEARCH_OK, "get_original_photos": empty_delivery})
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, FINAL_ANSWER_TOOL: empty_delivery})
     run_turn = build(env, model, toolbox)
     turn_id = start(run_turn, conversation)
 
     result = run_turn.run(turn_id)
 
-    assert len(model.calls) == 3
+    assert len(model.calls) == 2
     assert result.answer == "我找到了两张海边的照片，但没能把原图交出来。"
     assert result.attachments == ()
     assert result.status is TurnStatus.PARTIAL
@@ -691,13 +720,10 @@ def test_an_ordinary_question_never_hits_the_refusal_rules(env):
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
-            tool_call("get_original_photos", "c2", result_set_id="rs_1", handles=["photo_1", "photo_2"]),
-            final("这是你要的两张海边照片。"),
+            final_call("这是你要的两张海边照片。", "photo_1", "photo_2"),
         ]
     )
-    run_turn = build(
-        env, model, StubToolbox({"search_memories": SEARCH_OK, "get_original_photos": DELIVER_OK})
-    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK, FINAL_ANSWER_TOOL: DELIVER_OK}))
 
     turn_id = run_turn.start(TurnRequest(conversation_id=conversation.id, question=QUESTION)).id
     result = run_turn.run(turn_id)

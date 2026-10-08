@@ -21,7 +21,12 @@ from sentrix.domain.assistant.models import (
     TerminationReason,
 )
 from sentrix.domain.assistant.profile import TurnProfile
-from sentrix.domain.assistant.tools import TOOLS_BY_NAME, CostClass
+from sentrix.domain.assistant.tools import (
+    FINAL_ANSWER_TOOL,
+    RETRIEVAL_TOOLS,
+    TOOLS_BY_NAME,
+    CostClass,
+)
 
 # 阶段用模块级字符串常量而不是枚举：它只影响日志可读性，不参与任何判定。
 PLANNING = "planning"
@@ -95,12 +100,30 @@ class TaskState:
 
         被拒绝的调用与缓存回放都不计——1.0 也是这个口径（``tool_policy.py:61-62`` 只在
         执行成功后才 ``record_tool_call``）：拒绝不是执行，不该再罚一次预算。
+
+        **终止动作（``final_answer``）也不计。** 它不是取证工具，是作答那一步；算进来的
+        话，「回答被门禁打回一次」会顺带吃掉一次工具配额，而 6 次这个数是照着 1.0 的
+        生产 profile 定的。
         """
-        return sum(1 for record in self.records if record.status == "ok")
+        return sum(1 for record in self.records if record.status == "ok" and record.tool != FINAL_ANSWER_TOOL)
 
     @property
     def search_calls(self) -> int:
         return sum(1 for record in self.records if record.tool == "search_memories")
+
+    @property
+    def current_result_set_id(self) -> str | None:
+        """最近一次成功检索的结果集——交付时按它解 handle。
+
+        1.0 把这一格存在可变的 ``task.current_result_set`` 上（``runtime.py:1428``）。
+        2.0 不新增状态：检索记录的观察里本来就带着 ``result_set_id``，倒着找第一条
+        成功的就是它。多存一份迟早会与记录对不上。
+        """
+        for record in reversed(self.records):
+            if record.status == "ok" and record.tool in RETRIEVAL_TOOLS:
+                value = record.observation.get("result_set_id")
+                return str(value) if value else None
+        return None
 
     @property
     def inspection_calls(self) -> int:

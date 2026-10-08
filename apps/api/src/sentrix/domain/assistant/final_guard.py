@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from sentrix.domain.assistant.evidence_ledger import EvidenceLedger
 from sentrix.domain.assistant.task_state import TaskState
-from sentrix.domain.assistant.tools import RETRIEVAL_TOOLS
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, RETRIEVAL_TOOLS
 
 # ---- 安全硬拦：1.0 ``final_guard.py:162-178`` 的五条 --------------------------
 #
@@ -129,7 +129,7 @@ class GuardFacts:
     # 1.0 ``result_set.py:378/402`` 的交付簿记：检索后 available/complete，交付后 delivered。
     delivery_state: str = "not_requested"
     # 初值是 ``None`` 而不是 0——1.0 ``result_set.py:263`` 就是 ``int | None = None``，
-    # 只有 ``get_original_photos`` 真的调用过才会变成整数。这条区别是实质的：
+    # 只有终止动作真的带着交付走过才会变成整数。这条区别是实质的：
     # ``delivery_contradiction`` 要求 ``delivered_count == 0``，把初值写成 0 会让
     # 「检索恰好一次取完、又从没交付过」的正常回合全部被拦下来（1.0 不会）。
     delivered_count: int | None = None
@@ -144,7 +144,8 @@ class GuardFacts:
         """复刻 1.0 ``result_set.py`` 的交付簿记：按调用顺序走一遍记录。
 
         顺序有意义，与 1.0 一致：一次 ``search_memories`` 把 ``delivery_state`` 置成
-        ``available``（还有下一页）或 ``complete``（取完了），一次 ``get_original_photos``
+        ``available``（还有下一页）或 ``complete``（取完了），一次终止动作
+        （``final_answer``，1.0 是 ``final`` 动作上的 ``selected_image_handles`` 字段）
         把它置成 ``delivered`` 并记下交付数。后面的调用覆盖前面的。
         """
         rows: list[Mapping[str, object]] = []
@@ -159,7 +160,7 @@ class GuardFacts:
                 rows.append({"tool": record.tool, "total": observation.get("total")})
                 has_more = bool(observation.get("has_more"))
                 delivery_state = "available" if has_more else "complete"
-            elif record.tool == "get_original_photos":
+            elif record.tool == FINAL_ANSWER_TOOL:
                 delivery_state = "delivered"
                 raw = observation.get("delivered")
                 delivered_count = int(str(raw)) if raw is not None else None
@@ -268,8 +269,8 @@ class FinalGuard:
 
         ``delivery_contradiction`` 的触发面很窄，这是 1.0 的实情而不是遗漏：要求
         ``delivery_state == "complete"``（最后一次检索把结果取完了）**且**
-        ``delivered_count == 0``（整数 0，即真的调过交付工具、且它返回 0 张）。从没调过
-        交付工具的回合 ``delivered_count`` 是 ``None``，不会命中。
+        ``delivered_count == 0``（整数 0，即终止动作真的带着交付走过、且一张都没交出去）。
+        从没交付过的回合 ``delivered_count`` 是 ``None``，不会命中。
         """
         if facts.result_mode == "all" and facts.has_more:
             return _verdict("all_requested_but_has_more")

@@ -1,7 +1,7 @@
 """工具契约：名字、描述、参数 schema、能满足哪类证据、贵不贵（``cost_class``）。
 
 S3 上线四个，S6 加了 ``query_memory_facts``（T121）、``query_photo_people``（T122）
-与 ``inspect_photo``（T123），现在六个。
+与 ``inspect_photo``（T123），现在七个取证工具 + 一个终止动作（``final_answer``）。
 
 对应 1.0 ``agent_runtime/tool_registry.py`` + ``tools.py`` 的注册段（``tools.py:2681``）。
 两处与 1.0 的**结构性差异**：
@@ -81,7 +81,7 @@ SEARCH_MEMORIES = ToolSpec(
         "按内容词检索家庭照片（人/物/场景/衣着/颜色/地点特征）。"
         "返回一个结果集摘要，其中 preview 是排在最前的几张，每条带 handle 与拍摄时间。"
         "一次对话只需要检索一次；要看更多候选用 get_result_page 翻页，不要改词重搜。"
-        "要把照片展示给用户，必须先调 get_original_photos 把 preview 里的 handle 交出去。"
+        "要把照片展示给用户，在 final_answer 的 selected_image_handles 里填这些 handle。"
     ),
     parameters=_object_schema(
         {
@@ -119,27 +119,43 @@ GET_RESULT_PAGE = ToolSpec(
     required=("result_set_id", "page"),
 )
 
-GET_ORIGINAL_PHOTOS = ToolSpec(
-    name="get_original_photos",
+#: 终止动作的工具名。**交付是它的一个字段，不是一次单独的工具调用**——这是 1.0 的
+#: 形状（``runtime.py:309`` 的 ``{"action":"final","answer":...,"selected_image_handles":[...]}``）。
+#: 单独放一个 ``get_original_photos`` 会多花一个模型步，而 1.0 的实测是：它被调用了 **0 次**，
+#: 239 道图片题全部走 final 字段交付。留成常量是因为 ``final_guard`` 与 ``run_turn``
+#: 都要按名字认它。
+FINAL_ANSWER_TOOL = "final_answer"
+
+FINAL_ANSWER = ToolSpec(
+    name=FINAL_ANSWER_TOOL,
     description=(
-        "把选中的照片交付给用户查看。handles 必须来自当前结果集的 preview（例如 photo_1）。"
-        "用户说「给我看看…」时必须在给出最终回答之前调用本工具，否则用户看不到任何照片。"
+        "给出最终回答并结束本轮。answer 是要说给用户的那段话；"
+        "要把照片展示给用户，就在**同一次调用**里把 handle 填进 selected_image_handles。"
+        "handle 必须来自当前结果集（例如 photo_1），最多 6 张；"
+        "搜索返回的全部候选不能直接当作要展示的图片。不展示照片就留空数组。"
     ),
     parameters=_object_schema(
         {
-            "result_set_id": {"type": "string", "description": "search_memories 返回的结果集 id。"},
-            "handles": {
+            "answer": {
+                "type": "string",
+                "description": "给用户的最终回答，用中文。",
+            },
+            "selected_image_handles": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "要交付的 handle 列表，最多 6 个，必须来自该结果集的 preview。",
-                "minItems": 1,
+                "description": (
+                    "最终确实要展示给用户的 handle（photo_1…），最多 6 张，"
+                    "必须来自当前结果集；不展示照片就填空数组。"
+                ),
                 "maxItems": 6,
             },
         },
-        ["result_set_id", "handles"],
+        ["answer"],
     ),
+    # **声明了 ``DELIVERED_PHOTO``，但 ``run_turn`` 只在真的交出图时才销账**：
+    # 「声明要交付」与「交付了」不是一回事，一张都没交时销账会让那一轮假装不缺证据。
     satisfies=(EvidenceType.DELIVERED_PHOTO,),
-    required=("result_set_id", "handles"),
+    required=("answer",),
 )
 
 GET_PERSON_PROFILE = ToolSpec(
@@ -348,8 +364,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     INSPECT_PHOTO,
     READ_PHOTO_TEXT,
     GET_RESULT_PAGE,
-    GET_ORIGINAL_PHOTOS,
     GET_PERSON_PROFILE,
+    FINAL_ANSWER,
 )
 
 TOOLS_BY_NAME: Mapping[str, ToolSpec] = {spec.name: spec for spec in TOOL_SPECS}
