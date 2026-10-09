@@ -238,6 +238,8 @@ def test_the_complete_frame_does_not_repeat_the_progress_array(client: TestClien
         "answer",
         "attachments",
         "requirements",
+        # §3.8：检索抓回来的那批候选，与 attachments（交付的那批）分开。
+        "retrieved_candidates",
         "error",
     }
     assert complete["turn_id"] == turn_id

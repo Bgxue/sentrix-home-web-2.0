@@ -1,9 +1,21 @@
 """WeMM-Embedding-2B：统一多模态嵌入的 HTTP 客户端（W1）。
 
 对应 1.0 ``backend/embeddings/wemm_sidecar.py``。**模型不在这个进程里**——侧车跑在
-8102（``scripts/maintenance/wemm_embedder_sidecar.py``），与 8100 的 VLM、8101 的 bge
-同一条口径：2.0 不管理模型进程的生命周期（设计 §2.1），只连它。本进程因此不 import
-``torch``。
+8102，与 8100 的 VLM、8101 的 bge 同一条口径：2.0 不管理模型进程的生命周期（设计 §2.1），
+只连它。本进程因此不 import ``torch``。
+
+**侧车的启动脚本在 1.0 的仓库里**：``Sentrix-Home-Web/scripts/maintenance/
+wemm_embedder_sidecar.py``，用那个仓库的隔离 venv 跑（``.venv-wemm``；WeMM 要
+``transformers==5.2.0``，与 2.0 venv 里的版本不兼容，所以它必须是独立环境）：
+
+    cd ~/Github/Sentrix-Home-Web
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
+      nohup .venv-wemm/bin/python scripts/maintenance/wemm_embedder_sidecar.py --port 8102 &
+
+**这条路径原先写的是 2.0 自己的 ``scripts/maintenance/wemm_embedder_sidecar.py``，那个
+文件不存在**——2026-10-09 侧车挂掉（10-08 10:45）、要把它拉起来时，按这句话去找是找不到
+的。``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` 不是可选的调优：不设时 PyTorch
+的缓存分配器会攥住约 4.3 GB 不放，而那部分显存对同一张卡上的 8100 VLM 是不可见的。
 
 **它是统一空间，所以一个类同时满足两个端口。** 文本、图像、视频落在**同一个 2048 维
 空间**里，跨模态检索原生成立——不再需要「文本塔去对齐图像空间」那种间接关系。

@@ -559,3 +559,65 @@ def test_the_step_budget_covers_a_full_tool_budget():
 5. **改完跑 `make ci` 全链**（ruff / mypy strict / import-linter / 两级可达性 /
    capability-map / module-map / 两份 openapi / coverage / web-check）。
 6. **全量评测由使用者跑**，本文档不声称成绩已恢复。
+
+---
+
+## 7. 施工结果（2026-10-09 补记）
+
+**§3.1–§3.8 全部落地**，两个提交：`11450a2`（助手侧七修 + §3.8 助手侧）、
+`3e709bb`（§3.8 的 PhotoBench 侧）。逐条的实施内容、判据与门禁见提交信息与
+`docs/refactor/2026-10-09-assistant-deviations.md`。
+
+施工时对计划的三处**修正/补充**，都记在这里：
+
+### 7.1 两个测试假件必须改判据（计划没预料到）
+
+`tests/integration/test_run_turn.py` 与 `tests/contract/test_assistant_routes.py` 的假件
+用 `if not tools:` 区分「这是规划 / L2 评审」。§3.4 的 C/B′ 让工具循环**也能合法拿到
+空元组**，于是这条判据会把主循环当成评审——测出来的东西与跑的东西不是一回事。改成按
+system 提示词里的 `PLANNER_MARKER` / `JUDGE_MARKER` 分流。
+
+### 7.2 一处**已红但没人发现**的门禁
+
+`tests/integration/test_read_photo_text.py::test_the_tool_is_cheap_not_expensive` 从
+`f07b86d` 起就是红的：它断言 `read_photo_text` 是 `CHEAP`，而那次提交恰恰把它改成了
+`EXPENSIVE`，**提交信息里却写着「助手相关集成测试全绿」**。已改成断言 `EXPENSIVE`。
+
+另有一处既有的红：`scripts/diff_photobench_reports.py` 的 2 条 mypy 错误（`git stash`
+之后同样红），不在本次范围内。
+
+### 7.3 **那轮「修复后」对照是在检索残废的状态下跑出来的**（重要）
+
+`20261008-232747` 那一轮（10-08 23:27）跑在 **WeMM 侧车 8102 死掉之后**（日志最后写入
+10-08 10:45，之后一直没起来）。2.0 的 `visual_embedder` 与 `text_embedder` 是**同一个
+WeMM 实例**，所以那一轮里：
+
+- 视觉通道（融合权重 **2.5**，最强的一路）全程没跑；
+- 文本 ANN 通道也没跑；
+- 只剩 lexical / metadata / entity 三路。
+
+实测证据（2026-10-09 在同样的降级状态下直连 8191）：
+
+```
+GET /api/v1/search?q=海边  →  degraded=true, degraded_reason="embedder_unavailable"
+channel_trace: visual_ann=unavailable, text_ann=unavailable
+```
+
+**后果**：§1.1 那张「修复前 56.3% → 修复后 70.6%」的对照表，右边那列不成立。
+§3.1 的诊断本身**不受影响**——那是 1.0 vs 2.0-20261007 的对照，而 Oct 7 那一轮侧车还活着；
+但「`f07b86d` 之后全面变差」这个结论**分不出多少来自代码、多少来自侧车**。
+
+**重跑前必须确认侧车在跑**（判据是 `GET /api/v1/search` 的 `degraded == false` 且
+`channel_trace` 里 `visual_ann` 是 `ok`）。启动方式见
+`infrastructure/models/wemm.py` 的模块 docstring。
+
+### 7.4 一处**没做**、要你定的
+
+§2 的决定表写着「**B 类全补**」，但 §3.1 的详细改法（6 条）里没有 B 类那三个字段：
+`group_photo_count` / `group_photo_sizes` / `group_photo_rows`。
+
+它们是 1.0 `_RETRIEVAL_TOP_KEEP` 里的，含义是「这一组其实有 N 张」——1.0 的
+`_asset_group_key` 把视频关键帧与事件近重复归成一组，预览只给一张代表。**2.0 没有这套
+分组机制**（grep 全库，一行都没有），补它等于新做一个「近重复归组」特性，不是补一个字段。
+
+**本次按 §3.1 的详细清单做了那 6 条，这三个没做。** 做不做、什么时候做，待定。
