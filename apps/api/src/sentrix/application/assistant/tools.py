@@ -76,6 +76,26 @@ _LEVEL_BY_EVIDENCE_CLASS: Mapping[str, str] = {
 }
 
 
+#: 「合影」的判据：**这张照片上有两个人以上**。1.0 判的是「caption/activity 里出现了
+#: 「合影」两个字」——一条硬编码的题型关键词，而它服务的是 487 道评测题里的 **1 道**
+#: （「一共拍了几张不同人数的合影」）。人数据已经在了（人脸绑定 + 观察快照），按数据判
+#: 既不用关键词、也不再依赖模型把「合影」写进描述里。
+GROUP_PHOTO_MIN_PEOPLE = 2
+
+
+def _group_photo_rows(preview: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """这一页里人数 ≥ 2 的候选，按 handle 列出。
+
+    **不搬 1.0 的 ``description`` 那一格**（它存的是 ``caption[:240]``）：预览里已经有
+    ``evidence_summary`` 了，同一段文字发两遍是白花 token。
+    """
+    return [
+        {"handle": item["handle"], "group_size": int(item["people_count"])}
+        for item in preview
+        if int(item["people_count"]) >= GROUP_PHOTO_MIN_PEOPLE
+    ]
+
+
 def _observation_summary(observation: Observation | None) -> str:
     """一条观察压成给模型看的一句话。分段顺序照 1.0，用 2.0 现成的列。
 
@@ -275,6 +295,9 @@ class AssistantToolbox:
     ) -> ToolOutcome:
         page = result_set.page(page_no)
         preview = [self._preview(entry) for entry in page.entries]
+        # 1.0 ``_RETRIEVAL_TOP_KEEP`` 里那三个 ``group_photo_*`` 的等价物，**判据换了**
+        # （见 ``_group_photo_rows``）。
+        group_rows = _group_photo_rows(preview)
         model_visible: dict[str, Any] = {
             "result_set_id": result_set.id,
             "query": result_set.query,
@@ -285,6 +308,11 @@ class AssistantToolbox:
             # 与 ``has_more`` 不是一件事——前者问「这批候选能不能继续取证」，后者问
             # 「后面还有没有更多候选」。翻到最后一页时前者为真、后者为假。
             "can_inspect": bool(preview),
+            # 「这一页里有几张合影、各是几人」。**这是从 ``preview[].people_count``
+            # 现算的聚合**，不是另一次推理——模型数 6–12 行不可靠，这一句替它数。
+            "group_photo_count": len(group_rows),
+            "group_photo_sizes": sorted({row["group_size"] for row in group_rows}),
+            "group_photo_rows": group_rows,
             "preview": preview,
         }
         # ``total`` 刻意**不进** model_visible：1.0 实测过模型会把候选池的数量直接当成
@@ -339,8 +367,28 @@ class AssistantToolbox:
             "level": _LEVEL_BY_EVIDENCE_CLASS.get(entry.evidence_class, ""),
             "place": latest.place if latest else "",
             "people": list(latest.people) if latest else [],
+            # **这张照片上有几个人**（已确认 + 未确认同行者）。它回答的是一类具体问题
+            # ——「里面有谁」「有几个人」「一共拍了几张不同人数的合影」——而这几个问题
+            # 此前只能靠逐张 ``query_photo_people`` 或 ``inspect_photo`` 去凑。
+            "people_count": self._people_count(entry.asset_id),
             "evidence_summary": _observation_summary(latest),
         }
+
+    def _people_count(self, asset_id: str) -> int:
+        """这张照片上有几个**人**（已确认的 + 未确认身份的同行者）。
+
+        **与 ``query_photo_people`` 用同一份数据、同一套算法，这不是巧合而是要求**：
+        预览里说 4 个人、工具里说 3 个，模型只能以为自己看错了，然后反复调工具去核。
+        两处一旦分家，就是又一条「指示与现实矛盾」。
+
+        未确认那一项要减掉已绑定的脸数——命名流程会把已确认的人**追加**进同一份快照，
+        不减就会把已经认出来的人再数一遍（1.0 ``tools.py:2582-2588`` 的注释写的就是
+        这件事）。
+        """
+        identities = self._faces.list_photo_identities(asset_id)
+        snapshot = self._observations.latest_people_snapshot(asset_id)
+        described = sum(1 for entry in snapshot if not entry.entity_id)
+        return len(identities) + max(0, described - len(identities))
 
     # ---- 交付（终止动作上的一个字段）-----------------------------------------
 

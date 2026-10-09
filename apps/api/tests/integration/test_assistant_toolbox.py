@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import PersonProfile, PersonRelationship
 from sentrix.domain.assistant.result_set import ResultSet
+from sentrix.domain.identity.models import ENTITY_STATUS_CONFIRMED, FACE_VALIDITY_VERIFIED
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES
 from sentrix.domain.retrieval import scheme
@@ -473,6 +475,149 @@ def test_the_preview_keys_are_always_present(toolbox):
     #  那里读回来的是空串而不是 ``strong``。）
     assert entry["media_kind"] == "image"
     assert entry["level"] == "strong"
+
+
+# ---- 人数与合影：数据驱动的重设计（替代 1.0 的 group_photo_*）------------------
+#
+# 1.0 那三个字段（``group_photo_count`` / ``sizes`` / ``rows``）只在 **query 或 goal 里
+# 出现「合影」两个字**时才计算（``tools.py:1085`` 的 ``if re.search(r"合影", ...)``），
+# 人数则靠正则从 ``caption`` / ``activity`` 的中文散文里抠「N名 / N人」。
+#
+# **判据换成数据。** 人数据本来就在库里（人脸绑定 + 观察快照），按它判既不用关键词、
+# 也不依赖模型把「合影」写进描述里。字段名与形状照 1.0 保留。
+
+
+def add_person(db, *, asset_id: str, name: str | None, people: int) -> None:
+    """给一张照片落一份「谁在这上面」。``people`` = **这张照片上一共几个人**。
+
+    ``name`` 给出时，其中一位是**已确认并绑定人脸**的（这正是 ``people_count`` 里
+    「已确认」那一半的来源——它数的是**绑定的脸**，不是 ``people_json`` 里带 id 的条目）。
+
+    **形状照真实写入路径**：VLM 先把 N 个原始人写成不带 ``entity_id`` 的条目，命名时
+    ``_append_person_snapshot`` **再追加**一条带 id 的（``entities.py:1000``）。所以
+    ``people_json`` 里「没有 id 的条目数」== N，而绑定的脸数是 1——``_people_count``
+    的 ``described - len(identities)`` 减的就是这个重复。
+
+    与 ``query_photo_people`` 的夹具同一套路：**人数据必须真落库**，否则测的是构造
+    而不是算法。
+    """
+    faces = SqliteFaceRepository(db)
+    observations = SqliteObservationRepository(db)
+    observation_id = f"obs_{asset_id}"
+    observations.add(
+        Observation(
+            id=observation_id,
+            scope_id=SCOPE,
+            asset_id=asset_id,
+            source_type="image",
+            captured_at=datetime(2019, 8, 1, tzinfo=UTC),
+            confidence=0.9,
+            created_at=NOW,
+            updated_at=NOW,
+            caption="婚礼合影",
+            people=(name,) if name else (),
+        )
+    )
+    # 原始条目**没有名字**：``_json_people`` 会跳过空名，所以 ``Observation.people``
+    # （预览里那一格）留下的正是「已确认的那几位」——与 ``people_count`` 分工明确。
+    snapshot: list[dict[str, object]] = [{"name": "", "entity_id": None} for _ in range(people)]
+    if name:
+        entity = SqliteEntityRepository(db).create_person(
+            name, status=ENTITY_STATUS_CONFIRMED, scope_id=SCOPE
+        )
+        cluster = faces.create_cluster([0.0] * 4, confidence=0.9, scope_id=SCOPE)
+        faces.link_entity(cluster.id, entity.id)
+        faces.add_instance(
+            asset_id=asset_id,
+            observation_id=observation_id,
+            cluster_id=cluster.id,
+            bbox=(0.1, 0.2, 0.3, 0.4),
+            embedding=[0.0] * 4,
+            detection_confidence=0.95,
+            quality=0.9,
+            pose=[0.0] * 3,
+            pose_bucket_name="front",
+            embedding_model="buffalo_l",
+            embedding_version="1",
+            embedding_quality_signal=0.9,
+            validity=FACE_VALIDITY_VERIFIED,
+            area_ratio=0.05,
+            sharpness=100.0,
+        )
+        # **命名会把这个人追加进快照**，所以原始那批未确认条目仍然在里面——这正是
+        # ``_people_count`` 要减掉 ``len(identities)`` 的原因。
+        snapshot.append({"name": name, "entity_id": entity.id})
+    with db.connect() as connection, connection:
+        connection.execute(
+            "UPDATE observations SET people_json = ? WHERE id = ?",
+            (json.dumps(snapshot, ensure_ascii=False), observation_id),
+        )
+
+
+def test_the_preview_carries_how_many_people_are_on_the_photo(toolbox, migrations_ready_db):
+    """每条 preview 要能直接读出「这张上有几个人」。
+
+    ``people`` 只有**已确认**的人名，所以只看它会把「四个人合影、认出来一个」读成
+    「一个人」。``people_count`` 把未确认的同行者也算进去。
+    """
+    add_person(migrations_ready_db, asset_id="asset_0", name="妈妈", people=4)
+
+    entry = run(toolbox, "search_memories", query="海边").model_visible["preview"][0]
+
+    assert entry["people"] == ["妈妈"]
+    assert entry["people_count"] == 4
+
+
+def test_the_group_photo_rollup_is_not_keyword_gated(toolbox, migrations_ready_db):
+    """**这一条就是这次重设计的全部理由。**
+
+    1.0 只在 query 含「合影」时才算那三个字段。这里同一个检索**不带那个词**，聚合照样
+    在——判据是数据（这张上有几个人），不是问题措辞。
+    """
+    add_person(migrations_ready_db, asset_id="asset_0", name="妈妈", people=3)
+    add_person(migrations_ready_db, asset_id="asset_1", name="爸爸", people=1)
+
+    body = run(toolbox, "search_memories", query="海边").model_visible
+
+    assert "合影" not in body["query"]
+    assert body["group_photo_count"] == 1
+    assert body["group_photo_sizes"] == [3]
+    assert body["group_photo_rows"] == [{"handle": "photo_1", "group_size": 3}]
+
+
+def test_the_rollup_is_derived_from_the_per_photo_counts(toolbox, migrations_ready_db):
+    """断言的是**关系**：聚合等于 preview 里那些人数的投影，不是抄一组常量。
+
+    改了 ``GROUP_PHOTO_MIN_PEOPLE`` 或改了每张的人数，两边必须一起动——它们本来就是
+    同一个数的两种读法。
+    """
+    add_person(migrations_ready_db, asset_id="asset_0", name="妈妈", people=2)
+    add_person(migrations_ready_db, asset_id="asset_1", name="爸爸", people=4)
+
+    body = run(toolbox, "search_memories", query="海边").model_visible
+
+    counts = {item["handle"]: item["people_count"] for item in body["preview"]}
+    assert counts == {"photo_1": 2, "photo_2": 4}
+    assert body["group_photo_count"] == 2
+    assert body["group_photo_sizes"] == [2, 4]
+    assert {row["handle"] for row in body["group_photo_rows"]} == {"photo_1", "photo_2"}
+
+
+def test_a_page_without_multi_person_photos_rolls_up_empty(toolbox, migrations_ready_db):
+    """反向：一张多人照片都没有时是**空**，不是漏算。
+
+    ``group_photo_count`` 与 ``group_photo_sizes`` 分开取 0 与 ``[]``——前者是
+    「几张」，后者是「都是几人」。
+    """
+    add_person(migrations_ready_db, asset_id="asset_0", name="妈妈", people=1)
+
+    body = run(toolbox, "search_memories", query="海边").model_visible
+
+    assert body["group_photo_count"] == 0
+    assert body["group_photo_sizes"] == []
+    assert body["group_photo_rows"] == []
+    # 但每张自己的计数照给：0 张合影不等于「没人」。
+    assert body["preview"][0]["people_count"] == 1
 
 
 def test_the_page_says_whether_it_can_be_inspected(toolbox):
