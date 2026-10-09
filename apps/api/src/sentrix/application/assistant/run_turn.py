@@ -1077,7 +1077,14 @@ def _status_for(reason: TerminationReason) -> TurnStatus:
 
 
 def _tool_status_text(name: str, outcome: ToolOutcome) -> str:
-    if name in {"search_memories", "get_result_page"}:
+    if name == "get_result_page":
+        # **必须报页号。** 原先它与 ``search_memories`` 共用一句「结果集里共有 N 张候选
+        # 照片」——翻到第几页在轨迹里完全看不出来，实测排查时只能数次数、数不出页号。
+        # 一条说不出自己做了什么的事件，等于没有诊断力。
+        total = int(outcome.observation.get("total") or 0)
+        page = int(outcome.model_visible.get("page") or 0)
+        return f"已翻到第 {page} 页（这一份共 {total} 张候选）。" if total else "这次检索没有匹配到照片。"
+    if name == "search_memories":
         total = int(outcome.observation.get("total") or 0)
         return f"结果集里共有 {total} 张候选照片。" if total else "这次检索没有匹配到照片。"
     if name == FINAL_ANSWER_TOOL:

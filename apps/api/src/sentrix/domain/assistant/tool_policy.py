@@ -137,6 +137,24 @@ class ToolPolicy:
                 ),
             )
 
+        # 翻页额度。**排在工具总预算之前**，与 ``search_memories`` 那条同一个位置与理由：
+        # 命中总预算时回的是「别再调工具了」，而这里要说的是「这一份候选你已经看完了」——
+        # 两句话让模型做的下一件事不一样。
+        if call.name == "get_result_page" and state.page_calls >= state.profile.max_page_calls:
+            return ToolDecision(
+                action=ToolAction.DENY,
+                code="page_call_limit",
+                # 文案要说清**为什么够了**：结果集最多 12 张、每页 6 张，第 1 页 search
+                # 已经给过。只说「到上限了」的话，模型会以为再等等就能翻——实测它正是
+                # 这么一直翻到模型步耗尽的（56 个 step_budget_exhausted 里 53 个以
+                # get_result_page 收尾）。
+                reason=(
+                    f"翻页额度已经用完（每轮最多 {state.profile.max_page_calls} 次）。"
+                    "结果集最多 12 张、每页 6 张，最多两页，这一份候选你已经看完了。"
+                    "请基于已经看到的内容作答；确实需要别的照片就说明拿不到，不要继续翻页。"
+                ),
+            )
+
         if not state.can_call_tool():
             return ToolDecision(
                 action=ToolAction.DENY,

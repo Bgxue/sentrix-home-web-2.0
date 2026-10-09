@@ -315,6 +315,16 @@ class AssistantToolbox:
             "group_photo_rows": group_rows,
             "preview": preview,
         }
+        if not preview and page.total:
+            # **越界页仍然是 ``ok``**（1.0 的行为，``test_a_page_past_the_end_is_empty_not_an_error``
+            # 钉着）：越界不是错误，是「没有更多了」。但**光给一个空数组不够**——实测模型
+            # 拿到空页之后会换个页码接着试，一直试到模型步耗尽。这一句把「到底了」说成
+            # 一句人话，让它没有理由再翻。
+            pages = (page.total + page.page_size - 1) // page.page_size
+            model_visible["note"] = (
+                f"第 {page.page} 页没有内容：这个结果集一共 {page.total} 张、共 {pages} 页，"
+                "已经到底了。请基于已经看到的内容作答。"
+            )
         # ``total`` 刻意**不进** model_visible：1.0 实测过模型会把候选池的数量直接当成
         # 答案里的统计数字（``runtime.py:116``）。模型要判断「还有没有更多」看 has_more
         # 就够了，那是个布尔，不会被当成计数。

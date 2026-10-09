@@ -6,8 +6,13 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
+# 唯一一处从 application 层取常量：这条断言的就是**跨层的那条关系**——
+# 检索能返回多少张（application 的上限）决定了要翻几次页（domain 的额度）。
+from sentrix.application.assistant.tools import MAX_SEARCH_LIMIT
 from sentrix.domain.assistant.models import (
     ProgressStage,
     ProgressStatus,
@@ -16,6 +21,7 @@ from sentrix.domain.assistant.models import (
     ToolCall,
 )
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
+from sentrix.domain.assistant.result_set import PAGE_SIZE
 from sentrix.domain.assistant.task_state import TERMINAL, TaskState, ToolCallRecord
 from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL
 
@@ -263,3 +269,32 @@ def test_tool_call_rejects_a_non_object_payload():
 
 def test_empty_arguments_parse_to_an_empty_mapping():
     assert ToolCall(call_id="c1", name="search_memories").parse() == {}
+
+
+def test_the_page_budget_covers_the_whole_result_set():
+    """翻页额度**由结果集的容量推出来**，不是一个拍出来的数。
+
+    ``search_memories`` 的 ``limit`` 上限 12、每页 6 张 → 最多两页。额度小于它，模型就
+    看不完自己检索到的东西（那会把「检索到了」变成「检索到了但看不到」）；大于它，
+    多出来的额度只会被用在空页上。这条钉住那个关系——改了 limit 或 PAGE_SIZE 而没改
+    额度，这里立刻红。
+    """
+    pages_in_a_full_result_set = math.ceil(MAX_SEARCH_LIMIT / PAGE_SIZE)
+
+    assert DEFAULT_PROFILE.max_page_calls >= pages_in_a_full_result_set
+    # 第 1 页 ``search_memories`` 已经给过，所以「看完」只需要再来 1 次；
+    # 额度留到 2 是余量，但不能大到「可以随便翻」。
+    assert DEFAULT_PROFILE.max_page_calls <= pages_in_a_full_result_set
+
+
+def test_a_denied_page_call_still_counts():
+    """被拒的翻页也要计数——与 ``search_calls`` 同一个口径。
+
+    不算的话，模型可以靠「先被拒一次、再重发」绕过上限，而它烧的是模型步，
+    那正是这条上限要护住的东西。
+    """
+    state = make_state()
+    state.record(ToolCallRecord(call_id="p1", tool="get_result_page", signature="s1", status="ok"))
+    state.record(ToolCallRecord(call_id="p2", tool="get_result_page", signature="s2", status="denied"))
+
+    assert state.page_calls == 2

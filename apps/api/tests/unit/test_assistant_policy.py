@@ -183,13 +183,19 @@ def test_a_second_duplicate_is_denied(make_state):
 
 
 def test_tool_budget_exhaustion_denies(make_state):
+    """总预算用尽时回 ``tool_budget_exhausted``。
+
+    **这里刻意不用 ``get_result_page`` 当填充物。** 它现在有自己的额度
+    （``max_page_calls``），而那道闸排在总预算之前——用它来填会把这条用例变成在测
+    另一条规则。凡是带自己额度的工具都不适合当这个填充物。
+    """
     state = make_state()
     for index in range(state.profile.max_tool_calls):
         state.record(
-            ToolCallRecord(call_id=f"c{index}", tool="get_result_page", signature=f"s{index}", status="ok")
+            ToolCallRecord(call_id=f"c{index}", tool="query_memory_facts", signature=f"s{index}", status="ok")
         )
 
-    decision = ToolPolicy().decide(call("get_result_page", result_set_id="rs_1", page=2), state)
+    decision = ToolPolicy().decide(call("query_memory_facts", operation="count", subject="asset"), state)
 
     assert decision.action is ToolAction.DENY
     assert decision.code == "tool_budget_exhausted"
@@ -571,3 +577,49 @@ def test_an_empty_delivery_list_is_not_a_missing_argument(make_state):
     absent = ToolPolicy().decide(call("final_answer", answer="没有找到能确认的照片。"), make_state())
 
     assert absent.code == "missing_argument"
+
+
+# ---- 翻页额度 -----------------------------------------------------------------
+
+
+def test_paging_is_capped_by_the_size_of_the_result_set(make_state):
+    """翻页到额度就拒，并且**说清为什么够了**。
+
+    实测 20261009 那一轮：56 个以 ``step_budget_exhausted`` 收尾的回合里 **53 个最后
+    动作都是翻页**——模型被 L2 打回之后不知道说什么就翻页，而越界页返回空仍是 ``ok``，
+    它拿不到「到底了」的信号。一次翻页是一个工具往返、一个模型步。
+    """
+    state = make_state()
+    for index in range(state.profile.max_page_calls):
+        state.record(
+            ToolCallRecord(call_id=f"p{index}", tool="get_result_page", signature=f"p{index}", status="ok")
+        )
+
+    decision = ToolPolicy().decide(call("get_result_page", result_set_id="rs_1", page=9), state)
+
+    assert decision.action is ToolAction.DENY
+    assert decision.code == "page_call_limit"
+    # 文案要说清「你已經看完了」，不是只说「到上限了」——后者会让模型以为再等等就能翻。
+    assert "最多两页" in decision.reason
+    assert "已经看完" in decision.reason
+
+
+def test_the_page_cap_comes_before_the_tool_budget(make_state):
+    """额度用尽时回的是 ``page_call_limit`` 而不是 ``tool_budget_exhausted``。
+
+    两句话让模型做的下一件事不一样：前者是「这一份候选你看完了，去作答」，
+    后者是「别再调工具了」。命中哪一条取决于**先撞上哪道闸**，所以顺序有意义。
+    """
+    state = make_state()
+    for index in range(state.profile.max_page_calls):
+        state.record(
+            ToolCallRecord(call_id=f"p{index}", tool="get_result_page", signature=f"p{index}", status="ok")
+        )
+    for index in range(state.profile.max_tool_calls):
+        state.record(
+            ToolCallRecord(call_id=f"t{index}", tool="query_memory_facts", signature=f"t{index}", status="ok")
+        )
+
+    decision = ToolPolicy().decide(call("get_result_page", result_set_id="rs_1", page=9), state)
+
+    assert decision.code == "page_call_limit"

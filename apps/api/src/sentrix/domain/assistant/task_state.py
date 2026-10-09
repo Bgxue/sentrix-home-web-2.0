@@ -122,6 +122,16 @@ class TaskState:
         return sum(1 for record in self.records if record.tool == "search_memories")
 
     @property
+    def page_calls(self) -> int:
+        """这一轮翻了几次页。
+
+        **与 ``search_calls`` 同一个口径：数「模型发出了几次」，被拒的那次也要算。**
+        不算的话，模型可以靠「先被拒一次、再重发」绕过 ``max_page_calls``——而它烧的是
+        模型步，那正是这条上限要护住的东西。
+        """
+        return sum(1 for record in self.records if record.tool == "get_result_page")
+
+    @property
     def current_result_set_id(self) -> str | None:
         """最近一次成功检索的结果集——交付时按它解 handle。
 

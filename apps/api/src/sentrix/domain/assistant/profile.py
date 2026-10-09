@@ -25,6 +25,20 @@ class TurnProfile:
     max_steps: int
     max_tool_calls: int
     max_search_calls: int
+    #: 一轮里最多翻几次页（``get_result_page``）。**1.0 没有这条上限。**
+    #
+    # 数是照着**结果集本身的容量**定的，不是拍的：``search_memories`` 的 ``limit``
+    # 上限是 12（``application/assistant/tools.py`` 的 ``MAX_SEARCH_LIMIT``），每页
+    # 6 张（``result_set.PAGE_SIZE``）——**最多两页**。而第 1 页 ``search_memories``
+    # 已经返回过了，所以看完整个结果集再来 1 次就够，2 是余量。
+    #
+    # **为什么需要它。** 实测 20261009 那一轮：56 个以 ``step_budget_exhausted`` 收尾的
+    # 回合里 **53 个最后动作都是 ``get_result_page``**——模型被 L2 打回之后不知道说什么，
+    # 就翻页；而**翻过头不报错**（越界返回空页仍是 ``ok``，那是 1.0 的行为），于是它
+    # 拿不到「已经到底了」这个信号，一直翻到步数耗尽。一次翻页是一个工具往返、一个模型步。
+    #
+    # 与 ``max_search_calls`` 并列而不是合并：那是「检索几次」，这是「同一份检索看几页」。
+    max_page_calls: int
     # 一轮里最多几次「精读」（``ToolSpec.cost_class == EXPENSIVE``）。1.0
     # ``budget_manager.py:17`` 的 ``max_inspections = 1``。
     #
@@ -46,6 +60,9 @@ DEFAULT_PROFILE = TurnProfile(
     # 1.0 runtime.py:1895 的硬收敛。实测小模型会反复改 query 重搜，把工具预算耗光后
     # 以空答案收场（e8c9d4 的 35 题里 52%）；收敛到 1 次后逼它翻页或直接作答。
     max_search_calls=1,
+    # 见 ``max_page_calls`` 的注释：结果集最多 12 张、每页 6 张 → 最多 2 页，
+    # 而第 1 页 search 已经给过。
+    max_page_calls=2,
     # 1.0 生产 profile 的值：``PROFILES["goal_driven_candidate"].max_inspections = 3``
     # （``backend/agent_runtime/profile.py``）。**不是** ``budget_manager.py:17`` 的
     # dataclass 默认值 1 —— 那个只在没有 profile 覆盖时才生效，而 1.0 的
