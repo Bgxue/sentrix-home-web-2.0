@@ -238,6 +238,24 @@ class Container:
                 sentrix_switch=SentrixModelSwitch(sentrix_process),
             )
 
+        # **``run_suites`` 先建、``runs`` 后建**：列表页要叠加「还在跑的 run」，
+        # 而那些 run 只在 ``RunSuites._active`` 里（索引里没有它们，见
+        # ``RunIndex.upsert``）。顺序反过来就拿不到那个回调。
+        run_suites = RunSuites(
+            store=run_store,
+            writer=result_writer,
+            index=run_index,
+            albums=album_source,
+            config=config,
+            sentrix=sentrix,
+            http=http,
+            new_execution=run_execution,
+            lifecycle_for=lifecycle_provider,
+            manager_telemetry_for=manager_telemetry,
+            detect_framework=detect_runtime_framework,
+            inline_images=judge_images,
+        )
+
         runs = ReadRuns(
             store=run_store,
             index=run_index,
@@ -247,6 +265,7 @@ class Container:
             # 而 ``POST /api/config`` 会就地改那个全局量。传取值函数而不是当前值，
             # 才会在配置被写回之后用上新的地址——与 1.0 的 ``global`` 等价。
             sentrix_url=lambda: config.sentrix_url,
+            live_states=run_suites.active_states,
         )
         reports = RunReports(
             store=run_store,
@@ -265,20 +284,6 @@ class Container:
         # 再建一个客户端只会多一份连接池与一套超时默认值。
         datasets = DatasetCatalog(albums=album_source, http=http, config=config)
         spaces = MemorySpaces(http=http, config=config, index=run_index)
-        run_suites = RunSuites(
-            store=run_store,
-            writer=result_writer,
-            index=run_index,
-            albums=album_source,
-            config=config,
-            sentrix=sentrix,
-            http=http,
-            new_execution=run_execution,
-            lifecycle_for=lifecycle_provider,
-            manager_telemetry_for=manager_telemetry,
-            detect_framework=detect_runtime_framework,
-            inline_images=judge_images,
-        )
         return Container(
             settings=settings,
             config_store=config_store,

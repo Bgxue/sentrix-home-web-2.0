@@ -84,7 +84,11 @@ def results(tmp_path: Path) -> Path:
     return root
 
 
-def _read_runs(results: Path, http: FakeJsonHttpClient | None = None) -> ReadRuns:
+def _read_runs(
+    results: Path,
+    http: FakeJsonHttpClient | None = None,
+    live: dict | None = None,
+) -> ReadRuns:
     store = FileRunStore(results)
     index = RunIndex()
     index.refresh(store)
@@ -94,6 +98,7 @@ def _read_runs(results: Path, http: FakeJsonHttpClient | None = None) -> ReadRun
         qa_metadata=_NoQaMetadata(),
         http=http or FakeJsonHttpClient(),
         sentrix_url=lambda: "http://sentrix:8191",
+        live_states=(lambda: live) if live is not None else None,
     )
 
 
@@ -120,6 +125,38 @@ def test_list_runs_sorts_by_started_at_descending_and_counts_active(results: Pat
     assert response["active_count"] == 1  # run-b 是 running
     assert response["total"] == 2
     assert response["scan"]["state"] == "ready"
+
+
+def test_a_run_that_is_still_going_shows_up_in_the_list(results: Path):
+    """**还在跑的 run 必须在列表里。**（2026-10-09 修）
+
+    索引里没有它们——写侧只在 run 结束时 ``upsert``，在那之前索引不知道这一轮存在。
+    而前端没有 URL 路由（``App.tsx`` 用 ``useState`` 选 run），所以「不在列表里」等于
+    **整轮评测期间界面上完全够不着**：看不到进度，也点不到取消。实测跑了一轮 487 题的
+    评测一个多小时，界面上一直什么都没有。
+
+    这条断言的是**它出现在列表里**，不是某个具体字段——字段由
+    ``analysis.run_list_entry`` 决定，那是另一件事。
+    """
+    live = _state("run-live", status="running", started_at="2026-03-01T00:00:00+08:00")
+
+    response = _read_runs(results, live={"run-live": live}).list_runs()
+
+    assert [run["run_id"] for run in response["runs"]] == ["run-live", "run-b", "run-a"]
+    assert response["active_count"] == 2  # run-live 与 run-b
+
+
+def test_a_finished_run_is_not_listed_twice(results: Path):
+    """索引里已经有了的 run 不再叠一遍——**两个来源，一份列表**。
+
+    真机上这两个来源会重叠一瞬：run 刚结束时写侧 ``upsert`` 与 ``cancel``/``delete``
+    的清理之间有窗口。叠重了前端会看到两行一模一样的。
+    """
+    live = _state("run-a", status="running")
+
+    response = _read_runs(results, live={"run-a": live}).list_runs()
+
+    assert [run["run_id"] for run in response["runs"]] == ["run-b", "run-a"]
 
 
 def test_list_runs_paginates(results: Path):

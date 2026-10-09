@@ -18,7 +18,7 @@ import copy
 import math
 import threading
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -44,6 +44,11 @@ _STATE_CACHE_SIZE = 2
 NON_TERMINAL_STATUSES = frozenset({"pending", "running", "cancelling"})
 
 
+def _run_sort_key(run: Mapping[str, Any]) -> str:
+    """列表排序键。**活 run 与索引条目必须用同一个**——混排时不共用会得到两种顺序。"""
+    return str(run.get("started_at") or run.get("created_at") or "")
+
+
 class ReadRuns:
     """读侧用例。依赖四个端口，全部由装配点注入（``bootstrap.container``）。"""
 
@@ -54,12 +59,16 @@ class ReadRuns:
         qa_metadata: QaMetadataSource,
         http: JsonHttpClient,
         sentrix_url: Callable[[], str],
+        live_states: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
     ) -> None:
         self._store = store
         self._index = index
         self._qa_source = qa_metadata
         self._http = http
         self._sentrix_url = sentrix_url
+        # 「还在跑的 run」的活状态。**传取值函数而不是快照**，与上面那个
+        # ``sentrix_url`` 同一条理由：列表页每次来问都要拿当下的，不是装配那时的。
+        self._live_states = live_states
         self._lock = threading.RLock()
         self._states: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._qa_metadata: dict[str, dict[str, Any]] | None = None
@@ -145,12 +154,21 @@ class ReadRuns:
     # -- 用例 ---------------------------------------------------------------
 
     def list_runs(self, page: int = 1, page_size: int = 20) -> dict[str, Any]:
-        """``GET /api/runs``（1.0 ``:7648`` 的分支 + ``list_runs`` ``:5343``）。"""
-        rows = sorted(
-            self._index.entries(),
-            key=lambda run: str(run.get("started_at") or run.get("created_at") or ""),
-            reverse=True,
-        )
+        """``GET /api/runs``（1.0 ``:7648`` 的分支 + ``list_runs`` ``:5343``）。
+
+        **还在跑的 run 要叠上去。** 索引里没有它们——写侧只在 run 结束时 ``upsert``，
+        而在那之前索引不知道这一轮存在。不叠的话，整轮评测期间列表页是空的，而前端
+        没有 URL 路由，于是那一轮在界面上完全够不着（看不到进度，也点不到取消）。
+        实测 2026-10-09：一轮 487 题的评测跑了一个多小时，界面上一直什么都没有。
+        """
+        rows = sorted(self._index.entries(), key=_run_sort_key, reverse=True)
+        live = self._live_states() if self._live_states is not None else {}
+        if live:
+            known = {str(row.get("run_id") or "") for row in rows}
+            rows = [
+                analysis.run_list_entry(dict(state)) for run_id, state in live.items() if run_id not in known
+            ] + rows
+            rows.sort(key=_run_sort_key, reverse=True)
         response = analysis.paginate_rows(rows, page, page_size)
         response["active_count"] = sum(
             1

@@ -708,6 +708,29 @@ class RunSuites:
 
     # ---- 供路由用的只读投影 -------------------------------------------------
 
+    def active_states(self) -> dict[str, dict[str, Any]]:
+        """还在跑的 run 的**活状态**，给 ``GET /api/runs`` 的列表叠加用。
+
+        **索引里没有它们。** 写侧只在 run 结束时 ``upsert``（``RunIndex.upsert``：
+        「一次 suite 只会新增几个 run，重扫 267 个 ``run.json`` 是 75 秒的工作」），
+        而在那之前索引根本不知道这一轮存在。于是整轮评测期间列表页是空的——而前端
+        **没有 URL 路由**（``App.tsx`` 用 ``useState`` 选 run，没有 deep link），
+        所以那一轮在界面上**完全够不着**：看不到进度，也点不到取消。
+
+        实测 2026-10-09：一轮 487 题的评测跑了一个多小时，界面上一直什么都没有。
+        """
+        with self._lock:
+            states: dict[str, dict[str, Any]] = {}
+            for run_id in self.active_run_ids():
+                execution = self._active.get(run_id)
+                if execution is None or execution.state is None:
+                    continue
+                # 浅拷贝：调用方（列表页）不该拿到执行体正在改的那只 dict。
+                # 取 ``.data`` 而不是 ``dict(state)``——``RunState`` 是带锁的**包装**，
+                # 它本身不是 dict。
+                states[run_id] = dict(execution.state.data)
+            return states
+
     def active_run_ids(self) -> list[str]:
         """还在跑（``running`` / ``pending`` / ``cancelling``）的 run——**注册表里的
         已完成 run 不算**：``_active`` 保留它们只为让 ``cancel``/``delete`` 能按 id 找到
