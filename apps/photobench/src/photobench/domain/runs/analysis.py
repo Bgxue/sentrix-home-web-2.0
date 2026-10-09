@@ -370,18 +370,37 @@ def agent_stability(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _round_or_none(metrics: dict[str, Any] | None, key: str) -> float | None:
+    """从一份 micro 指标里取一格，没有就 ``None``（**不是 0.0**）。"""
+    if metrics is None:
+        return None
+    value = metrics.get(key)
+    return round(float(value), 3) if isinstance(value, (int, float)) else None
+
+
 def derive_attribution(item: dict[str, Any]) -> dict[str, Any]:
     """1.0 ``:4202``。从已存的 turn 字段里判定失败层。"""
     judge_score = (item.get("judge") or {}).get("score")
     recall = item.get("retrieval_recall")
+    # **R 层问的是「检索找到了吗」，不是「交付了吗」。**
+    #
+    # ``retrieval_recall`` 那一格的分母是 GT、分子是**交付集**，所以零交付的题上它必然
+    # 是 0——实测 424 道题的 R 层亮红，而其中相当一部分的检索其实抓到了正确答案，只是
+    # 模型没把图交出来。把两件事混在一个数里，归因表就只是「没交付」的影子。
+    # 候选级指标到位之后（``candidate_retrieval_recall``，分子分母都取检索交给模型的那
+    # 一批），R 才真的在回答检索。
+    candidate_recall = item.get("candidate_retrieval_recall")
+    source = "candidate" if isinstance(candidate_recall, (int, float)) else "delivery"
+    layer_recall = candidate_recall if source == "candidate" else recall
     tools = item.get("tool_trace") or []
     calls = item.get("model_call_metrics") or []
     guard = item.get("guard_debug") or {}
     layers = {key: "na" for key in ("R", "V", "O", "T", "S", "G", "J")}
     details = {}
-    if isinstance(recall, (int, float)):
-        layers["R"] = "pass" if recall >= 1 else "fail"
-        details["R"] = f"图片召回率 {recall:.1%}"
+    if isinstance(layer_recall, (int, float)):
+        layers["R"] = "pass" if layer_recall >= 1 else "fail"
+        label = "检索召回率" if source == "candidate" else "召回率（交付口径，无候选集）"
+        details["R"] = f"{label} {layer_recall:.1%}"
     if (
         item.get("angle") in {"scene_visual", "food_or_object"}
         or item.get("task_type") == "T1_retrieve_media"
@@ -416,7 +435,15 @@ def derive_attribution(item: dict[str, Any]) -> dict[str, Any]:
         layers["J"] = "pass" if judge_score == 2 else "fail"
         details["J"] = f"Judge {judge_score} 分"
     primary = next((key for key in ("G", "R", "V", "O", "T", "S", "J") if layers[key] == "fail"), "PASS")
-    return {"primary": primary, "layers": layers, "detail": details, "source": "derived_from_turn_result"}
+    return {
+        "primary": primary,
+        "layers": layers,
+        "detail": details,
+        "source": "derived_from_turn_result",
+        # **R 这一层用的是哪一档口径**，必须能读出来：有候选集的 run 判检索，没有的
+        # 退回交付口径。不标出来的话，两批 run 的 R 层会被当成同一个数比较。
+        "recall_source": source,
+    }
 
 
 def annotate_model_calls(model_calls: Sequence[Any], execution_trace: Sequence[Any]) -> list[dict[str, Any]]:
@@ -930,6 +957,13 @@ def capability_summary(
         } | {"metric_count": len(legacy_values["recall"])}
         media_macro = image_macro
         video_macro = None
+    # 候选级指标的样本是「有候选集可比的题」——没有那一格的 run（这次契约放宽之前跑的）
+    # 不进分母，而不是当成零分。
+    candidate_items = [item for item in metric_items if "candidate_retrieval_counts" in item]
+    candidate_metrics: dict[str, Any] | None = (
+        micro_metrics_from_counts(candidate_items, "candidate_retrieval_counts") if candidate_items else None
+    )
+    candidate_metric_count = len(candidate_items)
     evidence_judges = [item.get("evidence_judge") or {} for item in items]
     evidence_scores = [
         score
@@ -1053,6 +1087,16 @@ def capability_summary(
         "retrieval_metric_count": retrieval_metric_count,
         "retrieval_metric_scope": "all_media" if typed_retrieval_items else "legacy_image_only",
         "retrieval_excluded_unanswerable_count": excluded_unanswerable_count,
+        # **候选级（检索通道）**。与上面那组「交付级」并列，不是替代：交付级回答
+        # 「模型交对了没有」，候选级回答「检索找到没有」。零交付的题在候选级上照样
+        # 可以得满分——那正是这次要把两者分开的理由。
+        #
+        # 计数为 0 时给 ``None`` 而不是 0.0：**「没有候选数据」与「召回率为零」必须
+        # 分得开**，否则没有候选集的旧 run 会被读成「检索全军覆没」。
+        "candidate_metric_count": candidate_metric_count,
+        "candidate_retrieval_precision_micro": _round_or_none(candidate_metrics, "precision"),
+        "candidate_retrieval_recall_micro": _round_or_none(candidate_metrics, "recall"),
+        "candidate_retrieval_f1_micro": _round_or_none(candidate_metrics, "f1"),
         "media_retrieval_precision_micro": round(media_metrics["precision"], 3)
         if media_metrics and media_metrics["precision"] is not None
         else None,

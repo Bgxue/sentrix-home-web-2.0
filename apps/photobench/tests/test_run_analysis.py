@@ -156,6 +156,76 @@ def test_capability_summary_uses_the_typed_media_path():
     assert summary["media_retrieval_metric_count"] == 1
 
 
+def test_the_candidate_metrics_are_separate_from_the_delivery_metrics():
+    """候选级与交付级是**两组并列的数**，不是一组。
+
+    这一条钉的是「零交付 ≠ 零召回」：同一个 item 上，候选集抓到了 GT（candidate recall
+    = 1.0）而交付集是空的（delivery recall = 0.0）。如果两者合用一格，这道题会被读成
+    「检索全军覆没」——而它其实是「检索找到了，模型没交图」，两件事的修法相反。
+    """
+    items = [
+        _item(
+            retrieval_media_refs=[
+                {"media_type": "image", "media_id": "a.jpg"},
+                {"media_type": "image", "media_id": "b.jpg"},
+            ],
+            media_retrieval_counts={"gt": 2, "predicted": 0, "matched": 0},
+            image_retrieval_counts={"gt": 2, "predicted": 0, "matched": 0},
+            video_retrieval_counts={"gt": 0, "predicted": 0, "matched": 0},
+            candidate_retrieval_counts={"gt": 2, "predicted": 2, "matched": 2},
+            retrieval_recall=0.0,
+        )
+    ]
+
+    summary = analysis.capability_summary(items)
+
+    assert summary["media_retrieval_recall_micro"] == 0.0
+    assert summary["candidate_retrieval_recall_micro"] == 1.0
+    assert summary["candidate_retrieval_precision_micro"] == 1.0
+    assert summary["candidate_metric_count"] == 1
+
+
+def test_a_run_without_candidates_reports_none_not_zero():
+    """**「没有候选数据」与「召回率为零」必须分得开。**
+
+    没有候选集的旧 run 若被读成 0.0，会被当成「检索全军覆没」，而它只是那次没记这件事。
+    分母为 0 时给 ``None``。
+    """
+    items = [
+        _item(
+            retrieval_media_refs=[
+                {"media_type": "image", "media_id": "a.jpg"},
+                {"media_type": "image", "media_id": "b.jpg"},
+            ],
+            media_retrieval_counts={"gt": 2, "predicted": 0, "matched": 0},
+            image_retrieval_counts={"gt": 2, "predicted": 0, "matched": 0},
+            video_retrieval_counts={"gt": 0, "predicted": 0, "matched": 0},
+            retrieval_recall=0.0,
+        )
+    ]
+
+    summary = analysis.capability_summary(items)
+
+    assert summary["candidate_metric_count"] == 0
+    assert summary["candidate_retrieval_recall_micro"] is None
+
+
+def test_the_recall_layer_reads_the_candidate_set_when_there_is_one():
+    """归因表的 R 层问的是**检索**，不是交付。
+
+    这一格此前用的是 ``retrieval_recall``——分母 GT、分子**交付集**，于是零交付的题
+    R 层必然亮红（实测 424 道），而那些题里有相当一部分检索其实抓到了。``source`` /
+    ``recall_source`` 标出用的是哪一档口径，免得两批 run 的 R 层被当成同一个数比。
+    """
+    with_candidates = analysis.derive_attribution(_item(candidate_retrieval_recall=1.0, retrieval_recall=0.0))
+    without = analysis.derive_attribution(_item(retrieval_recall=1.0))
+
+    assert with_candidates["layers"]["R"] == "pass"
+    assert with_candidates["recall_source"] == "candidate"
+    assert without["recall_source"] == "delivery"
+    assert "交付口径" in without["detail"]["R"]
+
+
 def test_capability_summary_excludes_unanswerable_questions_from_retrieval_metrics():
     items = [
         _item(answerability="unanswerable", retrieval_image_ids=["a.jpg"]),

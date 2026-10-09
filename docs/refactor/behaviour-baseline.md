@@ -113,6 +113,50 @@
 | `max_search_calls` 硬收敛 | 1 | `backend/agent_runtime/runtime.py:1895` |
 | 本地模型 max_tokens 上限 | min(1501, 4400 - prompt_tokens)，下限 64 | `backend/app.py:2680-2692` |
 
+> **2026-10-09 修正（§3.3）：`4400` 那个上限不再照搬，下限 64 被删掉。**
+> `4400` 是照 **1.0 自己**的 `max_model_len = 4501` 算的（1.0 注释原文：「Phase H H4：
+> max_model_len=4501 的硬上限保护」）。2.0 换了端点，窗口是 **6144**
+> （`--ctx-size 24576 ÷ --parallel 4`），常量没跟着换——于是 `prompt > 4336` 时公式给
+> 负数、被下限 64 抬起来，**发出一个「窗口其实装得下、但输出只够写半个 JSON」的请求**，
+> 端点回 500（解析失败）或 400（超窗），而用户看到的是「模型服务不可用」。实测两轮
+> 487 题里 22 道是这么来的。现在窗口由 `Settings.vlm_context_tokens` 给（**部署事实**，
+> 与「模型名问端点」同一条理由），剩余不足 `MIN_USABLE_OUTPUT_TOKENS = 256` 时**不
+> 发请求**，抛 `PromptTooLongError` 让调用方压缩历史再试。
+
+> **2026-10-09 修正（§3.4A）：工具计价口径**。1.0 只把**执行成功**的调用计入工具预算
+> （`tool_policy.py:61-62`），2.0 此前照抄。**那条口径的前提是 1.0 在被拒时
+> `break` 结束回合**（`runtime.py:3318`），拒绝不会再来一次；2.0 把拒绝当普通工具结果
+> 发回、允许重试，于是同一件事**照常烧掉一个模型步**（实测 762 次被拒里 426 步是
+> 「整步全被拒」，占 2667 步的 16%）。2.0 改成数**所有工具往返**（`tool_round_trips`），
+> 由此 `6(往返) + 1(作答) + 1(L2) = 8 = max_steps` 这条不变量才真的成立——此前只是
+> 假成立。**这是一处有意的偏离，不是对齐 1.0。**
+
+### 2026-10-09：助手链路的七处修正
+
+依据 `docs/refactor/2026-10-08-assistant-fixes-implementation-plan.md`。**只有这一节是
+2.0 的当前行为**，上面各表是 1.0 的记录。
+
+| # | 项 | 1.0 | 2.0 现在 | 为什么 |
+|---|---|---|---|---|
+| §3.1 | 检索 preview 的字段 | `_RETRIEVAL_PREVIEW_KEEP` 7 个字段 + 复合 `evidence_summary`（caption → activity → place → objects[:8] → clothing[:8] → 文字：…，单段 120 字 / 整串 300 字上限） | **补齐同一套**，另加 `media_kind` / `level` / 顶层 `can_inspect` | 2.0 只暴露了 `caption` 一个列，而 `Observation` 上有八个。`objects` / `clothing` / `ocr_text` 恰恰是模型要调 `inspect_photo` / `read_photo_text` 才拿得到的东西——精读从 0.97 次/题涨到 3.4 次/题，撞上 `max_inspections = 3` 之后成片被拒（拒绝率 1.4% → 26.7%） |
+| §3.1 | preview 的 `level` | `exact` / `strong` / `approximate`，判据是「是不是事件成员」（`tools.py:1770`） | **同三个词，判据换成 `fusion.evidence_class_for`**：`anchor → exact`、`semantic → strong`、`expander → approximate` | 1.0 那个判据在 2.0 没有对应物；而 2.0 的融合层一直在算 `evidence_class`，只是 `RetrieveEvidence` 转 `EvidenceHit` 时把它丢了 |
+| §3.1 | preview 每页条数 | `preview[:5]` | **6**（`ResultSet.page_size`） | 1.0 那个 5 是它自己的上限裁切，没有证据说 5 比 6 好 |
+| §3.1 | preview 缺失时的键 | 键恒在、值取空 | **同** | 空值的意思是「这张图没记录到」，缺键会让模型以为链路坏了 |
+| §3.2 | 每一转发几份工具契约 | JIT，`LITE_TOOL_SCHEMAS` 每工具 <40 token，单步 150–300 token | **JIT**，`ToolSpec.brief`（≤40 字）+ `jit.select_tools`。实测第一转 863 字符 / 检索后 1839 / 交付题 1246（全量是 5509） | 2.0 原先每转发全量八份完整 schema = 5509 字符 ≈ 2704 token；1.0 的真实 `prompt_tokens` 中位数是 1437 |
+| §3.2 | JIT 剪枝的效力 | **只剪提示词渲染**，准入白名单是 `profile.tools`——模型看不见但仍能调 | **剪掉即不能调**（原生 `tools` 字段既是广告也是约束） | 所以 2.0 的规则一律**比 1.0 保守**：只剪「现在根本用不上」的。`get_result_page` 只要已有结果集就一直在——`photo_set` 销账不等于候选看完了（一页 6 条、结果集最多 12 条） |
+| §3.3 | max_tokens | `min(1501, 4400 - prompt)`，下限 64 | **`min(1501, context - prompt)`**，`context` 由 `Settings.vlm_context_tokens` 给（生产 6144）；剩余 < 256 时抛 `PromptTooLongError`，调用方压缩一整轮工具往返后再试一次 | 见上面 §3.3 那段 |
+| §3.4A | 工具计价 | 只数**成功**的调用 | **数所有工具往返**（`tool_round_trips`） | 见上面 §3.4A 那段 |
+| §3.4C | 工具额度用尽时 | 1.0 被拒即 `break` 结束回合 | **一个工具都不发**（`select_tools` 返回空集），模型只剩「说话」 | 实测 `step_budget_exhausted` 的 123 道里 **102 道判 0、2 分一道没有**——根子是模型到最后几步仍在撞墙，从没被逼着开口 |
+| §3.5 | 收尾前的一次性提醒 | 三条（`structured_fact_reminder` / `gate_unattempted` / `fabrication_check`），各一个 `*_prompted` 标志 | **搬回同样三条**，闩用 2.0 既有的 `block_guard_code` | 实测 212 道声明 `delivered_photo`、145 道零交付，而这 145 道里交付工具**一次都没被调用过**；`visible_text` 155 道未满足，其中 147 道从未调用过 `read_photo_text`。两条都不是检索失败，是**规划与执行脱节**——工具层看不见它，因为没有任何一次调用是错的 |
+| §3.6 | 规划提示词的 `delivered_photo` | 无条件：「声明 photo_set……**同时声明** delivered_photo」 | **有条件**：只有用户明确要看图时才同时声明 | **有意的偏离。** 实测 487 道里 212 道声明了 `delivered_photo`，而问题文本里真正要求看图的只有 **3 道** |
+| §3.7 | `delivery_contradiction` 规则 | 有（`final_guard.py:106-112`） | **已删除**，连同它的输入 `delivery_state` / `delivered_count` | 判据取不到（`deliver()` 成功恒 ≥ 1、失败记成 `error` 被 `from_state` 跳过），且前提变了：W6 之后交付字段必填，零交付是**明确写下的 `[]`** 而不是遗漏。让它活起来会在约 300 道题上各花一个模型步，打回的是模型的显式选择 |
+| §3.8 | 候选集 | item 里有 `retrieved_candidate_media` | **有**（`TurnRecord.retrieved_candidates` → `agent_turns.candidates_json` → 终态载荷 → `item["retrieved_candidate_media"]` + `candidate_retrieval_*`） | 见「2.0 不再暴露的轨迹」那一节 |
+
+`all_requested_but_has_more` **保留**：它读的是 `result_mode == "all"`，而 2.0 的工具契约里
+没有 `mode` 参数，所以那条规则照旧够不着——但它**不是死代码**，它与 §3.7 那条的区别在于
+它的输入是「将来会重新引入的东西」（1.0 的 `search_memories(mode=...)`），而 §3.7 那条的
+输入是被 2.0 的**设计**排除掉的。
+
 ## 事件
 
 > **2026-09-22 修正**：本节的「信号」一行原文写的是**四个**信号（时间 / GPS 2km /
@@ -651,7 +695,7 @@ S9b-2 把 1.0 `BenchmarkRun`（`benchmark_orchestrator.py:1895`）的六个相�
 | `debug_trace` / `retrieval_trace` / `execution_trace` | **没有**。`ProgressEvent` 的 payload 里只有 `tool` 与 `tool_call_id`，**没有入参、没有结果** |
 | `tool_trace`（含 `debug_asset_ids` / observation） | **没有**。工具结果只进 `agent_turns.attachments_json`（且只有交付那几张） |
 | `answer_grounding` / `tool_perf` / `agent2_trace` | **不存在** |
-| `retrieved_candidate_media` / `evidence_source_media` / `image_ranking` | **拿不到候选集**。2.0 只给**交付集**（`result.attachments[].asset_id`），所以主链只算交付口径的召回/精确率，**不编候选集指标** |
+| `retrieved_candidate_media` / `evidence_source_media` / `image_ranking` | **2026-10-09 起部分收回（§3.8）。** 原先「拿不到候选集」——2.0 只给交付集（`result.attachments[].asset_id`），于是 PhotoBench 只能把 `retrieval_media_refs` 直接赋成 GT：分母是 GT、分子是**交付集**，394 道零交付的题 recall 一道不差全是 0.0，**分不出「检索没找到」与「没交付」**。现在 `agent_turns.candidates_json` 落库、终态载荷里 `retrieved_candidates` 与 `attachments` 分开，PhotoBench 新增 `candidate_retrieval_*` 一族，归因表的 R 层改读**候选级**口径并用 `recall_source` 标出来源。`evidence_source_media` / `image_ranking` 仍**没有**——前者要工具级观察（2.0 的 `ProgressEvent` 仍然只带 `tool` 与 `tool_call_id`），后者要候选**顺序**，而 `retrieved_candidates` 是有序的、可以补，属于下一件事 |
 | 交付集的媒体类型 | `AttachmentSummary` 只有 `handle` / `asset_id` / `file_name`，**没有 media_type**——类型由 `assets` 表回查 |
 | `agent_turn_events` 表 | 存在的，但**唯一读取者**是轮询与 SSE 两个端点，没有别的指标端点 |
 

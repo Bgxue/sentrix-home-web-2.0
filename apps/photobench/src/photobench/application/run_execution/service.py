@@ -75,6 +75,7 @@ from photobench.domain.runs.execution import (
     normalize_media_refs,
     resolve_gt_media,
     resolve_predicted_media,
+    retrieved_candidate_asset_ids,
     safe_slug,
     selected_asset_ids,
     summarize_progress,
@@ -1426,6 +1427,12 @@ class RunExecution:
             predicted_media = resolve_predicted_media(selected, assets_by_name)
             gt_media = resolve_gt_media(gt_refs, assets_by_name, predicted_media)
             metrics = modality_metrics(gt_refs, predicted_media)
+            # **候选级指标单独算一份。** ``metrics`` 那一份比的是「交付集 vs GT」——它
+            # 回答「模型交对了没有」，回答不了「检索找到没有」。两者分开之后，
+            # 「零交付」不再必然等于「零召回」：候选集里有没有 GT 是**检索通道**的分数。
+            candidate_ids = retrieved_candidate_asset_ids(last_result)
+            candidate_media = resolve_predicted_media(candidate_ids, assets_by_name)
+            candidate_metrics = modality_metrics(gt_refs, candidate_media)
             selected_keys = {
                 (str(entry.get("media_type")), str(entry.get("file_name"))) for entry in predicted_media
             }
@@ -1450,6 +1457,15 @@ class RunExecution:
                         for entry in gt_media
                         if (str(entry["media_type"]), str(entry["file_name"])) in selected_keys
                     ),
+                    # **候选级（检索通道）**：分子分母都取检索交给模型的那一批。
+                    # 与下面那组「交付级」并列，不是它的替代——两个都要有，否则
+                    # 「检索没找到」与「找到了没交付」分不开。
+                    "retrieved_candidate_asset_ids": candidate_ids,
+                    "retrieved_candidate_media": candidate_media,
+                    "candidate_retrieval_counts": candidate_metrics["media"],
+                    "candidate_retrieval_recall": candidate_metrics["media"]["recall"],
+                    "candidate_retrieval_precision": candidate_metrics["media"]["precision"],
+                    "candidate_retrieval_f1": candidate_metrics["media"]["f1"],
                     "media_retrieval_counts": metrics["media"],
                     "image_retrieval_counts": metrics["image"],
                     "video_retrieval_counts": metrics["video"],

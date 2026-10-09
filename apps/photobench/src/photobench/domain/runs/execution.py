@@ -182,6 +182,24 @@ def selected_asset_ids(turn_result: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def retrieved_candidate_asset_ids(turn_result: dict[str, Any]) -> list[str]:
+    """2.0 的**候选集**：``result.retrieved_candidates``——检索捞回来的那批 ``asset_id``。
+
+    **它与 ``selected_asset_ids`` 是两个不同的问题**，合起来才分得出锅：
+    ``selected`` 是「模型从候选里挑了哪几张交出去」，这个是「检索给了它哪些」。
+    只有交付集的时候，「检索没找到」与「找到了没交付」在指标上完全一样——而这才是
+    ``retrieval_*`` 那一族此前失真的根因：分母是 GT、分子是交付集，394 道零交付的题
+    recall 一道不差全是 0.0。
+
+    契约在 ``api/schemas/assistant.py`` 的 ``CompleteEventPayload.retrieved_candidates``。
+    老结果（这次放宽之前跑的）没有这个字段，读到**空列表**而不是回填交付集——
+    回填就又把两件事合成一件了。
+    """
+    candidates = turn_result.get("retrieved_candidates")
+    ids = [str(item) for item in (candidates or []) if item]
+    return list(dict.fromkeys(ids))
+
+
 def resolve_predicted_media(
     asset_ids: list[str], assets_by_name: dict[str, list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -291,9 +309,10 @@ def modality_metrics(
 ) -> dict[str, dict[str, Any]]:
     """1.0 ``:1206``：总量、图片、视频三组 triplet。
 
-    ``predicted_media`` 是**交付集**（2.0 只有这一个集），所以这里算出来的就是
-    1.0 口径里的 delivery 指标——1.0 把那三个集分开算正是因为它的候选集与交付集
-    是两份数据；2.0 只有一份，那就只用一份，不假装有两个。
+    ``predicted_media`` 是**哪一批**由调用方决定，函数本身不关心。调用方现在传两次：
+    一次交付集（``predicted_media``）、一次候选集（``retrieved_candidate_media``）——
+    1.0 把那三个集分开算正是因为它的候选集与交付集是两份数据；2.0 此前只有交付一份，
+    于是「检索没找到」与「找到了没交付」在指标上完全一样。
     """
     gt_keys = {media_key(ref.get("media_type"), ref.get("media_id")) for ref in gt_refs}
     predicted_keys = {
