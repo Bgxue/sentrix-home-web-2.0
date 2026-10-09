@@ -507,28 +507,34 @@ class RunTurn:
             except PromptTooLongError as error:
                 # 提示词撑爆了窗口。**先压历史再试一次**——这是它区别于别的模型服务
                 # 故障的地方：真因在调用方这一侧，压缩就解决得了。
-                compacted = _drop_oldest_tool_round_trip(messages)
-                if compacted is None:
-                    log.warning("提示词超预算，而历史里已经没有可压缩的工具往返: %s", error)
-                    return self._model_error_stop(session, error)
-                self._publish(
-                    session,
-                    state.emit(
-                        ProgressStage.RECOVERING,
-                        ProgressStatus.RUNNING,
-                        "上下文太满，正在压缩早先的工具往返…",
-                        kind="guard",
-                        payload={"code": "prompt_too_long"},
-                    ),
-                )
-                messages = compacted
-                try:
-                    reply = self._model.complete(messages, specs)
-                except Exception as retry_error:
-                    # **只压一次。** 再撑爆说明这一轮的提示词本身（system + 问题 +
-                    # 最新一轮工具结果）就超了窗口，继续丢只会把证据丢光还不一定装得下。
-                    # 这时如实收尾，理由用既有的 ``MODEL_ERROR``，不新造枚举。
-                    return self._model_error_stop(session, retry_error)
+                #
+                # **一直丢到装得下为止**，不是丢一轮就重试。一次工具往返可能只占几百
+                # token，而超出的量可能上千——丢一轮不够时原先的实现直接收尾，把一次
+                # 「压缩就能救回来」的回合判成了模型故障。每次丢一整轮，所以这个循环
+                # 的步数上界就是历史里的往返数。
+                while True:
+                    compacted = _drop_oldest_tool_round_trip(messages)
+                    if compacted is None:
+                        log.warning("提示词超预算，而历史里已经没有可压缩的工具往返: %s", error)
+                        return self._model_error_stop(session, error)
+                    messages = compacted
+                    self._publish(
+                        session,
+                        state.emit(
+                            ProgressStage.RECOVERING,
+                            ProgressStatus.RUNNING,
+                            "上下文太满，正在压缩早先的工具往返…",
+                            kind="guard",
+                            payload={"code": "prompt_too_long"},
+                        ),
+                    )
+                    try:
+                        reply = self._model.complete(messages, specs)
+                        break
+                    except PromptTooLongError:
+                        continue
+                    except Exception as retry_error:
+                        return self._model_error_stop(session, retry_error)
             except Exception as error:
                 return self._model_error_stop(session, error)
 

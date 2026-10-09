@@ -16,8 +16,13 @@
    模板容忍，严格的 Qwen 模板直接 400（PhotoBench 上 84% 的题在第二步 preflight 挂掉）。
    1.0 的修法是 ``_merge_system_constraint`` 把新约束折进 messages[0]；2.0 更简单：
    系统提示词只在开头拼一次，之后不再往里加东西。
-3. **``max_tokens`` 按剩余上下文算。** 1.0 是 ``min(1501, 4400 - prompt_tokens)``，下限
-   64（``app.py:2680-2692``）。8100 的 ``--ctx-size`` 是 8192，沿用同一个公式。
+3. **``max_tokens`` 按剩余上下文算，而窗口是部署事实。** 1.0 是
+   ``min(1501, 4400 - prompt_tokens)``、下限 64（``app.py:2680-2692``），那个 4400 是照
+   它自己的 ``max_model_len = 4501`` 算的。2.0 的窗口由 ``Settings.vlm_context_tokens``
+   给（生产 6144 = 8100 的 ``--ctx-size 24576 ÷ --parallel 4``）；**剩余不足 256 时
+   不发请求**，抛 ``PromptTooLongError`` 让调用方压缩历史——那条下限 64 只会把
+   「提示词太大」伪装成「模型服务挂了」。估算**必须把 tools 的 schema 一起算进来**，
+   它走的是同一个窗口。
 4. **思考通道在这里剥掉。** Gemma 4 的推理写在 ``<|channel>thought\\n……<channel|>`` 里，
    8100 没开 ``--reasoning-parser``，于是这一段原样落在 ``content`` 上。实测（2026-09-25）
    工具往返两轮之后模型给出的最终 content 是
@@ -63,9 +68,18 @@ MAX_ANSWER_TOKENS = 1501
 # ``final_answer`` 那种最长的一次调用留的余量。
 MIN_USABLE_OUTPUT_TOKENS = 256
 
-# 估算提示词 token 时给每个字符记的权重。中文在 gemma 的词表里大致一个字一到两个
-# token，取 1/2 是 1.0 的旧口径（它偏乐观，所以下面还要再留一道 margin）。
-_TOKENS_PER_CHAR = 0.5
+# 估算提示词 token 时给每个字符记的权重。**这是实测值，不是拍的。**
+#
+# 2026-10-09 在 8100 上实测（``qwen35-q4km``）：1449 个汉字的段落 → **902** prompt
+# tokens，即 **0.622 token/字**。原先写 0.5 是照 1.0 的旧口径抄的，**偏乐观 24%**——
+# 于是一条「估算说还装得下」的请求会被端点以
+# ``request (6591 tokens) exceeds the available context size`` 回 400。
+# 实测那一轮 487 题里 **16 道**是这么死的（358 题时统计）。
+#
+# 取 0.7 而不是实测的 0.622，是因为这道闸的**两个方向的代价不对称**：估高了只是少发
+# 几个请求（走压缩历史那条路，用户无感），估低了是一次必然失败的调用（用户看到
+# 「模型服务不可用」）。宁可保守。
+TOKENS_PER_CHAR = 0.7
 
 # 不传 ``context_tokens`` 时用的窗口。**只是为了测试与本地起得来**，生产必须由
 # ``Settings.vlm_context_tokens`` 给——窗口是部署事实（见该字段的注释）。
@@ -240,8 +254,8 @@ class OpenAIChatModel:
     def _post(
         self, model_name: str, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
     ) -> httpx.Response:
-        prompt_tokens = self.estimate_prompt_tokens(messages)
-        budget = self._max_tokens(messages)
+        prompt_tokens = self.estimate_prompt_tokens(messages, tools)
+        budget = self._max_tokens(messages, tools)
         if budget < MIN_USABLE_OUTPUT_TOKENS:
             # **不发这个请求。** 发出去的结果只有两种，两种都会说错原因：端点回 500
             # （生成被截断、JSON 解析不了）或 400（超窗），而 ``complete`` 把它们统一
@@ -270,15 +284,24 @@ class OpenAIChatModel:
             raise ModelServiceError(f"模型端点 {self._base_url} 不可达：{error}") from error
 
     @staticmethod
-    def estimate_prompt_tokens(messages: Sequence[ChatMessage]) -> int:
-        """提示词 token 的粗估：字符数的一半。
+    def estimate_prompt_tokens(messages: Sequence[ChatMessage], tools: Sequence[ToolSpec] = ()) -> int:
+        """提示词 token 的粗估。
 
-        中文在 gemma 的词表里大致一个字一到两个 token。估得准不准只影响**生成长度上限
-        与那条拒绝判据**，不影响正确性；真要精确就得再打一次 tokenize 端点。
+        **``tools`` 必须一起算进来。** 它走的是同一个上下文窗口，而原先这一项**根本
+        没有被计入**——JIT 之后每转仍要带 900–1800 字符的工具 JSON（工具名 + ≤40 字的
+        brief + 参数 schema），那几百 token 是实打实占着窗口的。漏掉它就是漏掉一整块：
+        估算说「还装得下」，端点回
+        ``request (6591 tokens) exceeds the available context size``。
+
+        估得准不准只影响**生成长度上限与那条拒绝判据**，不影响正确性；
+        真要精确就得再打一次 tokenize 端点。
         """
-        return int(sum(len(message.content) for message in messages) * _TOKENS_PER_CHAR)
+        characters = sum(len(message.content) for message in messages)
+        if tools:
+            characters += len(json.dumps(list(openai_tools(tools)), ensure_ascii=False))
+        return int(characters * TOKENS_PER_CHAR)
 
-    def _max_tokens(self, messages: Sequence[ChatMessage]) -> int:
+    def _max_tokens(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec] = ()) -> int:
         """这次生成最多能写多少 token。**不含任何「能发就发」的下限。**
 
         旧公式是 ``max(64, min(1501, 4400 - prompt))``——那个 64 的下限把「提示词已经
@@ -286,5 +309,5 @@ class OpenAIChatModel:
         现在剩余量不足 ``MIN_USABLE_OUTPUT_TOKENS`` 时**不发**，由 ``_post`` 抛
         ``PromptTooLongError``，调用方压缩历史再试。见 ``ports.PromptTooLongError``。
         """
-        available = self._context_tokens - self.estimate_prompt_tokens(messages)
+        available = self._context_tokens - self.estimate_prompt_tokens(messages, tools)
         return min(MAX_ANSWER_TOKENS, available)

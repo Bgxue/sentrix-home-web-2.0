@@ -16,18 +16,19 @@ import pytest
 
 from sentrix.domain.assistant.models import ChatMessage, ChatRole, ToolCall
 from sentrix.domain.assistant.ports import ModelServiceError, PromptTooLongError
-from sentrix.domain.assistant.tools import TOOL_SPECS
+from sentrix.domain.assistant.tools import TOOL_SPECS, openai_tools
 from sentrix.infrastructure.assistant.chat_client import (
     MAX_ANSWER_TOKENS,
+    TOKENS_PER_CHAR,
     ChatModelError,
     OpenAIChatModel,
 )
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
 #: 这些用例自己指定窗口，**与生产的 6144 无关**——被测的是「预算从窗口算出来」这条
-#: 关系。取一个小值，构造超预算的提示词不用真的写 6000 个 token；同时要大到
-#: 「1000 字的提示词 + ``MIN_USABLE_OUTPUT_TOKENS``」塞得下，否则所有用例都会走拒绝那条路。
-CONTEXT_TOKENS = 1000
+#: 关系。要大到「1000 字的提示词 + 全量工具 schema + ``MIN_USABLE_OUTPUT_TOKENS``」
+#: 塞得下（schema 那一份按 0.7 算就有 3856 token），否则所有用例都会走拒绝那条路。
+CONTEXT_TOKENS = 6000
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -389,10 +390,43 @@ def test_the_output_budget_is_derived_from_the_real_window(server: str):
 
     context_model(server).complete(messages_, TOOL_SPECS)
 
-    prompt_tokens = OpenAIChatModel.estimate_prompt_tokens(messages_)
+    prompt_tokens = OpenAIChatModel.estimate_prompt_tokens(messages_, TOOL_SPECS)
     sent = _Handler.received[0]["body"]["max_tokens"]
     assert sent == min(MAX_ANSWER_TOKENS, CONTEXT_TOKENS - prompt_tokens)
     assert sent != min(MAX_ANSWER_TOKENS, 4400 - prompt_tokens)
+
+
+def test_the_estimate_counts_the_tool_schemas(server: str):
+    """**工具 schema 走的是同一个上下文窗口，必须一起算。**
+
+    原先这一项根本没有被计入——JIT 之后每转仍要带 900–1800 字符的工具 JSON，那几百
+    token 是实打实占着窗口的。漏掉它的后果是实测出来的：2026-10-09 那一轮 487 题里
+    **16 道**以「估算说装得下、端点回 400（``request (6591 tokens) exceeds the
+    available context size``）」死掉。
+    """
+    messages_ = [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, "海边")]
+
+    without = OpenAIChatModel.estimate_prompt_tokens(messages_)
+    with_tools = OpenAIChatModel.estimate_prompt_tokens(messages_, TOOL_SPECS)
+
+    assert with_tools > without
+    # 差的就是那几份 schema：逐字节算得出来，不是「大概多一点」。
+    # 写成**代码用的那个式子**而不是「两者的差」，因为 int() 会把两次取整的误差
+    # 落成 ±1——那与「有没有算 schema」无关，却会让断言随机红。
+    schemas = len(json.dumps(list(openai_tools(TOOL_SPECS)), ensure_ascii=False))
+    characters = sum(len(message.content) for message in messages_)
+    assert without == int(characters * TOKENS_PER_CHAR)
+    assert with_tools == int((characters + schemas) * TOKENS_PER_CHAR)
+
+
+def test_the_estimate_is_conservative_against_the_measured_ratio(server: str):
+    """系数不许回到「乐观」那一侧。
+
+    ``_TOKENS_PER_CHAR`` 是**实测**出来的：1449 个汉字 → 902 prompt tokens，即 0.622。
+    这道闸两个方向的代价不对称——估高了少发几个请求（走压缩，用户无感），估低了是
+    一次必然失败的调用（用户看到「模型服务不可用」）。所以系数必须 ≥ 实测值。
+    """
+    assert TOKENS_PER_CHAR >= 0.622
 
 
 def test_a_short_prompt_gets_the_full_answer_budget(server: str):
