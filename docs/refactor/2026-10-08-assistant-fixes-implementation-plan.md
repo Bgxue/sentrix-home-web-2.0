@@ -611,13 +611,24 @@ channel_trace: visual_ann=unavailable, text_ann=unavailable
 `channel_trace` 里 `visual_ann` 是 `ok`）。启动方式见
 `infrastructure/models/wemm.py` 的模块 docstring。
 
-### 7.4 一处**没做**、要你定的
+### 7.4 `group_photo_*`：**做了，但判据换了**（2026-10-09 补记二）
 
-§2 的决定表写着「**B 类全补**」，但 §3.1 的详细改法（6 条）里没有 B 类那三个字段：
-`group_photo_count` / `group_photo_sizes` / `group_photo_rows`。
+§2 的决定表写着「B 类全补」，而 §3.1 的详细改法（6 条）里没有这三个字段。去看 1.0
+到底怎么算之后，决定**保留字段名与形状、换掉判据**（提交 `8166f63`）。
 
-它们是 1.0 `_RETRIEVAL_TOP_KEEP` 里的，含义是「这一组其实有 N 张」——1.0 的
-`_asset_group_key` 把视频关键帧与事件近重复归成一组，预览只给一张代表。**2.0 没有这套
-分组机制**（grep 全库，一行都没有），补它等于新做一个「近重复归组」特性，不是补一个字段。
+**§7.4 初稿把这套字段认成了「近重复归组」的产物——那是错的。** `_asset_group_key`
+（`tools.py:417`）服务于别的东西（预览去重与 `event_group_count`）。真正的
+`group_photo_*` 在 `tools.py:1085`：**「合影人数」**。
 
-**本次按 §3.1 的详细清单做了那 6 条，这三个没做。** 做不做、什么时候做，待定。
+**1.0 的判据**：`if re.search(r"合影", display_query or user_goal)` —— 只有问题里出现
+「合影」两个字时才算，人数靠正则从 `caption` / `activity` 的中文散文里抠「N名 / N人」。
+它与 §4 已经否掉的 `recommended_resolution` 是同一类东西（硬编码题型词 + 判据在问题
+文本上）。
+
+**它服务多少题**：实测 `mixed-image-video-487q.jsonl` 里含「合影」的题 **77 道**，而问
+「一共有几张不同人数的合影」的只有 **1 道**；另外 76 道问的是地点 / 时间 / 是谁，那些
+§3.1 的 preview 已经覆盖了。
+
+**2.0 的做法**：`people_count` 进每条 preview（数据来自人脸绑定 + 观察快照，与
+`query_photo_people` 同一套算法），顶层的三个字段由 `people_count >= 2` 现算、**不按
+关键词门控**。不搬 1.0 的 `description` 那一格（preview 里已有 `evidence_summary`）。

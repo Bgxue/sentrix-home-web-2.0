@@ -99,3 +99,17 @@
 | 1.0 的 `recommended_resolution` | 与规划器重复、硬编码题型词（`合影\|聚餐\|旅行`）、判据在问题文本上、未验证 |
 | 1.0 的第四条提醒（`is_candidate_mode` 的「你尚未检索相册，禁止直接猜测回答」） | 它**没有** `prompted` 标志（不是一次性的），会一直拦；2.0 已有 `MIN_REQUIREMENTS = 1` 堵住零需求 |
 | `HISTORY_LIMIT = 8` | 不是回归。真正的缺口是**多轮会极快耗尽上下文窗口**，而 1.0 也没真正设计过多轮对话。登记为已知缺口 |
+
+---
+
+## D6 · `group_photo_*` 的判据换成数据（§7.4）
+
+| | 1.0 | 2.0 |
+|---|---|---|
+| 何时计算 | **只有问题里出现「合影」两个字时**（`tools.py:1085` 的 `re.search(r"合影", …)`） | **总是** |
+| 人数从哪来 | 正则从 `caption` / `activity` 的中文散文里抠「N名 / N人」（带一张中文数字表） | 人脸绑定 + 观察快照（与 `query_photo_people` 同一套算法） |
+| 字段 | `group_photo_count` / `group_photo_sizes` / `group_photo_rows`（含 `description: caption[:240]`） | 同名字段与形状；**去掉 `description`**（preview 里已有 `evidence_summary`）；另加每条 preview 的 `people_count` |
+
+**理由**：见计划文档 §7.4。要点是 1.0 的判据与 §4 已经否掉的 `recommended_resolution`
+同类（硬编码题型词），而它服务的只有 487 道题里的 1 道；`people_count` 还顺带补掉另一个
+洞——`people` 只有已确认的人名，只看它会把「四个人合影、认出来一个」读成「一个人」。
