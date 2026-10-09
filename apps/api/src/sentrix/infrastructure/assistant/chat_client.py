@@ -40,7 +40,11 @@ from typing import Any
 import httpx
 
 from sentrix.domain.assistant.models import ChatMessage, ChatRole, ModelReply, ToolCall
-from sentrix.domain.assistant.ports import ModelServiceError, PromptTooLongError
+from sentrix.domain.assistant.ports import (
+    ModelServiceError,
+    OutputTruncatedError,
+    PromptTooLongError,
+)
 from sentrix.domain.assistant.tools import ToolSpec, openai_tools
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
@@ -60,7 +64,16 @@ _CHANNEL_CLOSE = "<channel|>"
 # ``max(MIN_ANSWER_TOKENS, …)`` 抬成 64——**发出一个「窗口装得下、但输出只够写半个
 # JSON」的请求**，端点回 500（解析失败）或 400（超窗），而用户看到的是「模型服务不可用」。
 # 实测两轮 487 题里 22 道是这么来的。窗口现在从 ``Settings.vlm_context_tokens`` 传进来。
-MAX_ANSWER_TOKENS = 1501
+# ``1501`` 被改成 ``2048``，理由与上面删掉 4400 是同一条：**它也是从 1.0 自己的窗口推
+# 出来的**（``4501 - 101`` 的安全余量），端点换了之后那个数就不再有意义。
+#
+# **它现在的职责只剩「延迟护栏」，与窗口无关**——窗口那部分由 ``context - prompt`` 管
+# （见 ``_max_tokens``）。留着它的理由是一个跑飞的生成会拖过 180s 的墙钟预算。
+#
+# 2048 的依据是实测：20261009 那一轮 11 道题以「工具调用 JSON 被截断」死掉，最大的一处
+# 断在 **5683 个字符**（参数是 ASCII 为主的 JSON，约 1500–1700 token）——**正好卡在 1501
+# 上**。这是那批失败的直接成因。
+MAX_ANSWER_TOKENS = 2048
 
 # 无论上下文多满都必须留下的最小生成量。**它不是 64。**
 # 一次工具调用的 JSON（工具名 + 一到四个参数 + ``selected_image_handles`` 数组）写不完
@@ -155,6 +168,25 @@ def split_thought_channel(text: str) -> tuple[str, str]:
     return "".join(kept), "\n".join(thought)
 
 
+#: llama.cpp 解析不了工具调用参数时正文里的那句。**按它认「被切断」，不按状态码**——
+#: 500 也可能是别的意思，而这一句是端点自己说出来的、
+#: 唯一能区分「写不完」与「端点坏了」的证据。
+_TRUNCATED_TOOL_CALL = "Failed to parse tool call arguments"
+
+
+def _is_truncated_tool_call(response: httpx.Response) -> bool:
+    """这次失败是不是「工具调用的 JSON 被切断」。
+
+    **按端点的原话认，不按状态码。** 500 还可能是别的东西；而这个说法只在
+    ``max_tokens`` 把生成切在半句上时出现。认错方向的代价不对称：判成截断 → 压缩重试
+    一次（最多白花一个模型步）；判成服务故障 → 用户看到「模型服务不可用」而端点好好的，
+    而且**下一轮还会一模一样地失败**。
+
+    措辞变了会静默退化成 ``ModelServiceError``（也就是现在的行为），不会更糟。
+    """
+    return _TRUNCATED_TOOL_CALL in response.text
+
+
 def _read_tool_calls(raw: object) -> tuple[ToolCall, ...]:
     if not isinstance(raw, list):
         return ()
@@ -224,6 +256,16 @@ class OpenAIChatModel:
                 response = self._post(model_name, messages, tools)
 
         if response.status_code != 200:
+            # **先认「这一句是被切断的」。** llama.cpp 解析不了工具调用的参数时会回 500，
+            # 原因是 ``max_tokens`` 在半句 JSON 上把它切了——那不是端点的问题，是这一轮
+            # 留给输出的余量不够，而余量由提示词决定（腾出上下文，余量就回来）。归成
+            # ``ModelServiceError`` 会让用户看到「模型服务当前不可用」，而那句话在这里
+            # 不成立。实测 20261009 那一轮 11 道题是这么死的。
+            if _is_truncated_tool_call(response):
+                raise OutputTruncatedError(
+                    f"模型端点 {self._base_url} 上的 {model_name} 写工具调用时被截断"
+                    f"（{response.status_code}）：{response.text[:200]}"
+                )
             raise ModelServiceError(
                 f"模型端点 {self._base_url} 上的 {model_name} 返回 {response.status_code}："
                 f"{response.text[:200]}"

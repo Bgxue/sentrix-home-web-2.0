@@ -55,6 +55,22 @@ class PromptTooLongError(ModelServiceError):
     """
 
 
+class OutputTruncatedError(PromptTooLongError):
+    """生成被 ``max_tokens`` 切断，端点因此回 500。
+
+    llama.cpp 的原话是 ``Failed to parse tool call arguments as JSON: … invalid string:
+    missing …``——它拿到的是**半句工具调用 JSON**。实测 20261009 那一轮 11 道题是这么死的，
+    截断位置从 345 到 **5683** 字符不等。
+
+    **它为什么归在 ``PromptTooLongError`` 底下而不是 ``ModelServiceError``。** 它看起来
+    像服务故障（500），但那句话在用户那儿不成立——端点好好的，是**这一轮留给输出的余量
+    不够**。而余量是提示词决定的：腾出上下文，余量就回来。所以两者走**同一条修法**
+    （压缩历史再试），分成两个类只是为了让轨迹说得出是哪一种：
+    ``PromptTooLongError`` 是请求**根本没发**（``_post`` 拦下的），这个是**发出去了、
+    写不完**。
+    """
+
+
 class ChatModel(Protocol):
     """OpenAI 兼容的对话模型端点。2.0 只连它，不管理它的进程。
 

@@ -28,14 +28,27 @@ from sentrix.infrastructure.media.vlm_observer import (
 
 
 class _Endpoint(BaseHTTPRequestHandler):
-    """只会应答 ``/v1/models``；对话端点故意答 503。"""
+    """应答 ``/v1/models``；**记录每个 POST 的请求体**；对话端点默认答 503。
+
+    ``reply`` 不设时故意答 503——``test_a_chat_failure_returns_none`` 要的就是那条路。
+    记录请求体的目的是让「两处是不是共用同一个常量」**可断言**：原先那条用例是拿
+    ``== '{"max": 1501}'`` 断言的，那是把常量抄了一遍，守的是值不是关系。
+    """
+
+    received: list[dict] = []
+    reply: dict | None = None
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
         payload = b'{"object":"list","data":[{"id":"fake-vlm","object":"model"}]}'
         self._send(payload, 200)
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
-        self._send(b'{"error":"boom"}', 503)
+        length = int(self.headers.get("Content-Length") or 0)
+        type(self).received.append(json.loads(self.rfile.read(length) or b"{}"))
+        if type(self).reply is None:
+            self._send(b'{"error":"boom"}', 503)
+            return
+        self._send(json.dumps(type(self).reply).encode(), 200)
 
     def _send(self, payload: bytes, status: int) -> None:
         self.send_response(status)
@@ -46,6 +59,12 @@ class _Endpoint(BaseHTTPRequestHandler):
 
     def log_message(self, *_args: object) -> None:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_endpoint() -> None:
+    _Endpoint.received = []
+    _Endpoint.reply = None
 
 
 @pytest.fixture
@@ -313,8 +332,20 @@ def test_an_unreachable_endpoint_returns_none(image):
     assert observer.observe(image) is None
 
 
-def test_prompt_budget_constant_is_shared_with_the_chat_client():
-    """观察的 JSON 与对话的回答共用同一个 token 上限公式，不再各写一个数。"""
+def test_prompt_budget_constant_is_shared_with_the_chat_client(endpoint, image):
+    """观察的 JSON 与对话的回答**共用同一个常量**，不再各写一个数。
+
+    **断言的是「共用」，不是那个数的值。** 原先这里写死 ``== '{"max": 1501}'``——
+    那正好是「把常量抄一遍」：值一改，红的是测试而不是被测的东西，而这条用例本来要守的
+    「两处是不是同一个来源」反倒没人验。2026-10-09 改 ``1501 → 2048`` 时它就红了，
+    而两处**仍然共用**——测试守错了东西。
+
+    现在直接从**观察器发出去的请求体**里读 max_tokens，与常量比。
+    """
     from sentrix.infrastructure.assistant.chat_client import MAX_ANSWER_TOKENS
 
-    assert json.dumps({"max": MAX_ANSWER_TOKENS}) == '{"max": 1501}'
+    _Endpoint.reply = {"choices": [{"message": {"content": '{"caption": "海边"}'}, "finish_reason": "stop"}]}
+    OpenAIVlmObserver(endpoint, ServedModel(endpoint)).observe(image)
+
+    assert _Endpoint.received, "观察器必须真的发出了请求，否则这条断言什么也没验"
+    assert _Endpoint.received[0]["max_tokens"] == MAX_ANSWER_TOKENS

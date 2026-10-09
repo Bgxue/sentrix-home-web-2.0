@@ -15,7 +15,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from sentrix.domain.assistant.models import ChatMessage, ChatRole, ToolCall
-from sentrix.domain.assistant.ports import ModelServiceError, PromptTooLongError
+from sentrix.domain.assistant.ports import (
+    ModelServiceError,
+    OutputTruncatedError,
+    PromptTooLongError,
+)
 from sentrix.domain.assistant.tools import TOOL_SPECS, openai_tools
 from sentrix.infrastructure.assistant.chat_client import (
     MAX_ANSWER_TOKENS,
@@ -434,7 +438,56 @@ def test_a_short_prompt_gets_the_full_answer_budget(server: str):
 
     chat_model(server).complete(messages(), TOOL_SPECS)
 
-    assert _Handler.received[0]["body"]["max_tokens"] == 1501
+    assert _Handler.received[0]["body"]["max_tokens"] == MAX_ANSWER_TOKENS
+
+
+# ---- 生成被截断：它长得像 500，但不是服务故障 -------------------------------
+
+
+TRUNCATION_500 = {
+    "error": {
+        "code": 500,
+        "message": "Failed to parse tool call arguments as JSON: [json.exception.parse_error.101]"
+        " parse error at line 1, column 5683: syntax error while parsing value"
+        " - invalid string: missing terminating quote; last read: '\"海滩'",
+    }
+}
+
+
+def test_a_truncated_tool_call_is_not_reported_as_a_service_failure(server: str):
+    """**这一条是 20261009 那 11 道题的修复。**
+
+    端点回 500，但原因是 ``max_tokens`` 把工具调用的 JSON 切在半句上——不是端点坏了，
+    是这一轮留给输出的余量不够。归成 ``ModelServiceError`` 会让用户看到「模型服务当前
+    不可用」（端点好好的），而且**下一轮还会一模一样地失败**：提示词没变小，余量就没变多。
+
+    归成 ``PromptTooLongError`` 的子孙，是因为修法是同一条：**压缩历史 → 余量回来**。
+    """
+    _Handler.response = TRUNCATION_500
+    _Handler.status = 500
+
+    with pytest.raises(OutputTruncatedError) as error:
+        chat_model(server).complete(messages(), TOOL_SPECS)
+
+    # 它必须**同时**是 PromptTooLongError：``run_turn`` 的压缩重试按那个类捕获。
+    assert isinstance(error.value, PromptTooLongError)
+    # 文案要说清是「写不完」，不是「服务不可用」。
+    assert "被截断" in str(error.value)
+
+
+def test_an_ordinary_500_is_still_a_service_failure(server: str):
+    """反向：**不能把所有 500 都当成截断**。
+
+    判据是端点正文里那句 ``Failed to parse tool call arguments``——它只在生成被切在
+    半句上时出现。别的 500 仍然是服务故障，用户该被告知去看端点。
+    """
+    _Handler.response = {"error": {"code": 500, "message": "internal server error"}}
+    _Handler.status = 500
+
+    with pytest.raises(ModelServiceError) as error:
+        chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert not isinstance(error.value, PromptTooLongError)
 
 
 # ---- 思考通道不能漏进用户可见的答案 -------------------------------------------
