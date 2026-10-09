@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -47,6 +48,7 @@ from sentrix.application.assistant.tools import (
 from sentrix.domain.assistant import emergency
 from sentrix.domain.assistant.evidence_ledger import EvidenceLedger, EvidenceType
 from sentrix.domain.assistant.final_guard import FinalGuard, GuardFacts, answered_with_gap
+from sentrix.domain.assistant.jit import select_tools
 from sentrix.domain.assistant.models import (
     Attachment,
     ChatMessage,
@@ -65,12 +67,13 @@ from sentrix.domain.assistant.ports import (
     ChatModel,
     ConversationRepository,
     ModelServiceError,
+    PromptTooLongError,
     TurnRepository,
 )
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
 from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
-from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOL_SPECS, TOOLS_BY_NAME
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOLS_BY_NAME
 from sentrix.domain.errors import DomainError
 
 log = logging.getLogger("sentrix.assistant.run_turn")
@@ -110,6 +113,68 @@ STALLED_NUDGE = (
 # 连续几轮全白跑之后提醒。取 2：一轮是偶发（某张图刚好读不到字），两轮就是卡住了。
 STALLED_ROUNDS_BEFORE_NUDGE = 2
 
+# ---- 收尾前的三条一次性提醒（1.0 ``runtime.py:2540-2660``）----------------------
+#
+# 三条的**动作完全一样**：把模型刚才那个 final 塞回对话 → 追加一条 user 提醒 → 继续。
+# 各自一个闩（``TaskState.block_guard_code``），所以每条只给一次；模型在提醒之后坚持
+# 输出 final → **放行，代码不覆盖**（1.0 是 ``decision = partial_answer`` /
+# ``accept_with_insufficient_evidence``，2.0 现在就是这个行为）。
+#
+# **为什么这一层非有不可。** 实测 212 道题声明了 ``delivered_photo``，其中 145 道零交付，
+# 而这 145 道里交付工具**一次都没被调用过**（0 次被拒、0 次失败）——不是「想交交不了」，
+# 是「根本没走到」。同类：``visible_text`` 声明 213 道、155 道未满足，其中 **147 道从未
+# 调用过** ``read_photo_text``。两条都不是检索失败，是**规划与执行脱节**；工具层看不见它，
+# 因为**没有任何一次调用是错的**。
+
+# ① 声明了结构化统计需求、却一次都没查过精确统计。
+STRUCTURED_FACT_NUDGE = (
+    "该问题声明了全量结构化统计需求。若要报告数量、日期或分组，"
+    "请调用 query_memory_facts 获取当前相册的精确统计；"
+    "如果条件不支持或没有可确认口径，也可以直接输出 final 如实说明，"
+    "不要把检索候选数当作统计答案。"
+)
+
+# ② 还有**没试过**的必需需求。
+UNATTEMPTED_NUDGE_TEMPLATE = (
+    "还有声明的证据需求尚未尝试：{pending}。当前可用工具：{available}。"
+    "请先用兼容工具获取证据；如果确实没有对应的照片或记录可以确认"
+    "（例如问题本身没有可查的答案），请直接输出 final 如实说明，不要编造。"
+)
+
+# ③ 零工具调用却给出了具体数字/金额/年份。
+FABRICATION_NUDGE = (
+    "你的回答给出了具体的数字/金额/年份，但本轮还没有检索相册来核实。"
+    "请先调用 search_memories 检索相关照片（必要时再 read_photo_text / inspect_photo "
+    "查看照片里的文字或细节）；如果相册里确实没有能确认该数字的依据，"
+    "请如实说「现有记录无法确认」，不要编造数字。"
+)
+
+#: ③ 的判据。正则逐字取自 1.0 ``runtime.py:2645``。
+_QUANTIFIED_CLAIM = re.compile(r"\d[\d,，.万]*\s*(?:元|块钱|万|桌|张|人|个|名|年|月|日|号)")
+
+#: ③ 的例外：纯闲聊 / 让模型写东西 / 问知识，本来就不该去查相册。
+#: 1.0 ``runtime.py:382`` 的 ``_CHAT_ONLY_RE``，逐字。
+_CHAT_ONLY = re.compile(
+    r"你好|谢谢|在吗|再见|哈哈|好的|嗯|哦|你是谁|你叫什么|你会什么|帮我写|"
+    r"写一|写个|改一|翻译|解释一下什么是|什么是|怎么用|步骤|教程",
+    re.IGNORECASE,
+)
+
+
+def _attempted_evidence_types(state: TaskState) -> set[EvidenceType]:
+    """这一轮**被调用过的工具**合起来声明能满足的证据类型。
+
+    一次工具调用不等于证据（``evidence_ledger`` 开头那条纪律），但**「试过」就是试过**
+    ——这里问的是「模型有没有去取」，不是「取到了没有」。被拒的调用也算：模型确实发了它。
+    """
+    attempted: set[EvidenceType] = set()
+    for record in state.records:
+        spec = TOOLS_BY_NAME.get(record.tool)
+        if spec is not None:
+            attempted.update(spec.satisfies)
+    return attempted
+
+
 # 规划失败的收尾文案有两条，**按失败原因分岔**（用户 2026-09-25 裁决二）。合成一条是有害的：
 # 把「端点挂了」说成「规划不出来」，用户会以为是自己问得不好，于是换个问法接着问；而该做
 # 的事是去看那个端点。这正是 2.0 助手在 8100 被换成 vLLM 之后的表现——真因（``404 The model
@@ -124,6 +189,31 @@ PLANNER_BLOCKED_ANSWER = "当前问题的证据需求无法可靠规划，因此
 #    端点同时服务了多个模型）。说的是模型服务，不说是规划——并把端点自己的说明接在后面，
 #    那句话里有地址，用户与运维据此能直接去查。
 MODEL_SERVICE_ANSWER = "模型服务当前不可用，因此这一轮没有开始检索。"
+
+
+def _drop_oldest_tool_round_trip(messages: Sequence[ChatMessage]) -> list[ChatMessage] | None:
+    """丢掉**最老的一整轮工具往返**；没有可丢的返回 ``None``。
+
+    **压缩的单位必须是「一整轮」，不能按消息条数丢。** 严格 chat template 要求每个
+    ``tool_call_id`` 都有一条配对的 ``role=tool`` 结果消息，丢一半端点直接 400
+    （1.0 ``intent.py`` 的注释记过这条）。所以这里找的是第一条带 ``tool_calls`` 的
+    assistant 消息，连同**紧跟其后的全部** tool 结果一起丢。
+
+    丢最老的一轮而不是最新的一轮：最新那轮是模型刚取到的证据，正是它下一步要用的；
+    早先那些往返的内容已经体现在模型的推理与后续调用里了。
+    """
+    kept: list[ChatMessage] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role is ChatRole.ASSISTANT and message.tool_calls:
+            index += 1
+            while index < len(messages) and messages[index].role is ChatRole.TOOL:
+                index += 1
+            return kept + list(messages[index:])
+        kept.append(message)
+        index += 1
+    return None
 
 
 def _planner_failure_answer(planned: PlannerResult) -> str:
@@ -327,12 +417,7 @@ class RunTurn:
 
         # 收尾前给还开着的需求补上真实原因：**是试过没拿到，还是根本没试**。
         # 必须在最后一次 ``as_payload()`` 之前——它同时喂给落库与返回值。
-        attempted: set[EvidenceType] = set()
-        for call_record in session.state.records:
-            spec = TOOLS_BY_NAME.get(call_record.tool)
-            if spec is not None:
-                attempted.update(spec.satisfies)
-        session.ledger.mark_unmet(attempted=attempted)
+        session.ledger.mark_unmet(attempted=_attempted_evidence_types(session.state))
 
         reason = session.state.termination_reason or session.state.finish(TerminationReason.MODEL_ERROR)
         status = _status_for(reason)
@@ -366,6 +451,7 @@ class RunTurn:
             answer=answer,
             attachments=session.delivered.items,
             requirements=list(session.ledger.as_payload()),
+            retrieved_candidates=session.state.retrieved_candidates,
             updated_at=now,
         )
         return TurnResult(
@@ -401,17 +487,50 @@ class RunTurn:
                 state.emit(ProgressStage.THINKING, ProgressStatus.RUNNING, "正在理解你的问题…"),
             )
 
+            # **JIT 剪枝。** 1.0 每一转只发当前这一步用得上的那几份精简契约
+            # （``jit_prompt.py`` 的 ``LITE_TOOL_SCHEMAS``，每工具 <40 token），
+            # 2.0 原先每次发全量八份完整 schema——实测 5408 字符 ≈ 2704 token，
+            # 而 1.0 的真实 ``prompt_tokens`` 中位数只有 1437。见 ``jit.py``。
+            #
+            # ``tools_exhausted`` 传的是**两条**预算的合成：工具额度用完（``tool_calls``
+            # 到顶）与墙钟只剩写答案的时间（``has_final_reserve`` 为假）。两者都意味着
+            # 「这一转不该再调工具了」，而 ``select_tools`` 对它的处置是**一个工具都不发**：
+            # 模型于是别无选择，只能说话。实测 ``step_budget_exhausted`` 的 123 道里
+            # 102 道判 0，根子就是模型到最后几步仍然只在撞墙、从没被逼着开口。
+            specs = select_tools(
+                session.ledger,
+                has_result_set=state.current_result_set_id is not None,
+                tools_exhausted=not state.can_call_tool(),
+            )
             try:
-                reply = self._model.complete(messages, TOOL_SPECS)
+                reply = self._model.complete(messages, specs)
+            except PromptTooLongError as error:
+                # 提示词撑爆了窗口。**先压历史再试一次**——这是它区别于别的模型服务
+                # 故障的地方：真因在调用方这一侧，压缩就解决得了。
+                compacted = _drop_oldest_tool_round_trip(messages)
+                if compacted is None:
+                    log.warning("提示词超预算，而历史里已经没有可压缩的工具往返: %s", error)
+                    return self._model_error_stop(session, error)
+                self._publish(
+                    session,
+                    state.emit(
+                        ProgressStage.RECOVERING,
+                        ProgressStatus.RUNNING,
+                        "上下文太满，正在压缩早先的工具往返…",
+                        kind="guard",
+                        payload={"code": "prompt_too_long"},
+                    ),
+                )
+                messages = compacted
+                try:
+                    reply = self._model.complete(messages, specs)
+                except Exception as retry_error:
+                    # **只压一次。** 再撑爆说明这一轮的提示词本身（system + 问题 +
+                    # 最新一轮工具结果）就超了窗口，继续丢只会把证据丢光还不一定装得下。
+                    # 这时如实收尾，理由用既有的 ``MODEL_ERROR``，不新造枚举。
+                    return self._model_error_stop(session, retry_error)
             except Exception as error:
-                log.warning("模型调用失败: %s", error)
-                state.finish(TerminationReason.MODEL_ERROR)
-                # 工具循环里的服务侧失败带说明走，与规划那条同一条理由（用户 2026-09-25
-                # 裁决二）：异常文案里已经写着端点与服务端给的原因（8100 缺 tool-call flag
-                # 时那句 400 就是），转述比在上层另拼一句更准；别的原因（2.0 自己拼错了
-                # 请求）不往里塞，免得把内部形状说给用户听——与 ``goal_planner`` 同一条边界。
-                detail = str(error) if isinstance(error, ModelServiceError) else ""
-                return self._stop(session, TerminationReason.MODEL_ERROR, detail=detail)
+                return self._model_error_stop(session, error)
 
             if not reply.wants_tools:
                 # 正文收尾仍然有效，只是它交不出图——交付是 ``final_answer`` 上的字段，
@@ -475,6 +594,19 @@ class RunTurn:
                 )
                 messages.append(ChatMessage(ChatRole.USER, STALLED_NUDGE))
                 continue
+
+    def _model_error_stop(self, session: _Session, error: Exception) -> str:
+        """模型这一侧的失败收尾。
+
+        ``detail`` 只带**服务侧**给的说明，与规划那条同一条理由（用户 2026-09-25 裁决二）：
+        异常文案里往往已经写着端点与服务端给的原因（8100 缺 tool-call flag 时那句 400
+        就是），转述比在上层另拼一句更准；别的原因（2.0 自己拼错了请求、提示词太大）
+        不往里塞，免得把内部形状说给用户听——与 ``goal_planner`` 同一条边界。
+        """
+        log.warning("模型调用失败: %s", error)
+        session.state.finish(TerminationReason.MODEL_ERROR)
+        detail = str(error) if isinstance(error, ModelServiceError) else ""
+        return self._stop(session, TerminationReason.MODEL_ERROR, detail=detail)
 
     def _finish_with_final_answer(
         self, session: _Session, messages: Sequence[ChatMessage], call: ToolCall
@@ -590,6 +722,10 @@ class RunTurn:
             if self._review_with_l2(session, messages, answer):
                 # 与门禁拦下同一条路：调用方把 pending_reminder 加回对话后继续循环。
                 return None
+            reminder = self._one_shot_evidence_reminder(session, answer)
+            if reminder is not None:
+                session.pending_reminder = reminder
+                return None
             if session.l2_unverified:
                 # 1.0 ``runtime.py:2961-2968``：某次 final 曾被语义评审判不实、经软引导后
                 # 放行 → **打标供分析**。1.0 把它记成一条 ``type="judge"`` / ``status=
@@ -659,6 +795,86 @@ class RunTurn:
         )
         session.pending_reminder = verdict.message
         return None
+
+    def _one_shot_evidence_reminder(self, session: _Session, answer: str) -> str | None:
+        """收尾前的三条一次性提醒。返回提醒文案，或 ``None``（无事可提）。
+
+        位置是**L1 与 L2 都通过之后、``state.finish()`` 之前**：走到这里说明这句回答
+        形式上没毛病，而这三条问的是另一个问题——**模型是不是压根没去取证**。
+        1.0 也把它们排在 L2 之后（``runtime.py:2540`` 起）。
+
+        三条的先后与互斥逐条照 1.0：① 只针对 ``structured_fact``；② 在 ① 已经提醒过时
+        把 ``structured_fact`` 排除掉（否则同一件事会被提醒两遍）；③ 只看「零工具调用」
+        这一条，与账本无关。
+        """
+        state = session.state
+        if not state.can_step():
+            # 没有模型步了，提醒只会换来一次「预算用尽」的收尾。1.0 同样要求
+            # ``turn.budget.can_model_step()``。
+            return None
+
+        attempted = _attempted_evidence_types(state)
+        unattempted = [
+            item for item in session.ledger.open_requirements() if item.evidence_type not in attempted
+        ]
+
+        # ① 声明了结构化统计需求，却一次都没查过精确统计——模型很可能正打算拿
+        # ``search_memories`` 的候选数当答案报出去（1.0 ``runtime.py:116`` 记过这条）。
+        structured = [item for item in unattempted if item.evidence_type is EvidenceType.STRUCTURED_FACT]
+        if structured and state.block_guard_code("structured_fact_reminder"):
+            self._reminder_event(session, "structured_fact_reminder", [item.id for item in structured])
+            return STRUCTURED_FACT_NUDGE
+
+        # ② 还有没试过的必需需求。这里**不问「为什么没满足」**，只问「试过没有」——
+        # 取过没取到是检索的问题，根本没去取是规划与执行脱节，两者修法完全不同。
+        rest = [
+            item
+            for item in unattempted
+            if not (
+                item.evidence_type is EvidenceType.STRUCTURED_FACT
+                and "structured_fact_reminder" in state.guard_blocked_codes
+            )
+        ]
+        # 1.0 要求 ``available`` 非空：一个工具都给不出去时，提醒「请用工具」是空话。
+        available = select_tools(
+            session.ledger,
+            has_result_set=state.current_result_set_id is not None,
+            tools_exhausted=not state.can_call_tool(),
+        )
+        if rest and available and state.block_guard_code("gate_unattempted"):
+            self._reminder_event(session, "gate_unattempted", [item.id for item in rest])
+            return UNATTEMPTED_NUDGE_TEMPLATE.format(
+                pending="、".join(f"{item.id}:{item.evidence_type.value}" for item in rest),
+                available="、".join(spec.name for spec in available),
+            )
+
+        # ③ 零工具调用，却报出了具体数字/金额/年份。需求为空（模型认为无需证据）**不**
+        # 等于可以凭空编数字——这是一条与账本无关的兜底。
+        #
+        # 「零工具调用」要**排掉终止动作自己**：走到这里时它刚被记进 ``records``，直接看
+        # ``not state.records`` 会恒为假，这条规则就成了死代码。
+        called_tools = [record for record in state.records if record.tool != FINAL_ANSWER_TOOL]
+        if (
+            _QUANTIFIED_CLAIM.search(answer)
+            and not called_tools
+            and not _CHAT_ONLY.search(state.question)
+            and state.block_guard_code("fabrication_check")
+        ):
+            self._reminder_event(session, "fabrication_check", [])
+            return FABRICATION_NUDGE
+        return None
+
+    def _reminder_event(self, session: _Session, code: str, requirement_ids: Sequence[str]) -> None:
+        self._publish(
+            session,
+            session.state.emit(
+                ProgressStage.RECOVERING,
+                ProgressStatus.RUNNING,
+                "看起来还有证据没有去取，提醒模型一次…",
+                kind="guard",
+                payload={"code": code, "requirements": list(requirement_ids)},
+            ),
+        )
 
     def _review_with_l2(self, session: _Session, messages: Sequence[ChatMessage], answer: str) -> bool:
         """L2 语义评审。返回 ``True`` 表示「继续循环，重新作答」。

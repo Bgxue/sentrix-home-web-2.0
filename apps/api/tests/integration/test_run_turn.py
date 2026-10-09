@@ -31,8 +31,8 @@ from sentrix.domain.assistant.models import (
     ToolCall,
     TurnStatus,
 )
-from sentrix.domain.assistant.ports import ModelServiceError
-from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOL_SPECS
+from sentrix.domain.assistant.ports import ModelServiceError, PromptTooLongError
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOL_SPECS, ToolSpec
 from sentrix.infrastructure.persistence.repositories.conversations import (
     SqliteConversationRepository,
 )
@@ -64,27 +64,36 @@ class ScriptedModel:
         self.calls: list[Sequence[ChatMessage]] = []
         self.planner_calls: list[Sequence[ChatMessage]] = []
         self.judge_calls: list[Sequence[ChatMessage]] = []
+        # 主循环每一次拿到的那份工具名单（JIT 剪枝之后每次都可能不同）。
+        self.tool_sets: list[list[str]] = []
 
-    def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
-        if not tools:
-            # 规划与 L2 评审都不带工具，靠 system 提示词区分——两条提示词的开头就写着
-            # 各自在做什么。
-            system = messages[0].content if messages else ""
-            if JUDGE_MARKER in system:
-                self.judge_calls.append(list(messages))
-                if isinstance(self._judge, Exception):
-                    raise self._judge
-                if isinstance(self._judge, PlannerScript):
-                    return ModelReply(content=self._judge.next(), finish_reason="stop")
-                return self._judge  # type: ignore[return-value]
+    def complete(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]) -> ModelReply:
+        # **按 system 提示词分流，不按 ``tools`` 空不空。** 原先用 ``if not tools:``
+        # 认「这是规划 / L2 评审」，而 JIT 剪枝之后工具循环**也可能合法地拿到空元组**
+        # （额度用尽时 ``select_tools`` 返回空集，见 §3.4 的 C/B′）——那时这条假件会把
+        # 主循环当成评审，测出来的东西与跑的东西不是一回事。
+        system = messages[0].content if messages else ""
+        if JUDGE_MARKER in system:
+            self.judge_calls.append(list(messages))
+            if isinstance(self._judge, Exception):
+                raise self._judge
+            if isinstance(self._judge, PlannerScript):
+                return ModelReply(content=self._judge.next(), finish_reason="stop")
+            return self._judge  # type: ignore[return-value]
+        if PLANNER_MARKER in system:
             self.planner_calls.append(list(messages))
             if isinstance(self._planner, Exception):
                 raise self._planner
             if isinstance(self._planner, PlannerScript):
                 return ModelReply(content=self._planner.next(), finish_reason="stop")
             return self._planner  # type: ignore[return-value]
+
         self.calls.append(list(messages))
-        assert [spec.name for spec in tools] == [spec.name for spec in TOOL_SPECS]
+        self.tool_sets.append([spec.name for spec in tools])
+        assert {spec.name for spec in tools} <= {spec.name for spec in TOOL_SPECS}
+        # 剪枝之后每一份描述都该是那一句 ≤40 字的 brief；发全量 description 就是
+        # 把 2704 token/转 的固定成本又加回去，而模型照答、不会报错。
+        assert all(len(spec.description) <= 40 for spec in tools)
         reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
         if isinstance(reply, Exception):
             raise reply
@@ -501,6 +510,120 @@ def test_a_hard_block_is_visible_in_the_trace(env):
     assert hard[0].kind == "guard"
 
 
+# ---- 收尾前的三条一次性提醒（1.0 runtime.py:2540-2660）------------------------
+
+
+def reminder_count(model: ScriptedModel, needle: str) -> int:
+    """这条提醒**在一次调用里最多出现几次**。
+
+    **不跨调用求和**：提醒一旦进了对话历史，之后每一次调用都会带着它，求和会把一次
+    提醒数成五次——本项目的门禁踩过这个坑（``test_the_stall_reminder_is_given_only_once``
+    的注释记着）。
+    """
+    return max(
+        (sum(1 for message in call if needle in message.content) for call in model.calls),
+        default=0,
+    )
+
+
+def test_a_declared_but_unused_structured_fact_earns_one_reminder(env):
+    """声明了 ``structured_fact`` 却一次都没查过精确统计 → 提醒一次（①）。
+
+    模型在这个形态下最容易拿 ``search_memories`` 的候选数当答案报出去——1.0
+    ``runtime.py:116`` 就是为这条才把 ``total`` 从模型可见的观察里剥掉的。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final_call("一共有 12 张海边的照片。", "photo_1"),
+        ],
+        planner=planner_reply("photo_set", "structured_fact"),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    assert reminder_count(model, "该问题声明了全量结构化统计需求") == 1
+
+
+def test_an_unattempted_requirement_earns_one_reminder(env):
+    """声明了 ``visible_text`` 却从没调用过 ``read_photo_text`` → 提醒一次（②）。
+
+    实测这一类有 155 道，其中 **147 道（95%）从头到尾没调用过 ``read_photo_text``**
+    ——不是「取了没取到」，是**根本没去取**。提醒里要写出**当前可用工具**，否则模型
+    只知道「还缺东西」，不知道拿什么去补。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final_call("海边有两张。", "photo_1"),
+        ],
+        planner=planner_reply("photo_set", "visible_text"),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    assert reminder_count(model, "还有声明的证据需求尚未尝试：") == 1
+    nudged = [call for call in model.calls if any("尚未尝试" in m.content for m in call)]
+    assert any("read_photo_text" in message.content for call in nudged for message in call)
+    assert any("visible_text" in message.content for call in nudged for message in call)
+
+
+def test_numbers_without_any_tool_call_earn_one_reminder(env):
+    """零工具调用却报出具体数字 → 提醒一次（③）。
+
+    这条与账本无关：需求为空（模型认为无需证据）**不**等于可以凭空编数字。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final("相册里一共 12 张照片。")])
+    run_turn = build(env, model, StubToolbox())
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    assert reminder_count(model, "你的回答给出了具体的数字") == 1
+
+
+def test_a_chat_question_with_numbers_is_not_nagged(env):
+    """反向：闲聊 / 让模型写东西本来就不该去查相册，不许提醒（1.0 ``_CHAT_ONLY_RE``）。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final("好的，帮你写 3 句话的祝福。")], planner=planner_reply())
+    run_turn = build(env, model, StubToolbox())
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    assert reminder_count(model, "你的回答给出了具体的数字") == 0
+
+
+def test_the_reminder_lets_the_model_insist(env):
+    """提醒之后模型坚持同样的 final → **放行，代码不覆盖**（1.0 的口径）。
+
+    1.0 在那里的处置是 ``decision = partial_answer`` / ``accept_with_insufficient_evidence``；
+    2.0 现在就是这个行为。若提醒后把答案换掉，「模型如实说无法确认」这句话永远出不去。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final_call("海边有两张，但照片里的字读不到。", "photo_1"),
+        ],
+        planner=planner_reply("photo_set", "visible_text"),
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "海边有两张，但照片里的字读不到。"
+    assert result.status is TurnStatus.PARTIAL
+
+
 # ---- 需求的收尾记账：分清「没去取」与「取了没取到」 --------------------------
 
 
@@ -671,6 +794,104 @@ def test_the_model_step_budget_ends_the_turn_with_a_reason(env):
     assert result.termination_reason is TerminationReason.STEP_BUDGET_EXHAUSTED
     assert result.status is TurnStatus.PARTIAL
     assert "结束" in result.answer
+
+
+def test_the_tools_are_withdrawn_when_the_budget_is_gone(env):
+    """工具额度用尽之后，那一转**一个工具都不发**（连 ``final_answer`` 也不发）。（§3.4 C/B′）
+
+    模型物理上无法再调，只剩「作答」这一条路——于是 8 步里最后那 1–2 步会被用来
+    **说话**而不是撞墙。实测 ``step_budget_exhausted`` 的 123 道里 **102 道判 0、
+    2 分一道没有**，根子就是模型到最后都没被逼着开口。
+
+    断言的是 ``complete`` **收到的那个 tools 参数**，不是最终结果——后者会被
+    ``_stop`` 的兜底文案掩盖成「看起来答了」。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([tool_call("get_result_page", "c1", result_set_id="rs_1", page=1)])
+    run_turn = build(env, model, StubToolbox({"get_result_page": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    run_turn.run(turn_id)
+
+    offered_before = (
+        model.tool_sets[: model.tool_sets.index([])] if [] in model.tool_sets else model.tool_sets
+    )
+    assert offered_before and all(offered_before), "额度还在时不该是空集"
+    assert model.tool_sets[-1] == [], "额度用尽之后必须把工具全部收回"
+    assert FINAL_ANSWER_TOOL not in model.tool_sets[-1]
+
+
+def assert_tool_messages_are_paired(messages: Sequence[ChatMessage]) -> None:
+    """每个 ``tool_call_id`` 都有配对结果，没有孤儿 ``tool`` 消息。
+
+    严格 chat template 的硬要求；违反它端点直接 400。压缩历史最容易踩的就是这条。
+    """
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role is ChatRole.ASSISTANT and message.tool_calls:
+            expected = {call.call_id for call in message.tool_calls}
+            index += 1
+            while index < len(messages) and messages[index].role is ChatRole.TOOL:
+                assert messages[index].tool_call_id in expected, f"对不上的 tool 结果：{message}"
+                expected.discard(messages[index].tool_call_id)
+                index += 1
+            assert not expected, f"这些 tool_call 没有配对结果：{expected}"
+            continue
+        assert message.role is not ChatRole.TOOL, f"孤立的 tool 结果：{message.tool_call_id}"
+        index += 1
+
+
+def test_compaction_drops_whole_tool_round_trips(env):
+    """提示词撑爆窗口时，**压缩的是整轮工具往返**，不是若干条消息。（§3.3）
+
+    丢一半会留下没有配对结果的 ``tool_calls``，端点直接 400——那是把一个可诊断的
+    「提示词太大」换成一个更难查的「请求格式不对」。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            PromptTooLongError("提示词约 9000 token，上下文上限 6144…"),
+            final_call("海边有两张。", "photo_1"),
+        ]
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "海边有两张。"
+    assert len(model.calls) == 3, "第三次是压缩之后的那次重试"
+    # 压缩前：模型手上确实有那一轮工具往返。
+    assert any(message.role is ChatRole.TOOL for message in model.calls[1])
+    # 压缩后：整对消失，且剩下的仍然配得上。
+    assert not any(message.role is ChatRole.TOOL for message in model.calls[2])
+    assert_tool_messages_are_paired(model.calls[2])
+
+
+def test_a_prompt_that_still_does_not_fit_ends_the_turn_honestly(env):
+    """压到极限仍装不下时，**如实收尾**，不崩、不新造终止原因。
+
+    只压一次：再撑爆说明这一轮的提示词本身（system + 问题 + 最新一轮工具结果）就超了
+    窗口，继续丢只会把证据丢光还不一定装得下。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            PromptTooLongError("提示词约 9000 token，上下文上限 6144…"),
+            PromptTooLongError("提示词约 8000 token，上下文上限 6144…"),
+        ]
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.status is TurnStatus.FAILED
+    assert result.termination_reason is TerminationReason.MODEL_ERROR
+    assert result.answer
 
 
 def test_a_model_failure_ends_the_turn_as_failed_not_complete(env):

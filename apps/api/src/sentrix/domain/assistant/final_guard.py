@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from sentrix.domain.assistant.evidence_ledger import EvidenceLedger
 from sentrix.domain.assistant.task_state import TaskState
-from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, RETRIEVAL_TOOLS
+from sentrix.domain.assistant.tools import RETRIEVAL_TOOLS
 
 # ---- 安全硬拦：1.0 ``final_guard.py:162-178`` 的五条 --------------------------
 #
@@ -111,8 +111,10 @@ _MESSAGES: Mapping[str, str] = {
     "all_requested_but_has_more": (
         "用户要求全部结果，但结果集还有更多未交付。请继续取回剩余结果，或如实说明只交付了部分。"
     ),
-    "delivery_contradiction": "你的回答声称已经全部交付，但实际没有交付任何结果。请如实说明交付情况。",
 }
+# **``delivery_contradiction`` 已删除（2026-10-09）。** 判据见
+# ``_delivery_completeness`` 上那段注释：它要求 ``delivered_count == 0``，而那个值在
+# 2.0 的形状下取不到。
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,13 +128,6 @@ class GuardFacts:
 
     tool_results: tuple[Mapping[str, object], ...] = ()
     has_more: bool = False
-    # 1.0 ``result_set.py:378/402`` 的交付簿记：检索后 available/complete，交付后 delivered。
-    delivery_state: str = "not_requested"
-    # 初值是 ``None`` 而不是 0——1.0 ``result_set.py:263`` 就是 ``int | None = None``，
-    # 只有终止动作真的带着交付走过才会变成整数。这条区别是实质的：
-    # ``delivery_contradiction`` 要求 ``delivered_count == 0``，把初值写成 0 会让
-    # 「检索恰好一次取完、又从没交付过」的正常回合全部被拦下来（1.0 不会）。
-    delivered_count: int | None = None
     # 1.0 的 ``result_mode`` 来自 ``search_memories(mode=...)``。S3 的工具契约里没有这个
     # 参数（``tools.py`` 的 SEARCH_MEMORIES 只有 query / limit），所以它恒为 None，
     # ``all_requested_but_has_more`` 在 S3 不会触发——规则照搬，输入留给重新引入 mode 的
@@ -141,35 +136,21 @@ class GuardFacts:
 
     @classmethod
     def from_state(cls, state: TaskState) -> GuardFacts:
-        """复刻 1.0 ``result_set.py`` 的交付簿记：按调用顺序走一遍记录。
+        """1.0 ``result_set.py`` 的检索簿记：按调用顺序走一遍记录，后面的覆盖前面的。
 
-        顺序有意义，与 1.0 一致：一次 ``search_memories`` 把 ``delivery_state`` 置成
-        ``available``（还有下一页）或 ``complete``（取完了），一次终止动作
-        （``final_answer``，1.0 是 ``final`` 动作上的 ``selected_image_handles`` 字段）
-        把它置成 ``delivered`` 并记下交付数。后面的调用覆盖前面的。
+        **交付侧的簿记（``delivery_state`` / ``delivered_count``）已随
+        ``delivery_contradiction`` 一起删除**（2026-10-09）：那条规则是它们唯一的读者，
+        而它本身在 2.0 够不着（见 ``_delivery_completeness``）。留着一格没人读的状态
+        比删掉更贵——它看起来还在守什么。
         """
         rows: list[Mapping[str, object]] = []
         has_more = False
-        delivery_state = "not_requested"
-        delivered_count: int | None = None
         for record in state.records:
-            if record.status != "ok":
+            if record.status != "ok" or record.tool not in _RETRIEVAL_TOOLS:
                 continue
-            observation = record.observation
-            if record.tool in _RETRIEVAL_TOOLS:
-                rows.append({"tool": record.tool, "total": observation.get("total")})
-                has_more = bool(observation.get("has_more"))
-                delivery_state = "available" if has_more else "complete"
-            elif record.tool == FINAL_ANSWER_TOOL:
-                delivery_state = "delivered"
-                raw = observation.get("delivered")
-                delivered_count = int(str(raw)) if raw is not None else None
-        return cls(
-            tool_results=tuple(rows),
-            has_more=has_more,
-            delivery_state=delivery_state,
-            delivered_count=delivered_count,
-        )
+            rows.append({"tool": record.tool, "total": record.observation.get("total")})
+            has_more = bool(record.observation.get("has_more"))
+        return cls(tool_results=tuple(rows), has_more=has_more)
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,17 +246,24 @@ class FinalGuard:
 
     @staticmethod
     def _delivery_completeness(facts: GuardFacts) -> GuardVerdict | None:
-        """1.0 ``final_guard.py:106-112`` 的两条交付结构规则。
+        """1.0 ``final_guard.py:106-112`` 的交付结构规则。
 
-        ``delivery_contradiction`` 的触发面很窄，这是 1.0 的实情而不是遗漏：要求
-        ``delivery_state == "complete"``（最后一次检索把结果取完了）**且**
-        ``delivered_count == 0``（整数 0，即终止动作真的带着交付走过、且一张都没交出去）。
-        从没交付过的回合 ``delivered_count`` 是 ``None``，不会命中。
+        **``delivery_contradiction`` 已删除（2026-10-09）。** 两条理由，第二条是主因：
+
+        1. **它的输入取不到。** 规则要求 ``delivery_state == "complete"``、
+           ``delivered_count == 0``（**整数** 0）。而 ``deliver()`` 的成功路径
+           ``delivered`` 恒 ``>= 1``；失败路径走 ``_failure``（观察里没有 ``delivered``
+           这一格），``_finish_with_final_answer`` 又把它记成 ``status="error"``，
+           ``GuardFacts.from_state`` 只读 ``ok`` 记录。所以那一格永远是 ``>= 1`` 或
+           ``None``，**命中不了**。
+        2. **它的前提已经变了。** 规则设计于「省略的时代」——1.0 的 final 动作
+           239/487（49%）根本不带 ``selected_image_handles``，dict 缺键不报错。2.0 把
+           那个字段做成**必填**之后，零交付是一个明确写下的 ``[]``，不是一个遗漏。
+           让它活起来，会在约 300 道「检索取完但没交图」的题上各打回一次、各花一个
+           模型步，而且打回的是模型的**显式选择**。
         """
         if facts.result_mode == "all" and facts.has_more:
             return _verdict("all_requested_but_has_more")
-        if facts.delivery_state == "complete" and facts.delivered_count == 0:
-            return _verdict("delivery_contradiction")
         return None
 
 

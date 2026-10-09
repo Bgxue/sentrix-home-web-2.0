@@ -16,7 +16,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 
 PAGE_SIZE = 6
@@ -26,6 +27,10 @@ PAGE_SIZE = 6
 class ResultSetEntry:
     handle: str
     asset_id: str
+    # 融合层给这条候选的证据分级（``anchor`` / ``semantic`` / ``expander``）。
+    # 空串的意思是「这个结果集没有带分级」——老结果集与测试直接造的结果集就是这种，
+    # 它与 ``semantic`` 不是一回事：前者是「不知道」，后者是「判过、是相似度命中」。
+    evidence_class: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +50,13 @@ class ResultSet:
     query: str
     asset_ids: tuple[str, ...]
     created_at: datetime
+    # ``asset_id`` -> 证据分级。**与 ``asset_ids`` 平行，但用映射而不是平行数组**：
+    # 平行数组在增删候选时会错位，而这里的键（``asset_id``）在结果集里本来就唯一。
+    #
+    # 存在结果集这一侧而不是翻页时重算：结果集是**一次检索的冻结快照**，而
+    # ``get_result_page`` 读的是库里那一份——重算会得到与首次预览不同的分级，
+    # 同一张图在第一页是 ``exact``、翻回来变成 ``strong``。
+    evidence_classes: Mapping[str, str] = field(default_factory=dict)
 
     def page(self, page_no: int, page_size: int = PAGE_SIZE) -> ResultSetPage:
         """第 ``page_no`` 页（1-based）。页码越界返回空页，不抛异常。
@@ -56,7 +68,11 @@ class ResultSet:
         start = max(0, (max(1, page_no) - 1) * size)
         end = start + size
         entries = tuple(
-            ResultSetEntry(handle=f"photo_{start + index + 1}", asset_id=asset_id)
+            ResultSetEntry(
+                handle=f"photo_{start + index + 1}",
+                asset_id=asset_id,
+                evidence_class=self.evidence_classes.get(asset_id, ""),
+            )
             for index, asset_id in enumerate(self.asset_ids[start:end])
         )
         return ResultSetPage(

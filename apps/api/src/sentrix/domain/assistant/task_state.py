@@ -95,17 +95,27 @@ class TaskState:
     # ---- 预算 ---------------------------------------------------------------
 
     @property
-    def tool_calls(self) -> int:
-        """计入预算的工具调用次数。
+    def tool_round_trips(self) -> int:
+        """**发出去的工具往返次数**——成功、被拒、失败、回放，一律计。
 
-        被拒绝的调用与缓存回放都不计——1.0 也是这个口径（``tool_policy.py:61-62`` 只在
-        执行成功后才 ``record_tool_call``）：拒绝不是执行，不该再罚一次预算。
+        1.0 只数成功的那几次（``tool_policy.py:61-62`` 在执行成功后才
+        ``record_tool_call``），理由是「拒绝不是执行，不该再罚一次预算」。**那条口径的
+        前提是主循环只在成功时才继续转**——而 1.0 在被拒时 ``break`` 结束回合
+        （``runtime.py:3318``），所以被拒确实不必再计价。2.0 把拒绝当普通工具结果发回、
+        允许模型重试，于是同一件事**照常烧掉一个模型步**：实测 762 次被拒里有 426 步是
+        「整步全被拒」，占全部 2667 步的 **16%**，而 `step_budget_exhausted` 的 123 道
+        里 **102 道判 0、2 分一道没有**。
 
-        **终止动作（``final_answer``）也不计。** 它不是取证工具，是作答那一步；算进来的
+        计价器与它计的东西对不上，是这里要修的那件事。修完之后：
+        **往返数被硬限死在 6，而每次往返恰好 1 个模型步**，所以
+        ``6(往返) + 1(作答) + 1(L2 评审) = 8 = max_steps``——那条不变量才真的成立。
+        在此之前它只是**假成立**：被拒可以额外吃步，模型于是能一路试到步数耗尽。
+
+        **终止动作（``final_answer``）仍不计。** 它不是取证工具，是作答那一步；算进来的
         话，「回答被门禁打回一次」会顺带吃掉一次工具配额，而 6 次这个数是照着 1.0 的
         生产 profile 定的。
         """
-        return sum(1 for record in self.records if record.status == "ok" and record.tool != FINAL_ANSWER_TOOL)
+        return sum(1 for record in self.records if record.tool != FINAL_ANSWER_TOOL)
 
     @property
     def search_calls(self) -> int:
@@ -124,6 +134,25 @@ class TaskState:
                 value = record.observation.get("result_set_id")
                 return str(value) if value else None
         return None
+
+    @property
+    def retrieved_candidates(self) -> tuple[str, ...]:
+        """**检索捞回来的那批候选**（``asset_id``，按名次），不是交付的那批。
+
+        与 ``current_result_set_id`` 同为「最后一次成功检索」的投影，只是取的格子不同：
+        那个取 ``result_set_id``，这个取 ``asset_ids``。**两者必须都能拿到**——交付集
+        回答「模型挑了哪几张」，候选集回答「检索给了它哪些」，而「检索没找到」与
+        「找到了没交付」是两种缺陷，修法相反。
+
+        1.0 的 item 里有 ``retrieved_candidate_media``；2.0 此前没有把它带出助手契约，
+        于是 PhotoBench 只能拿交付集冒充检索集（见 ``TurnRecord.retrieved_candidates``）。
+        """
+        for record in reversed(self.records):
+            if record.status == "ok" and record.tool in RETRIEVAL_TOOLS:
+                raw = record.observation.get("asset_ids")
+                if isinstance(raw, (list, tuple)):
+                    return tuple(str(item) for item in raw)
+        return ()
 
     @property
     def inspection_calls(self) -> int:
@@ -161,7 +190,7 @@ class TaskState:
         return self.model_steps < self.profile.max_steps and self.wall_remaining() > 0
 
     def can_call_tool(self) -> bool:
-        return self.tool_calls < self.profile.max_tool_calls and self.has_final_reserve()
+        return self.tool_round_trips < self.profile.max_tool_calls and self.has_final_reserve()
 
     def wall_remaining(self) -> float:
         return self.profile.wall_time_s - (time.monotonic() - self.started_at)

@@ -74,6 +74,25 @@ def test_the_prompt_lists_exactly_the_evidence_registry():
     )
 
 
+def test_delivered_photo_is_declared_only_when_the_user_asked_to_see_photos():
+    """``delivered_photo`` 是**有条件的**，不再是「声明 photo_set 时的默认搭子」。
+
+    **一次有意的偏离。** 1.0 的原句是「用户想看照片、要求展示、或问「有没有……的照片」
+    时，声明 ``photo_set``；同时声明 ``delivered_photo``……」——后半句无条件，于是
+    ``delivered_photo + photo_set`` 成了默认模板：实测 487 道题里 **212 道**声明了
+    ``delivered_photo``，而问题文本里真正要求看图的只有 **3 道**。
+
+    这条是**文本断言，本身很弱**（它只能证明提示词里写着条件词，证明不了模型照做）。
+    真正的验证靠重跑后的「声明了 ``delivered_photo`` 的题数从 212 降下来」。留在这里
+    是因为它至少能挡住「有人把条件词删回去」。
+    """
+    prompt = build_prompt()
+
+    assert "只有" in prompt
+    assert "才**同时**声明" in prompt
+    assert "不要**声明 delivered_photo" in prompt
+
+
 def test_the_prompt_never_shows_a_real_scope_id():
     """1.0 的教训：示例里出现真实 scope_id 会被小模型整段照抄，抄错一位就 scope_mismatch。"""
     assert SCOPE not in build_prompt()

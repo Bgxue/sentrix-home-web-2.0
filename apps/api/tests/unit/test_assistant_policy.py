@@ -232,14 +232,21 @@ def test_a_single_failure_does_not_block_the_retry(make_state):
     assert decision.action is ToolAction.EXECUTE
 
 
-def test_denied_calls_do_not_consume_the_tool_budget(make_state):
+def test_repeated_denials_are_stopped_before_the_budget_runs_out(make_state):
+    """连撞几次之后**换一个码**拒绝，而不是继续回 ``unknown_tool``。
+
+    （这条原先叫 ``test_denied_calls_do_not_consume_the_tool_budget``，钉的是「被拒不
+    计价」那半——§3.4 A 把那半推翻了：被拒也计价，理由见 ``TaskState.tool_round_trips``。）
+    这里要钉的是它**没有**被推翻的另一面：计价器变了不改变「同一个工具连试就是卡住」
+    这条规则，它排在预算检查之前（W3），所以模型看到的是 ``repeated_failure``。
+    """
     state = make_state()
     policy = ToolPolicy()
     for index in range(5):
         policy.decide(call(f"nope_{index}"), state)
         state.record(ToolCallRecord(call_id=f"c{index}", tool="nope", signature=f"s{index}", status="denied"))
 
-    assert state.tool_calls == 0
+    assert state.tool_round_trips == 5
     assert policy.decide(call("search_memories", query="海边"), state).action is ToolAction.EXECUTE
 
 
@@ -264,6 +271,7 @@ def expensive_spec(name: str):
     return ToolSpec(
         name=name,
         description="测试用的昂贵工具。",
+        brief="测试用。",
         parameters={"type": "object", "properties": {}, "required": []},
         satisfies=(),
         cost_class=CostClass.EXPENSIVE,

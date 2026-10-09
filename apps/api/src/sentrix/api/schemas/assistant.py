@@ -108,6 +108,13 @@ class CompleteEventPayload(BaseModel):
     answer: str
     attachments: list[AttachmentSummary]
     requirements: list[dict[str, Any]]
+    # **检索抓回来的那批候选**（``asset_id``，按名次）。与 ``attachments`` 是两件事：
+    # 后者是模型从里面挑了哪几张，这个是检索给了它哪些。
+    #
+    # 这是一次**有意放宽契约**：2.0 原先不暴露候选集，评测侧只能拿交付集冒充检索集，
+    # 于是「检索没找到」与「找到了没交付」在指标上完全一样。``behaviour-baseline.md``
+    # 的「2.0 不再暴露的轨迹」一节里 ``retrieved_candidate_media`` 那一行随之改掉。
+    retrieved_candidates: list[str] = []
     error: str = ""
 
 

@@ -307,6 +307,7 @@ class Container:
                 settings.vlm_base_url,
                 served_model,
                 timeout_s=settings.chat_timeout_s,
+                context_tokens=settings.vlm_context_tokens,
             ),
             vlm_observer=OpenAIVlmObserver(
                 settings.vlm_base_url,

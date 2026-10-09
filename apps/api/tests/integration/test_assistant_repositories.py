@@ -199,6 +199,7 @@ def test_finishing_a_turn_records_the_reason_answer_and_attachments(turns, conve
         answer="这是你要的海边照片。",
         attachments=(Attachment(handle="photo_1", asset_id="asset_1", file_name="a.jpg"),),
         requirements=({"id": "photo_set", "evidence_type": "photo_set", "status": "satisfied"},),
+        retrieved_candidates=("asset_1", "asset_2", "asset_3"),
         updated_at=NOW,
     )
 
@@ -208,6 +209,31 @@ def test_finishing_a_turn_records_the_reason_answer_and_attachments(turns, conve
     assert record.answer == "这是你要的海边照片。"
     assert record.attachments[0].asset_id == "asset_1"
     assert record.requirements[0]["status"] == "satisfied"
+    # **候选集与交付集是两份数据**：交付了 1 张，检索给了 3 张。合成一格就再也分不出
+    # 「检索没找到」与「找到了没交付」。
+    assert record.retrieved_candidates == ("asset_1", "asset_2", "asset_3")
+
+
+def test_a_turn_without_retrieval_records_no_candidates(turns, conversations):
+    """反向：没检索过就是**空元组**，不是某个默认值。
+
+    拿交付集冒充候选集，正是这条字段要修掉的那个错——所以「没检索」必须读得出是空。
+    """
+    conversation = conversations.create(scope_id="album1", title="对话", created_at=NOW)
+    turns.create(make_turn("turn_1", conversation_id=conversation.id))
+
+    turns.finish(
+        "turn_1",
+        status=TurnStatus.COMPLETE.value,
+        termination_reason="answered",
+        answer="不知道。",
+        attachments=(),
+        requirements=(),
+        retrieved_candidates=(),
+        updated_at=NOW,
+    )
+
+    assert turns.get("turn_1").retrieved_candidates == ()
 
 
 def test_a_pending_turn_has_no_termination_reason_yet(turns, conversations):
@@ -239,6 +265,55 @@ def test_a_result_set_survives_a_round_trip(result_sets):
     assert loaded.asset_ids == ("asset_1", "asset_2")
     assert loaded.query == "海边"
     assert loaded.page(1).entries[1].handle == "photo_2"
+
+
+def test_the_evidence_classes_survive_a_round_trip(result_sets):
+    """候选的证据分级必须**落库**，不能只活在首页那次调用里。
+
+    ``get_result_page`` 读的是库里这一份。分级不落库的话，翻页拿到的 preview 就会
+    丢掉 ``level``——同一张图在第一页是 ``exact``、翻回来变成空的。
+    """
+    result_sets.add(
+        ResultSet(
+            id="rs_levels",
+            scope_id="album1",
+            query="海边",
+            asset_ids=("asset_1", "asset_2"),
+            created_at=NOW,
+            evidence_classes={"asset_1": "anchor", "asset_2": "semantic"},
+        )
+    )
+
+    loaded = result_sets.get("rs_levels")
+
+    assert loaded is not None
+    assert loaded.evidence_classes == {"asset_1": "anchor", "asset_2": "semantic"}
+    assert loaded.page(1).entries[0].evidence_class == "anchor"
+    assert loaded.page(1).entries[1].evidence_class == "semantic"
+
+
+def test_a_result_set_without_levels_reads_back_as_unknown_not_semantic(result_sets):
+    """没带分级的结果集读回来是**「不知道」**（空串），不是 ``semantic``。
+
+    这两件事不一样：前者是「这个结果集没有分级信息」（老数据、测试直接造的），
+    后者是「判过，是相似度命中」。把前者伪造成后者，模型会以为拿到了一条它没被给过的
+    判断。
+    """
+    result_sets.add(
+        ResultSet(
+            id="rs_plain",
+            scope_id="album1",
+            query="海边",
+            asset_ids=("asset_1",),
+            created_at=NOW,
+        )
+    )
+
+    loaded = result_sets.get("rs_plain")
+
+    assert loaded is not None
+    assert loaded.evidence_classes == {}
+    assert loaded.page(1).entries[0].evidence_class == ""
 
 
 def test_a_missing_result_set_is_none(result_sets):

@@ -49,6 +49,15 @@ class CostClass(StrEnum):
 class ToolSpec:
     name: str
     description: str
+    # **JIT 剪枝时发出去的那一句**，一行说清「这个工具干什么、什么时候用」，≤40 字。
+    # 对应 1.0 ``jit_prompt.py:33`` 的 ``LITE_TOOL_SCHEMAS``（每工具 40 token 以内）。
+    #
+    # 两句话都要维护是有意的：`description` 是**唯一一次**把边界讲清楚的地方
+    # （信息边界、失败语义、反例），`brief` 是**每一转**都要付的固定成本。把两者
+    # 合成一句，要么边界讲不清，要么每转多花几百 token。
+    #
+    # 没有默认值：漏写一句 brief 会让那个工具在剪枝模式下失去描述，而那是静默的。
+    brief: str
     parameters: Mapping[str, Any]
     satisfies: tuple[EvidenceType, ...]
     required: tuple[str, ...] = ()
@@ -77,11 +86,14 @@ def _object_schema(properties: Mapping[str, Any], required: Sequence[str]) -> Ma
 
 SEARCH_MEMORIES = ToolSpec(
     name="search_memories",
+    brief="按内容词检索照片，返回带地点/时间/人物/描述的候选预览。",
     description=(
         "按内容词检索家庭照片（人/物/场景/衣着/颜色/地点特征）。"
         "返回一个结果集摘要，其中 preview 是排在最前的几张。"
         "每条 preview 自带 captured_at（拍摄时间）/ place（拍摄地点）/ people（已确认人物）/ "
-        "evidence_summary（画面描述）——**单张照片的地点、时间、人物直接在 preview 里读，"
+        "media_kind（image 还是 video）/ level（相关强度：exact 命中确定性条件、"
+        "strong 语义相近、approximate 由邻近扩展）/ evidence_summary（画面内容、物品、"
+        "衣着与图内文字）——**单张照片的地点、时间、人物、画面内容直接在 preview 里读，"
         "不要为此再调用其他工具**。"
         "一次对话只需要检索一次；要看更多候选用 get_result_page 翻页，不要改词重搜。"
         "要把照片展示给用户，在 final_answer 的 selected_image_handles 里填这些 handle。"
@@ -107,6 +119,7 @@ SEARCH_MEMORIES = ToolSpec(
 
 GET_RESULT_PAGE = ToolSpec(
     name="get_result_page",
+    brief="查看结果集的下一页（每页最多 6 张），不要改词重搜。",
     description=(
         "查看指定结果集的某一页（每页最多 6 张，page 从 1 开始）。"
         "result_set_id 用 search_memories 返回的那个；要换检索条件请重新调用 search_memories。"
@@ -131,6 +144,7 @@ FINAL_ANSWER_TOOL = "final_answer"
 
 FINAL_ANSWER = ToolSpec(
     name=FINAL_ANSWER_TOOL,
+    brief="给出最终回答并结束本轮；要展示的照片填进 handles。",
     description=(
         "给出最终回答并结束本轮。answer 是要说给用户的那段话；"
         "要把照片展示给用户，就在**同一次调用**里把 handle 填进 selected_image_handles。"
@@ -172,6 +186,7 @@ FINAL_ANSWER = ToolSpec(
 
 GET_PERSON_PROFILE = ToolSpec(
     name="get_person_profile",
+    brief="读取一位已确认人物的家庭归属、人物关系与画像。",
     description=(
         "读取一位**已确认人物**的家庭归属、人物关系与已有画像。"
         "关系来自家庭图谱，逐条标了来源（模型推断或用户确认）。"
@@ -189,6 +204,7 @@ GET_PERSON_PROFILE = ToolSpec(
 
 QUERY_MEMORY_FACTS = ToolSpec(
     name="query_memory_facts",
+    brief="精确统计相册（数量/最早最晚/按月分组），不走相似度检索。",
     description=(
         "精确统计当前相册，答案是一个确定的数字或时间，不经过相似度检索。"
         "能回答：有多少张原始照片/视频、某个已确认人物出现在多少张照片里、"
@@ -255,6 +271,7 @@ QUERY_MEMORY_FACTS = ToolSpec(
 
 QUERY_PHOTO_PEOPLE = ToolSpec(
     name="query_photo_people",
+    brief="读一张候选照片的已确认人物与未确认同行者。",
     description=(
         "读取一张已检索照片自己的已确认人物和未确认同行者。"
         "asset_handle 必须来自当前 search_memories preview；不会把其他候选照片的人名移植过来。"
@@ -289,6 +306,7 @@ QUERY_PHOTO_PEOPLE = ToolSpec(
 
 INSPECT_PHOTO = ToolSpec(
     name="inspect_photo",
+    brief="复核单张照片的视觉细节（物体/衣着/颜色/场景）。昂贵。",
     description=(
         "复核已检索照片的视觉细节（物体/衣着/颜色/场景）。"
         "asset_handle 使用 search_memories preview 里的 handle（photo_1…），可省略（默认用预览第一张）。"
@@ -335,6 +353,7 @@ INSPECT_PHOTO = ToolSpec(
 
 READ_PHOTO_TEXT = ToolSpec(
     name="read_photo_text",
+    brief="读取这张照片已存下的文字（招牌/价格/店名/年份）。昂贵。",
     description=(
         "读取这张照片**已经存下来的**文字内容（菜单/价格/招牌/店名/电话/年份/小字）。"
         "适用于「多少钱/价格/售价/店名/招牌/电话/写了什么/什么字/哪一年」等需要看照片文字的题。"
@@ -397,4 +416,10 @@ RETRIEVAL_TOOLS = frozenset({"search_memories", "get_result_page"})
 
 
 def openai_tools(specs: Sequence[ToolSpec] = TOOL_SPECS) -> tuple[Mapping[str, Any], ...]:
+    """把契约渲染成端点的 ``tools`` 字段。
+
+    **没有 ``brief`` 开关**：精简与否在 ``jit.select_tools`` 就定好了（它返回的 spec
+    其 ``description`` 已经是 ``brief``）。多一个开关等于给「发哪一份描述」留两个
+    真相，而选错的那一个不会报错，只会让每一转多付两千多 token。
+    """
     return tuple(spec.as_openai_tool() for spec in specs)

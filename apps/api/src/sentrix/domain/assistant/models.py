@@ -233,6 +233,14 @@ class TurnRecord:
     termination_reason: str = ""
     attachments: tuple[Attachment, ...] = ()
     requirements: tuple[Mapping[str, Any], ...] = ()
+    # **检索到的那批候选**（``asset_id``，按名次），不是交付的那批。两者必须分开：
+    # 交付是「模型从候选里挑了哪几张」，候选是「检索捞回来了哪些」。合成一个数就分不出
+    # 「检索没找到」与「找到了没交付」——而这两种缺陷的修法完全相反。
+    #
+    # 1.0 的 item 里有 ``retrieved_candidate_media`` / ``evidence_source_media``；
+    # 2.0 此前**没有暴露它**，PhotoBench 只能把 ``retrieval_media_refs`` 直接赋成 GT，
+    # 于是那个指标的分母是 GT、分子是交付集：394 道零交付的题 recall 一道不差全是 0.0。
+    retrieved_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -39,9 +39,10 @@ from sentrix.application.retrieval.retrieve_evidence import EvidenceRequest, Ret
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
-from sentrix.domain.assistant.result_set import ResultSet
+from sentrix.domain.assistant.result_set import ResultSet, ResultSetEntry
 from sentrix.domain.identity.ports import FaceRepository, PersonCropRenderer
 from sentrix.domain.media.inspection import CERTAINTY_SUPPORTED
+from sentrix.domain.media.models import Observation
 from sentrix.domain.media.ports import AssetRepository, ObservationRepository, PhotoInspector
 from sentrix.domain.retrieval.fact_query import FactRejection
 
@@ -52,6 +53,59 @@ DEFAULT_INSPECT_QUESTION = "请描述这张照片"
 
 DEFAULT_SEARCH_LIMIT = 12
 MAX_SEARCH_LIMIT = 12
+
+# 复合摘要的三个上限，逐条取自 1.0 ``agent_runtime/tools.py:371-414`` 的
+# ``_observation_summary``（单段文字 120 字、整串 300 字、列表取前 8 项）。
+#
+# **它们不是节流阀。** 实测这份摘要在真机上的中位数只有 136 字，上限几乎从不生效；
+# 它是防「一条异常长的 caption 或一份 1000 字的 OCR 把上下文吃掉」的兜底。
+# 不加的话，一页 6 条 preview 的摘要最坏可以是 6×1000 字——而 2.0 的窗口只有 6144。
+_SUMMARY_TEXT_LIMIT = 300
+_SUMMARY_OCR_LIMIT = 120
+_SUMMARY_LIST_LIMIT = 8
+
+# 融合层的证据分级 → 给模型看的相关性强度。1.0 用的正是这三个词
+# （``agent_runtime/tools.py:1770``：``"strong" if _aid in event_member_ids else
+# "approximate"``），但它判的是「是不是事件成员」——那个判据在 2.0 没有对应物。
+# 2.0 判的是**这条候选被哪一类通道召回**：``anchor``（metadata / entity，确定性锚点，
+# 融合时还额外加过 1.0 的固定加成）比 ``semantic``（相似度命中）更硬。
+_LEVEL_BY_EVIDENCE_CLASS: Mapping[str, str] = {
+    "anchor": "exact",
+    "semantic": "strong",
+    "expander": "approximate",
+}
+
+
+def _observation_summary(observation: Observation | None) -> str:
+    """一条观察压成给模型看的一句话。分段顺序照 1.0，用 2.0 现成的列。
+
+    ``caption → activity → place → objects[:8] → clothing[:8] → 文字：…``
+
+    2.0 原先只给 ``caption``，而 ``Observation`` 上有八个语义列。**这正是那条因果链
+    的起点**：``objects`` / ``clothing`` / ``ocr_text`` 恰恰是模型会去调
+    ``inspect_photo`` / ``read_photo_text`` 才拿得到的东西，摘要里没有它们，模型就
+    只能逐张精读去确认「这张是不是我要找的」——精读调用从 0.97 次/题涨到 3.4 次/题，
+    撞上 ``max_inspections = 3`` 之后开始成片被拒。
+    """
+    if observation is None:
+        return ""
+    parts: list[str] = []
+    for value in (observation.caption, observation.activity, observation.place):
+        text = (value or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    for values in (observation.objects, observation.clothing):
+        labels: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in labels:
+                labels.append(text)
+        if labels:
+            parts.append("、".join(labels[:_SUMMARY_LIST_LIMIT]))
+    ocr = (observation.ocr_text or "").strip()
+    if ocr:
+        parts.append(f"文字：{ocr[:_SUMMARY_OCR_LIMIT]}")
+    return "；".join(parts)[:_SUMMARY_TEXT_LIMIT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +242,7 @@ class AssistantToolbox:
             query=query,
             asset_ids=tuple(hit.asset_id for hit in result.hits),
             created_at=now,
+            evidence_classes={hit.asset_id: hit.evidence_class for hit in result.hits},
         )
         self._result_sets.add(result_set)
         return self._page_outcome(
@@ -219,13 +274,17 @@ class AssistantToolbox:
         self, result_set: ResultSet, *, page_no: int, extra: Mapping[str, Any] | None = None
     ) -> ToolOutcome:
         page = result_set.page(page_no)
-        preview = [self._preview(entry.handle, entry.asset_id) for entry in page.entries]
+        preview = [self._preview(entry) for entry in page.entries]
         model_visible: dict[str, Any] = {
             "result_set_id": result_set.id,
             "query": result_set.query,
             "page": page.page,
             "page_size": page.page_size,
             "has_more": page.has_more,
+            # 1.0 ``_RETRIEVAL_TOP_KEEP`` 里的一个字段：这一页**有没有东西可以精读**。
+            # 与 ``has_more`` 不是一件事——前者问「这批候选能不能继续取证」，后者问
+            # 「后面还有没有更多候选」。翻到最后一页时前者为真、后者为假。
+            "can_inspect": bool(preview),
             "preview": preview,
         }
         # ``total`` 刻意**不进** model_visible：1.0 实测过模型会把候选池的数量直接当成
@@ -242,35 +301,45 @@ class AssistantToolbox:
             observation.update(extra)
         return ToolOutcome(observation=observation, model_visible=model_visible)
 
-    def _preview(self, handle: str, asset_id: str) -> Mapping[str, Any]:
+    def _preview(self, entry: ResultSetEntry) -> Mapping[str, Any]:
         """一条候选在**模型眼里**的样子。
 
-        **这四个字段是下限，不是一份随手列的清单。** 1.0 的 ``_preview_entry``
-        （``agent_runtime/tools.py:590-615``）给模型 14 个字段，其中 ``place`` /
-        ``people`` / ``evidence_summary`` 三个是回答「这张照片在哪、有谁、是什么」
-        的全部依据；它的 ``search_memories`` 描述里还专门写了一句
-        「单张照片的地点、时间、人物**直接在 preview 里读，不要为此再调用其他工具**」。
+        **这是模型获取照片信息的主要手段，字段按 1.0 的 ``_preview_entry``
+        （``agent_runtime/tools.py:564-615``）补齐，不做删减。** 1.0 给 14 个字段，
+        其中 ``place`` / ``people`` / ``evidence_summary`` / ``level`` / ``media_kind``
+        是回答「这张照片在哪、有谁、是什么、有多相关、是照片还是视频」的全部依据；
+        它的 ``search_memories`` 描述里还专门写了一句「单张照片的地点、时间、人物
+        **直接在 preview 里读，不要为此再调用其他工具**」。
 
-        2.0 的 ``_preview`` 是 S3（Task 40）写的，那时这三样在 2.0 还不存在。S4 加了
-        地点、S5 加了人物与语义——**没有一个切片回头把它加宽**。后果是可测的：模型
-        无法从检索结果判断"这张是不是我要找的"，只能逐张 ``inspect_photo``。地点类题
-        平均调用工具 6.63 次、``inspect_photo`` 用掉 308 次，而 1.0 同题分别是
-        1.83 次与 55 次；地点类错率 38.7% → 75.3%。
+        2.0 的 ``_preview`` 是 S3（Task 40）写的，那时这些都还不存在。S4 加了地点、
+        S5 加了人物与语义——**没有一个切片回头把它加宽**。后果是可测的：模型无法从
+        检索结果判断"这张是不是我要找的"，只能逐张 ``inspect_photo``。地点类题平均
+        调用工具 6.63 次、``inspect_photo`` 用掉 308 次，而 1.0 同题分别是 1.83 次
+        与 55 次；地点类错率 38.7% → 75.3%。
 
-        读**最新一条观察**（1.0 也是 ``updated_at DESC LIMIT 1``）。没有观察时三个字段
-        留空——空串的意思是「这张图没有记录到」，与「字段没给我们」是两回事，所以键
-        恒在。
+        读**最新一条观察**（1.0 也是 ``updated_at DESC LIMIT 1``）。没有观察时那几个
+        字段留空——空串的意思是「这张图没有记录到」，与「字段没给我们」是两回事，
+        所以键恒在。
+
+        **不搬 1.0 的血缘字段**（``source_video_asset_id`` / ``source_timestamp_sec``
+        / ``source_scene_index`` / ``source_video_file_name``）：1.0 自己也没有把
+        「这一帧属于哪个视频」交给模型，2.0 不扩大这个口子，只给 ``media_kind``。
+        也不搬 ``condition_summary`` / ``priority_rank`` / ``selection_reason``——
+        前者的条件判定在 2.0 走的是另一条路（``evaluate_conditions``），后两者是
+        1.0 在问题文本上做关键词匹配的产物，2.0 不搬那套判据。
         """
-        asset = self._assets.get(asset_id)
-        observations = self._observations.list_by_asset(asset_id)
+        asset = self._assets.get(entry.asset_id)
+        observations = self._observations.list_by_asset(entry.asset_id)
         latest = observations[0] if observations else None
         return {
-            "handle": handle,
+            "handle": entry.handle,
             "file_name": asset.file_name if asset else "",
+            "media_kind": asset.media_type.value if asset else "",
             "captured_at": asset.captured_at.isoformat() if asset and asset.captured_at else "",
+            "level": _LEVEL_BY_EVIDENCE_CLASS.get(entry.evidence_class, ""),
             "place": latest.place if latest else "",
             "people": list(latest.people) if latest else [],
-            "evidence_summary": latest.caption if latest else "",
+            "evidence_summary": _observation_summary(latest),
         }
 
     # ---- 交付（终止动作上的一个字段）-----------------------------------------

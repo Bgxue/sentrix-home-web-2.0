@@ -264,6 +264,7 @@ def _complete_payload(record: TurnRecord) -> CompleteEventPayload:
             for item in record.attachments
         ],
         requirements=[dict(item) for item in record.requirements],
+        retrieved_candidates=list(record.retrieved_candidates),
     )
 
 

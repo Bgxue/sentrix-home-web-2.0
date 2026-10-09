@@ -15,10 +15,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from sentrix.domain.assistant.models import ChatMessage, ChatRole, ToolCall
-from sentrix.domain.assistant.ports import ModelServiceError
+from sentrix.domain.assistant.ports import ModelServiceError, PromptTooLongError
 from sentrix.domain.assistant.tools import TOOL_SPECS
-from sentrix.infrastructure.assistant.chat_client import ChatModelError, OpenAIChatModel
+from sentrix.infrastructure.assistant.chat_client import (
+    MAX_ANSWER_TOKENS,
+    ChatModelError,
+    OpenAIChatModel,
+)
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
+
+#: 这些用例自己指定窗口，**与生产的 6144 无关**——被测的是「预算从窗口算出来」这条
+#: 关系。取一个小值，构造超预算的提示词不用真的写 6000 个 token；同时要大到
+#: 「1000 字的提示词 + ``MIN_USABLE_OUTPUT_TOKENS``」塞得下，否则所有用例都会走拒绝那条路。
+CONTEXT_TOKENS = 1000
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -90,6 +99,12 @@ def chat_model(server: str) -> OpenAIChatModel:
     写死的名字」正是 2026-09-24 那次事故的入口。
     """
     return OpenAIChatModel(server, ServedModel(server))
+
+
+def context_model(server: str) -> OpenAIChatModel:
+    """带显式窗口的客户端。窗口是**部署事实**，生产由 ``Settings.vlm_context_tokens``
+    给；测试里指定一个小值，构造超预算的提示词不必真写 6000 个 token。"""
+    return OpenAIChatModel(server, ServedModel(server), context_tokens=CONTEXT_TOKENS)
 
 
 def reply(content: str = "好的。", tool_calls: list[dict] | None = None) -> dict:
@@ -339,17 +354,45 @@ def test_a_chat_call_on_an_endpoint_with_no_models_fails_loudly(server: str):
     assert _Handler.received == []
 
 
-def test_max_tokens_follows_the_behaviour_baseline_formula(server: str):
-    """``min(1501, 4400 - 提示词 token)``，下限 64——1.0 ``app.py:2680-2692``。"""
+def test_a_prompt_that_leaves_no_room_is_refused_not_truncated(server: str):
+    """提示词大到写不完一次工具调用时，**不发明知会失败的请求**，抛具名异常。
+
+    旧公式 ``max(64, min(1501, 4400 - prompt))`` 的下限 64 把这件事盖住了：它照样发请求，
+    端点在生成被截断之后回 500（JSON 解析不了）或 400（超窗），而 ``complete`` 把两者
+    统一报成「模型服务不可用」——真因（提示词太大）与用户看到的那句话完全无关。
+    实测两轮 487 题里 22 道是这么来的。
+    """
     _Handler.response = reply()
-    long_question = "问" * 9000
+    huge = "问" * (CONTEXT_TOKENS * 2 + 4000)
 
-    chat_model(server).complete(
-        [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, long_question)],
-        TOOL_SPECS,
-    )
+    with pytest.raises(PromptTooLongError) as error:
+        context_model(server).complete(
+            [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, huge)],
+            TOOL_SPECS,
+        )
 
-    assert _Handler.received[0]["body"]["max_tokens"] == 64
+    assert _Handler.received == [], "这条请求根本不该发出去"
+    # 文案要带**真实数字**：运维据此判断该压历史还是该改部署。
+    assert str(CONTEXT_TOKENS) in str(error.value)
+    assert "不足以写完一次工具调用" in str(error.value)
+
+
+def test_the_output_budget_is_derived_from_the_real_window(server: str):
+    """断言的是**关系**，不是抄一个数。
+
+    窗口是部署事实（8100 的 ``--ctx-size 24576 ÷ --parallel 4``），不是代码常量——
+    ``4400`` 那个数就是照 1.0 自己的 ``max_model_len = 4501`` 算出来的，端点换了它没换。
+    这条钉住「预算确实是从传进来的窗口算的」：换一个窗口，预算跟着换。
+    """
+    _Handler.response = reply()
+    messages_ = [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, "问" * 1000)]
+
+    context_model(server).complete(messages_, TOOL_SPECS)
+
+    prompt_tokens = OpenAIChatModel.estimate_prompt_tokens(messages_)
+    sent = _Handler.received[0]["body"]["max_tokens"]
+    assert sent == min(MAX_ANSWER_TOKENS, CONTEXT_TOKENS - prompt_tokens)
+    assert sent != min(MAX_ANSWER_TOKENS, 4400 - prompt_tokens)
 
 
 def test_a_short_prompt_gets_the_full_answer_budget(server: str):

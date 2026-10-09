@@ -24,6 +24,7 @@ from sentrix.application.retrieval.retrieve_text_ann import RetrieveTextAnn
 from sentrix.application.retrieval.retrieve_visual import RetrieveVisual
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import PersonProfile, PersonRelationship
+from sentrix.domain.assistant.result_set import ResultSet
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES
 from sentrix.domain.retrieval import scheme
@@ -321,11 +322,142 @@ def test_the_preview_carries_where_who_and_what(toolbox, migrations_ready_db):
     entry = outcome.model_visible["preview"][0]
     assert entry["place"] == "浙江省杭州市萧山区"
     assert entry["people"] == ["妈妈"]
-    assert entry["evidence_summary"] == "海边两个人合影"
+    assert "海边两个人合影" in entry["evidence_summary"]
+
+
+def test_the_summary_is_composed_like_1_0(toolbox, migrations_ready_db):
+    """摘要不是 caption 一句话，而是**按 1.0 的分段顺序拼出来的复合句**。
+
+    1.0 ``_observation_summary``（``agent_runtime/tools.py:371``）的顺序是
+    ``caption → activity → place → objects[:8] → clothing[:8] → 文字：…``。
+
+    这条断言的是「那四样**同时**在」——只测 caption 的话，把 ``_observation_summary``
+    换回 ``latest.caption`` 也照样绿，而那正是被修掉的那个 bug。
+    """
+    observations = SqliteObservationRepository(migrations_ready_db)
+    observations.add(
+        Observation(
+            id="obs_rich",
+            scope_id=SCOPE,
+            asset_id="asset_0",
+            source_type="image",
+            captured_at=datetime(2019, 8, 1, tzinfo=UTC),
+            confidence=0.9,
+            created_at=NOW,
+            updated_at=NOW,
+            caption="婚礼现场，新郎新娘站在紫色地毯上",
+            activity="婚礼仪式进行中",
+            place="婚礼宴会厅",
+            objects=("紫色地毯", "白色婚纱", "麦克风"),
+            clothing=("婚纱", "西装"),
+            ocr_text="双喜",
+        )
+    )
+
+    outcome = run(toolbox, "search_memories", query="海边")
+
+    summary = outcome.model_visible["preview"][0]["evidence_summary"]
+    # 这四样原先一样都进不了 preview——它们正是模型会去调 inspect_photo /
+    # read_photo_text 才拿得到的东西。
+    assert "婚礼仪式进行中" in summary  # activity
+    assert "紫色地毯、白色婚纱、麦克风" in summary  # objects
+    assert "婚纱、西装" in summary  # clothing
+    assert "文字：双喜" in summary  # ocr_text
+    # 分段之间用「；」连，段内用「、」连——1.0 的两种分隔符不是随手选的。
+    assert summary.startswith("婚礼现场，新郎新娘站在紫色地毯上；婚礼仪式进行中；")
+
+
+def test_the_preview_carries_the_media_kind(toolbox, migrations_ready_db, tmp_path):
+    """照片与视频都要能认出来：``media_kind`` 取资产自己的 ``media_type``。
+
+    没有它，模型分不出「这是视频」还是「这是一张图」——而视频在 2.0 是**一个资产**，
+    它的关键帧才是图。
+    """
+    video = tmp_path / "婚礼.mp4"
+    video.write_bytes("视频字节".encode())
+    SqliteAssetRepository(migrations_ready_db).add(
+        Asset(
+            id="asset_video",
+            scope_id=SCOPE,
+            file_name="婚礼.mp4",
+            media_type=MediaType.VIDEO,
+            path=str(video),
+            mime_type="video/mp4",
+            size_bytes=video.stat().st_size,
+            status=AssetStatus.PROCESSED,
+            content_sha256="hashvideo",
+            captured_at=datetime(2019, 8, 3, tzinfo=UTC),
+            captured_location=GpsPoint(30.0, 120.0),
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    build, result_sets = toolbox
+    result_sets.add(
+        ResultSet(
+            id="rs_kind",
+            scope_id=SCOPE,
+            query="婚礼",
+            asset_ids=("asset_0", "asset_video"),
+            created_at=NOW,
+        )
+    )
+    outcome = build.execute(
+        "get_result_page", {"result_set_id": "rs_kind", "page": 1}, scope_id=SCOPE, now=NOW
+    )
+
+    kinds = [item["media_kind"] for item in outcome.model_visible["preview"]]
+    assert kinds == ["image", "video"]
+
+
+def test_the_preview_carries_the_relevance_level(toolbox, migrations_ready_db):
+    """``level`` 取**这条候选被哪一类通道召回**，不是名次。
+
+    ``anchor``（metadata / entity）是确定性锚点，``semantic`` 是相似度命中。
+    1.0 用 ``exact`` / ``strong`` / ``approximate`` 三个词表达它，但它的判据是
+    「是不是事件成员」；2.0 的判据在 ``fusion.evidence_class_for``。
+    """
+    build, result_sets = toolbox
+    result_sets.add(
+        ResultSet(
+            id="rs_level",
+            scope_id=SCOPE,
+            query="海边",
+            asset_ids=("asset_0", "asset_1"),
+            created_at=NOW,
+            evidence_classes={"asset_0": "anchor", "asset_1": "semantic"},
+        )
+    )
+
+    outcome = build.execute(
+        "get_result_page", {"result_set_id": "rs_level", "page": 1}, scope_id=SCOPE, now=NOW
+    )
+
+    levels = [item["level"] for item in outcome.model_visible["preview"]]
+    assert levels == ["exact", "strong"]
+
+
+def test_the_fused_evidence_class_survives_retrieval(toolbox):
+    """融合层算出来的分级必须**一路带到结果集**，不能在 ``EvidenceHit`` 那里被丢掉。
+
+    这是 ``level`` 的上游：``RetrieveEvidence`` 把 ``FusedCandidate`` 转成
+    ``EvidenceHit`` 时，原先只搬了 ``asset_id`` / ``score`` / ``channels`` /
+    ``raw_scores``——``evidence_class`` 就此消失。
+    """
+    build, result_sets = toolbox
+
+    outcome = build.execute("search_memories", {"query": "海边"}, scope_id=SCOPE, now=NOW)
+
+    stored = result_sets.get(outcome.model_visible["result_set_id"])
+    assert stored is not None
+    assert set(stored.evidence_classes) == set(stored.asset_ids)
+    # 这个夹具的候选全部来自视觉通道（semantic），所以一条 anchor 都不该有。
+    assert set(stored.evidence_classes.values()) == {"semantic"}
 
 
 def test_the_preview_keys_are_always_present(toolbox):
-    """没有观察行时三个键**仍然在**，值取空。
+    """没有观察行、也没有分级时这几个键**仍然在**，值取空。
 
     空串的意思与「字段没给我们」不是一回事：前者是「这张图确实没记录到地点」，
     后者会让模型以为这条链路坏了、转头去调 ``inspect_photo`` 试探。
@@ -336,6 +468,25 @@ def test_the_preview_keys_are_always_present(toolbox):
     assert entry["place"] == ""
     assert entry["people"] == []
     assert entry["evidence_summary"] == ""
+    # 这两格的键也恒在：资产在、所以认得出是照片；检索给分级、所以这一格有值。
+    # （「结果集压根没带分级」那一支在 test_assistant_repositories.py，
+    #  那里读回来的是空串而不是 ``strong``。）
+    assert entry["media_kind"] == "image"
+    assert entry["level"] == "strong"
+
+
+def test_the_page_says_whether_it_can_be_inspected(toolbox):
+    """``can_inspect`` 与 ``has_more`` 是两件事，不能合并。
+
+    前者问「这一页有没有东西可以继续取证」，后者问「后面还有没有更多候选」。
+    翻到最后一页时前者为真、后者为假——合成一个字段就必然有一个说错。
+    """
+    build, _result_sets = toolbox
+
+    outcome = build.execute("search_memories", {"query": "海边"}, scope_id=SCOPE, now=NOW)
+
+    assert outcome.model_visible["can_inspect"] is True
+    assert outcome.model_visible["has_more"] is False
 
 
 # ---- 交付：终止动作上的一个字段，不是一次工具调用 ---------------------------

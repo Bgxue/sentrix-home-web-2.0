@@ -125,14 +125,19 @@ def test_the_tool_satisfies_visible_text():
     assert TOOLS_BY_NAME["read_photo_text"].satisfies == (EvidenceType.VISIBLE_TEXT,)
 
 
-def test_the_tool_is_cheap_not_expensive():
-    """**一处与 1.0 的偏离，钉住它。** 1.0 标 ``expensive`` 是因为它真跑一次 OCR 引擎
-    （CPU 推理，占那个共用的 ``inspections`` 计数器）。2.0 读的是一列已落库的文本。
+def test_read_photo_text_costs_a_photo_slot_like_1_0():
+    """**T124 的降级已被推翻，回到 1.0 的 ``EXPENSIVE``。**（W5）
 
-    照抄 ``expensive`` 的后果不是「保守一点」，是**一次免费的读库会把
-    ``inspect_photo`` 那唯一一次精读预算吃掉**。
+    T124 曾把它降成 ``CHEAP``，理由是「2.0 读的是一列已落库的文本，照抄 ``expensive``
+    会让一次免费的读库挤掉 ``inspect_photo`` 的精读预算」。**那条理由的前提是
+    ``max_inspections = 1``。** 现在是 3（1.0 生产 profile 的值），代价翻到了另一面：
+    ``CHEAP`` 的工具**不受任何单轮次数约束**，只受 6 次工具总预算管——实测
+    ``album3v4-026`` 连读 6 次，把工具预算与模型步一起用光。
+
+    两者共用「每轮 3 次照片级取证」不是硬凑：它们本来就是同一件事——**对某一张照片
+    做一次取证**（1.0 的 ``budget_unit="image"`` 说的就是这句）。
     """
-    assert TOOLS_BY_NAME["read_photo_text"].cost_class is CostClass.CHEAP
+    assert TOOLS_BY_NAME["read_photo_text"].cost_class is CostClass.EXPENSIVE
 
 
 def test_the_tool_does_not_take_a_question():

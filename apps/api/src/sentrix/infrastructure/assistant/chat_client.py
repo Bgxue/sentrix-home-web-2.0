@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from sentrix.domain.assistant.models import ChatMessage, ChatRole, ModelReply, ToolCall
-from sentrix.domain.assistant.ports import ModelServiceError
+from sentrix.domain.assistant.ports import ModelServiceError, PromptTooLongError
 from sentrix.domain.assistant.tools import ToolSpec, openai_tools
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
@@ -46,11 +46,30 @@ log = logging.getLogger("sentrix.assistant.chat_client")
 _CHANNEL_OPEN = "<|channel>"
 _CHANNEL_CLOSE = "<channel|>"
 
-# 1.0 app.py:2680-2692 的三个人工常数：给回答留的 token 预算上限、给提示词留的总量、
-# 以及无论上下文多满都必须留下的最小生成量。
+# 1.0 ``app.py:2680-2692`` 的两个人工常数：给回答留的 token 上限，与安全余量。
+#
+# **``PROMPT_BUDGET_TOKENS = 4400`` 已被删除，它是一条静默失败。** 那个数是照 1.0
+# 自己的 ``max_model_len = 4501`` 算的（1.0 注释原文：「Phase H H4：max_model_len=4501
+# 的硬上限保护」），而 2.0 的窗口是 **6144**（8100 的 ``--ctx-size 24576 ÷ --parallel 4``）。
+# 常量没跟着换，于是 ``4400 - prompt_tokens`` 在提示词超过 4336 token 时给负数，被
+# ``max(MIN_ANSWER_TOKENS, …)`` 抬成 64——**发出一个「窗口装得下、但输出只够写半个
+# JSON」的请求**，端点回 500（解析失败）或 400（超窗），而用户看到的是「模型服务不可用」。
+# 实测两轮 487 题里 22 道是这么来的。窗口现在从 ``Settings.vlm_context_tokens`` 传进来。
 MAX_ANSWER_TOKENS = 1501
-PROMPT_BUDGET_TOKENS = 4400
-MIN_ANSWER_TOKENS = 64
+
+# 无论上下文多满都必须留下的最小生成量。**它不是 64。**
+# 一次工具调用的 JSON（工具名 + 一到四个参数 + ``selected_image_handles`` 数组）写不完
+# 就是一次解析失败，而解析失败在用户那儿与「模型服务挂了」长得一样。256 是给
+# ``final_answer`` 那种最长的一次调用留的余量。
+MIN_USABLE_OUTPUT_TOKENS = 256
+
+# 估算提示词 token 时给每个字符记的权重。中文在 gemma 的词表里大致一个字一到两个
+# token，取 1/2 是 1.0 的旧口径（它偏乐观，所以下面还要再留一道 margin）。
+_TOKENS_PER_CHAR = 0.5
+
+# 不传 ``context_tokens`` 时用的窗口。**只是为了测试与本地起得来**，生产必须由
+# ``Settings.vlm_context_tokens`` 给——窗口是部署事实（见该字段的注释）。
+DEFAULT_CONTEXT_TOKENS = 6144
 
 
 class ChatModelError(RuntimeError):
@@ -154,10 +173,20 @@ class OpenAIChatModel:
     详见 ``model_endpoint.py``。
     """
 
-    def __init__(self, base_url: str, model: ServedModel, *, timeout_s: float = 120.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: ServedModel,
+        *,
+        timeout_s: float = 120.0,
+        context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_s = timeout_s
+        # 单个并发槽的窗口。**必须由部署方给**（``Settings.vlm_context_tokens``），
+        # 默认值只是让测试与本地起得来，不代表生产。
+        self._context_tokens = context_tokens
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]) -> ModelReply:
         if not messages or messages[0].role is not ChatRole.SYSTEM:
@@ -211,12 +240,24 @@ class OpenAIChatModel:
     def _post(
         self, model_name: str, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
     ) -> httpx.Response:
+        prompt_tokens = self.estimate_prompt_tokens(messages)
+        budget = self._max_tokens(messages)
+        if budget < MIN_USABLE_OUTPUT_TOKENS:
+            # **不发这个请求。** 发出去的结果只有两种，两种都会说错原因：端点回 500
+            # （生成被截断、JSON 解析不了）或 400（超窗），而 ``complete`` 把它们统一
+            # 报成 ``ModelServiceError`` ——用户看到「模型服务当前不可用」，运维去看端点
+            # 却什么毛病都没有。真因是**提示词太大**，那是调用方可以处理的（压缩历史）。
+            raise PromptTooLongError(
+                f"提示词约 {prompt_tokens} token，单个并发槽的上下文上限 {self._context_tokens}，"
+                f"只剩 {budget} 不足以写完一次工具调用（至少需要 {MIN_USABLE_OUTPUT_TOKENS}）。"
+            )
+
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": [_dump_message(message) for message in messages],
             "temperature": 0.0,
             "stream": False,
-            "max_tokens": self._max_tokens(messages),
+            "max_tokens": budget,
         }
         if tools:
             payload["tools"] = list(openai_tools(tools))
@@ -229,12 +270,21 @@ class OpenAIChatModel:
             raise ModelServiceError(f"模型端点 {self._base_url} 不可达：{error}") from error
 
     @staticmethod
-    def _max_tokens(messages: Sequence[ChatMessage]) -> int:
-        """按 1.0 的公式估：``min(1501, 4400 - 提示词 token)``，下限 64。
+    def estimate_prompt_tokens(messages: Sequence[ChatMessage]) -> int:
+        """提示词 token 的粗估：字符数的一半。
 
-        这里用字符数除以 2 粗估提示词 token——中文在 gemma 的词表里大致一个字一到两个
-        token。估得准不准只影响生成长度上限，不影响正确性；真要精确就得再打一次
-        tokenize 端点，那是 S6 的事。
+        中文在 gemma 的词表里大致一个字一到两个 token。估得准不准只影响**生成长度上限
+        与那条拒绝判据**，不影响正确性；真要精确就得再打一次 tokenize 端点。
         """
-        prompt_tokens = sum(len(message.content) for message in messages) // 2
-        return max(MIN_ANSWER_TOKENS, min(MAX_ANSWER_TOKENS, PROMPT_BUDGET_TOKENS - prompt_tokens))
+        return int(sum(len(message.content) for message in messages) * _TOKENS_PER_CHAR)
+
+    def _max_tokens(self, messages: Sequence[ChatMessage]) -> int:
+        """这次生成最多能写多少 token。**不含任何「能发就发」的下限。**
+
+        旧公式是 ``max(64, min(1501, 4400 - prompt))``——那个 64 的下限把「提示词已经
+        大到写不完了」这件事盖住了：它照样发请求，然后拿到一次截断（500）或超窗（400）。
+        现在剩余量不足 ``MIN_USABLE_OUTPUT_TOKENS`` 时**不发**，由 ``_post`` 抛
+        ``PromptTooLongError``，调用方压缩历史再试。见 ``ports.PromptTooLongError``。
+        """
+        available = self._context_tokens - self.estimate_prompt_tokens(messages)
+        return min(MAX_ANSWER_TOKENS, available)

@@ -7,30 +7,41 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
+import time
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
+from sentrix.config import Settings
 from sentrix.domain.assistant.models import ChatMessage, ModelReply, ToolCall
-from sentrix.domain.assistant.tools import TOOL_SPECS
+from sentrix.domain.assistant.tools import TOOL_SPECS, ToolSpec
+from sentrix.domain.retrieval import scheme
 from sentrix.main import create_app
+
+#: 规划那次调用的 system 提示词开头。**分流按它，不按 ``tools`` 空不空**——JIT 剪枝
+#: 之后工具循环也可能合法地拿到空元组（额度用尽时 ``select_tools`` 返回空集）。
+#: 与 ``test_run_turn.py`` 的 ``PLANNER_MARKER`` 是同一条判据。
+PLANNER_MARKER = "你正在规划家庭记忆任务"
 
 
 class ScriptedChatModel:
-    """主循环按剧本回话；规划（``tools`` 为空）走 ``planner_reply``，不消耗剧本。"""
+    """主循环按剧本回话；规划走 ``planner_reply``，不消耗剧本。"""
 
     def __init__(self, replies: Sequence[ModelReply]) -> None:
         self._replies = list(replies)
         self.calls = 0
         self.planner_calls = 0
 
-    def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
-        if not tools:
+    def complete(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]) -> ModelReply:
+        if PLANNER_MARKER in (messages[0].content if messages else ""):
             self.planner_calls += 1
-            return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
-        assert [spec.name for spec in tools] == [spec.name for spec in TOOL_SPECS]
+            return planner_reply("photo_set", "delivered_photo")
+        assert {spec.name for spec in tools} <= {spec.name for spec in TOOL_SPECS}
         self.calls += 1
         return self._replies[min(self.calls - 1, len(self._replies) - 1)]
 
@@ -251,3 +262,113 @@ def test_a_turn_can_be_started_without_creating_a_conversation_first(client: Tes
 
 def test_an_unknown_turn_has_no_event_stream(client: TestClient):
     assert client.get("/api/v1/assistant/turns/turn_nope/events").status_code == 404
+
+
+# ---- 候选集：与交付集分开暴露（§3.8）-----------------------------------------
+#
+# 这一组要**真的有照片可供检索**，所以自带一个脚本化嵌入器的 client——与
+# ``test_search_routes.py`` 同一个套路（向量由测试指定，「哪张排第一」是构造出来的）。
+
+RED = [1.0, 0.0, 0.0, 0.0]
+GREEN = [0.0, 1.0, 0.0, 0.0]
+
+
+class ScriptedEmbedder:
+    model_id = scheme.IMAGE_MODEL
+    dimension = 4
+
+    def embed_image(self, path: object) -> list[float]:
+        return list(RED if Path(str(path)).read_bytes() == _RED_JPEG else GREEN)
+
+    def embed_query(self, text: str) -> list[float]:
+        return list(RED if text.strip() == "红色" else GREEN)
+
+
+def jpeg(color: str) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+_RED_JPEG = jpeg("red")
+
+
+@pytest.fixture
+def candidate_client(settings: Settings) -> TestClient:
+    """脚本化嵌入器 + 一份「检索后正文收尾」的模型剧本。"""
+    app = create_app(settings)
+    app.state.container = dataclasses.replace(
+        app.state.container,
+        visual_embedder=ScriptedEmbedder(),
+        chat_model=ScriptedChatModel(
+            [
+                tool_call("search_memories", "c1", query="红色"),
+                final("找到了两张。"),
+            ]
+        ),
+    )
+    return TestClient(app)
+
+
+TERMINAL_STATUSES = {"complete", "partial", "failed"}
+
+
+def poll_until_terminal(client: TestClient, turn_id: str, *, timeout_s: float = 20.0) -> dict:
+    """轮询到回合终态。**回合跑在一条真工作线程里**（``start_turn`` 起线程），
+    202 响应回来时它多半还在跑——这是「先落库再执行」那个设计的必然形状。"""
+    deadline = time.monotonic() + timeout_s
+    body: dict = {}
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/v1/assistant/turns/{turn_id}").json()
+        if body["status"] in TERMINAL_STATUSES:
+            return body
+        time.sleep(0.05)
+    raise AssertionError(f"回合没有在 {timeout_s}s 内结束：{body}")
+
+
+def import_photo(client: TestClient, payload: bytes, scope_id: str = "album1") -> str:
+    return client.post(
+        "/api/v1/media/import",
+        files={"file": ("a.jpg", payload, "image/jpeg")},
+        data={"scope_id": scope_id},
+    ).json()["asset_id"]
+
+
+def test_a_turn_exposes_the_retrieved_candidates(candidate_client: TestClient):
+    """终态载荷里要能看到**检索抓回来的那批候选**，与交付的那批分开。
+
+    这是一次**有意放宽契约**。2.0 原先不暴露候选集，PhotoBench 只能把
+    ``retrieval_media_refs`` 直接赋成 GT——分母是 GT、分子是交付集，于是 394 道零交付的
+    题 recall 一道不差全是 0.0，**分不出「检索没找到」与「没交付」**。
+    """
+    first = import_photo(candidate_client, _RED_JPEG)
+    second = import_photo(candidate_client, jpeg("green"))
+    conversation = make_conversation(candidate_client)
+    turn = start_turn(candidate_client, conversation["id"], message="相册里红色的照片")
+
+    body = poll_until_terminal(candidate_client, turn["turn_id"])
+
+    # 正文收尾 → 交付那一格空着 → ``answered_with_gap``。状态是 ``partial`` 而不是
+    # ``complete`` 是对的：「答了，但声明的交付没做到」。
+    assert body["status"] == "partial"
+    assert body["result"]["retrieved_candidates"] == [first, second]
+    # 一句正文收尾、没有交付——**候选有、交付空**，这正是要能分辨的那种回合。
+    assert body["result"]["attachments"] == []
+
+
+def test_a_turn_without_retrieval_exposes_no_candidates(candidate_client: TestClient):
+    """反向：没检索过就是空数组，不是把交付集填进去。
+
+    这条守的是那个错法本身——「拿交付集冒充候选集」会让这里落成非空，测试当场红。
+    """
+    import_photo(candidate_client, _RED_JPEG)
+    conversation = make_conversation(candidate_client)
+    candidate_client.app.state.container = dataclasses.replace(
+        candidate_client.app.state.container,
+        chat_model=ScriptedChatModel([final("这是一句回答。")]),
+    )
+    turn = start_turn(candidate_client, conversation["id"], message="你好")
+
+    body = poll_until_terminal(candidate_client, turn["turn_id"])
+
+    assert body["result"]["retrieved_candidates"] == []

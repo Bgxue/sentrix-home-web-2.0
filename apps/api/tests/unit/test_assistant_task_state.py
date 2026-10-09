@@ -17,6 +17,7 @@ from sentrix.domain.assistant.models import (
 )
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import TERMINAL, TaskState, ToolCallRecord
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL
 
 
 def make_state(profile: TurnProfile = DEFAULT_PROFILE) -> TaskState:
@@ -94,13 +95,47 @@ def test_step_budget_stops_at_the_profile_limit():
     assert state.can_step() is False
 
 
-def test_tool_budget_counts_only_successful_calls():
-    """被拒绝的调用与缓存回放都不计预算——1.0 只在执行成功后才 ``record_tool_call``。"""
+def test_a_denied_call_consumes_the_tool_budget():
+    """**被拒也计价。**（§3.4 A）
+
+    原先只数 ``status == "ok"``，抄的是 1.0 的口径——而 1.0 那条口径的前提是**被拒就
+    ``break`` 结束回合**（``runtime.py:3318``），拒绝根本不会再来一次。2.0 把拒绝当
+    普通工具结果发回、允许重试，于是同一个回合里「被拒」照样烧掉一个模型步：
+    实测 762 次被拒里 426 步是「整步全被拒」，占 2667 步的 16%。
+
+    计价器与它计的东西对不上，模型于是能靠「一直撞墙」把 8 个模型步全用光——
+    ``step_budget_exhausted`` 的 123 道里 102 道判 0、2 分一道没有。
+    """
     state = make_state()
     for status in ("ok", "ok", "denied", "error", "replayed"):
         state.record(ToolCallRecord(call_id="c", tool="search_memories", signature=status, status=status))
 
-    assert state.tool_calls == 2
+    assert state.tool_round_trips == 5
+
+
+def test_the_terminal_action_is_not_a_tool_round_trip():
+    """``final_answer`` 不计：它是作答那一步，不是取证。
+
+    算进来的话，「回答被门禁打回一次」会顺带吃掉一次工具配额，而 6 次这个数是照着
+    1.0 的生产 profile 定的。
+    """
+    state = make_state()
+    state.record(ToolCallRecord(call_id="c1", tool="search_memories", signature="s1", status="ok"))
+    state.record(ToolCallRecord(call_id="c2", tool=FINAL_ANSWER_TOOL, signature="s2", status="ok"))
+
+    assert state.tool_round_trips == 1
+
+
+def test_the_step_budget_covers_a_full_tool_budget():
+    """一次能用满工具额度的回合必须塞得进模型步预算。（§3.4 B）
+
+    ``max_tool_calls`` 是**工具往返**次数，每一次往返恰好消耗 1 个模型步；此外还要留
+    1 步作答、1 步给 L2 评审。所以 ``max_steps >= max_tool_calls + 2``。
+
+    **A 之前这条是假成立的**——被拒可以额外吃步，于是「用完 6 次工具额度」并不蕴含
+    「用掉 6 个模型步」。它在这里被钉住，是为了让两个 profile 常量从此不能各改各的。
+    """
+    assert DEFAULT_PROFILE.max_steps >= DEFAULT_PROFILE.max_tool_calls + 1 + 1
 
 
 def test_search_calls_counts_every_issued_search():

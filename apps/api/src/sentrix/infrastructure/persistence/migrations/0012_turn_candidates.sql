@@ -1,0 +1,11 @@
+-- 回合级事实：这一轮**检索捞回来的那批候选**（asset_id，按名次）。
+--
+-- 与 ``attachments_json`` 是两件事，必须分开存：交付是「模型从候选里挑了哪几张」，
+-- 候选是「检索给了它哪些」。1.0 的 item 里有 ``retrieved_candidate_media`` /
+-- ``evidence_source_media``；2.0 此前没有暴露它，PhotoBench 只能把
+-- ``retrieval_media_refs`` 直接赋成 GT，于是那个指标的分母是 GT、分子是交付集——
+-- 394 道零交付的题 recall 一道不差全是 0.0，分不出「检索没找到」与「没交付」。
+--
+-- 存在 ``agent_turns`` 而不是 ``agent_turn_events``：它是**回合级事实**，不是事件流里
+-- 的一步。事件流会被 SSE 逐条消费，而这一格是收尾时一次性定下来的。
+ALTER TABLE agent_turns ADD COLUMN candidates_json TEXT NOT NULL DEFAULT '[]';

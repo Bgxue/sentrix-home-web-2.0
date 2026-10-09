@@ -26,6 +26,7 @@ def _row_to_result_set(row: sqlite3.Row) -> ResultSet:
         query=row["query"],
         asset_ids=tuple(json.loads(row["asset_ids_json"] or "[]")),
         created_at=datetime.fromisoformat(row["created_at"]),
+        evidence_classes=dict(json.loads(row["evidence_classes_json"] or "{}")),
     )
 
 
@@ -37,12 +38,14 @@ class SqliteResultSetRepository:
         with self._database.connect() as connection, connection:
             connection.execute(
                 "INSERT OR REPLACE INTO agent_result_sets"
-                " (id, scope_id, query, asset_ids_json, total, created_at) VALUES (?,?,?,?,?,?)",
+                " (id, scope_id, query, asset_ids_json, evidence_classes_json, total, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (
                     result_set.id,
                     result_set.scope_id,
                     result_set.query,
                     json.dumps(list(result_set.asset_ids)),
+                    json.dumps(dict(result_set.evidence_classes)),
                     len(result_set.asset_ids),
                     result_set.created_at.isoformat(),
                 ),

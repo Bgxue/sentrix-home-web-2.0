@@ -116,6 +116,11 @@ class EvidenceHit:
     score: float
     channels: Mapping[str, int] = field(default_factory=dict)
     raw_scores: Mapping[str, float] = field(default_factory=dict)
+    # 融合层给这条候选的**证据分级**（``anchor`` / ``semantic`` / ``expander``，见
+    # ``fusion.evidence_class_for``）。``FusedCandidate`` 一直在算它，而这里原先
+    # 在转成 ``EvidenceHit`` 时把它丢了——于是「这条命中的是确定性锚点还是相似度」
+    # 到不了检索预览，模型只能按名次猜哪张更可能是自己要找的。
+    evidence_class: str = "semantic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +360,7 @@ class RetrieveEvidence:
                     score=candidate.score,
                     channels=dict(candidate.channels),
                     raw_scores=dict(candidate.raw_scores),
+                    evidence_class=candidate.evidence_class,
                 )
                 for candidate in fused[:limit]
             ),

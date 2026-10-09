@@ -2397,6 +2397,12 @@ components:
             type: object
           type: array
           title: Requirements
+        retrieved_candidates:
+          items:
+            type: string
+          type: array
+          title: Retrieved Candidates
+          default: []
         error:
           type: string
           title: Error

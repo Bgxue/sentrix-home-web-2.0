@@ -94,8 +94,6 @@ def check(
         facts = GuardFacts(
             tool_results=facts.tool_results,
             has_more=facts.has_more,
-            delivery_state=facts.delivery_state,
-            delivered_count=facts.delivered_count,
             result_mode=result_mode,
         )
     verdict = FinalGuard().check(answer=answer, facts=facts)
@@ -207,13 +205,18 @@ def test_a_conditional_denial_is_not_an_omission():
 # ---- 交付结构（1.0 final_guard.py:106-112） ---------------------------------
 
 
-def test_delivering_nothing_then_exhausting_the_pool_is_a_contradiction():
-    """``delivery_contradiction`` 的触发面很窄，这是 1.0 的实情：
+def test_delivering_nothing_is_not_blocked_any_more():
+    """**``delivery_contradiction`` 已删除**（2026-10-09）。
 
-    要求 ``delivery_state == "complete"``（最后一次检索把结果取完了）**且**
-    ``delivered_count == 0``（整数 0——真的调过交付工具、且它返回 0 张）。
+    它要求 ``delivered_count == 0``（**整数** 0），而那条记录在 2.0 的形状下取不到：
+    ``deliver()`` 成功时 ``delivered`` 恒 ``>= 1``，失败时走 ``_failure``（观察里没有
+    这一格）、``_finish_with_final_answer`` 又把它记成 ``status="error"``，而
+    ``from_state`` 只读 ``ok``。
 
-    所以需要三段记录：检索 → 交付 0 张 → 再检索且取完。交付记录里的 0 才是那个「0」。
+    更要紧的是**前提变了**：规则设计于「省略的时代」（1.0 的 final 有 49% 不带
+    ``selected_image_handles``）；W6 把那个字段做成必填之后，零交付是一个明确写下的
+    ``[]``，不是遗漏。留在那里会在约 300 道「检索取完但没交图」的题上各花一个模型步，
+    而且打回的是模型的**显式选择**。
     """
     records = (
         search_record(2, call_id="s1"),
@@ -221,31 +224,7 @@ def test_delivering_nothing_then_exhausting_the_pool_is_a_contradiction():
         search_record(2, call_id="s2"),
     )
 
-    assert check("这是你要的海边照片。", records=records) == "delivery_contradiction"
-
-
-def test_never_delivering_at_all_is_not_a_contradiction():
-    """从没调过交付工具的回合 ``delivered_count`` 是 ``None``，而 ``None == 0`` 为假。
-
-    1.0 的 ``delivered_count`` 初值就是 ``None``（``result_set.py:263``）。把它当成 0
-    会让「检索恰好一次取完、又没交付」的正常收尾全部被拦下来——那是 1.0 不会发生的事。
-    """
-    assert check("这是你要的海边照片。", records=(search_record(2),)) == ""
-
-
-def test_delivering_at_least_one_photo_is_not_a_contradiction():
-    assert (
-        check(
-            "这是你要的海边照片。",
-            records=(search_record(2), deliver_record(2)),
-        )
-        == ""
-    )
-
-
-def test_a_search_with_more_pages_left_is_not_a_contradiction():
-    """结果还有下一页时不算「取完」——模型可能正在翻页途中收尾。"""
-    assert check("这是你要的海边照片。", records=(search_record(2, has_more=True),)) == ""
+    assert check("这是你要的海边照片。", records=records) == ""
 
 
 def test_asking_for_everything_while_more_remains_is_blocked():
@@ -274,7 +253,6 @@ def test_a_clean_answer_passes_every_rule():
 def test_there_is_no_evidence_gate_rule():
     """S3 自造的那条「证据门」已经删掉：需求还开着、预算也还有，**不再**拦最终答案。
 
-    1.0 没有这条规则；与它最接近的 ``delivery_contradiction`` 由上面的用例覆盖。
     这里用一句正常的收尾话，证明门禁不会因为「账本还开着」就拦下来。
     """
     state = make_state((search_record(0),))
@@ -285,20 +263,24 @@ def test_there_is_no_evidence_gate_rule():
     assert verdict.passed
 
 
-def test_from_state_reads_the_delivery_bookkeeping_like_1_0():
-    """``GuardFacts.from_state`` 复刻 1.0 ``result_set.py:378/402`` 的交付簿记。"""
+def test_from_state_reads_the_retrieval_bookkeeping_like_1_0():
+    """``GuardFacts.from_state`` 复刻 1.0 ``result_set.py:378/402`` 的检索簿记。
+
+    **只剩检索那一半。** 交付侧的簿记（``delivery_state`` / ``delivered_count``）随
+    ``delivery_contradiction`` 一起删除——那条规则是它们唯一的读者。留一格没人读的
+    状态比删掉更贵：它看起来还在守什么。
+    """
     empty = GuardFacts.from_state(make_state())
-    assert (empty.delivery_state, empty.has_more, empty.tool_results) == ("not_requested", False, ())
-    assert empty.delivered_count is None
+    assert (empty.has_more, empty.tool_results) == (False, ())
 
     searched = GuardFacts.from_state(make_state((search_record(5, has_more=True),)))
-    assert (searched.delivery_state, searched.has_more) == ("available", True)
+    assert searched.has_more is True
+    assert searched.tool_results == ({"tool": "search_memories", "total": 5},)
 
-    exhausted = GuardFacts.from_state(make_state((search_record(5),)))
-    assert exhausted.delivery_state == "complete"
-
+    # 交付记录不再进这份投影：它不是检索的产物。
     delivered = GuardFacts.from_state(make_state((search_record(5), deliver_record(3))))
-    assert (delivered.delivery_state, delivered.delivered_count) == ("delivered", 3)
+    assert delivered.tool_results == ({"tool": "search_memories", "total": 5},)
+    assert delivered.has_more is False
 
 
 # ---- 兜底答复 ---------------------------------------------------------------

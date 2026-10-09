@@ -41,6 +41,20 @@ class ModelServiceError(RuntimeError):
     """
 
 
+class PromptTooLongError(ModelServiceError):
+    """提示词大到**写不完一次工具调用**，请求根本没有发出去。
+
+    **它与「模型服务不可用」必须分得开。** 原先这条路上没有异常：``max_tokens`` 的公式
+    ``max(MIN, min(1501, 4400 - prompt))`` 在 ``prompt > 4336`` 时把下限 64 抬上来，
+    于是发出去的是一个「窗口其实装得下、但输出只够写半个 JSON」的请求——端点回 500
+    （解析失败）或 400（超窗），而用户看到的是「模型服务当前不可用」。
+    实测两轮 487 题共 **22 道**（126 题里）是这么来的。
+
+    这是一条静默失败：把「提示词太大」（可诊断、可回收）伪装成「模型服务挂了」。
+    调用方拿到它应当**压缩历史再试**，而不是直接收尾。
+    """
+
+
 class ChatModel(Protocol):
     """OpenAI 兼容的对话模型端点。2.0 只连它，不管理它的进程。
 
@@ -103,6 +117,7 @@ class TurnRepository(Protocol):
         answer: str,
         attachments: Sequence[Attachment],
         requirements: Sequence[Mapping[str, Any]],
+        retrieved_candidates: Sequence[str],
         updated_at: datetime,
     ) -> None: ...
 
