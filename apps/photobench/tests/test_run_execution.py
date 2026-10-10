@@ -117,6 +117,37 @@ def _completed_turn(
             if attachments is not None
             else [{"handle": "h1", "asset_id": "asset_a", "file_name": "a.jpg"}],
             "requirements": [{"id": "req_1"}],
+            "retrieved_candidates": ["asset_a", "asset_b"],
+            # 助手的**回合级事实**。形状由 ``run_turn._turn_trace`` 组装，这里照抄一份
+            # 生产上真的会出现的——三个投影都读它。
+            "trace": {
+                "model_calls": [
+                    {
+                        "step_id": "step_1",
+                        "call_type": "agent",
+                        "prompt_tokens": 700,
+                        "completion_tokens": 40,
+                        "duration_ms": 400.0,
+                        "tool_calls": ["search_memories"],
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "planner": {"status": "ok", "fallback_reason": "", "goal": "看海边的照片"},
+                "task_state": {
+                    "requirements": [
+                        {"id": "req_1", "evidence_type": "photo_set", "status": "satisfied"},
+                        {
+                            "id": "req_2",
+                            "evidence_type": "visible_text",
+                            "status": "open",
+                            "unmet_reason": "not_attempted",
+                        },
+                    ]
+                },
+                "evidence_ledger": {"entries": []},
+                "guard": [{"code": "internal_id_leak", "hard": True}],
+                "budget": {"model_steps": 5, "tool_round_trips": 2},
+            },
             "error": "",
         },
         "error": "",
@@ -590,13 +621,59 @@ def test_the_trace_is_persisted_verbatim_and_digested():
     assert row["status"] == "ok"
     assert row["text"] == "工具执行完成。"
     # 执行步骤脊柱：事件流逐条一个，供 ``bind_tool_calls_to_model_rounds`` 对齐轮次。
-    assert [step["text"] for step in item["execution_trace"]] == [
+    # 事件流逐条一条，**外加每次模型调用一条**（``stage="model"``，供
+    # ``analysis.agent_stability`` 计数）。后者没有 ``text``——它不是用户看到的事件。
+    assert [step.get("text") for step in item["execution_trace"]] == [
         "已确认需要哪些证据。",
         "正在执行 search_memories…",
         "工具执行完成。",
         "完成。",
+        None,
     ]
     assert item["execution_trace"][1]["conversation_turn"] == 0
+
+
+def test_the_turn_facts_are_projected_into_the_three_panels():
+    """助手报的**一份事实**，摆成三块面板各自的形状。
+
+    这三处此前在 8772 上分别是：``AgentLoopTree`` 整棵树只有一个空文案、
+    ``Agent2SummaryPanel`` 整块不出现、``DebugTracePanel`` 整块不出现——
+    而读侧的代码早就写好了，缺的一直是写侧。
+    """
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    item = execution.execute(_request())["items"][0]
+
+    # ① Agent Loop 调用树：每次模型调用一条，摊平到整题。
+    calls = item["model_call_metrics"]
+    assert len(calls) == 1
+    assert calls[0]["prompt_tokens"] == 700
+    assert calls[0]["conversation_turn"] == 0
+
+    # ② Agent 2.0 面板：``getAgent2Trace`` 要这三样，缺一样整块就不渲染。
+    agent2 = item["runtime_turns"][0]["agent2_trace"]
+    assert agent2["task_declaration"]["goal"] == "看海边的照片"
+    assert agent2["task_state"]["requirements"]
+    assert agent2["evidence_ledger"] == {"entries": []}
+    # 需求状态计数与「没凑齐」的条数：后者用 ``unmet_reason`` 判——
+    # 它把「取了没取到」与「根本没去取」分开，正是这个面板要看的东西。
+    assert agent2["requirement_status_counts"] == {"satisfied": 1, "open": 1}
+    assert agent2["evidence_coverage"] == {"entries": 2, "partial_entries": 1}
+
+    # ③ 调试详情：逐步轨迹，带工具入参与产出规模。
+    steps = item["runtime_turns"][0]["debug_trace"]
+    assert [step["type"] for step in steps] == [
+        "plan",
+        "model_action",
+        "tool_result",
+        "terminal",
+    ]
+
+    # ④ 稳定性卡只认 ``execution_trace`` 里 ``stage == "model"`` 的步骤——模型调用
+    #    的事实本来就在手上，不补成那种步骤，那张卡恒显示「未记录」。
+    model_steps = [s for s in item["execution_trace"] if s.get("stage") == "model"]
+    assert len(model_steps) == 1
+    assert model_steps[0]["call_type"] == "agent"
+    assert model_steps[0]["action"] == "search_memories"
 
 
 def test_a_multi_turn_question_reuses_one_conversation():
