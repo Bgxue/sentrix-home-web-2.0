@@ -37,6 +37,7 @@ tool_call_id**，没有参数、没有结果、没有 asset_id、没有耗时、
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -380,3 +381,81 @@ def summarize_progress(public_progress: list[Any]) -> dict[str, Any]:
         "executed_tools": executed,
         "error_codes": errors,
     }
+
+
+#: 2.0 的进度事件里，哪些 kind 是「一次工具调用」的两半。
+_TOOL_EVENT_KINDS = frozenset({"model_action", "tool_result", "tool_error"})
+
+
+def traces_from_progress(
+    turns: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """把 2.0 的 ``public_progress`` 事件流合成为 1.0 的 ``tool_trace`` 与 ``execution_trace``。
+
+    **为什么是「合成」而不是「照搬」。** 1.0 的助手把 ``tool_trace`` / ``execution_trace``
+    当成两个现成的字段返回；2.0 的助手只返回**一条事件流**（``public_progress``），
+    它是前端进度条与本层轨迹的**同一个来源**。所以这里做的是一次投影：事件流 → 两条轨迹。
+    这样只有一个真相，不存在「轨迹说 A、进度条说 B」。
+
+    形状对齐 1.0 是**必须的**，因为读侧的 ``bind_tool_calls_to_model_rounds`` /
+    ``annotate_model_calls``（``analysis.py``）早就写好了，它们按
+    ``(conversation_turn, parent_step_id)`` 把工具挂回模型轮次——挂不上那整棵
+    Agent Loop 调用树就是空的。**读侧没缺过代码，缺的一直是这两格**：
+
+    - 一次工具调用在事件流里是**两条**（``model_action`` 发起、``tool_result`` 收尾），
+      这里按 ``tool_call_id`` 合成一条；
+    - ``step_id`` 取 ``tool_call_id``（工具自己的 id），``parent_step_id`` 取发起它那次
+      模型调用的 ``step_N``——两者恰好是 1.0 那套绑定要找的键。
+    """
+    tool_trace: list[dict[str, Any]] = []
+    execution_trace: list[dict[str, Any]] = []
+    # 键 -> **那一行本身**。存下标会在第二次事件时把 int 当 dict 用。
+    row_by_call: dict[tuple[Any, str], dict[str, Any]] = {}
+    for turn in turns:
+        turn_index = turn.get("index")
+        for event in turn.get("trace") or []:
+            if not isinstance(event, Mapping):
+                continue
+            payload = event.get("payload") or {}
+            step_id = payload.get("step_id")
+            execution_trace.append(
+                {
+                    "step_id": step_id,
+                    "parent_step_id": payload.get("parent_step_id"),
+                    "conversation_turn": turn_index,
+                    "stage": event.get("stage"),
+                    "type": event.get("kind"),
+                    "status": event.get("status"),
+                    "text": event.get("text"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+            if event.get("kind") not in _TOOL_EVENT_KINDS or not payload.get("tool"):
+                continue
+            key = (turn_index, str(payload.get("tool_call_id") or step_id))
+            row = row_by_call.get(key)
+            if row is None:
+                row = {
+                    "step_id": step_id,
+                    "parent_step_id": payload.get("parent_step_id"),
+                    "conversation_turn": turn_index,
+                    "tool": str(payload.get("tool")),
+                    "status": None,
+                    "arguments": {},
+                    "duration_ms": None,
+                    "result": {},
+                    "text": "",
+                }
+                row_by_call[key] = row
+                tool_trace.append(row)
+            # 后到的那条（收尾）覆盖状态与结果；``arguments`` 只有发起那条有。
+            if payload.get("arguments") is not None:
+                row["arguments"] = dict(payload["arguments"])
+            if event.get("kind") != "model_action":
+                row["status"] = str(event.get("status") or "")
+                row["text"] = str(event.get("text") or "")
+                if payload.get("duration_ms") is not None:
+                    row["duration_ms"] = payload["duration_ms"]
+                if payload.get("result") is not None:
+                    row["result"] = dict(payload["result"])
+    return tool_trace, execution_trace

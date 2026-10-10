@@ -79,6 +79,7 @@ from photobench.domain.runs.execution import (
     safe_slug,
     selected_asset_ids,
     summarize_progress,
+    traces_from_progress,
 )
 from photobench.domain.runtime.ports import (
     InferenceProvider,
@@ -138,6 +139,7 @@ PASSTHROUGH_FIELDS = (
     "query_anchors",
     "expected_action",
     "answer_claims",
+    "alternative_evidence_media_sets",
 )
 
 
@@ -1417,12 +1419,28 @@ class RunExecution:
                         or row.get("expected_action"),
                         "reference_answer": str(turn_definition.get("reference_answer") or ""),
                         "agent_status": polled.get("status"),
+                        # **本轮实际交出去的图**。名字叫 ``predicted_images`` 是为了与 1.0
+                        # 的 ``runtime_turns[i].predicted_images`` 对齐——``JudgeRunner.
+                        # judge_item`` 从**回合**上读它，读不到就永远标 ``not_applicable``：
+                        # 2.0 此前**从不写这一格**，于是证据判分一次都没跑过（实测那一轮
+                        # 487/487 全是 ``{"score": null, "reason": "not_applicable"}``，
+                        # 而实现早就从 1.0 逐段移植齐了）。
+                        "predicted_images": [
+                            entry
+                            for entry in resolve_predicted_media(
+                                selected_asset_ids(last_result), assets_by_name
+                            )
+                            if entry.get("media_type") == "image"
+                        ],
                         # 轨迹**逐条原样**落盘（2.0 的 ProgressEventPayload），
                         # 不做投影：它是 2.0 关于「这一轮怎么走的」的全部记录。
                         "trace": last_progress,
                         "trace_summary": summarize_progress(last_progress),
                     }
                 )
+            # 轨迹：从**同一条事件流**投影出两条（见 ``traces_from_progress``）。
+            # 读侧的 ``bind_tool_calls_to_model_rounds`` 早就在等它们了。
+            tool_trace, execution_trace = traces_from_progress(turn_records)
             selected = selected_asset_ids(last_result)
             predicted_media = resolve_predicted_media(selected, assets_by_name)
             gt_media = resolve_gt_media(gt_refs, assets_by_name, predicted_media)
@@ -1447,6 +1465,12 @@ class RunExecution:
                     "termination_reason": last_result.get("termination_reason") or "",
                     "requirements": last_result.get("requirements") or [],
                     "trace_summary": summarize_progress(last_progress),
+                    # 1.0 的 ``tool_trace`` / ``execution_trace``：工具入参、耗时、结果规模，
+                    # 以及一条可用于绑定的执行步骤脊柱。前端有**五处**在读它们
+                    # （Agent Loop 树、工具耗时两格、工具性能卡、记忆有效性「N 条」、链路图），
+                    # 此前全是「未记录」/`0 条`。
+                    "tool_trace": tool_trace,
+                    "execution_trace": execution_trace,
                     "selected_asset_ids": selected,
                     "predicted_media": predicted_media,
                     "predicted_file_names": sorted(str(entry["file_name"]) for entry in predicted_media),

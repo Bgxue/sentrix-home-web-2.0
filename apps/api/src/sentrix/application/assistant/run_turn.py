@@ -28,7 +28,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -159,6 +160,44 @@ _CHAT_ONLY = re.compile(
     r"写一|写个|改一|翻译|解释一下什么是|什么是|怎么用|步骤|教程",
     re.IGNORECASE,
 )
+
+
+def _call_arguments(call: ToolCall) -> Mapping[str, Any]:
+    """这次工具调用的入参——1.0 ``tool_trace`` 里的 ``arguments``。
+
+    解析不出来就退回原始 JSON 串：一条「参数是什么都没记」的轨迹诊断不了任何事，
+    而模型写坏参数**正是需要被看见**的那种情况。
+    """
+    try:
+        return dict(call.parse())
+    except ToolArgumentError:
+        return {"_raw": call.arguments_json}
+
+
+def _tool_result_shape(outcome: ToolOutcome) -> Mapping[str, Any]:
+    """这次工具调用**产出了什么规模的东西**——不是结果本身。
+
+    放的是内部观察里的规模与来源（候选数、素材 id），不是那份发给模型的投影：
+    轨迹要回答的是「它拿到了什么」，而那份投影是模型的输入、不是这次调用的事实。
+    """
+    observation = outcome.observation
+    shape: dict[str, Any] = {}
+    for key in ("total", "has_more", "backend", "degraded", "delivered"):
+        if key in observation:
+            shape[key] = observation[key]
+    assets = observation.get("asset_ids")
+    if isinstance(assets, (list, tuple)):
+        shape["asset_ids"] = [str(item) for item in assets]
+    return shape
+
+
+def _step_id(state: TaskState) -> str:
+    """当前这一次模型调用在轨迹里的编号。
+
+    1.0 的 ``step_id`` 就是这个作用：它是**工具轨迹挂回模型轮次的锚**。2.0 的
+    ``model_steps`` 每转一圈加一，正是这个编号。
+    """
+    return f"step_{state.model_steps}"
 
 
 def _attempted_evidence_types(state: TaskState) -> set[EvidenceType]:
@@ -959,7 +998,17 @@ class RunTurn:
             # 回放**算拿到了东西**：模型手上多了一份（它刚问过的）结果，不算白跑。
             return json.dumps(dict(decision.replay), ensure_ascii=False), (), False, True
 
-        self._tool_event(session, call, ProgressStatus.RUNNING, f"正在执行 {call.name}…", "model_action")
+        self._tool_event(
+            session,
+            call,
+            ProgressStatus.RUNNING,
+            f"正在执行 {call.name}…",
+            "model_action",
+            # 入参：1.0 ``tool_trace`` 的 ``arguments``。解析不出来就退回原始 JSON 串——
+            # 一条「参数是什么都没记」的轨迹诊断不了任何事。
+            extra={"arguments": _call_arguments(call)},
+        )
+        started_at = time.perf_counter()
         outcome = self._toolbox.execute(
             call.name,
             decision.arguments,
@@ -970,6 +1019,7 @@ class RunTurn:
             # ``TaskState`` 没有那一格——**这不是加状态，是把已经在手上的那个字符串传下去**。
             question=state.question,
         )
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 1)
         state.record(
             ToolCallRecord(
                 call_id=call.call_id,
@@ -986,7 +1036,14 @@ class RunTurn:
             for evidence_type in TOOLS_BY_NAME[call.name].satisfies:
                 session.ledger.satisfy(evidence_type, call_id=call.call_id)
             self._tool_event(
-                session, call, ProgressStatus.OK, _tool_status_text(call.name, outcome), "tool_result"
+                session,
+                call,
+                ProgressStatus.OK,
+                _tool_status_text(call.name, outcome),
+                "tool_result",
+                # 耗时与结果规模——1.0 ``tool_trace`` 的两格。前端「工具/其他耗时」
+                # 与「工具性能」两张卡此前固定显示「未记录」。
+                extra={"duration_ms": duration_ms, "result": _tool_result_shape(outcome)},
             )
         elif outcome.blocks is not None:
             # 工具明确说「这类证据本轮拿不到」——账本封口，门禁不再逼模型重试一个查不到
@@ -994,7 +1051,14 @@ class RunTurn:
             session.ledger.block(outcome.blocks, reason=outcome.failure_reason)
             self._tool_event(session, call, ProgressStatus.PARTIAL, outcome.failure_reason, "tool_error")
         else:
-            self._tool_event(session, call, ProgressStatus.DENIED, outcome.failure_reason, "tool_error")
+            self._tool_event(
+                session,
+                call,
+                ProgressStatus.DENIED,
+                outcome.failure_reason,
+                "tool_error",
+                extra={"duration_ms": duration_ms},
+            )
 
         return (
             json.dumps(dict(outcome.model_visible), ensure_ascii=False),
@@ -1043,18 +1107,25 @@ class RunTurn:
         status: ProgressStatus,
         text: str,
         kind: str,
+        *,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
+        state = session.state
         stage = ProgressStage.ACTION if status is ProgressStatus.RUNNING else ProgressStage.TOOL_RESULT
-        self._publish(
-            session,
-            session.state.emit(
-                stage,
-                status,
-                text,
-                kind=kind,
-                payload={"tool": call.name, "tool_call_id": call.call_id},
-            ),
-        )
+        payload: dict[str, Any] = {
+            "tool": call.name,
+            "tool_call_id": call.call_id,
+            # **这两格是 1.0 ``tool_trace`` 的骨架，2.0 此前只发工具名。**
+            # PhotoBench 的 ``bind_tool_calls_to_model_rounds`` 按
+            # ``(conversation_turn, parent_step_id)`` 把工具挂回它所属的那次模型调用，
+            # 挂不上就没有 Agent Loop 调用树、没有工具耗时、没有工具性能卡——
+            # **读侧的代码早就写好了，缺的就是这两格**。
+            "step_id": call.call_id or f"tool_{len(state.records)}",
+            "parent_step_id": _step_id(state),
+        }
+        if extra:
+            payload.update(extra)
+        self._publish(session, state.emit(stage, status, text, kind=kind, payload=payload))
 
     def _publish(self, session: _Session, event: ProgressEvent) -> None:
         self._turns.append_event(session.state.turn_id, event)

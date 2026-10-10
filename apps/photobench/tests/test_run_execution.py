@@ -550,11 +550,16 @@ def test_runtime_turns_carry_the_gt_expected_action():
 
 
 def test_the_trace_is_persisted_verbatim_and_digested():
-    """轨迹是 2.0 的 ``public_progress`` 逐条原样，外加一份只做计数的摘要。
+    """轨迹是 2.0 的 ``public_progress`` 逐条原样，外加**两条投影**与一份计数摘要。
 
-    2.0 的 payload 里**只有工具名与 tool_call_id**——没有入参、没有结果、没有 asset_id。
-    所以摘要里不该出现 ``tool_trace`` 那种名字：那是 1.0 才有的东西，编一个出来
-    会让读侧以为拿得到结果。
+    **这条用例的方向在 2026-10-10 反过来了。** 它此前断言 ``"tool_trace" not in item``，
+    理由是「2.0 的 payload 里只有工具名，编一个 ``tool_trace`` 会让读侧以为拿得到结果」。
+    那个理由当时是真的——但它把**缺口**钉成了契约：前端五处读 ``tool_trace`` 的地方
+    （Agent Loop 树、工具耗时、工具性能卡、记忆有效性条数、链路图）因此永远显示「未记录」。
+
+    现在助手侧的 payload 带上了 ``step_id`` / ``parent_step_id`` / ``arguments`` /
+    ``duration_ms`` / ``result``，本层从**同一条事件流**投影出 1.0 那两条轨迹。
+    这条用例改成钉那个投影：一次工具调用在流里是**两条**，轨迹里必须合**一条**。
     """
     execution, _client, _writer, _lifecycle, _albums = _execution()
     state = execution.execute(_request())
@@ -575,7 +580,23 @@ def test_the_trace_is_persisted_verbatim_and_digested():
         "executed_tools": {"search_memories": 1},
         "error_codes": {},
     }
-    assert "tool_trace" not in item
+    # **两条事件合成一条轨迹行。** 分开记会让读侧把一次调用数成两次
+    # （``MemoryEffectivenessTable`` 的「工具轨迹 N 条」就会翻倍）。
+    assert len(item["tool_trace"]) == 1
+    row = item["tool_trace"][0]
+    assert row["tool"] == "search_memories"
+    assert row["conversation_turn"] == 0
+    # 状态与文本取**收尾**那条：发起那条的 ``running`` 不是这次调用的结论。
+    assert row["status"] == "ok"
+    assert row["text"] == "工具执行完成。"
+    # 执行步骤脊柱：事件流逐条一个，供 ``bind_tool_calls_to_model_rounds`` 对齐轮次。
+    assert [step["text"] for step in item["execution_trace"]] == [
+        "已确认需要哪些证据。",
+        "正在执行 search_memories…",
+        "工具执行完成。",
+        "完成。",
+    ]
+    assert item["execution_trace"][1]["conversation_turn"] == 0
 
 
 def test_a_multi_turn_question_reuses_one_conversation():
