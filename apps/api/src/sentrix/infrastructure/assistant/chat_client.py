@@ -81,18 +81,23 @@ MAX_ANSWER_TOKENS = 2048
 # ``final_answer`` 那种最长的一次调用留的余量。
 MIN_USABLE_OUTPUT_TOKENS = 256
 
-# 估算提示词 token 时给每个字符记的权重。**这是实测值，不是拍的。**
+# 估算提示词 token 的权重。**两个段分开算，这是实测出来的。**
 #
-# 2026-10-09 在 8100 上实测（``qwen35-q4km``）：1449 个汉字的段落 → **902** prompt
-# tokens，即 **0.622 token/字**。原先写 0.5 是照 1.0 的旧口径抄的，**偏乐观 24%**——
-# 于是一条「估算说还装得下」的请求会被端点以
-# ``request (6591 tokens) exceeds the available context size`` 回 400。
-# 实测那一轮 487 题里 **16 道**是这么死的（358 题时统计）。
+# 2026-10-10 在 8100 上实测（``qwen35-q4km``），两段的 token/字符比**差了 44%**：
 #
-# 取 0.7 而不是实测的 0.622，是因为这道闸的**两个方向的代价不对称**：估高了只是少发
-# 几个请求（走压缩历史那条路，用户无感），估低了是一次必然失败的调用（用户看到
-# 「模型服务不可用」）。宁可保守。
-TOKENS_PER_CHAR = 0.7
+# | 段 | 实测 | 取用 | 为什么 |
+# |---|---:|---:|---|
+# | 中文正文（prompt / 工具结果 / 回答） | **0.622** | 0.68 | 留 9% 余量 |
+# | 工具表 JSON（名字 + brief + 参数 schema） | **0.431** | 0.48 | JSON 的标点在词表里更省 |
+#
+# **一刀切 0.7 是一段历史上的错。** 它把工具表高估了 62%、正文高估 13%，合起来让
+# 一条真实 5500 token（离 6144 还有 600 余量）的请求被估算成 6500+ 而**拒发**——
+# 实测 20261010 那一轮这道闸响了 **222 次**，而同一轮端点**一次真超窗都没有**
+# （``model_error`` = 0，成功请求的真实峰值 prompt 只有 5229）。
+#
+# 每次误报的代价是：压缩掉一整轮工具往返（丢证据）+ 多花一个模型步。
+TOKENS_PER_CHAR = 0.68
+TOOLS_TOKENS_PER_CHAR = 0.48
 
 # 不传 ``context_tokens`` 时用的窗口。**只是为了测试与本地起得来**，生产必须由
 # ``Settings.vlm_context_tokens`` 给——窗口是部署事实（见该字段的注释）。
@@ -172,6 +177,21 @@ def split_thought_channel(text: str) -> tuple[str, str]:
 #: 500 也可能是别的意思，而这一句是端点自己说出来的、
 #: 唯一能区分「写不完」与「端点坏了」的证据。
 _TRUNCATED_TOOL_CALL = "Failed to parse tool call arguments"
+
+
+#: llama.cpp 真超窗时正文里的那句。**与「工具调用被截断」是两回事**：
+#: 那个是生成写不完（500），这个是提示词根本装不下（400）。两者的修法都是压缩历史，
+#: 所以归在同一个基类下，但**成因不同、判据不同**，分开认。
+_CONTEXT_OVERFLOW = "exceeds the available context size"
+
+
+def _is_context_overflow(response: httpx.Response) -> bool:
+    """这次失败是不是「提示词超出窗口」。
+
+    措辞变了会静默退化回 ``ModelServiceError``（也就是没有这道兜底的行为），不会更糟——
+    只是失去了一次「自动压缩重试」的机会。
+    """
+    return _CONTEXT_OVERFLOW in response.text
 
 
 def _is_truncated_tool_call(response: httpx.Response) -> bool:
@@ -261,6 +281,18 @@ class OpenAIChatModel:
             # 留给输出的余量不够，而余量由提示词决定（腾出上下文，余量就回来）。归成
             # ``ModelServiceError`` 会让用户看到「模型服务当前不可用」，而那句话在这里
             # 不成立。实测 20261009 那一轮 11 道题是这么死的。
+            # **端点说「装不下」时，信端点，不信自己的估算。**
+            #
+            # 上面那道闸是**预测**，而预测永远追不上服务端真实的 tokenizer——实测两轮
+            # 都翻过车（先低估 24% 放过 16 条注定 400 的请求，后高估 62% 误拒 222 次）。
+            # 端点真超窗时回的就是这一句 400，它是**反馈**，比任何估算都准。
+            #
+            # 归成 ``PromptTooLongError`` 而不是 ``ModelServiceError``：修法是同一条
+            # （压缩历史再试），而「模型服务不可用」这句话在这里不成立。
+            if _is_context_overflow(response):
+                raise PromptTooLongError(
+                    f"提示词超出端点的上下文窗口（{response.status_code}）：{response.text[:200]}"
+                )
             if _is_truncated_tool_call(response):
                 raise OutputTruncatedError(
                     f"模型端点 {self._base_url} 上的 {model_name} 写工具调用时被截断"
@@ -338,10 +370,13 @@ class OpenAIChatModel:
         估得准不准只影响**生成长度上限与那条拒绝判据**，不影响正确性；
         真要精确就得再打一次 tokenize 端点。
         """
-        characters = sum(len(message.content) for message in messages)
+        text = sum(len(message.content) for message in messages)
+        estimate = text * TOKENS_PER_CHAR
         if tools:
-            characters += len(json.dumps(list(openai_tools(tools)), ensure_ascii=False))
-        return int(characters * TOKENS_PER_CHAR)
+            # **两段分开算**：工具表是 JSON，token/字符比只有正文的七成。见上面那张表。
+            schema = len(json.dumps(list(openai_tools(tools)), ensure_ascii=False))
+            estimate += schema * TOOLS_TOKENS_PER_CHAR
+        return int(estimate)
 
     def _max_tokens(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec] = ()) -> int:
         """这次生成最多能写多少 token。**不含任何「能发就发」的下限。**

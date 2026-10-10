@@ -24,6 +24,7 @@ from sentrix.domain.assistant.tools import TOOL_SPECS, openai_tools
 from sentrix.infrastructure.assistant.chat_client import (
     MAX_ANSWER_TOKENS,
     TOKENS_PER_CHAR,
+    TOOLS_TOKENS_PER_CHAR,
     ChatModelError,
     OpenAIChatModel,
 )
@@ -31,7 +32,7 @@ from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 
 #: 这些用例自己指定窗口，**与生产的 6144 无关**——被测的是「预算从窗口算出来」这条
 #: 关系。要大到「1000 字的提示词 + 全量工具 schema + ``MIN_USABLE_OUTPUT_TOKENS``」
-#: 塞得下（schema 那一份按 0.7 算就有 3856 token），否则所有用例都会走拒绝那条路。
+#: 塞得下（schema 那一份按 0.48 算约 2644 token），否则所有用例都会走拒绝那条路。
 CONTEXT_TOKENS = 6000
 
 
@@ -420,17 +421,25 @@ def test_the_estimate_counts_the_tool_schemas(server: str):
     schemas = len(json.dumps(list(openai_tools(TOOL_SPECS)), ensure_ascii=False))
     characters = sum(len(message.content) for message in messages_)
     assert without == int(characters * TOKENS_PER_CHAR)
-    assert with_tools == int((characters + schemas) * TOKENS_PER_CHAR)
+    # **两段分开算**：工具表是 JSON，token/字符比只有正文的七成。
+    assert with_tools == int(characters * TOKENS_PER_CHAR + schemas * TOOLS_TOKENS_PER_CHAR)
 
 
 def test_the_estimate_is_conservative_against_the_measured_ratio(server: str):
     """系数不许回到「乐观」那一侧。
 
-    ``_TOKENS_PER_CHAR`` 是**实测**出来的：1449 个汉字 → 902 prompt tokens，即 0.622。
-    这道闸两个方向的代价不对称——估高了少发几个请求（走压缩，用户无感），估低了是
-    一次必然失败的调用（用户看到「模型服务不可用」）。所以系数必须 ≥ 实测值。
+    实测：1449 个汉字 → 902 prompt tokens（**0.622**），JIT 工具表 2254 字符 → 972
+    （**0.431**）。两段**差了 44%**，所以必须分开算——一刀切 0.7 曾把工具表高估 62%，
+    让真实 5500 token（离 6144 还有 600 余量）的请求被拒发，实测一道闸响了 222 次而
+    端点一次真超窗都没有。
+
+    两个系数都取在实测值**之上**留余量：这道闸两个方向的代价不对称——估高了少发几个
+    请求（走压缩，用户无感），估低了是一次必然失败的调用（用户看到「模型服务不可用」）。
     """
     assert TOKENS_PER_CHAR >= 0.622
+    assert TOOLS_TOKENS_PER_CHAR >= 0.431
+    # 分开算的意义就在这里：工具表那个必须**明显低于**正文，否则等于没分。
+    assert TOOLS_TOKENS_PER_CHAR < TOKENS_PER_CHAR
 
 
 def test_a_short_prompt_gets_the_full_answer_budget(server: str):
@@ -473,6 +482,31 @@ def test_a_truncated_tool_call_is_not_reported_as_a_service_failure(server: str)
     assert isinstance(error.value, PromptTooLongError)
     # 文案要说清是「写不完」，不是「服务不可用」。
     assert "被截断" in str(error.value)
+
+
+def test_a_context_overflow_400_is_retried_as_a_prompt_too_long(server: str):
+    """**端点说「装不下」时信端点，不信自己的估算。**（②）
+
+    上面那道闸是**预测**，而预测永远追不上服务端真实的 tokenizer——实测两轮都翻过车：
+    先低估 24% 放过 16 条注定 400 的请求，后高估 62% 误拒 222 次。
+
+    端点真超窗时回的就是这句 400，它是**反馈**。归成 ``PromptTooLongError`` 而不是
+    ``ModelServiceError``，因为修法是同一条（压缩历史再试），而「模型服务不可用」
+    这句话在这里不成立。
+    """
+    _Handler.response = {
+        "error": {
+            "code": 400,
+            "message": "request (6591 tokens) exceeds the available context size, try increasing it",
+        }
+    }
+    _Handler.status = 400
+
+    with pytest.raises(PromptTooLongError) as error:
+        chat_model(server).complete(messages(), TOOL_SPECS)
+
+    assert not isinstance(error.value, OutputTruncatedError)
+    assert "上下文窗口" in str(error.value)
 
 
 def test_an_ordinary_500_is_still_a_service_failure(server: str):
