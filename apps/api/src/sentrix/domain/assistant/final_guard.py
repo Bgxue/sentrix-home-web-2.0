@@ -158,6 +158,12 @@ class GuardVerdict:
     passed: bool
     code: str = ""
     message: str = ""
+    # **打回的那段原文本身。** 没有它，「这一轮为什么被硬拦」在轨迹上只剩一个规则码——
+    # 而 `viewer_escape` 那条正则里的 ``他人`` 是个日常词（家人合影里"与他人"很常见），
+    # 是真命中还是误伤，**只有看到原句才判得了**。
+    # 实测 20261010 那一轮 10 道题被它硬拦（整轮终结、走确定性兜底），
+    # 而原文一个字都没留下来，于是那 10 道完全不可诊断。
+    evidence: str = ""
 
     @property
     def hard(self) -> bool:
@@ -169,8 +175,21 @@ class GuardVerdict:
         return GuardVerdict(passed=True)
 
 
-def _verdict(code: str) -> GuardVerdict:
-    return GuardVerdict(passed=False, code=code, message=_MESSAGES[code])
+#: ``evidence`` 里留多长。够看清命中的那句话，又不至于把整段回答抄进轨迹。
+_EVIDENCE_LIMIT = 80
+
+
+def _match_evidence(pattern: re.Pattern[str], text: str) -> str:
+    """命中处前后各取一段，让读的人看得见上下文。"""
+    found = pattern.search(text)
+    if found is None:
+        return ""
+    start = max(0, found.start() - _EVIDENCE_LIMIT // 2)
+    return text[start : start + _EVIDENCE_LIMIT]
+
+
+def _verdict(code: str, evidence: str = "") -> GuardVerdict:
+    return GuardVerdict(passed=False, code=code, message=_MESSAGES[code], evidence=evidence)
 
 
 class FinalGuard:
@@ -194,20 +213,21 @@ class FinalGuard:
 
     @staticmethod
     def _safety(answer: str) -> GuardVerdict | None:
-        if _INTERNAL_ID.search(answer):
-            return _verdict("internal_id_leak")
-        if _TABLE_NAME.search(answer) or _INTERNAL_SCHEMA.search(answer):
-            return _verdict("table_name_leak")
-        if _VIEWER_ESCAPE.search(answer):
-            return _verdict("viewer_escape")
-        if _WRITE_NOT_ALLOWED.search(answer):
-            return _verdict("write_not_allowed")
+        for pattern, code in (
+            (_INTERNAL_ID, "internal_id_leak"),
+            (_TABLE_NAME, "table_name_leak"),
+            (_INTERNAL_SCHEMA, "table_name_leak"),
+            (_VIEWER_ESCAPE, "viewer_escape"),
+            (_WRITE_NOT_ALLOWED, "write_not_allowed"),
+        ):
+            if pattern.search(answer):
+                return _verdict(code, evidence=_match_evidence(pattern, answer))
         return None
 
     @staticmethod
     def _placeholder(answer: str) -> GuardVerdict | None:
         if _PLACEHOLDER.search(answer):
-            return _verdict("placeholder_leak")
+            return _verdict("placeholder_leak", evidence=_match_evidence(_PLACEHOLDER, answer))
         return None
 
     @staticmethod

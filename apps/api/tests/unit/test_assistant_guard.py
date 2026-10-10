@@ -349,3 +349,27 @@ def test_clarify_answer_is_used_before_a_ledger_exists():
 def test_answered_with_gap_tracks_the_ledger():
     assert answered_with_gap(ledger(EvidenceType.PHOTO_SET))
     assert not answered_with_gap(ledger())
+
+
+def test_a_blocked_answer_carries_the_offending_text():
+    """**打回的那段原文要留下来。**（2026-10-10 补）
+
+    在此之前 `GuardVerdict` 只有规则码——而 `viewer_escape` 的正则里 ``他人`` 是个日常
+    词（家人合影里「与他人」很常见），是真命中还是误伤，**只有看到原句才判得了**。
+    实测 20261010 那一轮 10 道题被它硬拦（整轮终结、走确定性兜底），原文一个字都没留下，
+    于是那 10 道完全不可诊断。
+    """
+    verdict = FinalGuard().check(
+        answer="那天我和他人一起在桥上拍了合影。",
+        facts=GuardFacts(),
+    )
+
+    assert verdict.code == "viewer_escape"
+    assert "他人" in verdict.evidence
+    # 留的是命中处前后一小段，不是整段回答。
+    assert len(verdict.evidence) <= 80
+
+
+def test_a_passing_answer_carries_no_evidence():
+    """反向：通过的裁决不该带一段原文——那会让「有没有命中」这件事变得含糊。"""
+    assert FinalGuard().check(answer="海边有两张照片。", facts=GuardFacts()).evidence == ""

@@ -74,23 +74,30 @@ def test_the_prompt_lists_exactly_the_evidence_registry():
     )
 
 
-def test_delivered_photo_is_declared_only_when_the_user_asked_to_see_photos():
-    """``delivered_photo`` 是**有条件的**，不再是「声明 photo_set 时的默认搭子」。
+def test_delivered_photo_is_declared_by_default_for_real_album_questions():
+    """``delivered_photo`` 的判据是「**这是不是一道关于相册的真问题**」，不是
+    「用户有没有说要看图」。
 
-    **一次有意的偏离。** 1.0 的原句是「用户想看照片、要求展示、或问「有没有……的照片」
-    时，声明 ``photo_set``；同时声明 ``delivered_photo``……」——后半句无条件，于是
-    ``delivered_photo + photo_set`` 成了默认模板：实测 487 道题里 **212 道**声明了
-    ``delivered_photo``，而问题文本里真正要求看图的只有 **3 道**。
+    **两次来回，都记在这里。**
+    1.0 的原句是「用户想看照片、要求展示、或问「有没有……的照片」时，声明 ``photo_set``；
+    **同时声明** ``delivered_photo``……」——后半句无条件，实测 212 道声明而真正要求
+    看图的只有 3 道。
+    2026-10-09 收紧成「**只有**用户明确说要看图时才声明」，实测声明数掉到 **51 道**——
+    **那个方向也是错的**：用户指着一张婚礼合影问「这是在哪儿拍的」，他没说「给我看看」，
+    但他要的显然就是那张照片的答案。
 
-    这条是**文本断言，本身很弱**（它只能证明提示词里写着条件词，证明不了模型照做）。
-    真正的验证靠重跑后的「声明了 ``delivered_photo`` 的题数从 212 降下来」。留在这里
-    是因为它至少能挡住「有人把条件词删回去」。
+    现在退回中间：**非普通聊天就声明**。普通聊天交给模型自己判——它读得到整句话，
+    比在这里跑关键词正则准。
+
+    这条是**文本断言，本身很弱**（证明不了模型照做）。真正的验证靠重跑后的
+    「声明了 ``delivered_photo`` 的题数」。留在这里是为了挡住「有人再把它收紧回去」。
     """
     prompt = build_prompt()
 
-    assert "只有" in prompt
-    assert "才**同时**声明" in prompt
-    assert "不要**声明 delivered_photo" in prompt
+    assert "关于这个相册/照片的真问题" in prompt
+    assert "同时声明 delivered_photo" in prompt
+    # 唯一的不声明条件是与相册无关的闲聊。
+    assert "普通聊天" in prompt
 
 
 def test_the_prompt_never_shows_a_real_scope_id():

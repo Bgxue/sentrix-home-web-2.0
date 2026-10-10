@@ -894,7 +894,12 @@ class RunTurn:
                     ProgressStatus.DENIED,
                     "回答触及安全边界，本轮不再由模型作答。",
                     kind="guard",
-                    payload={"code": verdict.code, "hard": True},
+                    # **带上被打回的那段原文。** 上面那段注释一直写着「看不到被打回的
+                    # 那段原文」，而 payload 里其实只有规则码——注释描述的是一个当时
+                    # 还不存在的行为。实测 20261010 那轮 10 道题被 `viewer_escape` 硬拦
+                    # （整轮终结、走确定性兜底），而它正则里的 ``他人`` 是个日常词
+                    # （家人合影里"与他人"很常见）——是真命中还是误伤，没有原句判不了。
+                    payload={"code": verdict.code, "hard": True, "evidence": verdict.evidence},
                 ),
             )
             state.finish(TerminationReason.GUARD_BLOCKED)
@@ -914,7 +919,7 @@ class RunTurn:
                 ProgressStatus.RUNNING,
                 verdict.message,
                 kind="guard",
-                payload={"code": verdict.code},
+                payload={"code": verdict.code, "evidence": verdict.evidence},
             ),
         )
         session.pending_reminder = verdict.message
