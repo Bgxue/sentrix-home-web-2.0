@@ -265,6 +265,7 @@ def _complete_payload(record: TurnRecord) -> CompleteEventPayload:
         ],
         requirements=[dict(item) for item in record.requirements],
         retrieved_candidates=list(record.retrieved_candidates),
+        trace=dict(record.trace),
     )
 
 

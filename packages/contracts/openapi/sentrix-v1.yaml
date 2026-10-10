@@ -2403,6 +2403,11 @@ components:
           type: array
           title: Retrieved Candidates
           default: []
+        trace:
+          additionalProperties: true
+          type: object
+          title: Trace
+          default: {}
         error:
           type: string
           title: Error

@@ -459,3 +459,87 @@ def traces_from_progress(
                 if payload.get("result") is not None:
                     row["result"] = dict(payload["result"])
     return tool_trace, execution_trace
+
+
+def agent2_trace_from(trace: Mapping[str, Any] | None, *, termination_reason: str) -> dict[str, Any]:
+    """把助手报的**回合级事实**摆成 1.0 的 ``agent2_trace`` 形状。
+
+    1.0 的助手直接返回 ``agent2_trace``；2.0 只返回事实（``task_state`` / ``planner`` /
+    ``evidence_ledger`` / ``budget``），**摆盘是评测侧的事**——同一个事实在三个消费者那里
+    可以有不同摆法，而它只有一个来源。
+
+    前端 ``Agent2SummaryPanel`` 整块依赖这个形状：没有它，那个面板**从来不会出现**
+    （``getAgent2Trace`` 返回 null 就 ``return null``）；记忆层那张「证据账本」卡也
+    一直显示「未记录」。
+    """
+    if not trace:
+        return {}
+    task_state = trace.get("task_state") or {}
+    requirements = [item for item in (task_state.get("requirements") or []) if isinstance(item, Mapping)]
+    status_counts: dict[str, int] = {}
+    for requirement in requirements:
+        status = str(requirement.get("status") or "")
+        if status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+    planner = trace.get("planner") or {}
+    decisions = (
+        [
+            {
+                "status": planner.get("status"),
+                "reason": planner.get("fallback_reason") or "",
+                "detail": planner.get("detail") or "",
+            }
+        ]
+        if planner
+        else []
+    )
+    # ``partial_entries``：1.0 判的是「取到的条数少于要的条数」，2.0 没有那个计数，
+    # 用 ``unmet_reason``——它回答的是同一个问题「这条需求是不是没凑齐」，而且更准
+    # （W7 把「取了没取到」与「根本没去取」分开记了）。
+    return {
+        "planner_decisions": decisions,
+        "task_declaration": {
+            "goal": planner.get("goal") or "",
+            "requirements": requirements,
+        },
+        "task_state": dict(task_state),
+        "evidence_ledger": dict(trace.get("evidence_ledger") or {}),
+        "requirement_status_counts": status_counts,
+        "evidence_coverage": {
+            "entries": len(requirements),
+            "partial_entries": sum(1 for item in requirements if item.get("unmet_reason")),
+        },
+        "terminal_reason": termination_reason,
+        "budget_outcome": dict(trace.get("budget") or {}),
+        "guard": list(trace.get("guard") or []),
+    }
+
+
+def debug_steps_from(events: Sequence[Any]) -> list[dict[str, Any]]:
+    """``DebugTracePanel`` 要的逐步轨迹。
+
+    **2.0 给不出 ``prompt`` / ``raw``**：助手从不把提示词与原始回复放上任何一条对外通道
+    （``behaviour-baseline.md`` 的「2.0 不再暴露的轨迹」一节登记过）。这一步给的是它
+    **确实有**的那几格——步骤类型、状态、工具入参、工具产出的规模。面板上 ``prompt``
+    那一格会是空的，**那是事实，不是缺页**。
+    """
+    steps: list[dict[str, Any]] = []
+    for event in events or []:
+        if not isinstance(event, Mapping):
+            continue
+        payload = event.get("payload") or {}
+        step: dict[str, Any] = {
+            "type": str(event.get("kind") or ""),
+            "status": str(event.get("status") or ""),
+            "text": str(event.get("text") or ""),
+        }
+        if payload.get("tool"):
+            step["tool"] = payload["tool"]
+        if payload.get("arguments") is not None:
+            step["arguments"] = dict(payload["arguments"])
+        if payload.get("result") is not None:
+            step["observation"] = dict(payload["result"])
+        if payload.get("duration_ms") is not None:
+            step["duration_ms"] = payload["duration_ms"]
+        steps.append(step)
+    return steps

@@ -241,6 +241,17 @@ class TurnRecord:
     # 2.0 此前**没有暴露它**，PhotoBench 只能把 ``retrieval_media_refs`` 直接赋成 GT，
     # 于是那个指标的分母是 GT、分子是交付集：394 道零交付的题 recall 一道不差全是 0.0。
     retrieved_candidates: tuple[str, ...] = ()
+    # **这一轮到底怎么走的**——模型调用、规划、账本、门禁、预算。
+    #
+    # 单独一份而不是继续往 progress 事件里塞：``public_progress`` 同时是**终端用户看到的
+    # 进度条**（``apps/web`` 的 ``AssistantPanel`` 把每一条都渲染成一行，只用 ``text``），
+    # 往里加事件 = 用户每步多看到一行噪音。这一份是**评测读的回合级事实**，与
+    # ``retrieved_candidates`` 走同一条路（终态载荷 → 落库 → PhotoBench）。
+    #
+    # 形状由 ``run_turn`` 组装，读它的是 PhotoBench 的 ``model_call_metrics`` /
+    # ``agent2_trace`` / ``debug_trace`` 三处投影。键名不在这里定死——这一格是
+    # 「助手知道的一切」的载体，投影是评测侧的事。
+    trace: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

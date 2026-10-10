@@ -134,6 +134,7 @@ class TurnRepository(Protocol):
         attachments: Sequence[Attachment],
         requirements: Sequence[Mapping[str, Any]],
         retrieved_candidates: Sequence[str],
+        trace: Mapping[str, Any],
         updated_at: datetime,
     ) -> None: ...
 

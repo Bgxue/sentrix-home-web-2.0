@@ -115,6 +115,12 @@ class CompleteEventPayload(BaseModel):
     # 于是「检索没找到」与「找到了没交付」在指标上完全一样。``behaviour-baseline.md``
     # 的「2.0 不再暴露的轨迹」一节里 ``retrieved_candidate_media`` 那一行随之改掉。
     retrieved_candidates: list[str] = []
+    # **这一轮到底怎么走的**：模型调用（token / 耗时 / 步号）、规划、证据账本、门禁、
+    # 预算。与 ``retrieved_candidates`` 同一条路——回合级事实进终态载荷，**不进**进度流。
+    #
+    # 进度流（``public_progress``）同时是终端用户看到的进度条，``apps/web`` 的
+    # ``AssistantPanel`` 把每一条都渲染成一行；往里加事件就是给用户每一步多加一行噪音。
+    trace: dict[str, Any] = {}
     error: str = ""
 
 

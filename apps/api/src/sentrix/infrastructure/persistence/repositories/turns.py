@@ -27,7 +27,7 @@ from sentrix.infrastructure.persistence.database import Database
 
 _TURN_COLUMNS = (
     "id, conversation_id, scope_id, question, status, termination_reason, answer,"
-    " attachments_json, requirements_json, candidates_json, created_at, updated_at"
+    " attachments_json, requirements_json, candidates_json, trace_json, created_at, updated_at"
 )
 
 
@@ -49,6 +49,7 @@ def _row_to_turn(row: sqlite3.Row) -> TurnRecord:
         ),
         requirements=tuple(json.loads(row["requirements_json"] or "[]")),
         retrieved_candidates=tuple(json.loads(row["candidates_json"] or "[]")),
+        trace=dict(json.loads(row["trace_json"] or "{}")),
     )
 
 
@@ -157,6 +158,7 @@ class SqliteTurnRepository:
         attachments: Sequence[Attachment],
         requirements: Sequence[Mapping[str, Any]],
         retrieved_candidates: Sequence[str],
+        trace: Mapping[str, Any],
         updated_at: datetime,
     ) -> None:
         payload = json.dumps(
@@ -168,11 +170,12 @@ class SqliteTurnRepository:
         )
         ledger_payload = json.dumps([dict(item) for item in requirements], ensure_ascii=False)
         candidates_payload = json.dumps(list(retrieved_candidates), ensure_ascii=False)
+        trace_payload = json.dumps(dict(trace), ensure_ascii=False)
         with self._database.connect() as connection, connection:
             connection.execute(
                 "UPDATE agent_turns SET status = ?, termination_reason = ?, answer = ?,"
                 " attachments_json = ?, requirements_json = ?, candidates_json = ?,"
-                " updated_at = ? WHERE id = ?",
+                " trace_json = ?, updated_at = ? WHERE id = ?",
                 (
                     status,
                     termination_reason,
@@ -180,6 +183,7 @@ class SqliteTurnRepository:
                     payload,
                     ledger_payload,
                     candidates_payload,
+                    trace_payload,
                     updated_at.isoformat(),
                     turn_id,
                 ),

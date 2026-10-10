@@ -200,6 +200,7 @@ def test_finishing_a_turn_records_the_reason_answer_and_attachments(turns, conve
         attachments=(Attachment(handle="photo_1", asset_id="asset_1", file_name="a.jpg"),),
         requirements=({"id": "photo_set", "evidence_type": "photo_set", "status": "satisfied"},),
         retrieved_candidates=("asset_1", "asset_2", "asset_3"),
+        trace={"budget": {"model_steps": 3}},
         updated_at=NOW,
     )
 
@@ -212,6 +213,8 @@ def test_finishing_a_turn_records_the_reason_answer_and_attachments(turns, conve
     # **候选集与交付集是两份数据**：交付了 1 张，检索给了 3 张。合成一格就再也分不出
     # 「检索没找到」与「找到了没交付」。
     assert record.retrieved_candidates == ("asset_1", "asset_2", "asset_3")
+    # 回合级事实也往返：它不是事件流，是收尾时一次性写下的一格。
+    assert record.trace == {"budget": {"model_steps": 3}}
 
 
 def test_a_turn_without_retrieval_records_no_candidates(turns, conversations):
@@ -230,6 +233,7 @@ def test_a_turn_without_retrieval_records_no_candidates(turns, conversations):
         attachments=(),
         requirements=(),
         retrieved_candidates=(),
+        trace={},
         updated_at=NOW,
     )
 

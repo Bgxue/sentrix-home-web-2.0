@@ -68,7 +68,9 @@ from photobench.domain.runs.analysis import (
 )
 from photobench.domain.runs.execution import (
     RunCancelledError,
+    agent2_trace_from,
     album_media_entries,
+    debug_steps_from,
     import_directories,
     index_assets_by_name,
     modality_metrics,
@@ -1436,6 +1438,14 @@ class RunExecution:
                         # 不做投影：它是 2.0 关于「这一轮怎么走的」的全部记录。
                         "trace": last_progress,
                         "trace_summary": summarize_progress(last_progress),
+                        # 三块面板要的形状，全部由**同一个来源**（助手的回合级事实 +
+                        # 事件流）投影出来。见 ``agent2_trace_from`` / ``debug_steps_from``。
+                        "agent2_trace": agent2_trace_from(
+                            last_result.get("trace"),
+                            termination_reason=str(last_result.get("termination_reason") or ""),
+                        ),
+                        "debug_trace": debug_steps_from(last_progress),
+                        "trace_bundle": dict(last_result.get("trace") or {}),
                     }
                 )
             # 轨迹：从**同一条事件流**投影出两条（见 ``traces_from_progress``）。
@@ -1471,6 +1481,12 @@ class RunExecution:
                     # 此前全是「未记录」/`0 条`。
                     "tool_trace": tool_trace,
                     "execution_trace": execution_trace,
+                    # 摊平到 item 级：``AgentLoopTree`` 数的是**整题**的每一次模型调用。
+                    "model_call_metrics": [
+                        dict(call) | {"conversation_turn": turn.get("index")}
+                        for turn in turn_records
+                        for call in (turn.get("trace_bundle") or {}).get("model_calls") or []
+                    ],
                     "selected_asset_ids": selected,
                     "predicted_media": predicted_media,
                     "predicted_file_names": sorted(str(entry["file_name"]) for entry in predicted_media),

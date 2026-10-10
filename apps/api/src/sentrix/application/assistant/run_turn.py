@@ -191,6 +191,61 @@ def _tool_result_shape(outcome: ToolOutcome) -> Mapping[str, Any]:
     return shape
 
 
+def _turn_trace(session: _Session, planned: PlannerResult | None) -> Mapping[str, Any]:
+    """这一轮到底怎么走的。**收尾时一次性组装**，随 ``TurnRecord.trace`` 落库。
+
+    读它的是 PhotoBench 的三处投影，各自对应一块 UI 面板：
+
+    - ``model_calls`` → ``model_call_metrics``（Agent Loop 调用树）
+    - ``planner`` / ``task_state`` / ``evidence_ledger`` / ``guard`` → ``agent2_trace``
+      （Agent 2.0 Shadow 面板、记忆层「证据账本」计数）
+    - 与 ``public_progress`` 一起 → ``debug_trace``（调试详情面板）
+
+    **这里不发明 1.0 的字段名。** 助手只报自己知道的事实；把它们摆成 1.0 那三份形状
+    是评测侧的事——同一个事实在两个消费者那里可以有不同摆法，而它只有一个来源。
+    """
+    state = session.state
+    ledger = session.ledger
+    requirements = [dict(item) for item in ledger.as_payload()]
+    return {
+        "model_calls": list(session.model_calls),
+        "planner": {
+            # ``fallback_reason`` 为空 = 规划器正常答了；非空 = 它退回了规则/失败。
+            # ``planned`` 为空 = 压根没走到规划（政策拒答那条提前 return 了）。
+            # **不编一个 ``ok``**：没规划过与规划成功是两件事。
+            "status": "not_planned" if planned is None else ("fallback" if planned.fallback_reason else "ok"),
+            "fallback_reason": planned.fallback_reason if planned else "",
+            "detail": planned.detail if planned else "",
+            "goal": state.question,
+            "requirements": requirements,
+        },
+        "task_state": {
+            "requirements": requirements,
+            "phase": state.phase,
+            "termination_reason": state.termination_reason.value if state.termination_reason else "",
+        },
+        # 账本条目：每条需求**取过没有、取到什么**。``unmet_reason`` 是 W7 加的，
+        # 它把「取了没取到」与「根本没去取」分开——那正是这个面板要看的东西。
+        "evidence_ledger": {"entries": requirements},
+        "guard": [
+            {"code": str(event.payload.get("code") or ""), "hard": bool(event.payload.get("hard"))}
+            for event in state.progress
+            if event.kind == "guard"
+        ],
+        "budget": {
+            "model_steps": state.model_steps,
+            "tool_round_trips": state.tool_round_trips,
+            "search_calls": state.search_calls,
+            "page_calls": state.page_calls,
+            "inspection_calls": state.inspection_calls,
+            "max_steps": state.profile.max_steps,
+            "max_tool_calls": state.profile.max_tool_calls,
+        },
+        "delivered": [item.asset_id for item in session.delivered.items],
+        "retrieved_candidates": list(state.retrieved_candidates),
+    }
+
+
 def _step_id(state: TaskState) -> str:
     """当前这一次模型调用在轨迹里的编号。
 
@@ -325,6 +380,9 @@ class _Session:
     pending_reminder: str = ""
     # 连续几轮「一条有用的结果都没拿到」。见 ``_converse`` 的护栏。
     stalled_rounds: int = 0
+    # 每一次模型调用的指标。**不进进度事件**——``public_progress`` 同时是终端用户看的
+    # 进度条，往里加事件就是给他每步多加一行噪音。它随收尾一起进 ``TurnRecord.trace``。
+    model_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 class RunTurn:
@@ -406,6 +464,10 @@ class RunTurn:
             emit=emit,
         )
 
+        # 政策拒答那条出口**不经过规划**，所以 ``planned`` 可能从头到尾没被赋值。
+        # 先绑成 None，``_turn_trace`` 据此报 ``not_planned``——没规划过与规划成功
+        # 是两件事，编一个「ok」会让那个面板把拒答读成一次正常规划。
+        planned: PlannerResult | None = None
         # 1.0 ``runtime.py:1725``：政策拒答在**任何模型调用之前**返回固定的拒绝语——
         # 不规划、不调工具、不进模型。位置也照搬（在规划之前）。
         refusal = detect_policy_refusal(record.question)
@@ -491,6 +553,7 @@ class RunTurn:
             attachments=session.delivered.items,
             requirements=list(session.ledger.as_payload()),
             retrieved_candidates=session.state.retrieved_candidates,
+            trace=_turn_trace(session, planned),
             updated_at=now,
         )
         return TurnResult(
@@ -541,6 +604,7 @@ class RunTurn:
                 has_result_set=state.current_result_set_id is not None,
                 tools_exhausted=not state.can_call_tool(),
             )
+            call_started_at = time.perf_counter()
             try:
                 reply = self._model.complete(messages, specs)
             except PromptTooLongError as error:
@@ -576,6 +640,21 @@ class RunTurn:
                         return self._model_error_stop(session, retry_error)
             except Exception as error:
                 return self._model_error_stop(session, error)
+
+            # 记下这一次模型调用。``ttft`` **给不出来**：请求是非流式的，客户端拿到的
+            # 是整段响应，没有「第一个 token 什么时候到」这个时刻。要它有就得把 8100
+            # 的请求改成 ``stream=True``——那是另一件事，不在这里假装测到。
+            session.model_calls.append(
+                {
+                    "step_id": _step_id(state),
+                    "call_type": "agent",
+                    "prompt_tokens": reply.prompt_tokens,
+                    "completion_tokens": reply.completion_tokens,
+                    "duration_ms": round((time.perf_counter() - call_started_at) * 1000, 1),
+                    "tool_calls": [call.name for call in reply.tool_calls],
+                    "finish_reason": reply.finish_reason,
+                }
+            )
 
             if not reply.wants_tools:
                 # 正文收尾仍然有效，只是它交不出图——交付是 ``final_answer`` 上的字段，
