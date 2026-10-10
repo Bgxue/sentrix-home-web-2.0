@@ -458,6 +458,29 @@ def traces_from_progress(
                     row["duration_ms"] = payload["duration_ms"]
                 if payload.get("result") is not None:
                     row["result"] = dict(payload["result"])
+        # **每次模型调用也是一条执行步骤**，而且必须带 ``stage="model"``：读侧的
+        # ``analysis.agent_stability`` 只认这一种（``stage/type == "model"`` +
+        # ``call_type``），数出来的 ``json_parse_total`` 喂给「主 Agent 稳定性」那张卡。
+        # 不带它，那张卡恒显示「未记录」——而模型调用的事实**就在手上**。
+        for call in (turn.get("trace_bundle") or {}).get("model_calls") or []:
+            tools = [str(name) for name in (call.get("tool_calls") or [])]
+            execution_trace.append(
+                {
+                    "step_id": call.get("step_id"),
+                    "conversation_turn": turn_index,
+                    "stage": "model",
+                    "type": "model_call",
+                    "call_type": str(call.get("call_type") or "agent"),
+                    "status": "complete",
+                    # ``action`` 是「这一步做了什么」：调了哪个工具，或者就是收口。
+                    # ``agent_stability`` 的 ``parsed_success`` 按它判「这一步解析出了动作」。
+                    "action": tools[0] if tools else "final",
+                    "parse_status": "success",
+                    "prompt_tokens": call.get("prompt_tokens"),
+                    "completion_tokens": call.get("completion_tokens"),
+                    "duration_ms": call.get("duration_ms"),
+                }
+            )
     return tool_trace, execution_trace
 
 

@@ -64,7 +64,9 @@ from photobench.domain.runs.analysis import (
     apply_live_sample,
     derive_attribution,
     effective_summary,
+    media_key,
     now_iso,
+    ranking_metrics,
 )
 from photobench.domain.runs.execution import (
     RunCancelledError,
@@ -1488,6 +1490,24 @@ class RunExecution:
                         for call in (turn.get("trace_bundle") or {}).get("model_calls") or []
                     ],
                     "selected_asset_ids": selected,
+                    # **检索的排名质量**（1.0 ``image_ranking``）。读侧的
+                    # ``ranking_from_item`` 会从 ``retrieved_candidate_media`` 兜底回算，
+                    # 但那只对 summary 生效——**逐题详情读的是 item 上这一格**，
+                    # 没有它就显示「未计算」。候选序是名次，所以这里算得出真值。
+                    "image_ranking": ranking_metrics(
+                        [
+                            media_key(
+                                entry.get("media_type"), entry.get("media_id") or entry.get("file_name")
+                            )
+                            for entry in candidate_media
+                            if entry.get("media_type") == "image"
+                        ],
+                        {
+                            media_key(ref.get("media_type"), ref.get("media_id"))
+                            for ref in gt_refs
+                            if ref.get("media_type") == "image"
+                        },
+                    ),
                     "predicted_media": predicted_media,
                     "predicted_file_names": sorted(str(entry["file_name"]) for entry in predicted_media),
                     "gt_media": gt_media,
