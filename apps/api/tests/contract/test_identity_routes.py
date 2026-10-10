@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -700,6 +701,16 @@ def test_crop_with_a_short_bbox_is_422(identity_client: TestClient, tmp_path: Pa
 # insightface 权重）与**不存在的实例是 404 而不是 422**。
 
 
+class NoFaceDetector:
+    """图里没有人脸。上传那条路会调它，用真检测器要 insightface 权重。"""
+
+    def detect(self, path: str):
+        return []
+
+    def detect_identity_photo(self, path: str):
+        return []
+
+
 class ExplodingDetector:
     """真被调上就说明实例那条路又去「挑照片里最好的脸」了。"""
 
@@ -754,6 +765,78 @@ def test_seeding_by_a_stored_face_instance_never_calls_the_detector(identity_cli
     assert cluster["status"] == "confirmed"
     assert cluster["member_count"] == 1
     assert cluster["canonical_name"] == "妈妈"
+
+
+def test_seeding_the_same_photo_twice_does_not_collide(identity_client, tmp_path):
+    """**同一张预置照片落两次不能炸。**（2026-10-10 修）
+
+    这条路原来写的是 ``asset_id = f"asset_{sha256(content)[:12]}"``——用**内容哈希**当 id，
+    而 ``assets.id`` 是**全局主键、不带 scope**。于是同一张预置照片只要在**任何一个** scope
+    里落过一次，之后每一次预置都撞 ``UNIQUE constraint failed: assets.id``，路由回 500。
+
+    实测的后果：`faceid_1.jpg` 早在 `PhotoBench-20261007-141043` 那一轮就落库了，
+    **从那以后每一轮评测的 8 个人一个都没种进去**（`seeded_count: 0, failed_count: 8`）
+    ——而「这一轮里的所有人都不存在」在读数上只表现为「人物类题答不对」。
+
+    口径改成与导入路径一致（``import_assets.py:325``）：随机 id + 按 (scope, 哈希) 去重。
+    """
+    import dataclasses
+    import hashlib
+
+    from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
+
+    payload = "同一张脸".encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    db = _db(identity_client)
+    container = identity_client.app.state.container
+    existing = container.asset_repository.add(
+        Asset(
+            id="asset_已经在库里",
+            scope_id=HOME,
+            file_name="faceid_1.jpg",
+            media_type=MediaType.IMAGE,
+            path=str(tmp_path / "faceid_1.jpg"),
+            mime_type="image/jpeg",
+            size_bytes=len(payload),
+            status=AssetStatus.PROCESSED,
+            content_sha256=digest,
+            captured_at=None,
+            captured_location=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    del existing
+    container.observation_repository.add(
+        Observation(
+            id="obs_已经在库里",
+            scope_id=HOME,
+            asset_id="asset_已经在库里",
+            source_type="seed_identity",
+            captured_at=None,
+            confidence=0.0,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    # 上传路径**会**过检测器（与按实例那条路不同）。这里给一个「图里没有人脸」的桩：
+    # 本用例要验的是**资产那一格不撞**，不是人脸，检测结果返回空不影响它——
+    # 而 ``_store_seed_photo`` 落在检测**之前**，正是它抛的那个 IntegrityError。
+    identity_client.app.state.container = dataclasses.replace(container, face_detector=NoFaceDetector())
+
+    response = identity_client.post(
+        "/api/v1/people/seed",
+        data={"name": "妈妈", "scope_id": HOME},
+        files={"files": ("faceid_1.jpg", payload, "image/jpeg")},
+    )
+
+    assert response.status_code != 500, response.text
+    # **没有落第二份**：同一个 scope 里同样的字节就是同一个资产。
+    with db.connect() as connection:
+        rows = connection.execute(
+            "SELECT id FROM assets WHERE scope_id = ? AND content_sha256 = ?", (HOME, digest)
+        ).fetchall()
+    assert [row["id"] for row in rows] == ["asset_已经在库里"]
 
 
 def test_an_unknown_face_instance_is_a_404_not_a_422(identity_client: TestClient):

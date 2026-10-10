@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
@@ -859,7 +860,26 @@ def _store_seed_photo(
     （``app.py:2337-2339``），不跑 VLM、不建事件、不写词法投影——用户在说「这张脸是妈妈」，
     不是在说「这张照片属于某次旅行」。走导入链会让预置照片长出事件，把两个语义混起来。
     """
-    asset_id = f"asset_{hashlib.sha256(content).hexdigest()[:12]}"
+    # **id 不能用内容哈希。** 这条路原来写的是
+    # ``f"asset_{sha256(content)[:12]}"``，而 ``assets.id`` 是**全局主键、不带 scope**——
+    # 于是同一张预置照片只要在**任何一个** scope 里落过一次，之后每一轮预置都撞
+    # ``UNIQUE constraint failed: assets.id``，路由回 500，``identity_seed`` 全军覆没。
+    #
+    # 实测（2026-10-10）：`faceid_1.jpg` 的哈希 `asset_131bea58c5d4` 早在
+    # `PhotoBench-20261007-141043` 那一轮就落库了，**从那以后每一轮的 8 个人一个都没种进去**
+    # （`seeded_count: 0, failed_count: 8`）——而"某一轮里的所有人都不存在"这件事，
+    # 在评测读数上只表现为「人物类题答不对」。
+    #
+    # 口径改成与导入路径一致（``import_assets.py:325`` 的 ``_new_id("asset")``）：**随机 id
+    # + 按 (scope, 内容哈希) 去重**。同一个 scope 里同样的字节仍然是同一个资产。
+    digest = hashlib.sha256(content).hexdigest()
+    existing = container.asset_repository.find_by_hash(scope_id, digest)
+    if existing is not None:
+        observations = container.observation_repository.list_by_asset(existing.id)
+        if observations:
+            # 已经有这个资产、也已经有观察——直接用它，不再落第二份。
+            return SeedPhoto(asset_id=existing.id, observation_id=observations[0].id, path=existing.path)
+    asset_id = f"asset_{uuid.uuid4().hex[:12]}"
     path = container.media_storage.store(asset_id, file_name, content)
     now = datetime.now(UTC)
     asset = Asset(
@@ -871,7 +891,7 @@ def _store_seed_photo(
         mime_type=content_type,
         size_bytes=len(content),
         status=AssetStatus.PROCESSED,
-        content_sha256=hashlib.sha256(content).hexdigest(),
+        content_sha256=digest,
         captured_at=now,
         captured_location=None,
         created_at=now,
