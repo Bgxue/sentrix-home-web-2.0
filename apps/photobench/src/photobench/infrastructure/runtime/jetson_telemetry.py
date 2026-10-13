@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -84,6 +85,111 @@ def _process_rss_mib(pid: int) -> float | None:
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+NVMAP_CLIENTS_PATH = os.environ.get("PHOTOBENCH_NVMAP_CLIENTS_PATH", "/sys/kernel/debug/nvmap/iovmm/clients")
+NVMAP_CACHE_SECONDS = max(0.0, float(os.environ.get("PHOTOBENCH_NVMAP_CACHE_SECONDS", "2")))
+
+_nvmap_cache: dict = {"at": float("-inf"), "table": None}
+
+
+def _read_nvmap_clients() -> str | None:
+    """Read the Tegra nvmap client table, or None when it is not readable.
+
+    The table lives in debugfs and is root-only. A passwordless sudo rule for
+    exactly this one file is the deployment hook (see the README); without it
+    the caller must treat GPU memory as *unknown*, never as zero.
+    """
+    try:
+        return Path(NVMAP_CLIENTS_PATH).read_text(encoding="ascii", errors="replace")
+    except OSError:
+        pass
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return None
+    try:
+        completed = subprocess.run(
+            [sudo, "-n", "cat", NVMAP_CLIENTS_PATH],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout or None
+
+
+def _nvmap_clients_mib() -> dict[int, float] | None:
+    """Per-PID nvmap (GPU/UMA) allocation in MiB, or None when unreadable."""
+    now = time.monotonic()
+    if now - float(_nvmap_cache["at"]) < NVMAP_CACHE_SECONDS:
+        return _nvmap_cache["table"]
+    text = _read_nvmap_clients()
+    table: dict[int, float] | None = None
+    if text:
+        parsed: dict[int, float] = {}
+        for line in text.splitlines():
+            parts = line.split()
+            # CLIENT PROCESS PID SIZE — the trailing "total" row has 2 fields.
+            if len(parts) < 4 or not parts[2].isdigit() or not parts[3].endswith("K"):
+                continue
+            try:
+                size_mib = float(parts[3][:-1]) / 1024.0
+            except ValueError:
+                continue
+            pid = int(parts[2])
+            parsed[pid] = round(parsed.get(pid, 0.0) + size_mib, 3)
+        table = parsed
+    _nvmap_cache["at"] = now
+    _nvmap_cache["table"] = table
+    return table
+
+
+def _process_gpu_memory_mib(
+    model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
+) -> tuple[float | None, str]:
+    """GPU/UMA memory charged to the model process, plus which source won."""
+    residual: float | None = None
+    if rss_mib is not None and host_rss_mib is not None:
+        residual = round(max(0.0, float(rss_mib) - float(host_rss_mib)), 3)
+    table = _nvmap_clients_mib()
+    nvmap: float | None = None
+    if table is not None and model_pids:
+        nvmap = round(sum(table.get(int(pid), 0.0) for pid in model_pids), 3)
+    if nvmap is None:
+        return (residual, "vmrss_residual") if residual is not None else (None, "unavailable")
+    if residual is None or nvmap >= residual:
+        return nvmap, "nvmap_iovmm"
+    return residual, "vmrss_residual"
+
+
+def unified_model_memory(model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None) -> dict:
+    """One accounting rule for every host: CPU pages + GPU/UMA pages.
+
+    ``host_rss_mib`` is the summed smaps ``Rss:`` of the model process, which
+    excludes device mappings, so adding the GPU figure never double-counts.
+    """
+    result: dict = {}
+    if rss_mib is None and host_rss_mib is None:
+        return result
+    if host_rss_mib is None:
+        # Cannot split host from GPU; keep the legacy whole-process figure.
+        result["model_process_system_memory_used_mib"] = rss_mib
+        result["model_process_system_memory_scope"] = "host_process_vmrss"
+        result["model_process_gpu_memory_source"] = "unavailable"
+        return result
+    gpu_mib, gpu_source = _process_gpu_memory_mib(model_pids, rss_mib=rss_mib, host_rss_mib=host_rss_mib)
+    total = round(float(host_rss_mib) + float(gpu_mib or 0.0), 2)
+    if rss_mib is not None:
+        total = round(max(total, float(rss_mib)), 2)
+    result["model_process_system_memory_used_mib"] = total
+    result["model_process_system_memory_scope"] = "host_smaps_rss_plus_gpu_uma"
+    result["model_process_host_memory_mib"] = round(float(host_rss_mib), 2)
+    result["model_process_gpu_memory_mib"] = round(total - float(host_rss_mib), 2)
+    result["model_process_gpu_memory_source"] = gpu_source
+    return result
 
 
 def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, set[str]]:
@@ -219,13 +325,14 @@ def _augment_local_process_memory(
         pid = int(row["pid"])
         row["pss_mib"] = _process_pss_mib(pid)
         row["smaps_rss_mib"] = _process_smaps_field_mib(pid, "Rss:")
+    model_pids = {row["pid"] for row in model_rows}
     model_rss = _sum_mib(model_rows, "rss_mib")
     model_pss = _sum_mib(model_rows, "pss_mib")
     model_smaps_rss = _sum_mib(model_rows, "smaps_rss_mib")
     sentrix_pss = _sum_mib(sentrix_rows, "pss_mib")
-    if model_rss is not None:
-        data["model_process_system_memory_used_mib"] = model_rss
-        data["model_process_system_memory_scope"] = "host_process_vmrss"
+    model_memory = unified_model_memory(model_pids, rss_mib=model_rss, host_rss_mib=model_smaps_rss)
+    if model_memory:
+        data.update(model_memory)
         data["model_system_processes"] = [
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
             for row in model_rows[:20]
@@ -247,9 +354,10 @@ def _augment_local_process_memory(
         and model_pss_complete
         and model_rss is not None
         and model_smaps_rss is not None
+        and model_memory.get("model_process_gpu_memory_mib") is not None
     ):
         cpu_pages = sentrix_pss + model_pss
-        uma_extra = max(0.0, model_rss - model_smaps_rss)
+        uma_extra = float(model_memory["model_process_gpu_memory_mib"])
         product = round(cpu_pages + uma_extra, 2)
         data["product_stack_memory_mib"] = product
         data["benchmark_process_memory_used_mib"] = product

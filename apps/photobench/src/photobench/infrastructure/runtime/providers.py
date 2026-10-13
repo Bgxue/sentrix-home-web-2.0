@@ -42,6 +42,7 @@ import httpx
 
 from photobench.domain.runtime.ports import LifecycleProvider, RuntimeProviders, TelemetryProvider
 from photobench.infrastructure.runtime.hardware import read_cpu_temperature_c
+from photobench.infrastructure.runtime.jetson_telemetry import unified_model_memory
 
 
 def normalize_service_url(value: str | None) -> str:
@@ -386,9 +387,9 @@ def _augment_host_process_memory(
     product_pss = _sum_mib(system_rows, "pss_mib")
     model_smaps_rss = _sum_mib(model_rows, "smaps_rss_mib")
     system_gpu = _sum_mib(system_gpu_rows, "used_memory_mib")
-    if model_rss is not None:
-        data["model_process_system_memory_used_mib"] = model_rss
-        data["model_process_system_memory_scope"] = "host_process_rss"
+    model_memory = unified_model_memory(model_pids_found, rss_mib=model_rss, host_rss_mib=model_smaps_rss)
+    if model_memory:
+        data.update(model_memory)
         data["model_system_processes"] = [
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
             for row in model_rows[:20]
@@ -407,8 +408,9 @@ def _augment_host_process_memory(
         and model_rss is not None
         and model_smaps_rss is not None
         and model_pss_complete
+        and model_memory.get("model_process_gpu_memory_mib") is not None
     ):
-        uma_extra = max(0.0, model_rss - model_smaps_rss)
+        uma_extra = float(model_memory["model_process_gpu_memory_mib"])
         product_memory = round(product_pss + uma_extra, 2)
         data["product_stack_memory_mib"] = product_memory
         data["benchmark_process_memory_used_mib"] = product_memory
