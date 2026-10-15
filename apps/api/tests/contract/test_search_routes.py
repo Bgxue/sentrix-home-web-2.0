@@ -200,12 +200,16 @@ def album(tmp_path: Path) -> Path:
 def channel_client(settings: Settings, album: Path) -> TestClient:
     """视觉把「雪山」排第一（查询词映射到绿色向量），词法把「海边」排第一。"""
     red, green = jpeg_bytes("red"), jpeg_bytes("green")
+    # W1 之后图像与文本是**同一个嵌入器**（同一个空间），导入期写文本向量走的也是
+    # 这一槽。**此前这里只换了 ``visual_embedder``**，``text_embedder`` 一直是真
+    # WeMM 侧车（8102）——侧车不在时 ``text_ann`` 通道就是空的，下面那条「三路融合」
+    # 的用例会红，而它红的理由与代码无关，只是那台机器上没起侧车。
+    embedder = ScriptedEmbedder(images={red: RED, green: GREEN}, texts={"海边": GREEN, "雪山": GREEN})
     app = create_app(settings)
     app.state.container = dataclasses.replace(
         app.state.container,
-        visual_embedder=ScriptedEmbedder(
-            images={red: RED, green: GREEN}, texts={"海边": GREEN, "雪山": GREEN}
-        ),
+        visual_embedder=embedder,
+        text_embedder=embedder,
         vlm_observer=WordObserver(),
     )
     client = TestClient(app)

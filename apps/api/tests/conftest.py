@@ -228,9 +228,17 @@ def client(settings) -> TestClient:
     （见 ``FakeChatModel``）。
     """
     app = create_app(settings)
+    # W1 之后图像与文本是**同一个嵌入器**（同一个 2048 维空间），真实现也是这么装的
+    # ——容器里 visual / text 两槽指向同一个实例。所以这里也用同一个假件顶两个槽。
+    fake_embedder = FakeVisualEmbedder()
     app.state.container = dataclasses.replace(
         app.state.container,
-        visual_embedder=FakeVisualEmbedder(),
+        visual_embedder=fake_embedder,
+        # **``text_embedder`` 此前一直没跟着换**，于是契约测试打的是**真的** WeMM 侧车
+        # （8102）：侧车不在时 ``text_ann`` 通道就是空的，`test_search_routes` 那两条
+        # 「三路融合」的用例会红——它们红的理由与代码无关，只是那台机器上没起侧车。
+        # 契约测试不该依赖一台跑着模型的机器（見本函数 docstring 第一句）。
+        text_embedder=fake_embedder,
         # 嵌入可用性也必须换掉：真实现会去打 8102 侧车，而契约测试不该依赖它。
         embedding_health=FakeEmbeddingHealth(),
         vlm_observer=FakeVlmObserver(),
