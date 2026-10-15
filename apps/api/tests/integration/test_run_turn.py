@@ -1457,3 +1457,33 @@ def test_a_style_only_problem_does_not_earn_the_label(env):
     assert not [
         event for event in turns.events_after(turn_id, 0) if event.payload.get("code") == "l2_soft_release"
     ]
+
+
+def test_the_recorded_tool_result_keeps_every_observation_key():
+    """轨迹里记的是**整份** observation，不是一份被裁过的「规模摘要」。
+
+    原先的白名单只留 ``total / has_more / backend / degraded / delivered`` 五个键 +
+    ``asset_ids``，而 ``read_photo_text`` 的 observation
+    （``result_set_id / asset_handle / asset_id / source / full_text``）与它**零交集**
+    —— 2026-10-10 那轮因此留下 159 条空对象，事后看不出模型读到了什么字。
+    ``degraded_reason`` 也同样被丢掉，于是「为什么降级」无法从 run.json 判断，
+    而那正是分析那轮的全部起点。
+    """
+    from sentrix.application.assistant.run_turn import _tool_result_shape
+
+    outcome = ToolOutcome(
+        observation={
+            "result_set_id": "rs_1",
+            "asset_id": "asset_1",
+            "full_text": "囍",
+            "degraded_reason": "embedder_unavailable",
+        },
+        model_visible={"full_text": "囍"},
+    )
+
+    assert _tool_result_shape(outcome) == {
+        "result_set_id": "rs_1",
+        "asset_id": "asset_1",
+        "full_text": "囍",
+        "degraded_reason": "embedder_unavailable",
+    }

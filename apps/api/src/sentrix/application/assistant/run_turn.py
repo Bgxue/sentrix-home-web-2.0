@@ -175,20 +175,24 @@ def _call_arguments(call: ToolCall) -> Mapping[str, Any]:
 
 
 def _tool_result_shape(outcome: ToolOutcome) -> Mapping[str, Any]:
-    """这次工具调用**产出了什么规模的东西**——不是结果本身。
+    """这次工具调用**产出了什么**——整份内部观察，原样。
 
-    放的是内部观察里的规模与来源（候选数、素材 id），不是那份发给模型的投影：
-    轨迹要回答的是「它拿到了什么」，而那份投影是模型的输入、不是这次调用的事实。
+    **2026-10-15：从白名单改成全量。** 原先只留
+    ``total / has_more / backend / degraded / delivered`` 五个键 + ``asset_ids``，
+    理由写的是「轨迹要回答规模，不是结果本身」。后果却是可测的：
+
+    - ``read_photo_text`` 的 observation 是
+      ``result_set_id / asset_handle / asset_id / source / full_text`` —— 与那份白名单
+      **零交集**，于是它的轨迹全是空对象（2026-10-10 那轮 159 条），事后看不出模型
+      到底读到了什么字；
+    - ``degraded_reason`` 就在 ``degraded`` 旁边，被一起丢掉，于是那轮「为什么降级」
+      （``embedder_unavailable`` 还是 ``dimension_mismatch``，代码里是两条不同的处置
+      路径）**无法从 run.json 判断**——而分析那轮的全部起点就是这个。
+
+    轨迹的用途恰恰是复盘「模型当时拿到了什么」。``observation`` 本来就是内部投影
+    （``ToolOutcome`` 的口径：这一份不发模型），落进 run.json 不增加任何暴露面。
     """
-    observation = outcome.observation
-    shape: dict[str, Any] = {}
-    for key in ("total", "has_more", "backend", "degraded", "delivered"):
-        if key in observation:
-            shape[key] = observation[key]
-    assets = observation.get("asset_ids")
-    if isinstance(assets, (list, tuple)):
-        shape["asset_ids"] = [str(item) for item in assets]
-    return shape
+    return dict(outcome.observation)
 
 
 def _turn_trace(session: _Session, planned: PlannerResult | None) -> Mapping[str, Any]:
