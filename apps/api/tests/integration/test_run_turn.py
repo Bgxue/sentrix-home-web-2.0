@@ -1347,6 +1347,56 @@ def test_the_judge_is_not_called_without_tool_results(env):
     assert result.answer == "你好，我可以帮你找照片。"
 
 
+def test_the_judge_is_not_called_when_only_the_terminal_action_was_recorded(env):
+    """**终止动作自己不算「工具观察」。**
+
+    ``final_answer`` 是终止动作，``_finish_with_final_answer`` 会先把它 ``state.record``
+    （``run_turn.py:791``）再调 ``_judge_answer``（``:812``）——所以「模型直接给终止动作」
+    这条路上 ``not state.records`` **恒为假**。
+
+    上面那条 ``..._without_tool_results`` 用的是正文收尾（``final()``），它的 ``records``
+    确实是空的；**两条路只测了一条**，而真实评测里模型走的是 ``final_answer`` 工具
+    （2026-10-10 那轮 643 次）。判据因此等价于「每一轮都评审」。
+
+    1.0 ``runtime.py:2865`` 用的是 ``task.tool_results``：执行成功并记下的**工具观察**。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel([final_call("你好，我可以帮你找照片。")], judge=RuntimeError("不该被调用"))
+    run_turn = build(env, model, StubToolbox({FINAL_ANSWER_TOOL: DELIVER_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert model.judge_calls == []
+    assert result.answer == "你好，我可以帮你找照片。"
+
+
+def test_the_judge_is_not_called_when_every_tool_call_was_denied(env):
+    """被拒的调用不产出观察，所以它不算「有工具结果」。
+
+    1.0 的 ``task.tool_results`` 只在工具**执行成功**时记录。若判据写成「有 records」，
+    被拒的尝试也会把评审放进来——而那时评审手上一条观察都没有，任何具体断言在它眼里
+    都像编造（这正是判不实率被抬高的机制之一）。
+    """
+    _conversations, _turns, conversation, _db = env
+    denied = ToolOutcome(
+        observation={"failure_reason": "page_call_limit"},
+        model_visible={"error": "page_call_limit"},
+        failure_reason="page_call_limit",
+    )
+    model = ScriptedModel(
+        [tool_call("get_result_page", "c1", result_set_id="rs_1", page=9), final("没有更多了。")],
+        judge=RuntimeError("不该被调用"),
+    )
+    run_turn = build(env, model, StubToolbox({"get_result_page": denied}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert model.judge_calls == []
+    assert result.answer == "没有更多了。"
+
+
 def test_only_missing_disclosure_does_not_block_the_answer(env):
     """``missing_disclosure`` 只是披露建议（severity=style），不拦事实正确的回答。"""
     _conversations, _turns, conversation, _db = env

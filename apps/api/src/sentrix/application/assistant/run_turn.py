@@ -1015,7 +1015,23 @@ class RunTurn:
         只是披露建议，不拦事实正确的回答（1.0 ``judge.py:174-176`` 的 severity 分层）。
         """
         state = session.state
-        if session.judged or not state.records or not state.can_step():
+        # 「本轮有工具结果」要排掉两样东西：
+        #
+        # ① ``final_answer`` 自己。它是**终止动作**，``_finish_with_final_answer`` 先
+        #    ``state.record``（``:791``）才走到这里（``:812``），所以直接看
+        #    ``not state.records`` 会**恒为假**——判据于是等价于「每一轮都评审」。
+        #    ``_one_shot_evidence_reminder:985`` 已经为同一条规律修过一次（那里的注释
+        #    写着「走到这里时它刚被记进 records，直接看 not state.records 会恒为假」），
+        #    这一处当时没跟上。
+        # ② **没成功的**调用。被拒 / 参数不合法 / 回放都不产出观察。
+        #
+        # 1.0 ``runtime.py:2865`` 的判据是 ``task.tool_results``——那是「执行成功并记下的
+        # 工具观察」。缺了这两条，评审会在手上一条观察都没有的情况下开门，而它的默认
+        # 姿态是「工具观察是唯一可信事实来源」：没有观察时，任何具体断言都像编造。
+        observations = [
+            record for record in state.records if record.tool != FINAL_ANSWER_TOOL and record.status == "ok"
+        ]
+        if session.judged or not observations or not state.can_step():
             return False
         session.judged = True
         state.model_steps += 1
