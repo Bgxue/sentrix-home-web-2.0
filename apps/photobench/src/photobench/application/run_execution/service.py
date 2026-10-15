@@ -178,7 +178,14 @@ class RunRequest:
     manager_url: str = ""
     model_base_url: str = ""
     run_id: str = ""
+    #: ``full`` 或 ``reuse``。``reuse`` 时 ``scope_id`` 必须是**已存在**的空间，
+    #: 且三个导入相位会被跳过（1.0 的 ``scope_attach`` 那条路）。
+    mode: str = "full"
     scope_id: str = ""
+    #: **resume 专用**：上一次已经跑完的结果，原样带进来与新跑的一起收尾。
+    #: 1.0 的 ``resume_state``（``:7560-7564`` 把整份旧 state 塞进新 run），
+    #: 2.0 只带 items 那一格——其余字段（相位、硬件快照）属于那一次运行，不该被覆盖。
+    prior_items: tuple[Mapping[str, Any], ...] = ()
     import_timeout: int = 7200
     turn_timeout: int = 900
     qa_concurrency: int = 0
@@ -311,16 +318,32 @@ class RunExecution:
         sampler_holder.append(sampler)
         self._sampler = sampler
         sampling = self._sampling_enabled() and self.telemetry_source != "unavailable"
-        phases: list[tuple[str, Callable[[RunState, RunRequest], None]]] = [
-            ("model_deploy", self._phase_model_deploy),
-            ("scope_setup", self._phase_scope_setup),
-            ("identity_seed", self._phase_identity_seed),
-            ("photo_import", self._phase_photo_import),
-            ("pipeline_processing", self._phase_processing),
-            ("qa_eval", self._phase_qa_eval),
-            ("gpu_metrics", self._phase_gpu_metrics),
-            ("aggregate", self._phase_aggregate),
-        ]
+        # **reuse 只跑「问答与收尾」四个相位。** 那三个导入相位（``identity_seed`` /
+        # ``photo_import`` / ``pipeline_processing``）的产物上一次已经落在那个 scope 里
+        # 了——重跑一遍测量不到任何新东西，只花掉 66 分钟，还会在导入期的显存高峰上
+        # 再赌一次（2026-10-10 那轮 WeMM 侧车就是在导入之后没的）。
+        #
+        # ``scope_setup`` 留着：它是**绑定**那一件事的位置（1.0 的 ``scope_attach``），
+        # 且它自己不发请求（空间由导入路径内部 ``_ensure_space`` 建），所以复用时要的
+        # 那句「这一轮绑在哪个 scope 上」正好有地方记。
+        if request.mode == "reuse":
+            phases: list[tuple[str, Callable[[RunState, RunRequest], None]]] = [
+                ("scope_setup", self._phase_scope_setup),
+                ("qa_eval", self._phase_qa_eval),
+                ("gpu_metrics", self._phase_gpu_metrics),
+                ("aggregate", self._phase_aggregate),
+            ]
+        else:
+            phases = [
+                ("model_deploy", self._phase_model_deploy),
+                ("scope_setup", self._phase_scope_setup),
+                ("identity_seed", self._phase_identity_seed),
+                ("photo_import", self._phase_photo_import),
+                ("pipeline_processing", self._phase_processing),
+                ("qa_eval", self._phase_qa_eval),
+                ("gpu_metrics", self._phase_gpu_metrics),
+                ("aggregate", self._phase_aggregate),
+            ]
         state.set("status", "running")
         state.set("started_at", now_iso())
         state.set("hardware_snapshots", {"start": self._hardware_snapshot(), "end": None})
@@ -393,8 +416,14 @@ class RunExecution:
         rows = self.albums.qa_rows(album_id, request.qa_set)
         return {
             "run_id": run_id,
-            "mode": "full",
-            "scope_source": "created_by_import",
+            # **这两个键以前是硬编码的**（``"full"`` / ``"created_by_import"``），
+            # 所以 run.json 里的 mode 永远是 full——复用过的 run 与新建的 run
+            # 在事后分析时完全分不出来。
+            "mode": request.mode,
+            "scope_source": "reused" if request.mode == "reuse" else "created_by_import",
+            # 1.0 的形状：``scope_id`` 是这一轮实际绑的空间，``existing_scope_id`` 是
+            # 调用方**传进来要求复用**的那个。full 模式下没有后者。
+            "existing_scope_id": scope_id if request.mode == "reuse" else None,
             "album_id": album_id,
             "album_name": manifest.get("album_name"),
             "model_profile": request.model_profile,
@@ -1335,8 +1364,22 @@ class RunExecution:
                 },
             )
 
-        record_progress(0)
-        items: dict[int, dict[str, Any]] = {}
+        # **resume：上一次的结果先摆回来。** 1.0 的做法是把整份旧 state 当
+        # ``resume_state`` 塞进新 run（``:7560-7564``），题级跳过靠
+        # ``completed_qa_ids``（``:3414-3417``，判据是
+        # ``execution_status not in {"scheduled", "running"}``）。
+        #
+        # 2.0 只带 items 那一格：**已完成的题不进池、直接当成结果**，于是续跑出来的
+        # run.json 仍然是一份完整的 487 题结果，而不是「只剩没跑的那些」——后者会让
+        # 汇总里所有的均值都只覆盖续跑的那一段，与上一轮不可比。
+        prior_by_qa = {str(item.get("qa_id")): item for item in request.prior_items}
+        items: dict[int, dict[str, Any]] = {
+            index: dict(prior)
+            for index, row in enumerate(rows)
+            if (prior := prior_by_qa.get(str(row.get("qa_id")))) is not None
+        }
+        pending_rows = [(index, row) for index, row in enumerate(rows) if index not in items]
+        record_progress(len(items))
         judge_futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
         judge_done = 0
         judge_pool = (
@@ -1352,7 +1395,7 @@ class RunExecution:
             ) as executor:
                 futures = {
                     executor.submit(self._evaluate_one, row, scope_id, assets_by_name, request): index
-                    for index, row in enumerate(rows)
+                    for index, row in pending_rows
                 }
                 for future in concurrent.futures.as_completed(tuple(futures)):
                     index = futures[future]

@@ -218,14 +218,40 @@ def _wait_until(predicate: Any, timeout: float = 5.0) -> bool:
 
 
 def test_start_suite_rejects_a_mode_2_0_does_not_implement(tmp_path: Path):
-    """``reuse`` / ``build`` 在 2.0 没有对应能力（scope_attach 已删）。
+    """``build``（只导入不问答）在 2.0 仍然没有对应能力。
 
-    **显式报错**而不是静默降级：把 ``reuse`` 当 ``full`` 会建出一个新 scope，
-    而那正是调用方想避免的。
+    **显式报错**而不是静默降级：把一个不认识的 mode 当成 ``full`` 跑，会建出一个
+    调用方想避免的新 scope、还做了一整套它没要的问答。
+
+    2026-10-15：``reuse`` 从这条断言里移出去了——它已经接上生产（``RUN_MODES`` 现在
+    是 ``("full", "reuse")``），改由 ``test_reuse_requires_an_existing_scope``
+    钉它的参数校验。
+    """
+    with pytest.raises(InvalidRequestError) as excinfo:
+        _suites(tmp_path).start_suite(_payload(mode="build"))
+    assert "mode must be" in str(excinfo.value)
+
+
+def test_reuse_requires_an_existing_scope(tmp_path: Path):
+    """``mode=reuse`` 没有 ``existing_scope_id`` 就是 400。
+
+    没有 scope id 就没有可复用的对象，而静默降级成 ``full`` 会建出一个新 scope
+    ——那正是调用方要避免的那件事（也是 1.0 ``scope_attach`` 存在的全部理由）。
     """
     with pytest.raises(InvalidRequestError) as excinfo:
         _suites(tmp_path).start_suite(_payload(mode="reuse"))
-    assert "mode must be" in str(excinfo.value)
+
+    assert "existing_scope_id" in str(excinfo.value)
+
+
+def test_reuse_is_accepted_with_an_existing_scope(tmp_path: Path):
+    """给了 scope id 就接受，并把 mode 与 scope 一路传下去。"""
+    suite = _suites(tmp_path).start_suite(
+        _payload(mode="reuse", existing_scope_id="PhotoBench-20260101-000000-album-qwen")
+    )
+
+    assert suite["mode"] == "reuse"
+    assert suite["existing_scope_id"] == "PhotoBench-20260101-000000-album-qwen"
 
 
 class _StrictAlbums:
@@ -509,3 +535,63 @@ def test_memory_profile_replays_questions_without_touching_the_answers(tmp_path:
     # 见 application.deploy；这条路径没有端点来源），如实记 false 并写明原因。
     assert record["gamma_sync"]["ok"] is False
     assert "application.deploy" in record["gamma_sync"]["error"]
+
+
+# ---- resume（2026-10-15 恢复）-----------------------------------------------
+
+
+def _cancelled_state(**over: Any) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "status": "cancelled",
+        "scope_id": "PhotoBench-20260101-000000-album-x-qwen",
+        "album_id": "album-x",
+        "qa_set": "qa-1",
+        "model_profile": "qwen",
+        "sentrix_url": "http://sentrix:8191",
+        "items": [
+            {"qa_id": "q1", "execution_status": "completed"},
+            {"qa_id": "q2", "execution_status": "scheduled"},
+            {"qa_id": "q3", "execution_status": "running"},
+        ],
+    }
+    state.update(over)
+    return state
+
+
+def test_resume_rejects_a_run_that_is_not_resumable(tmp_path: Path):
+    """只有 ``interrupted`` / ``failed`` / ``cancelled`` / ``completed_with_errors``
+    能续跑（1.0 ``:7495``）。正在跑的 run 不该被再起一个。"""
+    store = FakeRunStore({"run-1": _cancelled_state(status="running")})
+
+    with pytest.raises(InvalidRequestError) as excinfo:
+        _suites(tmp_path, store=store).resume_run("run-1")
+
+    assert "cannot be resumed" in str(excinfo.value)
+
+
+def test_resume_rejects_a_run_without_a_scope_checkpoint(tmp_path: Path):
+    """没有 scope 就没有可复用的对象——1.0 ``:7513`` 同样拒绝。"""
+    store = FakeRunStore({"run-1": _cancelled_state(scope_id="")})
+
+    with pytest.raises(InvalidRequestError) as excinfo:
+        _suites(tmp_path, store=store).resume_run("run-1")
+
+    assert "no memory-space checkpoint" in str(excinfo.value)
+
+
+def test_resume_carries_only_the_finished_items_and_reuses_the_scope(tmp_path: Path):
+    """续跑只带**跑完的**题；``scheduled`` / ``running`` 的留给这一轮重跑。
+
+    判据逐条照 1.0 ``:3414-3417`` 的 ``execution_status not in {"scheduled", "running"}``。
+    这也正是取消掉的题必须标 ``scheduled`` 而不能标 ``failed`` 的原因——标 failed
+    会被当成「已跑完」，续跑时永远跳过。
+    """
+    store = FakeRunStore({"run-1": _cancelled_state()})
+
+    result = _suites(tmp_path, store=store, gate=threading.Event()).resume_run("run-1")
+
+    assert result["mode"] == "reuse"
+    assert result["scope_id"] == "PhotoBench-20260101-000000-album-x-qwen"
+    assert result["resumed_from"] == "run-1"
+    # 三题里只有 q1 是 completed；另外两题留给这一轮。
+    assert result["resumed_items"] == 1

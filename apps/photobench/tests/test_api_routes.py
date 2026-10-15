@@ -117,7 +117,8 @@ def test_the_write_routes_are_mounted(client: TestClient):
     """S9b-1 那条「写侧一条都不该有」的用例，S9b-3 按实情反过来钉。
 
     ``POST /api/runs`` 落到 album 校验上（fixture 的 datasets 是空的）→ 400；
-    ``cancel`` 对一个不在跑的 run 返回「没取消」而不是 404；``resume`` 明确 501。
+    ``cancel`` 对一个不在跑的 run 返回「没取消」而不是 404；``resume`` 对不存在的
+    run 回 400（2026-10-15 之前它回 501「未实现」，那条路已接上生产）。
     """
     start = client.post("/api/v1/runs", json={})
     assert start.status_code == 400
@@ -125,7 +126,9 @@ def test_the_write_routes_are_mounted(client: TestClient):
     cancel = client.post("/api/v1/runs/run-a/cancel")
     assert cancel.status_code == 200
     assert cancel.json()["cancelled"] is False
-    assert client.post("/api/v1/runs/run-a/resume").status_code == 501
+    # resume 与 reuse 共用「绑到已有 scope」那块地基，于 2026-10-15 接上生产。
+    # 路由现在**存在**：run 不存在时回 400，不再是「未实现」的 501。
+    assert client.post("/api/v1/runs/run-a/resume").status_code == 400
     assert client.post("/api/v1/cancel-active").json()["total"] == 0
     assert client.delete("/api/v1/runs/run-a").json() == {"deleted": True, "run_id": "run-a"}
     assert client.get("/api/v1/runs/run-a").status_code == 404

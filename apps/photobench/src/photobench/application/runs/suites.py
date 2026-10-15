@@ -60,8 +60,14 @@ from photobench.domain.runs.execution import safe_slug
 from photobench.domain.runtime.ports import LifecycleProvider, TelemetryProvider
 from photobench.domain.sentrix.ports import SentrixClient
 
-#: 2.0 支持的模式。``reuse`` / ``build`` 不在其中，理由见模块 docstring。
-RUN_MODES = ("full",)
+#: 2.0 支持的模式。``build`` 仍不在其中（只导入不问答，尚无调用方要它）。
+#:
+#: **``reuse`` 于 2026-10-15 恢复。** S9b-2 删掉 ``scope_attach`` 时它一并被移除，
+#: 理由是「scope 由导入内部 ensure，没有可复用的入口」。但 2.0 自己跑过的每一轮都会
+#: 在库里留下一个 scope（``_default_scope_id`` 生成的名字同时是 id），
+#: ``GET /api/v1/memory-spaces`` 的 ``reuse_bases`` 一直在列它们、前端 ``useReuseMode``
+#: 也一直在让用户选——**只有写侧不接**。代价是一轮评测必须重跑 66 分钟的导入。
+RUN_MODES = ("full", "reuse")
 
 #: 1.0 ``:2043`` 的 ``dirty_statuses``。
 DIRTY_STATUSES = {"running", "pending", "cancelling"}
@@ -161,6 +167,12 @@ class RunSuites:
         mode = str(payload.get("mode") or "full").strip().lower()
         if mode not in RUN_MODES:
             raise InvalidRequestError(f"mode must be one of {sorted(RUN_MODES)}, got: {mode!r}")
+        # reuse 复用的是**一个已经导入好的 scope**。没有 scope id 就没有可复用的对象——
+        # 静默降级成 full 会建出一个新 scope，而那正是调用方想避免的（1.0 的
+        # ``scope_attach`` 相位做的也正是「绑定」这一件事）。
+        existing_scope_id = str(payload.get("existing_scope_id") or "").strip()
+        if mode == "reuse" and not existing_scope_id:
+            raise InvalidRequestError("mode=reuse requires existing_scope_id")
         album_id = str(payload.get("album_id") or "album3-14")
         try:
             manifest = self._albums.manifest(album_id)
@@ -208,6 +220,9 @@ class RunSuites:
                     manager_url=deps.manager_url,
                     model_base_url=deps.model_base_url,
                     run_id=run_id,
+                    mode=mode,
+                    # reuse 才传；full 留空让 ``execute`` 走 ``_default_scope_id``。
+                    scope_id=existing_scope_id,
                     runtime_framework=deps.runtime_framework,
                     judge_url=deps.judge.judge_url,
                     judge_model=deps.judge.judge_model,
@@ -248,8 +263,98 @@ class RunSuites:
             "models": [str(model) for model in models],
             "qa_set": qa_set,
             "mode": mode,
-            "existing_scope_id": None,
+            # 回显复用的那个 scope（1.0 ``start_suite`` 的响应形状）。full 模式为 None。
+            "existing_scope_id": existing_scope_id or None,
             "current_model_snapshot": None,
+        }
+
+    # ---- resume -------------------------------------------------------------
+
+    def resume_run(self, run_id: str) -> dict[str, Any]:
+        """``POST /api/runs/{id}/resume``（1.0 ``resume_run`` ``:7488``）。
+
+        **与 ``reuse`` 共用同一块地基**：两者都是「绑到一个已经存在的 scope 上、
+        不重新导入」。差别只在题目集——``reuse`` 从头跑全部，``resume`` 跳过已跑完的。
+
+        **只续跑「没跑过」的题**，判据逐条照 1.0 ``:3414-3417``：
+        ``execution_status not in {"scheduled", "running"}`` 的算已完成。
+        这也正是取消掉的题必须标 ``scheduled`` 而不能标 ``failed`` 的原因——
+        标 failed 的话它们会被当成「已跑完」，续跑时永远跳过（2026-10-15 改的）。
+
+        2.0 此前直接回 501（``api/routes/suites.py``），理由是「scope 由导入内部 ensure，
+        没有复用已存在 scope 这条路」。那条理由随 ``mode=reuse`` 一起消失了。
+        """
+        self._require_inactive()
+        try:
+            saved = self._store.load_state(run_id)
+        except KeyError as exc:
+            raise InvalidRequestError(f"run not found: {run_id}") from exc
+        status = str(saved.get("status") or "")
+        if status not in {"interrupted", "failed", "cancelled", "completed_with_errors"}:
+            raise InvalidRequestError(f"run cannot be resumed while status is {status or 'unknown'}")
+        scope_id = str(saved.get("scope_id") or "").strip()
+        if not scope_id:
+            raise InvalidRequestError("the saved run has no memory-space checkpoint")
+        album_id = str(saved.get("album_id") or "")
+        qa_set = str(saved.get("qa_set") or "")
+        if not album_id or not qa_set:
+            raise InvalidRequestError("the saved run is missing album_id or qa_set")
+        try:
+            self._albums.manifest(album_id)
+        except KeyError as exc:
+            raise InvalidRequestError(f"manifest not found for album: {album_id}") from exc
+
+        prior_items = tuple(
+            item
+            for item in (saved.get("items") or [])
+            if isinstance(item, dict)
+            and str(item.get("execution_status") or "") not in {"scheduled", "running"}
+        )
+        model_profile = str(saved.get("model_profile") or "")
+        new_run_id = (
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{safe_slug(album_id)}-"
+            f"{safe_slug(model_profile)}-resume-{uuid.uuid4().hex[:6]}"
+        )
+        request = RunRequest(
+            album_id=album_id,
+            qa_set=qa_set,
+            model_profile=model_profile,
+            sentrix_url=str(saved.get("sentrix_url") or self._config.sentrix_url),
+            manager_url=str(saved.get("manager_url") or ""),
+            model_base_url=str(saved.get("model_base_url") or self._config.model_base_url),
+            run_id=new_run_id,
+            mode="reuse",
+            scope_id=scope_id,
+            runtime_framework=str(saved.get("runtime_framework") or ""),
+            judge_url=str(saved.get("judge_url") or ""),
+            judge_model=str(saved.get("judge_model") or ""),
+            prior_items=prior_items,
+        )
+        with self._lock:
+            self._active[new_run_id] = self._new_execution(request)
+
+        def _run_resumed() -> None:
+            execution = self._active.get(new_run_id)
+            if execution is None:
+                return
+            try:
+                finished = execution.execute(request)
+            finally:
+                with self._lock:
+                    self._active.pop(new_run_id, None)
+            self._index.upsert(analysis.run_list_entry(finished))
+
+        thread = threading.Thread(target=_run_resumed, name=f"resume-{new_run_id}", daemon=True)
+        with self._lock:
+            self._threads[new_run_id] = thread
+        thread.start()
+        return {
+            "run_id": new_run_id,
+            "resumed_from": run_id,
+            "mode": "reuse",
+            "scope_id": scope_id,
+            # 带回来的题数——调用方据此判断续跑到底省了多少。
+            "resumed_items": len(prior_items),
         }
 
     # ---- 取消 / 删除 --------------------------------------------------------

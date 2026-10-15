@@ -1081,3 +1081,41 @@ def test_qa_concurrency_never_exceeds_the_endpoint_limit(monkeypatch):
     assert state["qa_concurrency"] == 2
     assert state["qa_concurrency_requested"] == 8
     assert state["qa_concurrency_runtime_limit"] == 2
+
+
+# ---- reuse：复用已存在的 scope（2026-10-15 恢复）----------------------------
+
+
+def test_reuse_skips_the_import_phases_and_keeps_the_existing_scope():
+    """reuse 只跑绑定与问答收尾——导入那三个相位的产物上一次已经落在那个 scope 里了。
+
+    1.0 的 reuse 复用已存在的 scope（读侧 ``_build_reuse_bases``），相位是
+    ``scope_attach / qa_eval / aggregate``。2.0 自 S9b-2 起只接 full，
+    ``RUN_MODES`` 直接拒绝 reuse——而**66 分钟的导入**正是复用要省掉的那件事。
+    """
+    execution, *_ = _execution()
+
+    state = execution.execute(_request(mode="reuse", scope_id="PhotoBench-20260101-000000-album-qwen"))
+
+    assert state["mode"] == "reuse"
+    assert state["scope_source"] == "reused"
+    assert state["scope_id"] == "PhotoBench-20260101-000000-album-qwen"
+    # 1.0 的形状：``existing_scope_id`` 是调用方要求复用的那个，与实际的 ``scope_id`` 分开记。
+    assert state["existing_scope_id"] == "PhotoBench-20260101-000000-album-qwen"
+    # 导入三个相位**一个都不该出现**；绑定与收尾四个都在。
+    for skipped in ("identity_seed", "photo_import", "pipeline_processing"):
+        assert skipped not in state["phases"], skipped
+    for run_phase in ("scope_setup", "qa_eval", "gpu_metrics", "aggregate"):
+        assert run_phase in state["phases"], run_phase
+
+
+def test_a_full_run_still_records_mode_and_scope_source():
+    """full 那一侧不能被 reuse 的改动带偏——它必须仍然建新 scope。"""
+    execution, *_ = _execution()
+
+    state = execution.execute(_request())
+
+    assert state["mode"] == "full"
+    assert state["scope_source"] == "created_by_import"
+    assert state["existing_scope_id"] is None
+    assert "photo_import" in state["phases"]

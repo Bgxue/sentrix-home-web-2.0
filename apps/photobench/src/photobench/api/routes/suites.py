@@ -18,7 +18,6 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 
 from photobench.api.deps import get_container, json_body
 
@@ -77,11 +76,14 @@ def delete_run(request: Request, run_id: str) -> dict[str, Any]:
     return get_container(request).run_suites.delete_run(run_id)
 
 
-@router.post("/runs/{run_id}/resume")
-def resume_run_not_supported(request: Request, run_id: str) -> JSONResponse:
-    """1.0 ``POST /api/runs/{id}/resume``（``:7768``）在 2.0 **没有对应能力**。
+@router.post("/runs/{run_id}/resume", status_code=202)
+def resume_run(request: Request, run_id: str) -> dict[str, Any]:
+    """``POST /api/runs/{id}/resume``（1.0 ``:7768`` → ``resume_run`` ``:7488``）。
 
-    返回 501 而不是 404：这条路在 1.0 存在、前端会调它，一个「未实现」的明确回答
-    比一个「查无此路」更容易定位（见模块 docstring）。
+    202 与 ``POST /runs`` 同：它起后台线程，不是同步完成。
+
+    2026-10-15 之前这条路回 501，理由是「2.0 的 scope 由导入内部 ensure，没有复用
+    已存在 scope 这条路（S9b-2 删掉了 ``scope_attach``）」。那条理由随 ``mode=reuse``
+    一起消失了——续跑与复用本就是同一件事的两种题目集。
     """
-    return JSONResponse(status_code=501, content={"error": "resume is not supported in 2.0"})
+    return get_container(request).run_suites.resume_run(run_id)
