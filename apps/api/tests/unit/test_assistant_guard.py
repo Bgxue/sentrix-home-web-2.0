@@ -133,6 +133,24 @@ def test_mentioning_other_users_is_blocked():
     assert check("其他用户的照片我看不到。") == "viewer_escape"
 
 
+def test_talking_about_people_in_a_family_photo_is_not_an_escape():
+    """家人合影里的「与他人」不该触发 ``viewer_escape``。
+
+    1.0 的正则把裸词 ``他人`` 单独成项（``final_guard.py:174``，2.0 原先逐字照搬）。
+    2026-10-10 那轮实测有 5 道题被它**硬拦**——硬拦不重试、整轮终结走确定性兜底、
+    均分 0，而问题原文是「我想找带强子第一次近距离看活海星和鲎的那次参观照片」
+    这类。相册里全是家人，「与他人一起拍的」是日常说法。
+    """
+    assert check("这张是与他人一起拍的合影，一共三个人。") == ""
+    assert check("画面里有他和他人合影的场景。") == ""
+
+
+def test_claiming_access_to_other_peoples_albums_is_still_blocked():
+    """收紧不等于放行：真正的越权表达照样命中——那才是这条规则存在的理由。"""
+    assert check("我还能看到他人的相册。") == "viewer_escape"
+    assert check("他人的隐私照片我也能看到。") == "viewer_escape"
+
+
 def test_claiming_a_write_is_blocked():
     assert check("已经帮你删除了那两张照片。") == "write_not_allowed"
 
@@ -358,9 +376,14 @@ def test_a_blocked_answer_carries_the_offending_text():
     词（家人合影里「与他人」很常见），是真命中还是误伤，**只有看到原句才判得了**。
     实测 20261010 那一轮 10 道题被它硬拦（整轮终结、走确定性兜底），原文一个字都没留下，
     于是那 10 道完全不可诊断。
+
+    **2026-10-15 补：光有 evidence 不够，正则本身也收紧了**（见
+    ``test_talking_about_people_in_a_family_photo_is_not_an_escape``）。这条用例原先
+    用的样例正是那类误伤句（「那天我和他人一起在桥上拍了合影」），现在换成一句真正
+    越权的回答——否则它钉的就不是 ``viewer_escape`` 了。
     """
     verdict = FinalGuard().check(
-        answer="那天我和他人一起在桥上拍了合影。",
+        answer="我还能翻看他人的相册。",
         facts=GuardFacts(),
     )
 

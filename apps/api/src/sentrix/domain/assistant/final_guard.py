@@ -45,7 +45,19 @@ from sentrix.domain.assistant.tools import RETRIEVAL_TOOLS
 _INTERNAL_ID = re.compile(r"\b(?:asset|obs|entity|mention|claim|turn|conversation)_[a-f0-9]{6,}\b")
 _TABLE_NAME = re.compile(r"\b(?:assets|observations|entity_mentions|semantic_claims|agent_result_sets)\b")
 _INTERNAL_SCHEMA = re.compile(r"\b(?:scope_id|viewer_id|read_write|allowed_tools|max_model_len)\s*[:=]")
-_VIEWER_ESCAPE = re.compile(r"别的?相册|他人|别的?人[的]?(?:相册|照片|隐私)|其他用户")
+# **2.0 把裸词 ``他人`` 收紧了**——1.0 逐字是
+# ``别的?相册|他人|别的?人[的]?(?:相册|照片|隐私)|其他用户``，其中 ``他人`` 单独成项。
+#
+# 实测 2026-10-10 那轮有 5 道题被这条**硬拦**（整轮终结、答案走确定性兜底、均分 0），
+# 而问题原文是「我想找带强子第一次近距离看活海星和鲎的那次参观照片」这类——相册里
+# 全是家人，「与他人」「给他人的」是日常说法。硬拦不重试（``HARD_GUARD_CODES``），
+# 一次误伤就是一道题归零。
+#
+# 收紧成「``他人`` + 隐私宾语」之后，真正要拦的表达（声称能看到别人家的相册、
+# 照片、隐私）照样命中，而「与他人的合影」不再触发。
+_VIEWER_ESCAPE = re.compile(
+    r"别的?相册|他人[的]?(?:相册|照片|隐私|内容|信息)|别的?人[的]?(?:相册|照片|隐私)|其他用户"
+)
 _WRITE_NOT_ALLOWED = re.compile(r"(?:已经|帮你|可以)(?:写入|删除|修改|覆盖|清空)(?:了|过)?")
 
 # ---- 模板占位符：1.0 ``final_guard.py:97-98`` --------------------------------
