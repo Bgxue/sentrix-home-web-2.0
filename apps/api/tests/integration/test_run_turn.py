@@ -1268,6 +1268,51 @@ def test_an_unfaithful_answer_is_pushed_back_once_then_released(env):
     assert "工具确认 2 张" in released[0].payload["reason"]
 
 
+def test_an_unfaithful_answer_is_released_when_the_judge_spent_the_last_step(env):
+    """评审吃掉最后一个模型步时，**放行模型自己那一版答案**，不用占位符覆盖。
+
+    1.0 ``runtime.py:2897`` 的 ``if turn.budget.can_model_step():`` 是配套闸门：没步就
+    **不回环**，落回收尾路径放行上一版 final 并打 ``possibly_fabricated`` 标。2.0 抄了
+    「评审计一个模型步」这个成本口径（``domain/assistant/judge.py`` 的模块注释写着
+    「调用前计一个模型步。1.0 ``runtime.py:2761`` 先 ``record_model_step()`` 再调」），
+    漏抄了这道闸门。
+
+    预算不变量 ``6(往返) + 1(作答) + 1(评审) = 8 = max_steps`` 意味着**只要工具往返
+    跑满 6 次，评审必然落在第 8 步**——判不实之后重答机会恒为 0。实测 2026-10-10 那轮
+    487 题里 48 题（9.9%）如此，均分 0.021，而其余题是 0.891。
+    """
+    _conversations, _turns, conversation, _db = env
+    # 6 次工具往返用满 ``max_tool_calls=6``（search 1 次 + 翻页 5 次），第 7 步作答，
+    # 第 8 步评审 —— 评审正好吃掉最后一个模型步。
+    script: list[ModelReply] = [tool_call("search_memories", "c1", query="海边")]
+    script += [
+        tool_call("get_result_page", f"c{index}", result_set_id="rs_1", page=index) for index in range(2, 7)
+    ]
+    script.append(final("相册里有 2 张海边的照片。"))
+    model = ScriptedModel(script, judge=judge_reply(("fabrication", "工具观察不支持这个说法")))
+    run_turn = build(
+        env,
+        model,
+        StubToolbox({"search_memories": SEARCH_OK, "get_result_page": SEARCH_OK}),
+    )
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    # 模型那一版答案原样放行——**不是** ``emergency.fallback_answer`` 拼的占位符。
+    assert result.answer == "相册里有 2 张海边的照片。"
+    assert "模型步数用尽" not in result.answer
+    assert result.termination_reason is TerminationReason.ANSWERED_WITH_GAP
+
+    # 放行的同时还必须有那条标：没有它，「评审放行的答案」与「评审通过的答案」在轨迹
+    # 上完全一样，而评测与排查要区分的正是这两者。
+    released = [
+        event for event in _turns.events_after(turn_id, 0) if event.payload.get("code") == "l2_soft_release"
+    ]
+    assert len(released) == 1
+    assert released[0].payload["possibly_fabricated"] is True
+
+
 def test_a_failing_judge_lets_the_answer_through(env):
     """L2 挂了就放行——1.0 ``judge.py:195-198`` 的 fail-open。
 

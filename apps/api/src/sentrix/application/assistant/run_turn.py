@@ -1039,7 +1039,24 @@ class RunTurn:
             ),
         )
         session.pending_reminder = verdict.reminder
-        return True
+        # **评审自己吃掉了一个模型步**（上面 ``state.model_steps += 1``）。若那正好是最后
+        # 一步，「回环重答」永远不会发生——调用方 ``continue`` 之后立刻撞上 ``can_step()``
+        # 为假，而模型刚才那一版答案从未被 ``return``，于是被 ``_stop`` 的占位符覆盖。
+        #
+        # 1.0 ``runtime.py:2897`` 的 ``if turn.budget.can_model_step():`` 就是这道闸门：
+        # **没步就不回环**，落回收尾路径放行上一版答案，并在 ``_judge_answer`` 里打
+        # ``l2_soft_release`` / ``possibly_fabricated`` 标。2.0 抄了「评审计一步」这个成本
+        # 口径，漏抄了配套的闸门。
+        #
+        # 预算不变量 ``6(往返) + 1(作答) + 1(评审) = 8 = max_steps`` 意味着**只要工具往返
+        # 跑满 6 次，评审必然落在第 8 步**——所以这不是偶发，是必然。
+        #
+        # 与 ``_one_shot_evidence_reminder:941`` 那道闸门是同一条理由（那里写着「没有模型
+        # 步了，提醒只会换来一次『预算用尽』的收尾」），L2 这条路当时没跟上。
+        #
+        # 写成 ``return state.can_step()``：走到这里已经确定判了不实，唯一还剩的问题就是
+        # **还能不能重答**——不能就落回收尾路径。
+        return state.can_step()
 
     def _run_tool(self, session: _Session, call: ToolCall) -> tuple[str, tuple[Attachment, ...], bool, bool]:
         """执行一次工具调用，返回 ``(发回模型的 JSON, 本次交付, 检索是否为空, 有没有拿到东西)``。
