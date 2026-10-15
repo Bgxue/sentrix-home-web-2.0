@@ -151,6 +151,11 @@ install-services: ## 装 systemd --user 单元到 ~/.config/systemd/user/（S11�
 	install -d $(SYSTEMD_USER_DIR)
 	install -m 0644 deploy/systemd/sentrix-api.service $(SYSTEMD_USER_DIR)/
 	install -m 0644 deploy/systemd/sentrix-photobench.service $(SYSTEMD_USER_DIR)/
+	# **模型侧车单独装、单独管。** 设计 §2.1 明写 2.0 不管理模型进程的生命周期，
+	# 所以它不进 SERVICE_UNITS——`make start/stop/restart` 不该碰模型。
+	# 但它的单元文件仍然与代码同源：2026-10-08 与 10-10 两次侧车自己消失，
+	# 而整轮评测 354/370 次检索静默降级，「谁来拉起它」不能只写在 docstring 里。
+	install -m 0644 deploy/systemd/sentrix-wemm-sidecar.service $(SYSTEMD_USER_DIR)/
 	systemctl --user daemon-reload
 
 start: ## 起 2.0 两个 --user 服务（8191/8772）

@@ -1,0 +1,31 @@
+# WeMM-Embedding-2B 嵌入侧车（端口 8102）。
+#
+# **为什么它需要一个单元文件。** 侧车不在 2.0 的管理范围内（设计 §2.1「2.0 不管理
+# 模型进程生命周期」），所以它的启动方式此前只写在 `apps/api/.../models/wemm.py`
+# 的 docstring 里——一句注释。结果是 2026-10-08 与 10-10 两次它自己消失，而整轮
+# 评测 354/370 次检索跑在 `backend=none, degraded=true` 下、没有任何一处报错。
+# 单元文件不改变「2.0 不管模型」这条设计，它只是把「谁来拉起它」从注释变成一个
+# 有 Restart= 的实体。同理它**不进 Makefile 的 SERVICE_UNITS**：
+# `make start/stop/restart` 不该碰模型进程。
+#
+# venv 与模型都不在 2.0 仓库里，所以这里写绝对路径（%h = 当前用户 home）：
+# - 侧车脚本属 1.0 仓库（WeMM 要 transformers==5.2.0，与 2.0 的 venv 不兼容，
+#   必须是独立环境，见 wemm.py 的模块注释）；
+# - 权重在 ~/models/WeMM-Embedding-2B。
+[Unit]
+Description=Sentrix WeMM embedding sidecar (port 8102)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Github/Sentrix-Home-Web
+# **不是可选调优。** 不设时 PyTorch 的缓存分配器会攥住约 4.3 GB 显存不放，而那部分
+# 对同一张卡上的 8100 是不可见的——它会以「显存够用」的假象把 VLM 饿死。
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ExecStart=%h/Github/Sentrix-Home-Web/.venv-text/.venv-wemm/bin/python scripts/maintenance/wemm_embedder_sidecar.py --port 8102
+# 侧车是被外部杀掉的（10-10 那次 dmesg 里没有 OOM 记录），所以崩溃即重拉。
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

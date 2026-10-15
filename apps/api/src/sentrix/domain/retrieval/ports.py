@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from sentrix.domain.media.models import Asset, Observation
 from sentrix.domain.retrieval.structured_query import AssetSample, GroupCount, StructuredFilter
@@ -316,3 +316,28 @@ class StructuredQueryRepository(Protocol):
         放进工具返回值；2.0 把那一刀对应到 ``ToolOutcome`` 的两份投影上。
         """
         ...
+
+
+@runtime_checkable
+class EmbeddingHealthProbe(Protocol):
+    """嵌入能力**现在**能不能用。
+
+    **为什么单独一个端口，而不是给 ``VisualEmbedder`` 加两个方法。**
+    ``VisualEmbedder`` 回答的是「怎么把一段文字/一张图变成向量」，那是**能力**；
+    这一格回答的是「此刻这台机器还嵌不嵌得动」，那是**状态**。两者会独立变化——
+    2026-10-10 那轮评测里侧车全程不在，而接口一切正常、检索照常返回结果，
+    354/370 次调用静默降级成 ``backend=none``，``/health`` 一路回 ``ok``。
+
+    ``available`` 与 ``load_error`` 的分工同 ``VectorIndexStatus``：能不能用是一个
+    可问的问题，为什么不能用是另一个。合成一个布尔值，排查时只剩「不能用」三个字。
+
+    两个成员声明成只读 property 而不是裸方法，理由同 ``VisualEmbedder``：
+    ``WeMMSidecarEmbedder`` 的实现是 property，而 mypy 不允许一个只读 property 去
+    满足「可调用的方法」的协议约定。
+    """
+
+    @property
+    def available(self) -> bool: ...
+
+    @property
+    def load_error(self) -> str: ...

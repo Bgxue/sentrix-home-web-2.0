@@ -62,6 +62,24 @@ class FakeVisualEmbedder:
         return self._vector(text)
 
 
+class FakeEmbeddingHealth:
+    """契约测试用的嵌入可用性：**永远可用**。
+
+    这些测试验的是 HTTP 映射，不该因为跑测试的机器上没起 8102 侧车而红（真链路的
+    验收在 ``tests/e2e``）。形状来自 ``domain/retrieval/ports.py`` 的
+    ``EmbeddingHealthProbe``；「不可用 → degraded」那条路由由 ``contract/test_health.py``
+    自己用下行的假件覆盖。
+    """
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def load_error(self) -> str:
+        return ""
+
+
 class FakeVlmObserver:
     """契约测试用的确定性观察器。
 
@@ -213,6 +231,8 @@ def client(settings) -> TestClient:
     app.state.container = dataclasses.replace(
         app.state.container,
         visual_embedder=FakeVisualEmbedder(),
+        # 嵌入可用性也必须换掉：真实现会去打 8102 侧车，而契约测试不该依赖它。
+        embedding_health=FakeEmbeddingHealth(),
         vlm_observer=FakeVlmObserver(),
         chat_model=FakeChatModel(),
         # 视频探测与转码同理：真适配器起 ffprobe/ffmpeg 子进程，契约测试不该依赖它们。

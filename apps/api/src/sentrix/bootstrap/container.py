@@ -61,6 +61,7 @@ from sentrix.domain.memories.ports import (
 from sentrix.domain.places.aliases import PlaceAliases
 from sentrix.domain.places.ports import AssetPlaceRepository, PlaceResolver
 from sentrix.domain.retrieval.ports import (
+    EmbeddingHealthProbe,
     LexicalIndex,
     LexicalSearch,
     StructuredQueryRepository,
@@ -167,6 +168,11 @@ class Container:
     vector_index: VectorIndex
     visual_embedder: VisualEmbedder
     text_embedder: TextEmbedder
+    # 嵌入能力的**可用性**（与上面两槽是同一个实例，但声明成另一个端口）。
+    # 分开的理由写在 ``EmbeddingHealthProbe`` 上：能力回答「怎么嵌」，状态回答
+    # 「此刻还嵌不嵌得动」——2026-10-10 那轮侧车全程不在，检索照常返回、静默降级，
+    # ``/health`` 一路回 ok。没有这一格，降级在运维侧不可见。
+    embedding_health: EmbeddingHealthProbe
 
     # 时间线（S4）。地点是纯离线的：区县走 PyGeoCN 的面，乡镇/村庄走 GeoNames 的
     # 最近邻点，运行时零网络依赖。
@@ -275,6 +281,7 @@ class Container:
             # 而且两个实例的健康状态与熔断计数会各自漂移，同一个模型却有两种可用性。
             visual_embedder=wemm_embedder,
             text_embedder=wemm_embedder,
+            embedding_health=wemm_embedder,
             place_resolver=OfflinePlaceResolver(
                 admin=PyGeoCNAdminResolver(),
                 nearest=GeoNamesNearestResolver(settings.geo_dir),

@@ -74,7 +74,11 @@ def test_the_static_mount_does_not_shadow_the_api_prefix(tmp_path: Path, dist: P
 
     health = client.get("/api/v1/health")
     assert health.status_code == 200
-    assert health.json()["status"] == "ok"
+    # **不钉 ``status`` 的字面值**：它现在也取决于嵌入侧车的可用性（2026-10-15 起
+    # ``/health`` 把嵌入器并进了状态），而这条测试问的是「API 路由有没有被挂在 ``/``
+    # 的静态挂载吃掉」。``database`` 那一格与静态挂载无关，钉它同样是「回的是真 JSON
+    # 而不是 index.html」的证据。
+    assert health.json()["database"] == "ok"
     assert client.get("/api/v1/nope").status_code == 404
     # 1.0 风格的无版本路径：同样不许被静态回落接手。
     assert client.get("/api/health").status_code == 404
