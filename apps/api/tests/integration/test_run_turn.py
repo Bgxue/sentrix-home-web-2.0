@@ -1487,3 +1487,66 @@ def test_the_recorded_tool_result_keeps_every_observation_key():
         "full_text": "囍",
         "degraded_reason": "embedder_unavailable",
     }
+
+
+def test_a_pushed_back_answer_survives_a_failed_rewrite(env):
+    """**模型写过答案就永远不用固定文案收尾**——哪怕重答把步数烧光了。
+
+    实测 2026-10-15 那轮有 21 道题是同一条路：模型给出 final → L2 判不实打回
+    → **还有一步**（评审落在第 7 步，第 8 步才是重答）→ 模型重答时没直接说，
+    而是又去翻页 → 被拒 → 步数耗尽 → ``_stop`` 用
+    「这一轮检索到 12 张候选照片。（本轮因「模型步数用尽」提前结束。）」把**模型
+    已经写好的一版答案**顶掉了。
+
+    1.0 ``runtime.py:2415-2419`` 的 D12：「恢复/后续模型调用失败时，不丢弃已产出的
+    final 回答」。
+    """
+    _conversations, _turns, conversation, _db = env
+    script: list[ModelReply] = [tool_call("search_memories", "c1", query="海边")]
+    script += [
+        tool_call("get_result_page", f"p{index}", result_set_id="rs_1", page=index) for index in range(1, 5)
+    ]
+    script.append(final("相册里有 2 张海边的照片。"))
+    script.append(tool_call("get_result_page", "p9", result_set_id="rs_1", page=9))
+    model = ScriptedModel(script, judge=judge_reply(("fabrication", "工具观察不支持这个说法")))
+    run_turn = build(
+        env,
+        model,
+        StubToolbox({"search_memories": SEARCH_OK, "get_result_page": SEARCH_OK}),
+    )
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.answer == "相册里有 2 张海边的照片。"
+    assert "模型步数用尽" not in result.answer
+    assert result.termination_reason is TerminationReason.STEP_BUDGET_EXHAUSTED
+
+
+def test_the_fallback_text_is_never_used_when_the_model_said_anything(env):
+    """固定文案只在**模型一个字都没说出来**时才出现。
+
+    这一条与上面那条是同一件事的两面：``_stop`` 先看 ``last_answer``，有就用它。
+    把这条单独钉出来，是因为「代码绝不替模型说话」是这一层的**根本要求**，
+    而它很容易在后续改动里被绕过（比如又往 ``_stop`` 里加一条早退分支）。
+    """
+    _conversations, _turns, conversation, _db = env
+    # 模型说完一句就去翻页，把剩下的步数烧光。
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            final("我看到 2 张海边的照片。"),
+            tool_call("get_result_page", "p2", result_set_id="rs_1", page=2),
+        ]
+    )
+    run_turn = build(
+        env,
+        model,
+        StubToolbox({"search_memories": SEARCH_OK, "get_result_page": SEARCH_OK}),
+    )
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert "这一轮检索到" not in result.answer
+    assert "提前结束" not in result.answer

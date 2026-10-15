@@ -99,6 +99,14 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 # 提醒一次，再空就按 ``PARSE_FAILURE`` 收尾，用确定性兜底把已有证据说清楚。
 PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
 
+#: 收尾时的**强制作答**提示（1.0 ``runtime.py:1600-1604``）。预算已经耗尽、模型还
+#: 一个字都没说出来时用它换一次纯文本回答——**固定文案能不出就不出**。
+FORCE_FINAL_NUDGE = (
+    "请直接用一两句中文给出你的最终回答，不要再调用任何工具。"
+    "根据已经看到的内容足以回答就直接回答；确实不足以回答，"
+    "就明确说「现有记录不足以确认」并给出你能确认的部分。"
+)
+
 # 连续几轮工具调用一条有用的结果都没拿到时，给模型的一次提醒。
 #
 # **为什么不能在工具层解决**：被拒的调用不推进任务、不占工具额度，**只烧模型步**
@@ -382,6 +390,17 @@ class _Session:
     l2_unverified_reason: str = ""
     # 门禁拦下时写给模型的提醒，由主循环作为一条 user 消息加回去。
     pending_reminder: str = ""
+    # **模型自己产出的最后一版答案。** 每一次 final（正文收尾或终止动作）都更新它。
+    #
+    # 存在的理由只有一条：**代码绝不替模型说话**。收尾兜底（``emergency.fallback_answer``）
+    # 是**最后**手段，不是默认值——只要模型这一轮说过一句答案，就该用模型那句。
+    # 1.0 ``runtime.py:2415-2419`` 的 D12 就是这个：「恢复/后续模型调用失败时，
+    # 不丢弃已产出的 final 回答」。
+    #
+    # 实测 2026-10-15 那轮：L2 判不实 → 模型重答时又去翻页 → 步数耗尽，21 道题的答案
+    # 被换成「这一轮检索到 N 张候选照片。（本轮因「模型步数用尽」提前结束。）」，
+    # 而**每一道都有一版模型写好、只是没人保存**的答案。
+    last_answer: str = ""
     # 连续几轮「一条有用的结果都没拿到」。见 ``_converse`` 的护栏。
     stalled_rounds: int = 0
     # 每一次模型调用的指标。**不进进度事件**——``public_progress`` 同时是终端用户看的
@@ -666,6 +685,11 @@ class RunTurn:
                 # 收尾就是一条消息，每轮为它多烧一个模型步，等于把「独立交付动作」那一步
                 # 原样搬了个地方，而这一版要修的正是那一步。改用终止动作交给提示词与
                 # 工具表去推动；真推不动时，账本会把这一轮如实标成带缺口。
+                # **先存这一版，再送门禁。** 门禁可能把它打回，而打回之后模型未必还有
+                # 机会再说一遍（它可能去翻页、然后把步数用光）——收尾兜底要靠这一版
+                # 才能不说固定文案（见 ``_stop``）。
+                if reply.content.strip():
+                    session.last_answer = reply.content.strip()
                 answer = self._judge_answer(session, messages, reply.content)
                 if answer is not None:
                     return answer
@@ -779,6 +803,9 @@ class RunTurn:
             return None
 
         answer = str(arguments.get("answer") or "").strip()
+        # 终止动作也算模型说过的答案——存下来，理由同 ``_converse`` 那一处。
+        if answer:
+            session.last_answer = answer
         raw_handles = arguments.get("selected_image_handles")
         handles = (
             [item for item in raw_handles if isinstance(item, str)] if isinstance(raw_handles, list) else []
@@ -1208,7 +1235,33 @@ class RunTurn:
         return messages
 
     def _stop(self, session: _Session, reason: TerminationReason, *, detail: str = "") -> str:
-        """收尾。``detail`` 只由**模型服务这一侧**的失败传入——见 ``_converse`` 的 except。"""
+        """收尾。``detail`` 只由**模型服务这一侧**的失败传入——见 ``_converse`` 的 except。
+
+        **模型说过话就用模型的话。** ``emergency.fallback_answer`` 拼出来的是**固定文案**
+        ——「这一轮检索到 N 张候选照片。（本轮因「模型步数用尽」提前结束。）」那样一句。
+        它对用户没有信息量，而且会把**模型已经写好的一版答案**顶掉。所以这里先看
+        ``last_answer``：只要这一轮模型产出过答案，就原样用它。
+
+        1.0 ``runtime.py:2415-2419`` 的 D12 就是这条：「恢复/后续模型调用失败时，
+        不丢弃已产出的 final 回答」。1.0 还有一层 ``_force_final_once``
+        （``:1590-1623``，预算耗尽时给一次**不计步数**的纯 final 调用），2.0 一并接在
+        下面——两者合起来才做到「固定文案只在模型彻底说不出话时才出现」。
+        """
+        # **安全硬拦不吃这一套。** 走到这里的原因若是「回答里带了内部标识 / 别人的
+        # 相册 / 声称写入了数据」，那一版答案**本身就是危害**——放行它等于把安全边界
+        # 让掉。1.0 ``runtime.py:2784-2791`` 也是这么分的：硬拦不重试，直接走确定性兜底。
+        #
+        # 这条界线正是两层的分工：**L2（忠实性）判的是「说没说谎」，打回之后模型没改好
+        # 就放行原话——它至多不准确；L1 硬拦判的是「能不能说」，那版答案不能出街。**
+        if reason is not TerminationReason.GUARD_BLOCKED and session.last_answer:
+            return session.last_answer
+        # 模型到这一步**一个字都没产出过**（端点从头就不通、或输出一直是空）。
+        # 再给它一次不占预算的机会，让它自己把话说出来。硬拦除外——再问一次只会
+        # 换回一段同样不能出街的话。
+        if reason is not TerminationReason.GUARD_BLOCKED:
+            forced = self._force_final_once(session)
+            if forced:
+                return forced
         photo_count = max(
             (int(record.observation.get("total") or 0) for record in session.state.records),
             default=0,
@@ -1220,6 +1273,47 @@ class RunTurn:
             delivered_count=len(session.delivered.items),
             detail=detail,
         )
+
+    def _force_final_once(self, session: _Session) -> str:
+        """**额外一次纯 final 调用**：让模型明确给出结论。失败返回空串。
+
+        1.0 ``runtime.py:1590-1623``（定义）与 ``:2379-2387``（步数耗尽处调用）。
+
+        **它不计 ``model_steps``**（那正是它的用处：预算已经用完了），只受墙钟的
+        ``final_reserve`` 约束——一个跑飞的生成不该拖过收尾预算。
+
+        **只在 ``last_answer`` 为空时才走这里**：模型已经说过话的时候再问一次，是把
+        一轮注定要收尾的对话又拖长一次，而用户等的是那句已经写好的答案。
+        """
+        if not session.state.has_final_reserve():
+            return ""
+        # **不带任何工具**：这一问的目的就是让模型把话说出来，不是让它再查一轮
+        # （``specs`` 传空元组，模型没有可调的东西）。也不重放历史——走到这里说明
+        # 前面已经塌了，把塌掉的过程再喂一遍只会让它重蹈覆辙。
+        messages = [
+            ChatMessage(ChatRole.SYSTEM, SYSTEM_PROMPT),
+            ChatMessage(ChatRole.USER, session.state.question),
+            ChatMessage(ChatRole.USER, FORCE_FINAL_NUDGE),
+        ]
+        try:
+            reply = self._model.complete(messages, ())
+        except Exception:  # noqa: BLE001 —— 兜底里的兜底：它失败就落回固定文案
+            log.warning("强制收尾的模型调用失败，落回确定性兜底", exc_info=True)
+            return ""
+        text = (reply.content or "").strip()
+        if not text:
+            return ""
+        self._publish(
+            session,
+            session.state.emit(
+                ProgressStage.FINALIZING,
+                ProgressStatus.OK,
+                "已由模型直接收尾。",
+                kind="judge",
+                payload={"code": "forced_final"},
+            ),
+        )
+        return text
 
     def _tool_event(
         self,
