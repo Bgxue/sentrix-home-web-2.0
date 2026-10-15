@@ -191,8 +191,10 @@ describe("watch(selectedReuseBaseId) 的 React 等价", () => {
     expect(result.current.reuse.selectedReuseBase?.base_id).toBe("b1");
     // 基座 watch 先写 hint，随后 existingScopeId watch 覆盖成「题目对照数据集」（1.0 顺序）。
     expect(result.current.reuse.scopeAlbumHint).toBe("题目对照数据集：album3");
-    // ⚠️ 已知缺陷照搬：qa_sets 在 2.0 是数组，Object.keys 得到 ["0"]，selectedQa 被写成 "0"。
-    expect(result.current.selectedQa).toBe("0");
+    // 2026-10-15 修：1.0 的 ``qa_sets`` 是对象、2.0 是数组，照搬 ``Object.keys``
+    // 会得到 ``["0"]`` 而把 ``selectedQa`` 写成 ``"0"`` —— 一选复用基座题集就废，
+    // 而那是复用这条路唯一的入口。现在两种形状都认，题集名原样保留。
+    expect(result.current.selectedQa).toBe("compact-10q");
   });
 
   it("不在 reuse 模式时选基座 → existingScopeId 不变", async () => {

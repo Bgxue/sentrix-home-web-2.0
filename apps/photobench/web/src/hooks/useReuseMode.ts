@@ -165,13 +165,16 @@ export function useReuseMode(options: UseReuseModeOptions) {
     if (base.album_id) {
       setSelectedAlbum(base.album_id);
       const manifest = manifests.find((item) => item.album_id === base.album_id);
-      // ⚠️ 照搬 1.0 `:2544` 的**已知缺陷**：1.0 的 manifest.qa_sets 是对象，而 2.0
+      // 1.0 `:2544` 的 `manifest.qa_sets` 是**对象**（`{名称: 文件}`），而 2.0
       // `/api/v1/manifests` 返回的是**数组**（types.ts `ManifestSummary.qa_sets: string[]`）。
-      // `Object.keys([...])` 得到 `["0","1",…]`，于是 `options.includes(selectedQa)`
-      // 永远匹配不到真实题集名，`selectedQa` 会被写成 `"0"`。**不修**——只在报告里登记。
-      const qaSetOptions = Object.keys(
-        (manifest?.qa_sets as unknown as Record<string, unknown>) || {},
-      );
+      //
+      // 照搬 `Object.keys` 会得到 `["0","1",…]`，于是 `options.includes(selectedQa)`
+      // 永远匹配不到真实题集名，`selectedQa` 被写成 `"0"` —— **一选复用基座，题集就废了**，
+      // 而它恰好是复用这条路唯一的入口。2026-10-15 修：两种形状都认。
+      const rawQaSets = manifest?.qa_sets;
+      const qaSetOptions = Array.isArray(rawQaSets)
+        ? rawQaSets.map(String)
+        : Object.keys((rawQaSets as unknown as Record<string, unknown>) || {});
       if (qaSetOptions.length && !qaSetOptions.includes(selectedQa)) {
         setSelectedQa(qaSetOptions[0]);
       }
