@@ -1226,6 +1226,26 @@ class RunExecution:
         except ValueError:
             return None
 
+    def _probe_endpoint_health(self) -> str | None:
+        """端点探活的**失败原因**；健康时返回 ``None``。1.0 ``:3797-3809``。
+
+        用的是 ``InferenceProvider.health()`` —— 这个方法此前**没有任何生产调用者**
+        （登记在 ``scripts/check_method_reachability.py`` 的例外表里，理由是「端点探活
+        走的是 ``chat``」）。走 ``chat`` 只证明「这一句能通」，而这里问的是「现在值不值得
+        开一轮 487 题」——两件事，所以那个例外登记随本方法一起消失。
+
+        **degraded 算健康**：它表示端点活着但自报状态不全（与 ``sentrix_process.py``
+        的启动判据同一条口径）。真正要拦的是不可达与显式 error。
+        """
+        try:
+            payload = self.inference.health()
+        except Exception as error:  # noqa: BLE001 —— 探活失败本身就是答案
+            return str(error) or type(error).__name__
+        status = str((payload or {}).get("status") or "").strip().lower()
+        if status in {"ok", "ready", "healthy", "available", "degraded"}:
+            return None
+        return status or "unknown_health_status"
+
     def _runtime_max_concurrency(self) -> int | None:
         """**实时问端点**（1.0 ``:3667-3688`` 的 ``_runtime_max_concurrency``）。
 
@@ -1274,6 +1294,13 @@ class RunExecution:
         并发预算会让「评测吞吐」与「打分吞吐」互相拖住。
         """
         started = time.perf_counter()
+        # 1.0 ``:3394-3397``：**入 QA 前先探一次端点**。不健康就抛——487 道题跑在一个
+        # 不回话的端点上，产出的是一份**看起来正常**的废数据，那比直接失败更糟
+        # （2026-10-10 那轮 18:13 起端点连续 13 题 503/Connection refused，
+        #  而整轮照常往下跑、只在每题上留一句「模型服务当前不可用」）。
+        health_error = self._probe_endpoint_health()
+        if health_error:
+            raise RuntimeError(f"model service is unhealthy before QA evaluation: {health_error}")
         scope_id = str(state.get("scope_id"))
         album_id = str(state.get("album_id"))
         assets = self.client.list_assets(scope_id=scope_id, limit=1000)
@@ -1331,6 +1358,16 @@ class RunExecution:
                     index = futures[future]
                     try:
                         item = future.result()
+                    except RunCancelledError as exc:
+                        # **被取消的题不是失败的题。** 1.0 的 resume 靠
+                        # ``execution_status not in {"scheduled", "running"}`` 挑出「从没
+                        # 开始过」的题（``:3414-3417``），而取消时还在排队里的题正好是从没
+                        # 开始过的。标成 failed 会让 resume 把它们当成已完成跳过——
+                        # 那正是「取消一次，155 题只能整轮重跑」的成因。
+                        item = {
+                            "error": f"cancelled while waiting: {exc}",
+                            "execution_status": "scheduled",
+                        }
                     except Exception as exc:  # noqa: BLE001 —— 1.0 ``:3218``
                         item = {"error": repr(exc), "failed": True}
                     item["_index"] = index
@@ -1346,8 +1383,15 @@ class RunExecution:
                                 judge_pool.submit(judge.judge_item, item, rows[index], assets_by_name)
                             ] = index
                     items[index] = item
+                    # 1.0 ``:3536-3538``：``completed`` 数的是**成功**的那些，不是「轮到
+                    # 了的」那些。用 ``len(items)`` 的话，取消时进度条显示 487/487 而实际
+                    # 只有 332 题有答案（2026-10-10 那轮实测）——一轮没跑完的评测在界面上
+                    # 看起来是跑完的。
+                    succeeded = sum(
+                        1 for entry in items.values() if entry.get("execution_status") == "completed"
+                    )
                     state.record_phase("qa_eval", "agent_completed", len(items))
-                    record_progress(len(items))
+                    record_progress(succeeded)
                     with state.lock:
                         state.data["items"] = [items[i] for i in sorted(items)]
                     state.persist()

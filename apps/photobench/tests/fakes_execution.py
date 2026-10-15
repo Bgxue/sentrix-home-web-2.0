@@ -268,9 +268,12 @@ class FakeInference:
         chat_error: Exception | None = None,
         stream_chunks: list[str] | None = None,
         slots: int | None = None,
+        health_status: str = "ok",
     ) -> None:
         self.calls: list[str] = []
         self.chat_error = chat_error
+        # 端点探活自报的状态。``"ok"`` 之外的任何值都表示「现在不值得开一轮 487 题」。
+        self.health_status = health_status
         # 端点自报的并发槽位。``None`` = 问不到（llama.cpp 之外的端点、或端点没起来），
         # 那是 ``_resolve_qa_concurrency`` 退回 1 的那条路。
         self.slots = slots
@@ -287,7 +290,7 @@ class FakeInference:
 
     def health(self) -> dict[str, Any]:
         self.calls.append("health")
-        return {"status": "ok"}
+        return {"status": self.health_status}
 
     def list_models(self) -> dict[str, Any]:
         self.calls.append("list_models")

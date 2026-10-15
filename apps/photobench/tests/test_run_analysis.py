@@ -367,3 +367,65 @@ def test_paginate_rows_clamps_page_size_and_page():
     assert page["pages"] == 3 and page["has_next"] is True and page["has_previous"] is True
     assert analysis.paginate_rows(rows, 99, 20)["page"] == 3
     assert analysis.paginate_rows(rows, 1, 999)["page_size"] == 100
+
+
+# ---- 完成口径与 run_valid（2026-10-15）--------------------------------------
+
+
+def _exec_item(*, execution: str, judge: str, **over: object) -> dict:
+    return _item(execution_status=execution, judge_status=judge, **over)
+
+
+def test_completed_counts_executed_items_not_judge_states():
+    """``completed`` 数的是执行成功的题，不是「有 judge 状态」的题。
+
+    1.0 ``:7286`` 用的是 ``judge_status in {completed, failed, skipped}``，而取消掉的题
+    在 2.0 里正是被标成 ``skipped`` 的那一批——于是取消的 run 在列表页显示
+    「487/487 完成」，实际只有 332 题有答案。1.0 极少遇到取消，2.0 已经遇到两次
+    （2026-10-08、10-10）。
+    """
+    state = {
+        "qa_count": 3,
+        "items": [
+            _exec_item(execution="completed", judge="completed"),
+            _exec_item(execution="completed", judge="completed"),
+            _exec_item(execution="failed", judge="skipped"),
+        ],
+    }
+
+    summary = analysis.effective_summary(state)
+
+    assert summary["total"] == 3
+    assert summary["completed"] == 2
+
+
+def test_run_valid_is_recomputed_on_the_read_side():
+    """取消的 run 不该被当成一份可信的结果。
+
+    2.0 原先只在 ``_phase_qa_eval`` 收尾时写一次 ``run_valid``，取消时那段根本跑不到，
+    于是它永远停在 ``_initial_state`` 的初值 ``False``——一个被取消的 run 与一个真失败
+    的 run 在界面上长得一样，而两者的处置相反：前者续跑，后者查原因。
+    """
+    state = {
+        "qa_count": 2,
+        "phases": {"qa_eval": {"status": "done"}},
+        "items": [
+            _exec_item(execution="completed", judge="completed"),
+            _exec_item(execution="completed", judge="completed"),
+        ],
+    }
+    assert analysis.effective_summary(state)["run_valid"] is True
+
+    state["items"][1] = _exec_item(execution="failed", judge="skipped")
+    assert analysis.effective_summary(state)["run_valid"] is False
+
+
+def test_run_valid_is_false_when_a_phase_did_not_finish_cleanly():
+    """1.0 ``:3819-3822``：有 partial/failed 相位就不算一份干净的结果。"""
+    state = {
+        "qa_count": 1,
+        "phases": {"qa_eval": {"status": "partial"}},
+        "items": [_exec_item(execution="completed", judge="completed")],
+    }
+
+    assert analysis.effective_summary(state)["run_valid"] is False

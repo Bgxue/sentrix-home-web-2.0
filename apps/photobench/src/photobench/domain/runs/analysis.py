@@ -1264,6 +1264,33 @@ def list_summary(state: dict[str, Any]) -> dict[str, Any]:
     return saved
 
 
+def _run_valid(state: dict[str, Any], items: list[dict[str, Any]]) -> bool:
+    """这一轮**是不是一份可信的结果**。1.0 ``:3816-3830`` 的 ``_compute_run_valid``。
+
+    **为什么必须读侧重算。** 2.0 原先只在 ``_phase_qa_eval`` 收尾时写一次
+    （``service.py:1310``），而取消时那段根本跑不到——``run_valid`` 于是永远停在
+    ``_initial_state`` 的初值 ``False``。后果是一个被取消的 run 与一个真失败的 run
+    在界面上长得一样，而两者的处置相反：前者续跑、后者查原因。
+
+    判据逐条照 1.0：没有任何 partial/failed 相位、题数齐、每题都执行成功、每题都判过。
+    （1.0 还有一条「基础设施未熔断」——2.0 没有熔断器，那条留给以后接守卫时一起加。）
+    """
+    phases = state.get("phases") or {}
+    invalid_phase = any(
+        str((bucket or {}).get("status") or "").lower() in {"partial", "failed", "stalled"}
+        for bucket in phases.values()
+        if isinstance(bucket, dict)
+    )
+    total = len(items)
+    return bool(
+        not invalid_phase
+        and total > 0
+        and total == int(state.get("qa_count") or total)
+        and all(item.get("execution_status") == "completed" for item in items)
+        and all(item.get("judge_status") == "completed" for item in items)
+    )
+
+
 def effective_summary(state: dict[str, Any]) -> dict[str, Any]:
     """1.0 ``:6662`` 的 ``OrchestratorRepository._effective_summary``。
 
@@ -1327,9 +1354,14 @@ def effective_summary(state: dict[str, Any]) -> dict[str, Any]:
     saved.update(
         {
             "total": saved.get("total", state.get("qa_count") or len(items)),
-            "completed": sum(
-                1 for item in items if item.get("judge_status") in {"completed", "failed", "skipped"}
-            ),
+            # **按执行状态数，不按 judge 状态数。** 1.0 ``:7286`` 用的是
+            # ``judge_status in {completed, failed, skipped}``，而取消掉的题在 2.0 里
+            # 正是被标成 ``skipped`` 的那一批（``_phase_qa_eval`` 的失败分支）——于是
+            # 一个取消的 run 在列表页显示「487/487 完成」，实际只有 332 题有答案。
+            # 1.0 极少遇到取消，2.0 已经遇到两次（10-08、10-10）。
+            "completed": sum(1 for item in items if item.get("execution_status") == "completed"),
+            # 读侧重算，理由见 ``_run_valid``。
+            "run_valid": _run_valid(state, items),
             "judge_valid_count": len(scores),
             "judge_distribution": distribution,
             "retrieval_recall_mean": saved.get(

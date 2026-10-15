@@ -814,9 +814,15 @@ def test_with_a_manager_the_model_is_stopped_then_started_then_probed():
     # 两次 ``chat`` 都是 1.0 的流程：等待就绪时探一次（``:2484``）、装载完健康检查
     # 再探一次（``:2593``）；``chat_stream`` 是随后的吞吐探测（``model_probe``）。
     # **不是一次多余的调用**——把它们合成一次的实现会让「端点到底通没通」少一个证据。
-    # 末尾那一次 ``max_concurrency`` 来自 ``qa_eval`` 的容量探测（1.0 ``:3667``）：
-    # 「这个端点同时能服务几个请求」是部署事实，只在真正要并发答题时才问。
-    assert execution.inference.calls == ["chat", "chat", "chat_stream", "max_concurrency"]
+    # 末尾两次都来自 ``qa_eval``，**顺序有意义**：先探端点健不健康（1.0 ``:3394``），
+    # 不健康就根本不该开始答题；再问它同时能服务几个请求（1.0 ``:3667``）。
+    assert execution.inference.calls == [
+        "chat",
+        "chat",
+        "chat_stream",
+        "health",
+        "max_concurrency",
+    ]
 
 
 def test_model_deploy_points_sentrix_at_the_requested_endpoint():
@@ -1010,6 +1016,38 @@ def test_qa_concurrency_follows_the_endpoint_slots():
     # 这一轮的夹具没配 judge，所以 judge 池不建（``_phase_qa_eval`` 的既有口径：
     # ``judge_concurrency if judge is not None else 0``）。judge 池自己的上限另测。
     assert state["judge_concurrency"] == 0
+
+
+def test_qa_eval_refuses_to_start_when_the_endpoint_is_unhealthy():
+    """入 QA 前先探一次端点；不健康就抛（1.0 ``:3394-3397``）。
+
+    487 道题跑在一个不回话的端点上，产出的是一份**看起来正常**的废数据——比直接失败
+    更糟，因为它会被当成一轮有效结果。2026-10-10 那轮从 18:13 起端点连续 13 题
+    503 / Connection refused，而整轮照常往下跑，只在每题上留一句「模型服务当前不可用」。
+
+    ``execute`` 把相位异常收成 ``status=failed``（不往外抛，1.0 ``:2404``），
+    所以这里钉的是终态与 ``failed_phase``。
+    """
+    execution, *_ = _execution(inference=FakeInference(health_status="error"))
+
+    state = execution.execute(_request())
+
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "qa_eval"
+    assert "unhealthy before QA evaluation" in state["fatal_error"]
+
+
+def test_a_degraded_endpoint_still_starts_the_run():
+    """``degraded`` 算健康——它表示端点活着但自报状态不全。
+
+    与 ``infrastructure/deploy/sentrix_process.py`` 的启动判据同一条口径
+    （「``ok`` / ``degraded`` 都算起来了」）。要拦的是不可达与显式 error。
+    """
+    execution, *_ = _execution(inference=FakeInference(health_status="degraded"))
+
+    state = execution.execute(_request())
+
+    assert state["status"] == "completed"
 
 
 def test_judge_concurrency_is_capped_at_eight():

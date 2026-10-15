@@ -155,7 +155,10 @@ PENDING_METHODS: dict[str, str] = {
     #   - `TelemetryProvider.system_memory` —— `GpuSampler.sample_once`
     #
     # —— S9b-1 新落的读写端口 ——
-    "InferenceProvider.health": "S9b-2 余项（端点探活走的是 `chat`，`health` 仍无调用者）",
+    # `InferenceProvider.health` **已被反向规则删掉**：2026-10-15 起 `_probe_endpoint_health`
+    # （入 QA 前的端点守卫，1.0 `benchmark_orchestrator.py:3394`）真的调它。登记里原先
+    # 写的理由是「端点探活走的是 `chat`」——那句只证明「这一句能通」，而守卫问的是
+    # 「现在值不值得开一轮 487 题」，是另一件事。
     "InferenceProvider.token_count": "S9b-2 余项（提示词预算，主链未用到）",
     "TelemetryProvider.kv_cache": "S9b-2 余项（KV cache 指标，采样器从 process_memory 里取）",
     # `InferenceProvider.capabilities` / `LifecycleProvider.profiles` / `.state` 三条
