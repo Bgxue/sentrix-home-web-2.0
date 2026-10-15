@@ -640,6 +640,9 @@ class _FakeInference:
     def capabilities(self) -> dict[str, object]:
         return {}
 
+    def max_concurrency(self) -> int | None:
+        return None
+
 
 @pytest.mark.parametrize(
     ("real", "port"),

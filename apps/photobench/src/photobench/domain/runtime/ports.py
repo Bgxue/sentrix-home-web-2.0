@@ -55,6 +55,21 @@ class InferenceProvider(Protocol):
 
     def capabilities(self) -> dict[str, Any]: ...
 
+    def max_concurrency(self) -> int | None:
+        """这个端点**同时能服务几个请求**。读不到返回 ``None``。
+
+        与 ``health`` 是两件事：健康只回答「能不能用」，这一格回答「能用几个」，而
+        **它是 QA 并发唯一诚实的来源**——发超过槽位数的请求，服务端只会排队或拒绝。
+
+        1.0 ``benchmark_orchestrator.py:3667-3688`` 的 ``_runtime_max_concurrency``：
+        ninfer 问 ``/stats`` 的 ``capacity.max_concurrency``，llama.cpp 问 ``/props`` 的
+        ``total_slots``，托管 vLLM 问 manager ``/state`` 的 ``max_num_seqs``。
+
+        2.0 原先没有这一格，于是 ``_resolve_qa_concurrency`` 只能退回 1（串行）——
+        实测 qa_eval 6570s，而 1.0 同一轮是 2876s。
+        """
+        ...
+
 
 @runtime_checkable
 class LifecycleProvider(Protocol):

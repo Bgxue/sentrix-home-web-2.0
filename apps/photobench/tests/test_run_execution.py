@@ -814,7 +814,9 @@ def test_with_a_manager_the_model_is_stopped_then_started_then_probed():
     # 两次 ``chat`` 都是 1.0 的流程：等待就绪时探一次（``:2484``）、装载完健康检查
     # 再探一次（``:2593``）；``chat_stream`` 是随后的吞吐探测（``model_probe``）。
     # **不是一次多余的调用**——把它们合成一次的实现会让「端点到底通没通」少一个证据。
-    assert execution.inference.calls == ["chat", "chat", "chat_stream"]
+    # 末尾那一次 ``max_concurrency`` 来自 ``qa_eval`` 的容量探测（1.0 ``:3667``）：
+    # 「这个端点同时能服务几个请求」是部署事实，只在真正要并发答题时才问。
+    assert execution.inference.calls == ["chat", "chat", "chat_stream", "max_concurrency"]
 
 
 def test_model_deploy_points_sentrix_at_the_requested_endpoint():
@@ -986,3 +988,58 @@ def test_hardware_snapshots_are_written_at_both_ends():
     assert snapshots["end"]["captured_at"]
     assert snapshots["end"]["gpu"] == []
     assert snapshots["end"]["gpu_status"]["status"] == "unavailable"
+
+
+# ---- QA 并发：跟随端点自报的槽位（1.0 ``benchmark_orchestrator.py:3632-3690``）------
+
+
+def test_qa_concurrency_follows_the_endpoint_slots():
+    """并发跟随端点自报的槽位，而不是恒定 1。
+
+    1.0 ``:3667-3688``：llama.cpp 问 ``/props`` 的 ``total_slots``、托管 vLLM 问 manager
+    ``/state`` 的 ``max_num_seqs``、ninfer 问 ``/stats``。恒定 1 的代价是可测的：
+    2026-10-10 那轮 qa_eval 用了 6570s，而 1.0 同题集同模型是 2876s。
+    """
+    execution, *_ = _execution(inference=FakeInference(slots=4))
+
+    state = execution.execute(_request())
+
+    assert state["qa_concurrency"] == 4
+    assert state["qa_concurrency_requested"] == 4
+    assert state["qa_concurrency_runtime_limit"] == 4
+    # 这一轮的夹具没配 judge，所以 judge 池不建（``_phase_qa_eval`` 的既有口径：
+    # ``judge_concurrency if judge is not None else 0``）。judge 池自己的上限另测。
+    assert state["judge_concurrency"] == 0
+
+
+def test_judge_concurrency_is_capped_at_eight():
+    """judge 是**独立的池**，上限 8，不随 QA 并发无限放大（1.0 ``:3833-3841``）。
+
+    两个池分开的理由：judge 打的是另一个端点（云 API 或本机另一个模型），把它塞进
+    Agent 的并发预算会让「评测吞吐」与「打分吞吐」互相拖住。
+    """
+    assert RunExecution._resolve_judge_concurrency(4) == 4
+    assert RunExecution._resolve_judge_concurrency(32) == 8
+    assert RunExecution._resolve_judge_concurrency(0) == 1
+
+
+def test_qa_concurrency_falls_back_to_one_when_the_endpoint_says_nothing():
+    """问不到就退回 1 —— 那是 1.0 ``:3662`` 的**最后一级**，不是 2.0 的默认值。"""
+    execution, *_ = _execution(inference=FakeInference(slots=None))
+
+    state = execution.execute(_request())
+
+    assert state["qa_concurrency"] == 1
+    assert state["qa_concurrency_runtime_limit"] is None
+
+
+def test_qa_concurrency_never_exceeds_the_endpoint_limit(monkeypatch):
+    """操作员覆盖值被端点实际容量夹住（1.0 ``:3665`` 的 ``min(requested, runtime_limit)``）。"""
+    monkeypatch.setenv("PHOTOBENCH_QA_CONCURRENCY", "8")
+    execution, *_ = _execution(inference=FakeInference(slots=2))
+
+    state = execution.execute(_request())
+
+    assert state["qa_concurrency"] == 2
+    assert state["qa_concurrency_requested"] == 8
+    assert state["qa_concurrency_runtime_limit"] == 2

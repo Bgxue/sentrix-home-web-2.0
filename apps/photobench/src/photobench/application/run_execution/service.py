@@ -148,6 +148,20 @@ PASSTHROUGH_FIELDS = (
 
 
 @dataclass(frozen=True)
+class QaConcurrency:
+    """QA 并发的三个数（1.0 ``:3663-3665`` 写进 state 的三个键）。
+
+    **三个都要留着**，因为它们回答的是三个不同的问题：``requested`` 是调用方想跑几个、
+    ``runtime_limit`` 是端点自己说能给几个、``effective`` 是这次真正用了几个。只有
+    ``effective`` 的话，「跑得慢」与「端点只给得了这么多」在 run.json 上长得一样。
+    """
+
+    requested: int
+    runtime_limit: int | None
+    effective: int
+
+
+@dataclass(frozen=True)
 class RunRequest:
     """一次 run 的输入。对应 1.0 ``POST /api/runs`` 的请求体。
 
@@ -1176,24 +1190,70 @@ class RunExecution:
 
     # ---- qa_eval ------------------------------------------------------------
 
-    def _resolve_qa_concurrency(self, request: RunRequest) -> int:
-        """1.0 ``:3330``：默认跟随被服务模型的 ``max_num_seqs``。
+    def _resolve_qa_concurrency(self, request: RunRequest, state: RunState) -> QaConcurrency:
+        """1.0 ``:3632-3665`` 的四级来源：请求体 → env → 部署快照 → **实时问引擎** → 1。
 
-        2.0 的这条来源没有了（没有 model_deploy 的模型快照可读，也没有
-        ``current_model_snapshot``），所以默认值是 **1**：串行。这不是保守，
-        是 2.0 侧唯一有依据的值——1.0 的默认值本身就是从被测模型那儿读来的，
-        读不到时 ``except`` 也退回 1（``:3338``）。环境变量 ``PHOTOBENCH_QA_CONCURRENCY``
-        的覆盖照搬。
+        2.0 原先只实现了第一级，其余直接退回 1：串行。那**不是保守，是缺能力**——
+        1.0 的默认值本身就是从被测模型那儿读来的，只有真读不到才退 1。恒定串行的代价
+        是可测的：2026-10-10 那轮 qa_eval 用了 6570s，而 1.0 同题集同模型是 2876s。
+
+        **「实时问引擎」这一级是 2.0 新接的**（此前全仓没有任何探测端点容量的路径）。
+        它是唯一对**外部端点**也成立的一条：153 的 8100 不是 manager 拉起来的，
+        manager 的 ``/state`` 对它一无所知，但 llama.cpp 自己在 ``/props`` 里报
+        ``total_slots``。
         """
-        if request.qa_concurrency:
-            return max(1, request.qa_concurrency)
+        runtime_limit = self._runtime_max_concurrency()
+        requested = (
+            max(1, request.qa_concurrency)
+            if request.qa_concurrency
+            else self._env_qa_concurrency() or self._snapshot_qa_concurrency(state)
+        )
+        if requested is None:
+            requested = runtime_limit or 1
+        # 1.0 ``:3665``：请求值永远被端点实际容量夹住——发超过槽位数的请求，
+        # 服务端只会排队或拒绝，那**不是并发的收益**。
+        effective = min(requested, runtime_limit) if runtime_limit is not None else requested
+        return QaConcurrency(requested=requested, runtime_limit=runtime_limit, effective=effective)
+
+    @staticmethod
+    def _env_qa_concurrency() -> int | None:
+        """``PHOTOBENCH_QA_CONCURRENCY``（1.0 ``:3642-3648``）。读不到或写坏了返回 ``None``。"""
         raw = str(os.environ.get("PHOTOBENCH_QA_CONCURRENCY") or "").strip()
-        if raw:
-            try:
-                return max(1, int(raw))
-            except ValueError:
-                pass
-        return 1
+        if not raw:
+            return None
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return None
+
+    def _runtime_max_concurrency(self) -> int | None:
+        """**实时问端点**（1.0 ``:3667-3688`` 的 ``_runtime_max_concurrency``）。
+
+        「模型能同时服务几个请求」是**部署事实**，由端点自己说了算，不由请求说了算。
+        读不到返回 ``None`` —— 那不是错误，是「这台机器没告诉我们」。
+        """
+        try:
+            return self.inference.max_concurrency()
+        except Exception:  # noqa: BLE001 —— 可选能力：探不到就退回串行，绝不因此让整轮挂掉
+            return None
+
+    @staticmethod
+    def _snapshot_qa_concurrency(state: RunState) -> int | None:
+        """``model_deploy`` 快照里的 ``max_num_seqs``（1.0 ``:3650-3658``）。
+
+        **只有托管分支会写这一格**（``_phase_model_deploy`` 的 manager 分支）；
+        外部端点那份快照里没有 ``model_state``，于是这一级为空、落到实时探测。
+        """
+        phase = (state.get("phases") or {}).get("model_deploy") or {}
+        snapshot = phase.get("model_state") if isinstance(phase, dict) else None
+        if not isinstance(snapshot, dict):
+            return None
+        declared = snapshot.get("max_num_seqs")
+        try:
+            value = int(declared) if declared is not None else None
+        except (TypeError, ValueError):
+            return None
+        return max(1, value) if value is not None else None
 
     @staticmethod
     def _resolve_judge_concurrency(qa_concurrency: int) -> int:
@@ -1219,10 +1279,15 @@ class RunExecution:
         assets = self.client.list_assets(scope_id=scope_id, limit=1000)
         assets_by_name = index_assets_by_name(assets)
         rows = self.albums.qa_rows(album_id, request.qa_set)
-        concurrency = self._resolve_qa_concurrency(request)
+        resolved = self._resolve_qa_concurrency(request, state)
+        concurrency = resolved.effective
         judge = self._judge
         judge_concurrency = self._resolve_judge_concurrency(concurrency)
         state.set("qa_concurrency", concurrency)
+        # 1.0 ``:3663-3665`` 的三个键都要落：要的数、端点自报的上限、真正用的数。
+        # 少了后两个，「这轮为什么跑得慢」与「端点只给得了这么多」在 run.json 上分不开。
+        state.set("qa_concurrency_requested", resolved.requested)
+        state.set("qa_concurrency_runtime_limit", resolved.runtime_limit)
         state.set("qa_assets", len(assets))
         state.set("judge_concurrency", judge_concurrency if judge is not None else 0)
         state.record_phase("qa_eval", "agent_total", len(rows))

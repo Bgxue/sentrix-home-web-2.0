@@ -263,10 +263,17 @@ class FakeInference:
     """``InferenceProvider`` 的替身。``chat_stream`` 给一段能算出 TTFT 的 SSE。"""
 
     def __init__(
-        self, *, chat_error: Exception | None = None, stream_chunks: list[str] | None = None
+        self,
+        *,
+        chat_error: Exception | None = None,
+        stream_chunks: list[str] | None = None,
+        slots: int | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.chat_error = chat_error
+        # 端点自报的并发槽位。``None`` = 问不到（llama.cpp 之外的端点、或端点没起来），
+        # 那是 ``_resolve_qa_concurrency`` 退回 1 的那条路。
+        self.slots = slots
         self.stream_chunks = (
             stream_chunks
             if stream_chunks is not None
@@ -305,6 +312,10 @@ class FakeInference:
     def capabilities(self) -> dict[str, Any]:
         self.calls.append("capabilities")
         return {"modes": ["generic"]}
+
+    def max_concurrency(self) -> int | None:
+        self.calls.append("max_concurrency")
+        return self.slots
 
 
 # ---------------------------------------------------------------------------

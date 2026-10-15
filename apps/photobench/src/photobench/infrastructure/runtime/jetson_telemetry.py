@@ -90,7 +90,7 @@ def _process_rss_mib(pid: int) -> float | None:
 NVMAP_CLIENTS_PATH = os.environ.get("PHOTOBENCH_NVMAP_CLIENTS_PATH", "/sys/kernel/debug/nvmap/iovmm/clients")
 NVMAP_CACHE_SECONDS = max(0.0, float(os.environ.get("PHOTOBENCH_NVMAP_CACHE_SECONDS", "2")))
 
-_nvmap_cache: dict = {"at": float("-inf"), "table": None}
+_nvmap_cache: dict[str, Any] = {"at": float("-inf"), "table": None}
 
 
 def _read_nvmap_clients() -> str | None:
@@ -125,7 +125,8 @@ def _nvmap_clients_mib() -> dict[int, float] | None:
     """Per-PID nvmap (GPU/UMA) allocation in MiB, or None when unreadable."""
     now = time.monotonic()
     if now - float(_nvmap_cache["at"]) < NVMAP_CACHE_SECONDS:
-        return _nvmap_cache["table"]
+        cached = _nvmap_cache["table"]
+        return cached if isinstance(cached, dict) else None
     text = _read_nvmap_clients()
     table: dict[int, float] | None = None
     if text:
@@ -165,13 +166,15 @@ def _process_gpu_memory_mib(
     return residual, "vmrss_residual"
 
 
-def unified_model_memory(model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None) -> dict:
+def unified_model_memory(
+    model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
+) -> dict[str, Any]:
     """One accounting rule for every host: CPU pages + GPU/UMA pages.
 
     ``host_rss_mib`` is the summed smaps ``Rss:`` of the model process, which
     excludes device mappings, so adding the GPU figure never double-counts.
     """
-    result: dict = {}
+    result: dict[str, Any] = {}
     if rss_mib is None and host_rss_mib is None:
         return result
     if host_rss_mib is None:

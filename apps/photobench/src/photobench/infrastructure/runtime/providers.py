@@ -568,6 +568,70 @@ class OpenAICompatibleInferenceProvider:
             "vllm_extensions": self.api_mode == "vllm",
         }
 
+    def max_concurrency(self) -> int | None:
+        """这个端点同时能服务几个请求。1.0 ``benchmark_orchestrator.py:3667-3713``。
+
+        两条来源按 1.0 的顺序：**先问端点自己**（llama.cpp 自报槽位），再问 manager
+        （托管 vLLM 的实例槽位）。
+
+        **读不到一律返回 ``None``。** 它不是错误，是「这台机器没告诉我们」——两个
+        HTTP 探测各自可以因为端点不是那个类型、没开、或超时而失败，而调用方对它们的
+        处置是同一条：退回串行。把异常抛出去会让每一次检索都挂在这个可选能力上。
+        """
+        slots = self._llamacpp_slots()
+        if slots is not None:
+            return slots
+        return self._manager_slots()
+
+    def _llamacpp_slots(self) -> int | None:
+        """llama-server 在 ``GET /props`` 里自报 ``total_slots``（= 启动时的 ``--parallel N``）。
+
+        **这是外部端点唯一问得到的容量**：llama.cpp 不是 manager 拉起来的，manager 的
+        ``/state`` 对它一无所知——而 153 的 8100 正是这个形态。
+        """
+        root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        try:
+            response = httpx.get(f"{root}/props", headers=self.headers, timeout=3)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:  # noqa: BLE001 —— 见 max_concurrency 的 docstring
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("total_slots")
+        if raw is None:
+            return None
+        try:
+            slots = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return slots if slots > 0 else None
+
+    def _manager_slots(self) -> int | None:
+        """托管 vLLM 实例的真实槽位（``--max-num-seqs``）。1.0 ``:3715-3748``。"""
+        if not self.manager_url:
+            return None
+        try:
+            response = httpx.get(f"{self.manager_url}/state", headers=self.headers, timeout=3)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(payload, dict):
+            return None
+        # 1.0 依次看这三个键，取第一个 > 0 的。
+        for key in ("max_num_seqs", "max_num_seqs_running", "max_concurrency"):
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
 
 class ManagerLifecycleProvider:
     """Sentrix vLLM Manager 的 ``/profiles`` ``/start`` ``/stop`` ``/state``。"""

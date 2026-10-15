@@ -79,7 +79,10 @@ def main() -> int:
     import benchmark_orchestrator as bo  # noqa: PLC0415
 
     sys.path.insert(0, MODERN_SRC)
-    from photobench.domain.runs import keyframe_analysis, memory_effectiveness  # noqa: PLC0415
+    # mypy strict 的 ``no_implicit_reexport`` 不允许从包隐式取子模块（``domain/runs``
+    # 的 ``__init__.py`` 只导出包本身），所以按模块路径显式导入。
+    import photobench.domain.runs.keyframe_analysis as keyframe_analysis  # noqa: PLC0415
+    import photobench.domain.runs.memory_effectiveness as memory_effectiveness  # noqa: PLC0415
 
     repo = bo.OrchestratorRepository(Path(LEGACY_RESULTS))
     print(f"1.0 仓储载入 {len(repo.runs)} 个 run")
