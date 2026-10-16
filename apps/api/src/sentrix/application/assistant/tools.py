@@ -45,6 +45,7 @@ from sentrix.domain.identity.ports import FaceRepository, PersonCropRenderer
 from sentrix.domain.media.inspection import CERTAINTY_SUPPORTED
 from sentrix.domain.media.models import Observation
 from sentrix.domain.media.ports import AssetRepository, ObservationRepository, PhotoInspector
+from sentrix.domain.places.ports import AssetPlaceRepository
 from sentrix.domain.retrieval.fact_query import FactRejection
 
 log = logging.getLogger("sentrix.assistant.tools")
@@ -175,12 +176,16 @@ class AssistantToolbox:
         observations: ObservationRepository,
         photo_inspector: PhotoInspector,
         person_crops: PersonCropRenderer,
+        asset_places: AssetPlaceRepository | None = None,
     ) -> None:
         self._retrieval = retrieval
         self._assets = assets
         self._result_sets = result_sets
         self._people = people
         self._memory_facts = memory_facts
+        # 照片的**行政地点**（导入期由 EXIF GPS 反解而来）。preview 的 ``place``
+        # 必须取这一份而不是 ``observations.place``——理由见 ``_place_label``。
+        self._asset_places = asset_places
         # ``query_photo_people`` 的两条读路径（T122）。两者都是**只读**，
         # 且都只被这一个工具用——不是通用能力。
         self._faces = faces
@@ -340,6 +345,21 @@ class AssistantToolbox:
             observation.update(extra)
         return ToolOutcome(observation=observation, model_visible=model_visible)
 
+    def _place_label(self, asset_id: str) -> str:
+        """这张照片的**行政地点**，形如 ``河北省石家庄市正定县 · 正定北门里村附近``。
+
+        来自 ``asset_places``——导入期用 EXIF GPS 反解出来的（PyGeoCN 出面得省市区县、
+        GeoNames 出点得乡镇村）。**解析不到返回空串**：那表示这张图没有 GPS 或反解失败，
+        与「这里没有地名」不是一回事，但模型侧只能给空串（``Place`` 的注释里写过
+        同一条区分）。
+        """
+        if self._asset_places is None:
+            # 只在不关心地点的用例里出现（生产装配一定给）。**不给假的兜底地名**——
+            # 编一个出来会让「没有反解」与「反解出这个地名」分不开。
+            return ""
+        place = self._asset_places.get(asset_id)
+        return place.display() if place is not None else ""
+
     def _preview(self, entry: ResultSetEntry) -> Mapping[str, Any]:
         """一条候选在**模型眼里**的样子。
 
@@ -376,7 +396,20 @@ class AssistantToolbox:
             "media_kind": asset.media_type.value if asset else "",
             "captured_at": asset.captured_at.isoformat() if asset and asset.captured_at else "",
             "level": _LEVEL_BY_EVIDENCE_CLASS.get(entry.evidence_class, ""),
-            "place": latest.place if latest else "",
+            # **地点取 GPS 反解，不取 VLM 的场景描述。** 1.0 的 preview ``place``
+            # 就是反地理编码出来的地名（``_short_place_label``，``tools.py:1862``
+            # 「从资产**反地理编码**取短地点标签（城市/区县名）」）；2.0 此前错取了
+            # ``observations.place``——那是 VLM 按提示词写出的**语义场景**
+            # （提示词原文：「``place`` 是语义地点，例如家中客厅、餐厅、公园」）。
+            #
+            # 后果是可测的：同一批题在 1.0 上答「保定市易县」「石家庄市赵县」
+            # 「宜昌市夷陵区」，2.0 答「户外水泥地面区域」「河流或湖泊中的开阔水域」，
+            # 且**与 ``observations.place`` 逐字相同**——模型就是在照抄这一格。
+            # 而反解数据一直好好地躺在 ``asset_places`` 里（354/362 张有 GPS 的图全解析出来了）。
+            "place": self._place_label(entry.asset_id),
+            # 场景描述留着，但换个名字——「这是室内还是室外」它仍然有用，
+            # 只是不该冒充地点。
+            "scene_hint": latest.place if latest else "",
             "people": list(latest.people) if latest else [],
             # **这张照片上有几个人**（已确认 + 未确认同行者）。它回答的是一类具体问题
             # ——「里面有谁」「有几个人」「一共拍了几张不同人数的合影」——而这几个问题

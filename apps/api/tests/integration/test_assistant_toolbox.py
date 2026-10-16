@@ -29,6 +29,13 @@ from sentrix.domain.assistant.result_set import ResultSet
 from sentrix.domain.identity.models import ENTITY_STATUS_CONFIRMED, FACE_VALIDITY_VERIFIED
 from sentrix.domain.media.models import Asset, AssetStatus, GpsPoint, MediaType, Observation
 from sentrix.domain.places.aliases import EMPTY_ALIASES
+from sentrix.domain.places.models import (
+    AdminArea,
+    NearestPlace,
+    Place,
+    PlacePrecision,
+    PlaceSource,
+)
 from sentrix.domain.retrieval import scheme
 from sentrix.domain.retrieval.ports import VectorRecord
 from sentrix.infrastructure.persistence.repositories.asset_places import SqliteAssetPlaceRepository
@@ -188,6 +195,8 @@ def toolbox(migrations_ready_db, tmp_path):
         # `inspect_photo` 的两件（T123）。这个夹具不调它——被测的是别的工具的信息边界。
         photo_inspector=StubInspector(),
         person_crops=StubCrops(),
+        # preview 的 ``place`` 取自 ``asset_places``（GPS 反解的行政地名）。
+        asset_places=places,
     )
     return build, result_sets
 
@@ -314,15 +323,32 @@ def test_the_preview_carries_where_who_and_what(toolbox, migrations_ready_db):
             created_at=NOW,
             updated_at=NOW,
             caption="海边两个人合影",
-            place="浙江省杭州市萧山区",
+            # **``observations.place`` 是 VLM 写的语义场景**（提示词原文：「place 是
+            # 语义地点，例如家中客厅、餐厅、公园」），不是行政地名。
+            place="婚礼或庆典活动的室内背景区",
             people=("妈妈",),
         )
+    )
+    # **地点另有来源**：``asset_places``——导入期由 EXIF GPS 反解出来的行政地名。
+    # preview 的 ``place`` 取这一份（1.0 的 ``_short_place_label`` 就是反解口径）。
+    SqliteAssetPlaceRepository(migrations_ready_db).save(
+        asset_id="asset_0",
+        scope_id=SCOPE,
+        gps=None,
+        place=Place(
+            admin=AdminArea(province="浙江省", city="杭州市", district="萧山区"),
+            nearest=NearestPlace(),
+            precision=PlacePrecision.DISTRICT,
+            source=PlaceSource.PYGEOCN,
+        ),
     )
 
     outcome = run(toolbox, "search_memories", query="海边")
 
     entry = outcome.model_visible["preview"][0]
     assert entry["place"] == "浙江省杭州市萧山区"
+    # 场景描述仍然给模型，但换个键——它对「室内还是室外」有用，只是不冒充地点。
+    assert entry["scene_hint"] == "婚礼或庆典活动的室内背景区"
     assert entry["people"] == ["妈妈"]
     assert "海边两个人合影" in entry["evidence_summary"]
 
