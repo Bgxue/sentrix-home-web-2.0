@@ -150,3 +150,51 @@ def served_names(body: object) -> list[str]:
         if isinstance(name, str) and name and name not in names:
             names.append(name)
     return names
+
+
+def probe_context_tokens(base_url: str, *, timeout: float = PROBE_TIMEOUT_S) -> int | None:
+    """端点上**一个并发槽**能吃多少 token。读不到返回 ``None``。
+
+    **为什么必须问，而不是写常量。** 窗口是**部署事实**：``Settings.vlm_context_tokens``
+    里那个 6144 是照某一次 ``--ctx-size 24576 ÷ --parallel 4`` 抄的，部署一改它就过期。
+    代价实测过——2026-10-10 那次 full 导入里**家庭图谱推断崩了两次**
+    （``family_analysis_runs``：``提示词约 6568 token，单个并发槽的上下文上限 6144``），
+    三张 ``family_*`` 表**一个字都没写进库**，关系类题因此全线失守；同一轮另有 42 道题
+    报 ``prompt_too_long``。部署侧后来提到了 8192/槽，而代码里还是 6144。
+
+    两条路，因为两个后端把它报在不同地方：
+
+    - **vLLM**：``GET /v1/models`` 的 ``data[].max_model_len``——它本来就是**每请求**的上限；
+    - **llama.cpp**：``GET /props`` 的 ``default_generation_settings.n_ctx``。
+      llama.cpp 的 ``--ctx-size`` 是整台服务的总窗口，要除以 ``--parallel`` 才是单槽的，
+      而 ``/props`` 报的**已经是除过的那个数**（2026-10-16 在 153 实测：
+      ``--ctx-size 32768 --parallel 4`` → ``n_ctx = 8192``，同时 ``total_slots = 4``）。
+
+    **读不到返回 ``None`` 而不是抛错**：调用方拿配置值兜底并留一行警告即可——
+    这与 ``ServedModel`` 不同，那个探测失败会让请求 404，是硬故障；窗口读不到只是
+    退回一个可能过期的保守值。
+    """
+    base = base_url.rstrip("/")
+    # vLLM 那一支。
+    try:
+        body = httpx.get(f"{base}/models", timeout=timeout).json()
+        for item in (body or {}).get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("max_model_len")
+            if isinstance(value, int) and value > 0:
+                return value
+    except (httpx.HTTPError, ValueError, TypeError):
+        pass
+
+    # llama.cpp 那一支。``/props`` 挂在根上，不在 ``/v1`` 下。
+    root = base[:-3] if base.endswith("/v1") else base
+    try:
+        props = httpx.get(f"{root}/props", timeout=timeout).json()
+        settings = (props or {}).get("default_generation_settings") or {}
+        value = settings.get("n_ctx")
+        if isinstance(value, int) and value > 0:
+            return value
+    except (httpx.HTTPError, ValueError, TypeError):
+        pass
+    return None

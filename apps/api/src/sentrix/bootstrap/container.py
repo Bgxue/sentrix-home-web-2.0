@@ -73,7 +73,7 @@ from sentrix.domain.retrieval.ports import (
 from sentrix.domain.spaces.ports import SpaceRepository
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
-from sentrix.infrastructure.assistant.model_endpoint import ServedModel
+from sentrix.infrastructure.assistant.model_endpoint import ServedModel, probe_context_tokens
 from sentrix.infrastructure.media.audio_metadata import FfprobeAudioMetadataReader
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
@@ -252,6 +252,10 @@ class Container:
         # 对话与视觉是**同一个端点**（8100），所以共用同一个探测。分两个实例会让同一个
         # 进程里存两份可能不一致的答案，还要多探一轮。
         served_model = ServedModel(settings.vlm_base_url)
+        # 单个并发槽的上下文窗口——**问端点**，理由与上面那个模型名同一条：窗口是
+        # **部署事实**，配置里那个 6144 是照部署的某一次实测抄的，部署一改它就过期。
+        # 读不到才退回配置值（那说明端点没在正常服务，此时保守值不添乱）。
+        served_context = probe_context_tokens(settings.vlm_base_url)
         # 统一多模态嵌入侧车。写入与查询共用同一个实例，见下面 visual/text 两槽的注释。
         wemm_embedder = WeMMSidecarEmbedder(settings.wemm_url)
         # 家庭图谱仓储被两个消费方用：容器自己的字段，以及人物目录——目录要靠它回答
@@ -314,7 +318,8 @@ class Container:
                 settings.vlm_base_url,
                 served_model,
                 timeout_s=settings.chat_timeout_s,
-                context_tokens=settings.vlm_context_tokens,
+                # 端点自报的窗口优先；它没报（探测失败）才用配置值。
+                context_tokens=served_context or settings.vlm_context_tokens,
             ),
             vlm_observer=OpenAIVlmObserver(
                 settings.vlm_base_url,

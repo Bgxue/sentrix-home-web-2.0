@@ -322,7 +322,16 @@ QUERY_PHOTO_PEOPLE = ToolSpec(
     # ``PHOTO_IDENTITY`` 是本工具自己的产物，``PERSON_PROFILE`` 是 1.0 那条
     # ``confirmed_identity`` 在 2.0 的名字——只声明前者的话，「问照片里的人是谁」
     # 这类需求在本工具被调用之后依然开着，门禁会逼模型再去找一个查不到的东西。
-    satisfies=(EvidenceType.PHOTO_IDENTITY, EvidenceType.PERSON_PROFILE),
+    # **只销 ``photo_identity`` 的账，不销 ``person_profile``。**
+    #
+    # 它给的是「这张照片里有谁」加上每个人的**角色标签**（``family_role``：大宝 /
+    # 侄子 / 母亲），而 ``person_profile`` 要的是**人与人的关系边**（谁是谁的谁）与
+    # 档案摘要——它自己的描述里还明说「不要据此推断两个人之间的亲属关系」。
+    # 此前两者都销，于是模型一调它，``person_profile`` 那一格就被关掉，
+    # ``get_person_profile`` 从此不在可用工具里。实测 2026-10-16 那轮：14 个声明了
+    # ``person_profile`` 的回合里 **13 个**是这么被抢先销账的（有一回它返回
+    # ``people: []`` 也照样销），**全 487 题 ``get_person_profile`` 调用 0 次**。
+    satisfies=(EvidenceType.PHOTO_IDENTITY,),
     required=("result_set_id", "asset_handle"),
 )
 
