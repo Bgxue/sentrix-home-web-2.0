@@ -680,14 +680,51 @@ def test_delivery_rejects_a_handle_outside_the_result_set(toolbox):
 
 
 def test_delivery_needs_an_explicit_handle_list(toolbox):
-    """不做回填：模型没选图就是没交付，交付为空是合法状态。"""
+    """不做回填：模型没选图就是没交付，**交付为空是合法状态**。
+
+    空数组 ``[]`` 不是错误。``domain/assistant/tools.py`` 的 ``FINAL_ANSWER`` 注释写着
+    「允许空数组是这条收紧能成立的前提」，``tool_policy`` 判「缺」的判据也是
+    「键不在 / null / 空串」而不是 falsy。**2026-10-15 之前这里收 ``[]`` 会回
+    ``missing_handle``**——同一件事在策略层合法、在交付层是错误码，于是「模型明确
+    回答这轮不交图」在轨迹里被记成一次失败。
+    """
     search = run(toolbox, "search_memories", query="海边")
     result_set_id = search.model_visible["result_set_id"]
 
     outcome = deliver(toolbox, result_set_id, [])
 
+    assert outcome.ok
+    assert outcome.attachments == ()
+    assert outcome.model_visible["delivered"] == 0
+
+
+def test_delivery_fails_only_when_no_handle_resolves(toolbox):
+    """**给了非空 handles、一条都解不出来**才是错误——空数组不是。"""
+    search = run(toolbox, "search_memories", query="海边")
+    result_set_id = search.model_visible["result_set_id"]
+
+    outcome = deliver(toolbox, result_set_id, ["photo_99", "nope"])
+
     assert not outcome.ok
-    assert outcome.failure_reason == "missing_handle"
+    assert outcome.failure_reason == "bad_handle"
+
+
+def test_delivery_drops_repeats_and_caps_at_the_limit(toolbox):
+    """去重与上限照 1.0 ``_normalize_selected_image_handles``（``runtime.py:239-251``）。
+
+    2.0 此前两者都没有：上限只在 JSON Schema 的 ``maxItems`` 里声明（那不保证端点会守），
+    重复的 handle 会产出重复附件。
+    """
+    search = run(toolbox, "search_memories", query="海边")
+    result_set_id = search.model_visible["result_set_id"]
+
+    # 重复同一个 handle，再要一轮超出上限的量。
+    outcome = deliver(toolbox, result_set_id, ["photo_1", "photo_1", "photo_2", "photo_2"])
+
+    assert outcome.ok
+    handles = [item.handle for item in outcome.attachments]
+    assert handles == ["photo_1", "photo_2"]
+    assert len(handles) == len(set(handles))
 
 
 def test_delivery_requires_a_known_result_set(toolbox):

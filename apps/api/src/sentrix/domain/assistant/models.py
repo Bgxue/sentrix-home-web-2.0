@@ -189,11 +189,17 @@ class ProgressEvent:
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
-    """交付给用户的一张可打开的照片。"""
+    """交付给用户的一份可打开的素材。"""
 
     handle: str
     asset_id: str
     file_name: str
+    # 这份素材是照片还是视频（``MediaType`` 的值）。**此前没有这一格**，于是
+    # 「我手上这段素材是什么」在交付链路上不可见——2026-10-15 那轮出现过
+    # 模型交付了视频的抽帧、同时如实说「没有找到视频」的矛盾（抽帧本身确实是
+    # ``media_type='image'`` 的普通资产，模型没说错，但它无从知道那是视频的帧）。
+    # 带上类型至少让交付物自己说清身份，前端与评测也不必再靠猜。
+    media_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)

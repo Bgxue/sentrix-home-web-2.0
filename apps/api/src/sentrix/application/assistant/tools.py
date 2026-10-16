@@ -40,6 +40,7 @@ from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
 from sentrix.domain.assistant.result_set import ResultSet, ResultSetEntry
+from sentrix.domain.assistant.tools import MAX_DELIVERED_PHOTOS
 from sentrix.domain.identity.ports import FaceRepository, PersonCropRenderer
 from sentrix.domain.media.inspection import CERTAINTY_SUPPORTED
 from sentrix.domain.media.models import Observation
@@ -416,13 +417,37 @@ class AssistantToolbox:
             return _failure("scope_mismatch", "这个结果集不属于当前相册。")
 
         raw_handles = handles
-        if not isinstance(raw_handles, (list, tuple)) or not raw_handles:
-            return _failure("missing_handle", 'handles 必须是非空的 handle 数组，例如 ["photo_1"]。')
+        if not isinstance(raw_handles, (list, tuple)):
+            return _failure("missing_handle", 'handles 必须是 handle 数组，例如 ["photo_1"]。')
+        # **空数组是合法的「这一轮不交图」，不是错误。** 产品口径写在
+        # ``domain/assistant/tools.py`` 的 ``FINAL_ANSWER`` 注释里：「模型没选 → 交付为空
+        # 合法」；``tool_policy`` 判「缺」的判据同样是键不在/null/空串，**不是 falsy**。
+        # 此前这里收 ``[]`` 就回 ``missing_handle``，于是「模型明确回答这轮不交图」在轨迹里
+        # 被记成一次失败——同一件事在策略层合法、在交付层是错误码。
+        if not raw_handles:
+            return ToolOutcome(
+                observation={"result_set_id": result_set.id, "delivered": 0, "rejected": []},
+                model_visible={
+                    "result_set_id": result_set.id,
+                    "delivered": 0,
+                    "rejected": [],
+                    "note": "这一轮没有要展示给用户的照片。",
+                },
+            )
 
         attachments: list[Attachment] = []
         rejected: list[str] = []
+        seen: set[str] = set()
         for item in raw_handles:
             handle = str(item or "").strip()
+            # 去重与上限照 1.0 ``_normalize_selected_image_handles``（``runtime.py:239-251``）：
+            # 重复的忽略，凑够 ``MAX_DELIVERED_PHOTOS`` 就停。2.0 此前两者都没有——上限
+            # 只在 JSON Schema 的 ``maxItems`` 里声明，那不保证端点会守。
+            if not handle or handle in seen:
+                continue
+            if len(attachments) >= MAX_DELIVERED_PHOTOS:
+                break
+            seen.add(handle)
             asset_id = result_set.resolve(handle)
             if asset_id is None:
                 rejected.append(handle)
@@ -433,7 +458,14 @@ class AssistantToolbox:
                 log.warning("交付的 handle 指向一个已不存在的资产，已丢弃: %s", asset_id)
                 rejected.append(handle)
                 continue
-            attachments.append(Attachment(handle=handle, asset_id=asset_id, file_name=asset.file_name))
+            attachments.append(
+                Attachment(
+                    handle=handle,
+                    asset_id=asset_id,
+                    file_name=asset.file_name,
+                    media_type=asset.media_type.value,
+                )
+            )
 
         if not attachments:
             return _failure(
@@ -450,7 +482,11 @@ class AssistantToolbox:
                 "result_set_id": result_set.id,
                 "delivered": len(attachments),
                 "rejected": rejected,
-                "note": "这些照片已经展示给用户了。",
+                # **交的是什么，让模型自己看得见。** 此前只有条数，「我交的这张是照片
+                # 还是视频」在模型这一侧无从判断——而它正是「交付了视频抽帧、同时说
+                # 没找到视频」那个矛盾的来源。
+                "media_types": sorted({item.media_type for item in attachments if item.media_type}),
+                "note": "这些素材已经展示给用户了。",
             },
             attachments=tuple(attachments),
         )

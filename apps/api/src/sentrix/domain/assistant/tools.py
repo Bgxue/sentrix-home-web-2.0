@@ -155,6 +155,12 @@ GET_RESULT_PAGE = ToolSpec(
 #: 都要按名字认它。
 FINAL_ANSWER_TOOL = "final_answer"
 
+#: 一轮最多交付几张。**1.0 ``_normalize_selected_image_handles`` 是硬截断的**
+#: （``runtime.py:248-249``：凑够 ``limit`` 就 ``break``），2.0 此前只在 JSON Schema
+#: 里写了 ``maxItems``——那依赖端点遵守 schema，而 ``deliver`` 自己不校验。
+#: 常量放这里是因为它同时约束两处：schema 的 ``maxItems`` 与交付时的截断。
+MAX_DELIVERED_PHOTOS = 6
+
 FINAL_ANSWER = ToolSpec(
     name=FINAL_ANSWER_TOOL,
     brief="给出最终回答并结束本轮；要展示的照片填进 handles。",
@@ -174,10 +180,10 @@ FINAL_ANSWER = ToolSpec(
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "最终确实要展示给用户的 handle（photo_1…），最多 6 张，"
+                    f"最终确实要展示给用户的 handle（photo_1…），最多 {MAX_DELIVERED_PHOTOS} 张，"
                     "必须来自当前结果集；不展示照片就填空数组。"
                 ),
-                "maxItems": 6,
+                "maxItems": MAX_DELIVERED_PHOTOS,
             },
         },
         # **``selected_image_handles`` 是必填的，这是一个 1.0 做不到的收紧。**
