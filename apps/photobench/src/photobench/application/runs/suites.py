@@ -26,6 +26,7 @@ scope 由导入内部 ensure），所以 **2.0 只接 ``full``**。其余两种�
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import hashlib
 import json
@@ -560,71 +561,135 @@ class RunSuites:
             inline_images=self._inline_images,
         )
 
+        #: 跨条目并发的上限，与 ``_resolve_judge_concurrency`` 同一个口径
+        #: （``min(8, qa_concurrency)``）。**rejudge 此前是纯串行**：qa_eval 阶段按
+        #: 这个数并行判，重判却一条一条来，561 个 turn 要跑近两小时。
+        #:
+        #: **worker 只算不写。** ``_state_if_exists`` 每次读整个 run.json（本轮 34MB），
+        #: 让 561 个 worker 各读一遍既慢、又可能读到别人写了一半的状态。所以输入在
+        #: 提交前一次性拍平成不可变元组，**状态回写全部留在主线程**——与并发前的
+        #: 「先读当前 state、改、再整份写回」保持同一个形状。
+        concurrency = max(1, min(8, int(state.get("qa_concurrency") or 4)))
+
+        def _payload(index: int, turn_index: int | None) -> tuple[Any, ...]:
+            item = (state.get("items") or [])[index]
+            turns = item.get("runtime_turns") or []
+            record = turns[turn_index] if turn_index is not None else item
+            expected = record.get("expected_action") or item.get("expected_action")
+            reference = str(record.get("reference_answer") or item.get("reference_answer") or "")
+            if not reference and expected == "clarify":
+                reference = "应要求用户提供至少一个具体、可用于后续检索的锚点；询问形式不限。"
+            return (
+                index,
+                turn_index,
+                str(record.get("message") or item.get("question") or ""),
+                reference,
+                str(record.get("answer") or ""),
+                expected,
+                item.get("task_type"),
+                item.get("question_type"),
+                item.get("answerability"),
+                turns[: turn_index + 1] if turn_index is not None else None,
+                record.get("agent_status") or item.get("agent_status"),
+                record.get("termination_reason") or item.get("termination_reason") or "",
+            )
+
+        def _judge_one(payload: tuple[Any, ...]) -> tuple[int, int | None, dict[str, Any], dict[str, Any]]:
+            (
+                index,
+                turn_index,
+                message,
+                reference,
+                answer,
+                expected,
+                task_type,
+                question_type,
+                answerability,
+                conversation,
+                agent_status,
+                termination,
+            ) = payload
+            judge_result = runner.judge(
+                message,
+                reference,
+                answer,
+                expected_action=expected,
+                task_type=task_type,
+                question_type=question_type,
+                answerability=answerability,
+                conversation=conversation,
+            )
+            # 任务行为判分跟着一起重判（1.0 ``:7200`` 的两个 future）——只重判
+            # 回答质量会让 ``task_judges`` 停在上一次的结论上，而界面上它们
+            # 看起来是同一批次的产物。
+            task_result = runner.judge_task_action(
+                message,
+                answer,
+                expected,
+                agent_status,
+                termination,
+                task_type=task_type,
+                question_type=question_type,
+                answerability=answerability,
+                reference=reference,
+                conversation=conversation,
+            )
+            return index, turn_index, judge_result, task_result
+
         def _run_rejudge() -> None:
             try:
-                for completed, (index, turn_index) in enumerate(targets, 1):
-                    current = self._state_if_exists(run_id)
-                    if current is None:
-                        return
-                    item = (current.get("items") or [])[index]
-                    turns = item.get("runtime_turns") or []
-                    record = turns[turn_index] if turn_index is not None else item
-                    expected = record.get("expected_action") or item.get("expected_action")
-                    reference = str(record.get("reference_answer") or item.get("reference_answer") or "")
-                    if not reference and expected == "clarify":
-                        reference = "应要求用户提供至少一个具体、可用于后续检索的锚点；询问形式不限。"
-                    judge_result = runner.judge(
-                        str(record.get("message") or item.get("question") or ""),
-                        reference,
-                        str(record.get("answer") or ""),
-                        expected_action=expected,
-                        task_type=item.get("task_type"),
-                        question_type=item.get("question_type"),
-                        answerability=item.get("answerability"),
-                        conversation=turns[: turn_index + 1] if turn_index is not None else None,
-                    )
-                    judge_result["ground_truth_source"] = "current_qa_metadata"
-                    judge_result["judged_at"] = now_iso()
-                    judge_result["rejudge_id"] = rejudge_id
-                    judge_result["status"] = (
-                        "completed" if judge_result.get("score") in {0, 1, 2} else "failed"
-                    )
-                    record["judge"] = judge_result
-                    # 任务行为判分跟着一起重判（1.0 ``:7200`` 的两个 future）——只重判
-                    # 回答质量会让 ``task_judges`` 停在上一次的结论上，而界面上它们
-                    # 看起来是同一批次的产物。
-                    agent_status = record.get("agent_status") or item.get("agent_status")
-                    termination = record.get("termination_reason") or item.get("termination_reason") or ""
-                    task_result = runner.judge_task_action(
-                        str(record.get("message") or item.get("question") or ""),
-                        str(record.get("answer") or ""),
-                        expected,
-                        agent_status,
-                        termination,
-                        task_type=item.get("task_type"),
-                        question_type=item.get("question_type"),
-                        answerability=item.get("answerability"),
-                        reference=reference,
-                        conversation=turns[: turn_index + 1] if turn_index is not None else None,
-                    )
-                    task_result["ground_truth_source"] = "current_qa_metadata"
-                    record["task_judge"] = task_result
-                    if turns:
-                        item["judge"] = turns[-1].get("judge") or {}
-                        item["task_judges"] = [turn.get("task_judge") or {} for turn in turns]
-                        item["task_judge"] = turns[-1].get("task_judge") or {}
-                        # **证据判分不重判**：它要按 asset_id 取回图片字节，而那条路径依赖
-                        # 一个活着的 2.0（1.0 在 ``:7226`` 现取资产表）。``EVIDENCE_JUDGE``
-                        # 默认关；这里如实把它标成 not_applicable 而不是留一个上次的值。
-                        item["evidence_judge"] = {"score": None, "reason": "not_applicable"}
-                    else:
-                        item["judge"] = record.get("judge") or {}
-                        item["task_judge"] = record.get("task_judge") or {}
-                    current["rejudge"]["completed"] = completed
-                    if judge_result.get("score") not in {0, 1, 2}:
-                        current["rejudge"]["failed"] += 1
-                    current["summary"] = analysis.effective_summary(current)
-                    self._writer.write_snapshot(run_id, current)
+                prepared = [_payload(index, turn_index) for index, turn_index in targets]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    futures = {pool.submit(_judge_one, payload): payload for payload in prepared}
+                    for completed, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                        current = self._state_if_exists(run_id)
+                        if current is None:
+                            return
+                        payload = futures[future]
+                        index, turn_index = int(payload[0]), payload[1]
+                        try:
+                            _, _, judge_result, task_result = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            # **单条失败不拖垮整轮**：串行版里一个异常会直接让整个
+                            # rejudge 记 failed，而 561 条里挂一条不该是这个结局。
+                            judge_result = {
+                                "score": None,
+                                "reason": f"judge_error: {exc}",
+                                "status": "failed",
+                            }
+                            task_result = {
+                                "actual_action": None,
+                                "correct": None,
+                                "reason": f"judge_error: {exc}",
+                            }
+                        item = (current.get("items") or [])[index]
+                        turns = item.get("runtime_turns") or []
+                        record = turns[turn_index] if turn_index is not None else item
+                        judge_result["ground_truth_source"] = "current_qa_metadata"
+                        judge_result["judged_at"] = now_iso()
+                        judge_result["rejudge_id"] = rejudge_id
+                        judge_result["status"] = (
+                            "completed" if judge_result.get("score") in {0, 1, 2} else "failed"
+                        )
+                        record["judge"] = judge_result
+                        task_result["ground_truth_source"] = "current_qa_metadata"
+                        record["task_judge"] = task_result
+                        if turns:
+                            item["judge"] = turns[-1].get("judge") or {}
+                            item["task_judges"] = [turn.get("task_judge") or {} for turn in turns]
+                            item["task_judge"] = turns[-1].get("task_judge") or {}
+                            # **证据判分不重判**：它要按 asset_id 取回图片字节，而那条路径依赖
+                            # 一个活着的 2.0（1.0 在 ``:7226`` 现取资产表）。``EVIDENCE_JUDGE``
+                            # 默认关；这里如实把它标成 not_applicable 而不是留一个上次的值。
+                            item["evidence_judge"] = {"score": None, "reason": "not_applicable"}
+                        else:
+                            item["judge"] = record.get("judge") or {}
+                            item["task_judge"] = record.get("task_judge") or {}
+                        current["rejudge"]["completed"] = completed
+                        if judge_result.get("score") not in {0, 1, 2}:
+                            current["rejudge"]["failed"] += 1
+                        current["summary"] = analysis.effective_summary(current)
+                        self._writer.write_snapshot(run_id, current)
                 final = self._state_if_exists(run_id)
                 if final is not None:
                     final["rejudge"]["status"] = "completed"
