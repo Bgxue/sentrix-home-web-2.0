@@ -388,7 +388,11 @@ export function toolLatencySegments(trace: unknown): ToolLatencySegment[] {
 /** 1.0 `:1573-1591` —— 工具耗时优先取已存 `agent_loop_timing.tool_ms`，否则累加各工具。 */
 export function callAgentLoopTiming(item: unknown, call: unknown): AgentLoopTiming {
   const c = dict(call);
-  const modelMs = Number(c.total_ms);
+  // **`duration_ms` 才是后端写进 `model_call_metrics` 的字段名**（`run_turn.py` 的
+  // `session.model_calls.append({... "duration_ms": ...})`）。此前只读 `total_ms`，
+  // 于是每一次模型调用的耗时都是 null → `totalMs` 为 null → 整条延迟时间线是空的，
+  // 而页面上「每一步骤的时间」的位置还在。`total_ms` 留着是为了兼容 1.0 的旧存档。
+  const modelMs = Number(c.total_ms ?? c.duration_ms);
   const validModelMs = Number.isFinite(modelMs) && modelMs >= 0 ? modelMs : null;
   const saved = dict(c.agent_loop_timing);
   const tools = toolsForGroupedCall(item, call);
@@ -455,14 +459,42 @@ export function itemTimingBreakdown(item: unknown): {
 } {
   const i = dict(item);
   const saved = dict(i.timing_breakdown);
-  const modelMs = saved.model_ms ?? dict(i.llm_summary).total_ms_sum ?? null;
+  // **两个回退源都从原始轨迹求和。** 2.0 的 run 不写 `timing_breakdown`，也不写
+  // `llm_summary`；如果只读这两个，`model_ms` / `tool_ms` / `other_ms` 恒为空——
+  // 页面上「每一步骤耗时」的位置还在，数字是 `-`。数据其实一直在
+  // `model_call_metrics[].duration_ms` 与 `tool_trace[].duration_ms` 里。
+  const modelFromCalls = itemCallMetrics(i)
+    .map((call) => Number(call.duration_ms))
+    .filter((value) => Number.isFinite(value));
+  const toolFromTrace = (Array.isArray(i.tool_trace) ? i.tool_trace : [])
+    .map((trace) => Number(dict(trace).duration_ms))
+    .filter((value) => Number.isFinite(value));
+  const modelMs =
+    saved.model_ms ??
+    dict(i.llm_summary).total_ms_sum ??
+    (modelFromCalls.length ? modelFromCalls.reduce((sum, value) => sum + value, 0) : null);
+  const toolMs =
+    saved.tool_ms ?? (toolFromTrace.length ? toolFromTrace.reduce((sum, value) => sum + value, 0) : null);
+  const wallMs = saved.wall_clock_ms ?? i.wall_clock_ms ?? null;
+  const judgeMs = saved.judge_ms ?? i.judge_ms ?? null;
+  // Agent 的墙钟 = 总墙钟 − Judge。Judge 是异步跑的，1.0 也按这个口径算。
+  const agentWallMs =
+    saved.agent_wall_ms ??
+    (Number.isFinite(Number(wallMs)) && Number.isFinite(Number(judgeMs))
+      ? Math.max(0, Number(wallMs) - Number(judgeMs))
+      : null);
+  const otherMs =
+    saved.other_ms ??
+    (Number.isFinite(Number(wallMs)) && Number.isFinite(Number(agentWallMs))
+      ? Math.max(0, Number(agentWallMs) - (Number(modelMs) || 0) - (Number(toolMs) || 0))
+      : null);
   return {
-    wall_clock_ms: saved.wall_clock_ms ?? i.wall_clock_ms ?? null,
-    agent_wall_ms: saved.agent_wall_ms ?? null,
+    wall_clock_ms: wallMs,
+    agent_wall_ms: agentWallMs,
     model_ms: modelMs,
-    tool_ms: saved.tool_ms ?? null,
-    judge_ms: saved.judge_ms ?? i.judge_ms ?? null,
-    other_ms: saved.other_ms ?? null,
+    tool_ms: toolMs,
+    judge_ms: judgeMs,
+    other_ms: otherMs,
   };
 }
 
