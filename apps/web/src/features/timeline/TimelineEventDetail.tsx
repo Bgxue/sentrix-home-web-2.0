@@ -33,9 +33,12 @@ function timeRange(event: TimelineEvent): string {
 export function TimelineEventDetail({
   eventId,
   onClose,
+  onOpenImage,
 }: {
   eventId: string;
   onClose: () => void;
+  /** 点照片时交给组合层打开全屏看图；不传就退化成新标签打开（旧行为）。 */
+  onOpenImage?: (src: string, caption: string) => void;
 }) {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
 
@@ -158,13 +161,24 @@ export function TimelineEventDetail({
                 <ul className="timeline-event-photo-list">
                   {event.photos.map((photo) => (
                     <li key={photo.asset_id}>
-                      <a href={timelinePhotoUrl(photo)} target="_blank" rel="noreferrer">
-                        <img
-                          src={timelinePhotoUrl(photo)}
-                          alt={photo.file_name}
-                          loading="lazy"
-                        />
-                      </a>
+                      {/* **点图片是放大，不是打开原文件。** 此前这里是
+                          `<a href="/assets/{id}/file" target="_blank">`——浏览器遇到
+                          HEIC 或不认识的 MIME 会直接下载，用户点「图片」得到的是一个文件。 */}
+                      {onOpenImage ? (
+                        <button
+                          type="button"
+                          className="timeline-photo-open"
+                          onClick={() =>
+                            onOpenImage(timelinePhotoUrl(photo), photo.file_name)
+                          }
+                        >
+                          <img src={timelinePhotoUrl(photo)} alt={photo.file_name} loading="lazy" />
+                        </button>
+                      ) : (
+                        <a href={timelinePhotoUrl(photo)} target="_blank" rel="noreferrer">
+                          <img src={timelinePhotoUrl(photo)} alt={photo.file_name} loading="lazy" />
+                        </a>
+                      )}
                       <small>{photo.file_name}</small>
                       <small>{formatDateTime(photo.captured_at)}</small>
                       {photo.place ? <small>{photo.place}</small> : null}

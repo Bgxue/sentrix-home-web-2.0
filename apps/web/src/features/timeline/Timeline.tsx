@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchTimeline, type TimelineDay, type TimelinePhoto } from "../../shared/api/client";
+import { Lightbox } from "../../shared/ui/Lightbox";
 import { TimelineEventDetail } from "./TimelineEventDetail";
 import { timelinePhotoUrl } from "./photoUrl";
 
@@ -44,6 +45,8 @@ export function Timeline({ scopeId, focusEventId, onOpenEvent }: Props) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<TimelinePhoto | null>(null);
+  // 事件详情里的照片走全屏看图；与列表的 `open` 分开是因为那个还要拿 place 等字段。
+  const [lightbox, setLightbox] = useState<{ src: string; caption: string } | null>(null);
   // 刷新：把 nonce 并进 key，首屏那个 effect 的依赖跟着变，自然重跑。
   // 比另写一条 reload 路径好——两条路径迟早会漂开。
   const [nonce, setNonce] = useState(0);
@@ -305,7 +308,18 @@ export function Timeline({ scopeId, focusEventId, onOpenEvent }: Props) {
         </div>
       ) : null}
       {focusEventId === null ? null : (
-        <TimelineEventDetail eventId={focusEventId} onClose={() => onOpenEvent(null)} />
+        <TimelineEventDetail
+          eventId={focusEventId}
+          onClose={() => onOpenEvent(null)}
+          onOpenImage={(src, caption) => setLightbox({ src, caption })}
+        />
+      )}
+      {lightbox === null ? null : (
+        <Lightbox
+          src={lightbox.src}
+          caption={lightbox.caption}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </section>
   );

@@ -36,3 +36,28 @@
 .empty-symbol { width: 50px; height: 50px; border-radius: 50%; margin: 0 auto 18px; display: grid; place-items: center; background: var(--lime); font-size: 25px; }
 .empty-search h2 { font-size: 24px; margin: 0 0 8px; }
 .empty-search p { color: var(--muted); font-size: 12px; margin: 0 auto; max-width: 420px; line-height: 1.7; }
+
+/* ---- 全屏看图 -------------------------------------------------------------
+   点图片放大，而不是打开/下载原文件。关闭：点遮罩、右上角 ×、Esc。 */
+.lightbox {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  padding: 28px; background: rgba(15, 23, 42, .82); cursor: zoom-out;
+}
+.lightbox img {
+  max-width: min(94vw, 1400px); max-height: 84vh;
+  object-fit: contain; border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop); cursor: default;
+}
+.lightbox-close {
+  position: absolute; top: 18px; right: 22px;
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08);
+  color: #fff; font-size: 22px; line-height: 1;
+}
+.lightbox-close:hover { background: rgba(255,255,255,.18); }
+.lightbox-caption {
+  position: absolute; bottom: 22px; margin: 0;
+  color: #fff; font-size: 11px; opacity: .8;
+  max-width: 80vw; text-align: center;
+}

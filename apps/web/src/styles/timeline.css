@@ -142,3 +142,9 @@
   .timeline-photos img { width: 84px; height: 84px; }
   .timeline-event > header { flex-direction: column; gap: 4px; }
 }
+
+/* 事件详情里的照片：点开是放大（Lightbox），不是打开/下载原文件。 */
+.timeline-photo-open {
+  display: block; width: 100%; padding: 0; border: 0; background: transparent;
+  cursor: zoom-in; line-height: 0;
+}
