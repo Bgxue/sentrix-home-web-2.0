@@ -30,7 +30,10 @@ FAMILY_MEMBERSHIPS = frozenset({"family", "friend", "unknown"})
 
 # 1.0 ``db.py:5618`` 的 ``_FAMILY_SOURCES``。只有两个来源，且**决定 locked**：
 # ``user_override`` 写的行 locked=1，``model`` 写的 locked=0。
-FAMILY_SOURCES = frozenset({"model", "user_override"})
+#: `role_seed` 是第三种：由已确认人物的 `family_role`（父亲/母亲/妻子）确定性补出的边。
+#: 它不是 `model` 推断（证据闸根本不会通过），也不是 `user_override`（用户没有直接
+#: 编辑这条边），所以单列一类——图谱页可以把三者分开显示，`locked` 仍只认 `user_override`。
+FAMILY_SOURCES = frozenset({"model", "user_override", "role_seed"})
 
 SOURCE_MODEL = "model"
 SOURCE_USER_OVERRIDE = "user_override"
