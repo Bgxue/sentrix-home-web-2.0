@@ -11,6 +11,7 @@
  * 1.0 里 RunsTable 与 RunDetail 是 `<main class="app-shell">` 下的兄弟节点（中间没有包装层），
  * 所以这里返回 fragment，不加多余 DOM。
  */
+import type { RejudgeJudgeConfig } from "../../hooks/useRunDetail.ts";
 import type { UseRunsApi } from "../../hooks/useRuns.ts";
 import type { MemoryLayerPanelProps } from "../memory/MemoryLayerPanel.tsx";
 import { RunDetail } from "./RunDetail.tsx";
@@ -22,6 +23,15 @@ export interface RunsViewProps {
   /** 配置切片的 `judgeModel`；`RejudgeCard` 缺省显示 `-`（1.0 `judgeModel || '-'`）。 */
   judgeModel: string;
   /**
+   * 重判要带上的 **Judge 连接配置**（1.0 `startRejudge` `:2606-2623`）。
+   *
+   * 不传的话 POST 体里 `judge_url` / `judge_model` / `judge_provider_id` 都是空串，
+   * `judge_api_key` 则**永远不会发送**——于是重判要么落到后端默认 Judge，要么因认证
+   * 失败整轮判不出来，而按钮上显示的模型名与实际调用的可能不是同一个。
+   * 由组合层从 `configApi` 透传（与 `startSuite` 同一份来源）。
+   */
+  judgeConfig?: RejudgeJudgeConfig;
+  /**
    * 配置切片的 `saveJudgePrompt(kind, prompt)`。**显式收参**：组合层用运行详情侧
    * （`useRunDetail`）的 `activePromptKind` / `rejudgePrompt` 去调它——1.0 只有一份
    * 提示词状态，保存的就该是用户刚编辑的那份。
@@ -31,9 +41,14 @@ export interface RunsViewProps {
   memory?: MemoryLayerPanelProps;
 }
 
-export function RunsView({ runs, judgeModel, saveJudgePrompt, memory }: RunsViewProps) {
+export function RunsView({ runs, judgeModel, judgeConfig, saveJudgePrompt, memory }: RunsViewProps) {
   return (
     <>
+      {/* **运行列表/详情/重判的错误出口。** 此前 `useRuns.error`（列表加载、删除、
+          选中 run 失败）与 `useRunDetail` 写入的错误都没有任何组件消费——点开一条
+          run 失败时界面只是空着，用户看不出是加载中还是出错了。配置区的 `error`
+          只覆盖配置请求，不覆盖这些。 */}
+      {runs.error ? <p className="error">{runs.error}</p> : null}
       <RunsTable
         runs={runs.runs}
         runPage={runs.runPage}
@@ -67,7 +82,7 @@ export function RunsView({ runs, judgeModel, saveJudgePrompt, memory }: RunsView
           rejudgeConfirmation: runs.rejudgeConfirmation,
           onRequestRejudge: runs.requestRejudge,
           onConfirmRejudge: () => {
-            void runs.confirmRejudge();
+            void runs.confirmRejudge(judgeConfig);
           },
           onCancelRejudge: runs.cancelRejudge,
           rejudgePercent: runs.rejudgePercent,

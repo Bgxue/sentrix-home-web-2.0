@@ -88,6 +88,8 @@ export function App({ initialLoading = false }: AppProps) {
   const runs = useRuns({
     loadQaPage: (page) => qaRef.current?.loadQaPage(page) ?? Promise.resolve(),
     resetQaState: () => qaRef.current?.resetQaState(),
+    // 1.0 `:2770`：`/judge-prompts` 失败或缺 default 时的兜底。
+    judgePromptFallback: configApi.config?.judge_prompt || "",
   });
   /** 逐题状态唯一实例；`QaResults` 与记忆面板共享（见文件头 1）。 */
   const qa = useQaPage({ activeRunId: runs.activeRunId, activeRejudge: runs.activeRejudge });
@@ -324,6 +326,14 @@ export function App({ initialLoading = false }: AppProps) {
             <RunsView
               runs={runs}
               judgeModel={configApi.judgeModel}
+              judgeConfig={{
+                judge_url: configApi.judgeUrl,
+                judge_model: configApi.judgeModel,
+                judge_provider_id: configApi.judgeProviderId,
+                // 与 `startSuite` 同一条口径：只有用户改过才发送 key，避免把
+                // 后端已存的密钥原样回传（`useConfig` 就是这么判 dirty 的）。
+                judge_api_key: configApi.judgeApiKeyDirty ? configApi.judgeApiKey : undefined,
+              }}
               memory={memory}
               saveJudgePrompt={(kind, prompt) => {
                 void (async () => {
@@ -334,6 +344,10 @@ export function App({ initialLoading = false }: AppProps) {
                 })();
               }}
             />
+            {/* 1.0 里逐题结果是 `RunDetail` 的 `v-else` 分支，未选中 run 时整块不存在。
+                2.0 拆成两个兄弟组件后忘了这层条件，初始状态会多出一整块
+                「QA 逐题结果 / 筛选结果 0 / 全部 0 条」的空白面板。 */}
+            {runs.activeRun ? (
             <QaResults
               activeRun={runs.activeRun}
               qa={qa}
@@ -350,6 +364,7 @@ export function App({ initialLoading = false }: AppProps) {
               }}
               onOpenMedia={setLightbox}
             />
+            ) : null}
           </>
         ) : (
           <QaBrowserView

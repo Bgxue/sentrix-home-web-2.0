@@ -29,6 +29,14 @@ export interface UseRunsOptions {
   loadQaPage?: (page?: number) => Promise<unknown>;
   /** 1.0 `:2324-2326`：清空 qaPage / qaDetails / openQaItems。 */
   resetQaState?: () => void;
+  /**
+   * 配置里的 `judge_prompt`（1.0 `config.value?.judge_prompt || ""`）。
+   *
+   * `/judge-prompts` 拿不到 `default`、或整个请求失败时，提示词初始值与「恢复默认」
+   * 都靠它兜底。**不传的后果是提示词为空**，而 `canRejudge` 要求提示词非空——
+   * 用户会看到一个永远灰着的「重新 Judge」按钮，且「恢复默认」点下去是清空。
+   */
+  judgePromptFallback?: string;
 }
 
 /**
@@ -71,7 +79,7 @@ function computeHasRunning(activeCount: number, runs: Run[]): boolean {
 }
 
 export function useRuns(options: UseRunsOptions = {}) {
-  const { loadQaPage, resetQaState } = options;
+  const { loadQaPage, resetQaState, judgePromptFallback } = options;
 
   const [runs, setRuns] = useState<Run[]>([]);
   const [runPage, setRunPage] = useState<RunPageState>(INITIAL_RUN_PAGE);
@@ -141,6 +149,7 @@ export function useRuns(options: UseRunsOptions = {}) {
     setError,
     onRunsReloaded,
     onRejudgeStarted,
+    judgePromptFallback,
   });
   const { loadActiveRun, setActiveRun } = detail;
 

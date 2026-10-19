@@ -23,6 +23,7 @@ import type { EChartsOption, EChartsType } from "echarts";
 import type { Run } from "../../../api/types.ts";
 import { EXECUTION_PHASES } from "../../../lib/constants.ts";
 import { fmtMemory } from "../../../lib/format.ts";
+import { jetsonUnifiedFromRun } from "../../../lib/telemetry.ts";
 import {
   liveTelemetryPhaseRows,
   liveTelemetryRows,
@@ -51,7 +52,10 @@ interface TelemetrySeriesDefinition {
 }
 
 /** 1.0 `:1041-1060`。按数据源三选一。 */
-function telemetrySeriesDefinitions(source: string): TelemetrySeriesDefinition[] {
+function telemetrySeriesDefinitions(
+  source: string,
+  unifiedOrin = false,
+): TelemetrySeriesDefinition[] {
   const isApple = source === "apple_unified";
   const isOrin = ["orin_ssh_pss", "jetson_local_pss"].includes(source);
   if (isApple) {
@@ -60,6 +64,9 @@ function telemetrySeriesDefinitions(source: string): TelemetrySeriesDefinition[]
       { key: "product_stack_memory_mib", name: "整套产品内存（相关进程 phys_footprint）", color: "#d9488b" },
       { key: "sentrix_stack_pss_mib", name: "Sentrix 周边（不含主模型，phys_footprint）", color: "#8b6de8" },
       { key: "model_process_system_memory_used_mib", name: "主模型进程 phys_footprint", color: "#f2b84b" },
+      // 1.0 `:1063-1069` 的第五条。它是 **AGXAccelerator 设备级**的 working set，
+      // 含其他进程，不能归因给主模型——所以单独一条、不并入上面四条。
+      { key: "gpu_in_use_unified_memory_mib", name: "全机 GPU 在用统一内存", color: "#e05a4f" },
     ];
   }
   if (isOrin) {
@@ -67,7 +74,12 @@ function telemetrySeriesDefinitions(source: string): TelemetrySeriesDefinition[]
       { key: "system_memory_used_mib", name: "整机 RAM（Orin UMA）", color: "#20a36a" },
       { key: "product_stack_memory_mib", name: "整套产品 RAM（相关进程 PSS + 主模型 UMA 补偿）", color: "#d9488b" },
       { key: "sentrix_stack_pss_mib", name: "Sentrix 周边 PSS（不含模型）", color: "#8b6de8" },
-      { key: "model_process_system_memory_used_mib", name: "主模型进程 VmRSS", color: "#f2b84b" },
+      {
+        key: "model_process_system_memory_used_mib",
+        // 1.0 `:1074`：口径由 run 的 `memory_profile.scope` 决定，不是写死 VmRSS。
+        name: unifiedOrin ? "主模型占用（smaps Rss + GPU）" : "主模型 VmRSS",
+        color: "#f2b84b",
+      },
     ];
   }
   return [
@@ -93,7 +105,7 @@ function buildTelemetryOption(run: Run | null | undefined, history: Dict[]): ECh
   const r = dict(run);
   const source =
     telemetryLiveState(run).source || r.telemetry_source || dict(dict(r.phases).gpu_metrics).source || "";
-  const definitions = telemetrySeriesDefinitions(source);
+  const definitions = telemetrySeriesDefinitions(source, jetsonUnifiedFromRun(run));
   const available = definitions.filter((definition) =>
     history.some((item) => seriesValue(item, definition) != null),
   );
@@ -272,9 +284,11 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
       <p className="metric-calc-time">
         测评进行中持续采样；任务失败或取消时保留已采集的最后值与峰值。
         {live.source === "apple_unified"
-          ? " Mac 统一内存。四条曲线是整机内存、整套产品 phys_footprint、Sentrix 周边、主模型 phys_footprint。"
+          ? " Mac 统一内存。五条曲线是整机内存、整套产品 phys_footprint、Sentrix 周边、主模型 phys_footprint，以及 AGXAccelerator 设备级的 GPU 在用统一内存（含其他进程，不能归因给主模型）。"
           : ["jetson_local_pss", "orin_ssh_pss"].includes(String(live.source))
-            ? " Orin 无独立显存。主指标看黄线 VmRSS（进程驻留）。"
+            ? jetsonUnifiedFromRun(run)
+              ? " Orin 无独立显存。主指标看黄线「主模型占用（smaps Rss + GPU/UMA 页）」——主机页与 GPU 页分开算、两半不重叠。"
+              : " Orin 无独立显存。主指标看黄线 VmRSS（进程驻留）。"
             : " 153 使用 NVIDIA GPU 显存；整机 RAM 为宿主机全部进程。"}
       </p>
       <div className="phase-metrics live-telemetry-metrics">

@@ -82,6 +82,8 @@ export interface RunDetailOptions {
   onRunsReloaded?: () => Promise<unknown> | unknown;
   /** 1.0 `:2598` 的 `startPolling()`（必须在 loadActiveRun 之后）。 */
   onRejudgeStarted?: () => void;
+  /** 配置里的 `judge_prompt`：`/judge-prompts` 没给 `default` 时的兜底（1.0 `:2770`）。 */
+  judgePromptFallback?: string;
 }
 
 export type RunDetailApi = ReturnType<typeof useRunDetail>;
@@ -103,6 +105,7 @@ export function useRunDetail(options: RunDetailOptions) {
     notify,
     onRunsReloaded,
     onRejudgeStarted,
+    judgePromptFallback = "",
   } = options;
 
   const [activeRun, setActiveRun] = useState<Run | null>(null);
@@ -314,14 +317,18 @@ export function useRunDetail(options: RunDetailOptions) {
       setJudgePromptKinds(kinds);
       const next = { ...promptDrafts };
       for (const meta of kinds) {
-        if (meta.kind) next[meta.kind] = meta.custom || meta.default || "";
+        // answer_quality 的兜底是配置里的 `judge_prompt`（1.0 `:2770`
+        // `config.custom_judge_prompt || config.judge_prompt`）。少了它，
+        // `/judge-prompts` 不返回 default 时提示词就是空串 → `canRejudge` 永久为假。
+        const fallback = meta.kind === "answer_quality" ? judgePromptFallback : "";
+        if (meta.kind) next[meta.kind] = meta.custom || meta.default || fallback;
       }
       setPromptDrafts(next);
       setRejudgePrompt(next.answer_quality || "");
     } catch {
       /* keep defaults from config */
     }
-  }, [promptDrafts]);
+  }, [promptDrafts, judgePromptFallback]);
 
   const switchPromptKind = useCallback(
     (kind: string) => {
@@ -331,15 +338,21 @@ export function useRunDetail(options: RunDetailOptions) {
     [promptDrafts],
   );
 
-  /** 1.0 `:2481`。`fallback` 对应 1.0 的 `config.value?.judge_prompt || ""`（config 归其它切片）。 */
+  /**
+   * 1.0 `:2481`。「恢复默认」= 该 kind 的 `default`，没有就退回配置里的 `judge_prompt`。
+   *
+   * **`fallback` 的默认值必须是 `judgePromptFallback`**：此前它是空串、而唯一调用方
+   * （`RunsView`）也不传，于是「恢复默认」在 `/judge-prompts` 缺 `default` 时把提示词
+   * 清空——按钮随之变灰，用户看到的是「恢复默认」反而把功能弄没了。
+   */
   const resetJudgePrompt = useCallback(
-    (fallback = "") => {
+    (fallback = judgePromptFallback) => {
       const meta = judgePromptKinds.find((item) => item.kind === activePromptKind) || null;
       const value = meta?.default || fallback;
       setRejudgePrompt(value);
       setPromptDrafts((prev) => ({ ...prev, [activePromptKind]: value }));
     },
-    [judgePromptKinds, activePromptKind],
+    [judgePromptKinds, activePromptKind, judgePromptFallback],
   );
 
   const activeRejudge = useMemo<RejudgeTask | null>(() => activeRun?.rejudge || null, [activeRun]);

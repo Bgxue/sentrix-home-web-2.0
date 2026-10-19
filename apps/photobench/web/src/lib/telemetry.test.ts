@@ -6,6 +6,7 @@ import {
   gpuMetricRows,
   gpuMetricsView,
   itemCallMetrics,
+  jetsonUnifiedFromRun,
   keyMetricRows,
   liveTelemetryPhaseRows,
   liveTelemetryRows,
@@ -371,5 +372,23 @@ describe("gpuMetricRows (:785-856)", () => {
     const orin = gpuMetricRows({ source: "orin_ssh_pss", samples_count: 4 });
     expect(orin).toHaveLength(9);
     expect(orin[0][0]).toBe("Orin 模型进程占用（VmRSS）");
+  });
+});
+
+describe("jetsonUnifiedFromRun", () => {
+  it("按 memory_profile.scope 判断，不按 source 猜", () => {
+    expect(
+      jetsonUnifiedFromRun({ phases: { gpu_metrics: { memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } } } }),
+    ).toBe(true);
+    expect(jetsonUnifiedFromRun({ memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } })).toBe(true);
+    expect(jetsonUnifiedFromRun({ phases: { gpu_metrics: { memory_profile: { scope: "vmrss_only" } } } })).toBe(false);
+    expect(jetsonUnifiedFromRun(null)).toBe(false);
+  });
+
+  it("同一台 Orin 上新旧两种口径的标签不同——写死 VmRSS 会读错旧 run", () => {
+    const legacy = { source: "orin_ssh_pss", samples_count: 1, model_process_system_memory_used_mib: { peak: 1024, mean: 512 } };
+    expect(gpuMetricRows(legacy)[0][0]).toBe("Orin 模型进程占用（VmRSS）");
+    const unified = { ...legacy, memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } };
+    expect(gpuMetricRows(unified)[0][0]).toBe("主模型占用（smaps Rss + GPU）");
   });
 });

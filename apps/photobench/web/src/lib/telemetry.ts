@@ -92,8 +92,12 @@ export function gpuMetricRows(rawPhase: unknown = {}): MetricRow[] {
     ["封装功耗", fmtNumber(power.mean, "W"), `峰值 ${fmtNumber(power.peak, "W")} · macmon，未安装时留空`],
     ["采样数量", phase.samples_count == null ? "-" : `${phase.samples_count} 次`, "统一内存采样；缺失项不补 0"],
   ];
-  if (["orin_ssh_pss", "jetson_local_pss"].includes(phase.source)) return [
-    ["Orin 模型进程占用（VmRSS）", fmtMemory(dict(phase.model_process_system_memory_used_mib).peak), `均值 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).mean)} · P95 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).p95)} · 进程驻留，含部分统一内存`, true],
+  if (["orin_ssh_pss", "jetson_local_pss"].includes(phase.source)) {
+    // 1.0 `:786-799`：口径由 `memory_profile.scope` 决定。同一台 Orin 上旧 run 是
+    // VmRSS-only，新 run 是「主机 smaps Rss + GPU/UMA 页」，写死其中一种都会读错。
+    const unified = dict(phase.memory_profile).scope === "host_smaps_rss_plus_gpu_uma";
+    return [
+    [unified ? "主模型占用（smaps Rss + GPU）" : "Orin 模型进程占用（VmRSS）", fmtMemory(dict(phase.model_process_system_memory_used_mib).peak), `均值 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).mean)} · P95 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).p95)} · ${unified ? "主机 smaps Rss + GPU/UMA 页（GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)），两半不重叠" : "进程驻留，含部分统一内存"}`, true],
     ["整机 RAM 相对本 run 基线", fmtMemory(dict(phase.system_memory_delta_mib).peak), "首个采样为 0；测评中会掺其他进程"],
     ["KV Cache 已用 token", fmtNumber(phase.kv_cache_used_tokens?.mean), `峰值 ${fmtNumber(phase.kv_cache_used_tokens?.peak)}`],
     ["KV Cache 使用率", fmtNumber(kvCache.mean, "%"), `峰值 ${fmtNumber(kvCache.peak, "%")}`],
@@ -102,7 +106,8 @@ export function gpuMetricRows(rawPhase: unknown = {}): MetricRow[] {
     ["CPU 温度", fmtNumber(dict(phase.cpu_temperature_c).mean, "°C"), `峰值 ${fmtNumber(dict(phase.cpu_temperature_c).peak, "°C")} · tegrastats cpu@`],
     ["GPU 温度", fmtNumber(temp.mean, "°C"), `峰值 ${fmtNumber(temp.peak, "°C")} · tegrastats gpu@`],
     ["采样数量", phase.samples_count == null ? "-" : `${phase.samples_count} 次`, `PSS 与主循环同频 0.5 秒；独立 PSS 点 ${phase.pss_samples_count ?? 0} 次；KV 随主循环，未暴露则为 -`],
-  ];
+    ];
+  }
   return [
     ["模型进程显存", fmtMemory(modelMemory.mean), `主模型进程实际占用的显存（NVML 按 PID 归因），不是整卡占用 · 峰值 ${fmtMemory(modelMemory.peak)} · P95 ${fmtMemory(modelMemory.p95)}`, true],
     ["采样数量", phase.samples_count == null ? "-" : `${phase.samples_count} 次`, "GPU 原始采样点数量；采不到的项留空，不补 0"],
@@ -339,6 +344,22 @@ export function telemetryChart(run: unknown): TelemetryChartData | null {
   return { history };
 }
 
+/**
+ * 这次 Orin/Jetson run 的主模型内存口径是不是「主机 smaps Rss + GPU/UMA 页」。
+ *
+ * 1.0 `:789-797` 的 `jetsonUnifiedFromPhase` / `jetsonUnifiedFromRun`。**作用域来自
+ * 后端**（`memory_profile.scope === "host_smaps_rss_plus_gpu_uma"`），不是前端的
+ * 猜测：同一台 Orin 上旧的 VmRSS-only run 与新 run 并存，硬编码其中一种都会把另一
+ * 种的历史读错。
+ *
+ * 2.0 此前三处标签全部写死成 VmRSS，等于把所有 run 都当成旧口径。
+ */
+export function jetsonUnifiedFromRun(run: unknown): boolean {
+  const r = dict(run);
+  if (dict(r.memory_profile).scope === "host_smaps_rss_plus_gpu_uma") return true;
+  return dict(dict(dict(r.phases).gpu_metrics).memory_profile).scope === "host_smaps_rss_plus_gpu_uma";
+}
+
 // ── 1.0 :1126-1150 相位快照行 ────────────────────────────────────────────
 
 /** 1.0 `:1126-1150`。**故意不含 apple_unified**：Orin 判据是 `isOrin = isApple || ...`。 */
@@ -349,7 +370,13 @@ export function liveTelemetryPhaseRows(run: unknown): MetricRow[] {
   const isApple = source === "apple_unified";
   const isOrin = isApple || ["orin_ssh_pss", "jetson_local_pss"].includes(source);
   const modelKey = isOrin ? "model_process_system_memory_used_mib" : "model_process_memory_used_mib";
-  const modelLabel = isApple ? "主模型 phys_footprint" : (isOrin ? "主模型 VmRSS" : "主模型 GPU");
+  const modelLabel = isApple
+    ? "主模型 phys_footprint"
+    : isOrin
+      ? jetsonUnifiedFromRun(run)
+        ? "主模型占用（smaps Rss + GPU）"
+        : "主模型 VmRSS"
+      : "主模型 GPU";
   const history = telemetryHistory(run);
   const phases = dict(r.telemetry_live?.phase_snapshots);
   const peakFromHistory = (phaseKey: string) => {
@@ -507,7 +534,9 @@ export function keyMetricRows(run: unknown, summary: unknown): KeyMetric[] {
   const processMemoryNote = isUnified
     ? "主模型 phys_footprint 峰值 · 统一内存的进程物理占用，不是 GPU 专属显存"
     : isOrin
-      ? "主模型 VmRSS 峰值 · Orin 无独立显存，这是进程驻留"
+      ? jetsonUnifiedFromRun(run)
+        ? "主模型占用峰值 · 主机 smaps Rss + GPU/UMA 页（GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)，两半不重叠）"
+        : "主模型 VmRSS 峰值 · Orin 无独立显存，这是进程驻留"
       : "主模型显存峰值 · NVML 按模型 PID 汇总";
   const throughputNote = s.agent_throughput_latency_mode === "measured_agent_phase"
     ? `Agent 阶段实际墙钟 ÷ ${s.agent_phase_completed_count ?? s.total ?? 0} 题 · 并发 ${r.qa_concurrency ?? "-"} · 不含 Judge（Judge 与 Agent 并行）`

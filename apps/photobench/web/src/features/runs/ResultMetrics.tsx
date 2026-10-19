@@ -62,7 +62,12 @@ function isOrinPssRun(run: Run | null | undefined): boolean {
     sources.includes(dict(r.telemetry_live).source) ||
     sources.includes(gpu.source) ||
     method === "orin_process_pss_uma_v1" ||
-    method === "apple_phys_footprint_v1"
+    method === "apple_phys_footprint_v1" ||
+    // 1.0 `:1195-1197`。漏掉这三种时，只有 `memory_profile.method` 的历史 Apple run
+    // 会多显示一张「可比较显存」卡——那张卡对统一内存机器不适用，会误导对比。
+    method === "apple_resident_rss_v2" ||
+    method === "apple_max_rss_footprint_v1" ||
+    method === "apple_phys_footprint_plus_mapped_weights_v1"
   );
 }
 
