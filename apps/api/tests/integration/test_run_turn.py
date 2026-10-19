@@ -474,6 +474,66 @@ def test_an_empty_search_cannot_be_reported_as_a_hit(env):
     assert result.answer == "这次没有匹配到海边的照片，可能没有拍到过。"
 
 
+#: 模型偶尔吐出来的正文工具调用（Llama 3.x 格式，8100 的 Qwen 模板解析不了）。
+#: 2026-10-19 那轮 487 题里原样出现在 18 条答案里。
+TEXTUAL_TOOL_CALL = (
+    "<tool_call>\n"
+    "<function=read_photo_text>\n"
+    "<parameter=result_set_id>\n"
+    "rs_441092e2ef66\n"
+    "</parameter>\n"
+    "<parameter=asset_handle>\n"
+    "photo_4\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+def test_a_textual_tool_call_is_never_delivered(env):
+    """正文里的 ``<tool_call>`` 不是答案，纠正一次后应当重新作答。
+
+    实测那 18 条的 ``termination_reason`` 全是 ``answered``——模型这一轮**没有**
+    结构化 ``tool_calls``，整段 XML 落在 ``content`` 里，被当成最终答案交给了用户。
+    """
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            ModelReply(content=TEXTUAL_TOOL_CALL, finish_reason="stop"),
+            final_call("就是穿红衣服那张。", "photo_1"),
+        ]
+    )
+    toolbox = StubToolbox({"search_memories": SEARCH_OK, FINAL_ANSWER_TOOL: DELIVER_OK})
+    run_turn = build(env, model, toolbox)
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert "<tool_call>" not in result.answer
+    assert "photo_4" not in result.answer
+    assert result.answer == "就是穿红衣服那张。"
+
+
+def test_a_second_textual_tool_call_ends_as_parse_failure(env):
+    """纠正一次仍写 XML，就按 ``PARSE_FAILURE`` 收尾——不能把 XML 端出去，也不能无限重试。"""
+    _conversations, _turns, conversation, _db = env
+    model = ScriptedModel(
+        [
+            tool_call("search_memories", "c1", query="海边"),
+            ModelReply(content=TEXTUAL_TOOL_CALL, finish_reason="stop"),
+            ModelReply(content=TEXTUAL_TOOL_CALL, finish_reason="stop"),
+        ]
+    )
+    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    turn_id = start(run_turn, conversation)
+
+    result = run_turn.run(turn_id)
+
+    assert result.termination_reason is TerminationReason.PARSE_FAILURE
+    assert "<tool_call>" not in result.answer
+
+
 def test_a_leaked_internal_identifier_is_never_delivered(env):
     """安全边界不做第二次让步：两次都泄漏就给确定性兜底，不把内部标识交给用户。"""
     _conversations, _turns, conversation, _db = env

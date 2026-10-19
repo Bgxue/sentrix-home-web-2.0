@@ -380,9 +380,11 @@ class AssistantToolbox:
         字段留空——空串的意思是「这张图没有记录到」，与「字段没给我们」是两回事，
         所以键恒在。
 
-        **不搬 1.0 的血缘字段**（``source_video_asset_id`` / ``source_timestamp_sec``
-        / ``source_scene_index`` / ``source_video_file_name``）：1.0 自己也没有把
-        「这一帧属于哪个视频」交给模型，2.0 不扩大这个口子，只给 ``media_kind``。
+        **血缘只搬「这一条是什么」**（``source_kind`` ← ``derived_kind``），不搬
+        「它属于哪个视频」（``parent_asset_id`` / ``source_timestamp_sec`` /
+        ``source_scene_index`` / ``source_video_file_name``）。1.0 一个血缘字段都没给，
+        代价是模型分不清视频帧与真照片——2026-10-19 那轮 48 道视频题里 9 道答
+        「相册里没有视频」。回答一个问题只需要知道「这是帧」，不需要整条视频的血缘。
         也不搬 ``condition_summary`` / ``priority_rank`` / ``selection_reason``——
         前者的条件判定在 2.0 走的是另一条路（``evaluate_conditions``），后两者是
         1.0 在问题文本上做关键词匹配的产物，2.0 不搬那套判据。
@@ -394,6 +396,15 @@ class AssistantToolbox:
             "handle": entry.handle,
             "file_name": asset.file_name if asset else "",
             "media_kind": asset.media_type.value if asset else "",
+            # **这一条是视频抽出来的帧，还是一张真照片。** 派生物的 ``media_type`` 就是
+            # ``image``（1.0 ``video/processor.py:188``），只看 ``media_kind`` 时模型
+            # 无从判断——2026-10-19 那轮里 48 道视频题有 9 道直接答「相册里没有视频，
+            # 只有静态照片」，它甚至找到了帧，只是不知道那是帧。
+            #
+            # 取 ``derived_kind``（``video_keyframe``）而不是 ``parent_asset_id``：
+            # 模型需要的是「这是什么」，不是「它爸爸是谁」——后者会把整条视频血缘
+            # 带进上下文，而回答一个问题只需要前者。
+            "source_kind": (asset.derived_kind if asset and asset.derived_kind else "photo"),
             "captured_at": asset.captured_at.isoformat() if asset and asset.captured_at else "",
             "level": _LEVEL_BY_EVIDENCE_CLASS.get(entry.evidence_class, ""),
             # **地点取 GPS 反解，不取 VLM 的场景描述。** 1.0 的 preview ``place``

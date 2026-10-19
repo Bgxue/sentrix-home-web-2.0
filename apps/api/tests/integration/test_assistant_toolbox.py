@@ -51,6 +51,7 @@ from sentrix.infrastructure.persistence.repositories.structured import (
     SqliteStructuredQueryRepository,
 )
 from sentrix.infrastructure.persistence.repositories.vectors import SqliteVectorRepository
+from sentrix.infrastructure.persistence.repositories.video import SqliteVideoRepository
 
 NOW = datetime(2026, 9, 22, 10, 0, tzinfo=UTC)
 SCOPE = "album1"
@@ -437,6 +438,76 @@ def test_the_preview_carries_the_media_kind(toolbox, migrations_ready_db, tmp_pa
 
     kinds = [item["media_kind"] for item in outcome.model_visible["preview"]]
     assert kinds == ["image", "video"]
+
+
+def test_the_preview_marks_a_video_keyframe_as_such(toolbox, migrations_ready_db, tmp_path):
+    """视频帧在 ``media_type`` 上就是普通图片，``source_kind`` 才能把它和真照片分开。
+
+    2026-10-19 那轮 48 道视频题里有 9 道答「相册里没有视频，只有静态照片」——
+    模型其实找到了帧，但 preview 只说 ``media_kind: image``，它无从知道那是帧。
+    """
+    video = tmp_path / "婚礼.mp4"
+    video.write_bytes(b"video")
+    SqliteAssetRepository(migrations_ready_db).add(
+        Asset(
+            id="asset_video",
+            scope_id=SCOPE,
+            file_name="婚礼.mp4",
+            media_type=MediaType.VIDEO,
+            path=str(video),
+            mime_type="video/mp4",
+            size_bytes=video.stat().st_size,
+            status=AssetStatus.PROCESSED,
+            content_sha256="hashvideo",
+            captured_at=datetime(2019, 8, 3, tzinfo=UTC),
+            captured_location=GpsPoint(30.0, 120.0),
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    frame = tmp_path / "kf_0001.jpg"
+    frame.write_bytes(b"frame")
+    # **必须走 ``add_derived``**：``SqliteAssetRepository.add`` 的 INSERT 列清单里
+    # 没有血缘三列（那条路进来的从来不是派生物），用它造出来的帧会被读回成普通照片。
+    SqliteVideoRepository(migrations_ready_db).add_derived(
+        parent_asset_id="asset_video",
+        asset=Asset(
+            id="asset_frame",
+            scope_id=SCOPE,
+            file_name="kf_0001.jpg",
+            media_type=MediaType.IMAGE,
+            path=str(frame),
+            mime_type="image/jpeg",
+            size_bytes=frame.stat().st_size,
+            status=AssetStatus.PROCESSED,
+            content_sha256="hashframe",
+            captured_at=datetime(2019, 8, 3, tzinfo=UTC),
+            captured_location=GpsPoint(30.0, 120.0),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        derived_kind="video_keyframe",
+        source_timestamp_sec=3.021,
+        source_frame_index=0,
+        source_scene_index=0,
+    )
+
+    build, result_sets = toolbox
+    result_sets.add(
+        ResultSet(
+            id="rs_frame",
+            scope_id=SCOPE,
+            query="婚礼",
+            asset_ids=("asset_0", "asset_frame"),
+            created_at=NOW,
+        )
+    )
+    outcome = build.execute(
+        "get_result_page", {"result_set_id": "rs_frame", "page": 1}, scope_id=SCOPE, now=NOW
+    )
+
+    kinds = [item["source_kind"] for item in outcome.model_visible["preview"]]
+    assert kinds == ["photo", "video_keyframe"]
 
 
 def test_the_preview_carries_the_relevance_level(toolbox, migrations_ready_db):

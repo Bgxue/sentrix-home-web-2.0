@@ -109,6 +109,8 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 
 【怎么用工具】
 - 需要照片证据时必须先查，不要凭印象回答。只使用查到的事实，不编造数字、日期、人名或地点。
+- **调用工具只能用原生工具调用**，不要把 `<tool_call>`、`<function=…>`、`<parameter=…>`
+  这类标记写进你的正文——那是内部格式，写进正文用户就会原样看到它们。
 - **本轮的回答必须用 final_answer 给出**，不要直接在正文里说完就停——只写在正文里
   等于这一轮什么也没答复。
 - 要展示给用户的照片，填在同一次 final_answer 的 selected_image_handles 里，最多 6 张。
@@ -127,6 +129,26 @@ SYSTEM_PROMPT = """你是这个家庭相册的助手。你能做的只有两件�
 # 用完重试次数才以 ``parse_failure`` 收尾），而不是另立一个终止原因。这里照 1.0 的口径：
 # 提醒一次，再空就按 ``PARSE_FAILURE`` 收尾，用确定性兜底把已有证据说清楚。
 PARSE_FAILURE_NUDGE = "你上一条回复是空的。请直接用一两句中文把结论说给用户，不要再调用工具。"
+
+# **正文里的工具调用标记**：模型偶尔会把 ``<tool_call><function=…><parameter=…>``
+# 写成正文（Llama 3.x 的格式，不是 8100 那套 Qwen 模板认的 JSON）。llama.cpp 解析不出
+# 结构化 ``tool_calls``，整段就落在 ``content`` 里，而 ``split_thought_channel`` 只剥
+# ``<|channel>``、不认这一种——于是用户会在答案里看到它们。
+#
+# 2026-10-19 那轮 487 题里出现 **18 次**，`termination_reason` 全是 ``answered`` /
+# ``answered_with_gap``（不是步数耗尽），说明模型是**主动**把想调的工具写成了正文。
+#
+# **只认标记、不解析内容**：把 XML 转成真正的工具调用等于恢复 1.0 那套正文解析器
+# （``chat_client`` 模块注释第 9-13 行说它连同失败模式一起被删掉了），而拿一段未经验证
+# 的文本去执行工具，代价比少答一道题大得多。
+_TEXTUAL_TOOL_CALL = re.compile(r"<tool_call\s*>|<function\s*=")
+
+#: 认出正文工具调用后给模型的一次纠正。**只说「那不是工具调用」**，不解释内部机制。
+TEXTUAL_TOOL_CALL_NUDGE = (
+    "你上一条回复里把工具调用写成了 `<tool_call>` 标记的形式，那不是一次真正的工具调用，"
+    "用户会原样看到这些标记。要调用工具请使用原生工具调用；要回答用户就直接用中文说。"
+    "请重新给出这一轮的回答。"
+)
 
 #: 收尾时的**强制作答**提示（1.0 ``runtime.py:1600-1604``）。预算已经耗尽、模型还
 #: 一个字都没说出来时用它换一次纯文本回答——**固定文案能不出就不出**。
@@ -432,6 +454,9 @@ class _Session:
     last_answer: str = ""
     # 连续几轮「一条有用的结果都没拿到」。见 ``_converse`` 的护栏。
     stalled_rounds: int = 0
+    # **正文工具调用的纠正只给一次。** 再犯说明模型这一轮压不住这个格式，
+    # 那就按 ``PARSE_FAILURE`` 收尾，而不是把同一句提醒反复喂进去换几次一样的输出。
+    corrected_textual_tool_call: bool = False
     # 每一次模型调用的指标。**不进进度事件**——``public_progress`` 同时是终端用户看的
     # 进度条，往里加事件就是给他每步多加一行噪音。它随收尾一起进 ``TurnRecord.trace``。
     model_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -709,6 +734,34 @@ class RunTurn:
             )
 
             if not reply.wants_tools:
+                # **正文里的工具调用标记不是答案。** 模型偶尔吐出
+                # ``<tool_call><function=…>``（Llama 3.x 格式，8100 的 Qwen 模板解析不了），
+                # 于是 llama.cpp 把它原样放进 ``content``。这是**这一轮没给出可用输出**，
+                # 不是一句话——直接交给用户就是在答案里印 XML。
+                #
+                # 纠正**只给一次**：第两次仍这样，说明模型压不住这个格式，按
+                # ``PARSE_FAILURE`` 收尾（与 1.0 的 ``parse_retries`` 用完后的口径一致），
+                # 让 ``_stop`` 用模型此前真正说过的话，而不是把同一段 XML 再问一遍。
+                if _TEXTUAL_TOOL_CALL.search(reply.content or ""):
+                    log.warning("模型把工具调用写进了正文，丢弃这一轮输出")
+                    if not session.corrected_textual_tool_call:
+                        session.corrected_textual_tool_call = True
+                        self._publish(
+                            session,
+                            state.emit(
+                                ProgressStage.RECOVERING,
+                                ProgressStatus.RUNNING,
+                                "正在纠正格式…",
+                                kind="guard",
+                                payload={"code": "textual_tool_call"},
+                            ),
+                        )
+                        messages.append(ChatMessage(ChatRole.ASSISTANT, reply.content))
+                        messages.append(ChatMessage(ChatRole.USER, TEXTUAL_TOOL_CALL_NUDGE))
+                        continue
+                    state.finish(TerminationReason.PARSE_FAILURE)
+                    return self._stop(session, TerminationReason.PARSE_FAILURE)
+
                 # 正文收尾仍然有效，只是它交不出图——交付是 ``final_answer`` 上的字段，
                 # 正文里根本没有那个字段。**不在这里逼模型改用终止动作**：原生协议的默认
                 # 收尾就是一条消息，每轮为它多烧一个模型步，等于把「独立交付动作」那一步
@@ -1337,7 +1390,9 @@ class RunTurn:
             log.warning("强制收尾的模型调用失败，落回确定性兜底", exc_info=True)
             return ""
         text = (reply.content or "").strip()
-        if not text:
+        # 这一问不带工具，模型本不该有理由写工具调用标记；真写了就当没答出来，
+        # 落回 ``_stop`` 里那版已经存下的答案或确定性兜底。
+        if not text or _TEXTUAL_TOOL_CALL.search(text):
             return ""
         self._publish(
             session,
