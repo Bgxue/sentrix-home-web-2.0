@@ -351,10 +351,23 @@ def participant_summary(event: EventRecord, participants: Sequence[EventParticip
     names = list(dict.fromkeys(item.person_name for item in participants if item.person_name))
     activity = event.activity or event.event_type or DEFAULT_ACTIVITY_WORD
     place = event.place
-    if names:
-        return f"{'、'.join(names)}在{place}参与{activity}"
     existing = event.summary.strip()
-    if existing and not existing.startswith(PLACEHOLDER_SUMMARY_PREFIX):
+    has_real_summary = bool(existing) and not existing.startswith(PLACEHOLDER_SUMMARY_PREFIX)
+    if names:
+        who = "、".join(names)
+        # **人名前缀 + 原摘要，而不是二选一。** 模型写的摘要里有时间、地点和活动细节，
+        # 直接覆盖会把它们丢掉；只保留原摘要则事件里永远看不到是谁。
+        if has_real_summary:
+            # **前缀只加一次。** 不能拿 `who` 做 startswith 判断——参与者的读取顺序
+            # 每次可能不同（「芳芳、我」vs「我、芳芳」），那样每次刷新都会再叠一层。
+            # 人名前缀的特征就是「开头一小段里出现全角冒号」，按它判即可。
+            # 摘要前 20 字里已经出现任一位参与者，就说明带过人名了（可能是
+            # 「我：我在…」也可能是「我在…参与…」），不再叠加。
+            if "：" in existing[:40] or any(name in existing[:20] for name in names):
+                return existing
+            return f"{who}：{existing}"
+        return f"{who}在{place}参与{activity}"
+    if has_real_summary:
         return existing
     return f"在{place}发生的{activity}"
 
