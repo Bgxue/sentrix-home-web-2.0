@@ -85,6 +85,8 @@ def _summarize_event(container: Container) -> SummarizeEvent:
         events=container.event_repository,
         observations=container.observation_repository,
         assets=container.asset_repository,
+        # 已确认的人物档案：摘要里能写出「王建国和张晓莉」，而不是「一名男子」。
+        participants=container.event_participant_repository,
         model=container.chat_model,
     )
 

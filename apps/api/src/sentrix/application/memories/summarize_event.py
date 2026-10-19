@@ -35,8 +35,8 @@ from sentrix.domain.assistant.models import ChatMessage, ChatRole, ModelReply
 from sentrix.domain.assistant.ports import ChatModel
 from sentrix.domain.media.models import Observation
 from sentrix.domain.media.ports import AssetRepository, ObservationRepository
-from sentrix.domain.memories.events import EventRecord
-from sentrix.domain.memories.ports import EventRepository
+from sentrix.domain.memories.events import EventParticipantRecord, EventRecord
+from sentrix.domain.memories.ports import EventParticipantRepository, EventRepository
 
 log = logging.getLogger("sentrix.memories.summarize_event")
 
@@ -56,12 +56,16 @@ NOISE_VALUES = frozenset({"待判断", "未识别", "未知"})
 OTHER_PLACE = "其他或不确定"
 
 _SUMMARY_PROMPT = """你是家庭事件总结器。下面是一组已经按拍摄时间和地点聚类的图片观察。
-只能使用给定观察，不得把元数据地点以外的信息当作事实，不得猜测未确认人物姓名；
+只能使用给定观察，不得把元数据地点以外的信息当作事实。
+**人物**：`participants` 里列出的是**已经确认身份**的人，可以直接使用他们的姓名
+（例如「王建国和张晓莉在正定古城合影」）；`participants` 之外的人**一律不得猜测姓名**，
+只能按画面描述（「一位穿黑色外套的女士」）。观察文本里的「一名男子」「一个孩子」
+不是身份，不要自行给它安名字。
 如果观察彼此不足以支持具体事件，使用保守、描述性的标题。
 地点必须使用观察中的语义地点（例如餐厅、家中厨房、湖边、商场），禁止输出 GPS 坐标、
 经纬度、文件名或路径。事件总结必须综合全部 observations，不能只依据其中一张图片。
 严格返回简体中文 JSON：title（不超过 20 字）、event_type、activity、
-summary（包含时间范围、语义地点和可验证活动）、confidence。\n事件："""
+summary（包含时间范围、语义地点、人物和可验证活动）、confidence。\n事件："""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +78,20 @@ class EventProjection:
     model: str
 
 
-def fallback_projection(event: EventRecord, observations: Sequence[Observation]) -> EventProjection:
+def fallback_projection(
+    event: EventRecord,
+    observations: Sequence[Observation],
+    participants: Sequence[EventParticipantRecord] = (),
+) -> EventProjection:
     """确定性事件摘要。逐行对应 1.0 ``pipeline.py:641-654`` 的 ``fallback_projection``。
 
     同一批观察永远给出同一个标题——这正是它进 ``make ci`` 的理由。
     """
     place = str(event.place or OTHER_PLACE).strip()
+    # **已确认参与者的姓名**。没有它，摘要只能说「一名男子在…」——而这些人是谁
+    # 系统其实已经知道（`event_participants` 由身份确认动作写入）。
+    names = list(dict.fromkeys(item.person_name for item in participants if item.person_name))
+    who = "、".join(names[:3])
     activities: list[str] = []
     captions: list[str] = []
     event_types: list[str] = []
@@ -94,8 +106,13 @@ def fallback_projection(event: EventRecord, observations: Sequence[Observation])
                 target.append(text)
     activity = "、".join(activities[:3]) or "图片记录"
     event_type = event_types[0] if event_types else "家庭活动"
-    title = f"{place}{activity}" if place != OTHER_PLACE else activity
-    summary = f"{place}记录了" + "；".join(captions[:4] or activities[:4])
+    title = (
+        f"{who}{place}{activity}"
+        if who and place != OTHER_PLACE
+        else (f"{who}{activity}" if who else (f"{place}{activity}" if place != OTHER_PLACE else activity))
+    )
+    body = "；".join(captions[:4] or activities[:4])
+    summary = f"{who}在{place}，记录了{body}" if who else f"{place}记录了{body}"
     return EventProjection(
         title=title[:20],
         event_type=event_type[:20],
@@ -165,8 +182,17 @@ def build_system_prompt() -> str:
     return _SUMMARY_PROMPT
 
 
-def build_evidence(event: EventRecord, observations: Sequence[Observation]) -> str:
-    """user 消息：这次要总结的事件的可验证证据（JSON，不含任何提示词）。"""
+def build_evidence(
+    event: EventRecord,
+    observations: Sequence[Observation],
+    participants: Sequence[EventParticipantRecord] = (),
+) -> str:
+    """user 消息：这次要总结的事件的可验证证据（JSON，不含任何提示词）。
+
+    ``participants`` 是**已确认身份**的人（``event_participants`` 由身份确认动作写入）。
+    把它们显式列进证据，模型才可能写出「王建国和张晓莉在正定古城合影」；不列的话，
+    它只能退化成「一名男子与一名女子」——系统明明知道是谁。
+    """
     evidence = [
         {
             "observation_id": item.id,
@@ -184,6 +210,9 @@ def build_evidence(event: EventRecord, observations: Sequence[Observation]) -> s
             "time_start": event.time_start.isoformat() if event.time_start else None,
             "time_end": event.time_end.isoformat() if event.time_end else None,
             "place": event.place,
+            "participants": [
+                {"name": item.person_name, "role": item.role} for item in participants if item.person_name
+            ],
             "observations": evidence,
         },
         ensure_ascii=False,
@@ -197,11 +226,15 @@ class SummarizeEvent:
         events: EventRepository,
         observations: ObservationRepository,
         assets: AssetRepository,
+        participants: EventParticipantRepository | None = None,
         model: ChatModel | None = None,
     ) -> None:
         self._events = events
         self._observations = observations
         self._assets = assets
+        # 可空是为了让只读的测试与旧装配不被迫造一个参与者仓储；没有它时摘要退回
+        # 「一名男子」那种描述，与这次改动之前的行为一致。
+        self._participants = participants
         self._model = model
 
     def execute(self, event_id: str) -> EventRecord:
@@ -225,7 +258,10 @@ class SummarizeEvent:
         if not observations or self._model is None:
             return event
 
-        projection = self._from_model(event, observations) or fallback_projection(event, observations)
+        people = self._participants.list_participants(event_id) if self._participants is not None else ()
+        projection = self._from_model(event, observations, people) or fallback_projection(
+            event, observations, people
+        )
         return self._events.apply_summary(
             event_id,
             title=projection.title,
@@ -234,7 +270,12 @@ class SummarizeEvent:
             summary=projection.summary,
         )
 
-    def _from_model(self, event: EventRecord, observations: Sequence[Observation]) -> EventProjection | None:
+    def _from_model(
+        self,
+        event: EventRecord,
+        observations: Sequence[Observation],
+        participants: Sequence[EventParticipantRecord] = (),
+    ) -> EventProjection | None:
         model = self._model
         if model is None:
             return None
@@ -242,7 +283,10 @@ class SummarizeEvent:
             reply: ModelReply = model.complete(
                 (
                     ChatMessage(role=ChatRole.SYSTEM, content=build_system_prompt()),
-                    ChatMessage(role=ChatRole.USER, content=build_evidence(event, observations)),
+                    ChatMessage(
+                        role=ChatRole.USER,
+                        content=build_evidence(event, observations, participants),
+                    ),
                 ),
                 (),
             )

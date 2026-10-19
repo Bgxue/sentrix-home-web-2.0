@@ -47,7 +47,7 @@ from sentrix.domain.identity.family import (
     FamilyEvidenceRow,
 )
 from sentrix.domain.identity.family_graph import validate_relationship_pair
-from sentrix.domain.identity.ports import FamilyGraphRepository
+from sentrix.domain.identity.ports import EntityRepository, FamilyGraphRepository
 from sentrix.domain.memories.ports import EventRepository
 
 log = logging.getLogger(__name__)
@@ -77,6 +77,10 @@ RUNNING = "running"
 COMPLETED = "completed"
 FAILED = "failed"
 INPUT_MODE = "semantic_text_only"
+
+#: 关系边的来源：由已确认人物的 `family_role` 确定性补出来的。**不是模型推断**，
+#: 所以图谱页可以把它和 `source=model` 的边分开显示。
+SOURCE_ROLE_SEED = "role_seed"
 
 # 1.0 ``:132-145`` 的关系证据词表，**只覆盖 13 个 predicate**。表外的谓词退化成
 # 「字面匹配谓词自己」——所以祖父母、叔伯姑舅姨、侄甥那几类**没有同义词**，
@@ -144,10 +148,16 @@ class FamilyGraphService:
         *,
         family: FamilyGraphRepository,
         events: EventRepository,
+        entities: EntityRepository | None = None,
         model: ChatModel | None = None,
     ) -> None:
         self._family = family
         self._events = events
+        # **角色播种**：已确认人物的 `family_role` 是身份确认时写入的 ground truth
+        # （「父亲」「母亲」「妻子」…），不是模型猜的。模型那条推断被证据闸挡住了
+        # ——VLM 描述里只会写「一名男子」，不会写「父亲」——于是关系图谱一条边都没有。
+        # 这里以「自己」为中心，把已知角色补成确定性的边。可空是为了不强制测试造实体仓储。
+        self._entities = entities
         self._model = model
 
     def run(self, run_id: str, scope_id: str) -> FamilyAnalysisRunRecord | None:
@@ -169,6 +179,9 @@ class FamilyGraphService:
             output = self._infer(evidence)
             self._family.update_run(run_id, status=RUNNING, stage="write_graph")
             counts = self._persist(scope_id, run_id, evidence, output)
+            # **已知角色补边**：模型那条推断被证据闸挡住时（VLM 只会写「一名男子」），
+            # 关系图谱不会一条边都没有——已确认角色的可靠程度高于模型推断。
+            counts["relationships"] += self._seed_relationships_from_roles(scope_id, run_id)
             self._family.update_run(run_id, status=RUNNING, stage="write_portraits")
             counts["portraits"] = self._write_portraits(scope_id, run_id, evidence)
             counts["event_watermark"] = self._event_count(scope_id)
@@ -252,6 +265,73 @@ class FamilyGraphService:
         ]
         cooccurrences.sort(key=lambda item: (-item.count, item.person_a, item.person_b))
         return FamilyTextEvidence(scope_id=scope_id, people=tuple(values), cooccurrences=tuple(cooccurrences))
+
+    # ---- 阶段 1.5：用已知角色补关系边 -----------------------------------------
+
+    def _seed_relationships_from_roles(self, scope_id: str, run_id: str) -> int:
+        """把已确认人物的 `family_role` 补成以「自己」为中心的关系边。
+
+        **这不是猜。** `family_role` 是身份确认时写进 `entities` 的（「父亲」「母亲」
+        「妻子」「侄子」），来源是用户在待确认簇里填的表单，比 VLM 描述可靠得多。
+
+        为什么需要它：模型那条推断要过 `has_explicit_relation_evidence` 闸——证据是
+        观察描述，而 VLM 只会写「一名男子」「一位女士」，永远不会写「父亲」。结果是
+        `family_relationships` 恒为 0，图谱只有孤立的点。
+
+        只映射**语义明确**的四种角色；「大宝」「小宝」这种乳名不猜性别、不建边。
+        """
+        entities = self._entities
+        if entities is None:
+            return 0
+        people = [
+            item
+            for item in entities.list_entities(status="confirmed", scope_id=scope_id)
+            if item.entity_type == "person"
+        ]
+        center = next((item for item in people if (item.family_role or "") == "自己"), None)
+        if center is None:
+            return 0
+        # role 是「这个人相对中心是什么」。反向谓词取表里第一个合法的。
+        mapping = {
+            "父亲": ("父亲", "儿子"),
+            "母亲": ("母亲", "儿子"),
+            "妻子": ("妻子", "丈夫"),
+            "丈夫": ("丈夫", "妻子"),
+            "侄子": ("侄子", "叔叔"),
+        }
+        created = 0
+        for person in people:
+            role = (person.family_role or "").strip()
+            if person.id == center.id or role not in mapping:
+                continue
+            predicate, inverse = mapping[role]
+            try:
+                validate_relationship_pair(predicate, inverse)
+            except ValueError:
+                continue
+            self._family.set_relationship(
+                scope_id,
+                person.id,
+                predicate,
+                center.id,
+                inverse,
+                source=SOURCE_ROLE_SEED,
+                confidence=0.9,
+                evidence_refs=(),
+                inference_run_id=run_id,
+            )
+            for related in (person.id, center.id):
+                self._family.set_membership(
+                    scope_id,
+                    related,
+                    "family",
+                    source=SOURCE_ROLE_SEED,
+                    confidence=0.9,
+                    evidence_refs=(),
+                    inference_run_id=run_id,
+                )
+            created += 1
+        return created
 
     # ---- 阶段 2：问模型 --------------------------------------------------------
 
