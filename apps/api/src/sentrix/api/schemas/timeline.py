@@ -84,6 +84,9 @@ class ImportBatchResponse(BaseModel):
     # 批末被总结过的事件数（去重后）。不为 0 是「事件拿到了真标题」的可观测面——
     # 这个数小于 ``events`` 说明有事件被折叠进了已总结过的那个（1.0 亦然）。
     summarized: int
+    #: 分项耗时（秒）：stage 落库/读文件、prepare VLM 观察、finish 归属写入、
+    #: summarize 事件总结、total 合计。2.0 的导入是同步的，不拆的话整段都记在导入上。
+    timings: dict[str, float] = {}
     failures: list[ImportFailure]
     # 批末自动跑的那一趟画像。**没有新照片时是 None**（判据在路由里，理由写在那儿）。
     # 用 ``None`` 而不是全 0 的计数对象：那两件事不一样——「没跑」与「跑了但一个人都

@@ -164,6 +164,7 @@ def import_album(
         events=result.events,
         lexical_terms=result.lexical_terms,
         summarized=result.summarized,
+        timings=dict(result.timings),
         failures=[ImportFailure(file_name=item.file_name, reason=item.reason) for item in result.failures],
         insights=insights,
         family_graph=family_graph,

@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -97,6 +98,11 @@ class AlbumImportResult:
     lexical_terms: int = 0
     summarized: int = 0
     failures: tuple[AlbumFailure, ...] = field(default_factory=tuple)
+    #: **分项耗时**（秒）。2.0 的导入是同步的——VLM 观察、事件归属都在
+    #: `POST /imports` 这一个请求里跑完，所以不拆的话 64 分钟全记在「导入」上，
+    #: 读起来像「复制文件花了 64 分钟」。键：`stage`（落库+读文件）、
+    #: `prepare`（VLM 观察，并行）、`finish`（归属+写入）、`summarize`（事件总结）。
+    timings: dict[str, float] = field(default_factory=dict)
 
     @property
     def scanned(self) -> int:
@@ -127,6 +133,11 @@ class ImportAlbum:
         )[: max(1, int(request.limit))]
 
         imported = deduplicated = events = lexical_terms = 0
+        # 分项计时：同步导入里这些阶段是**交织**的（prepare 在池里跑、finish 按序收），
+        # 所以 prepare 取「总墙钟 − 其余三项」，保证四项相加就是这次导入的真实耗时。
+        t_start = time.perf_counter()
+        stage_seconds = 0.0
+        finish_seconds = 0.0
         event_ids: list[str] = []
         # 按**下标**归集失败，最后按序输出——原先逐张跑时它们天然是路径序，
         # 现在 stage 与 finish 两处都可能失败，混着 append 会把顺序打乱。
@@ -144,6 +155,7 @@ class ImportAlbum:
                 while next_submit < len(paths) and next_submit - next_finish < self._workers:
                     index = next_submit
                     next_submit += 1
+                    stage_started = time.perf_counter()
                     try:
                         outcome = self._importer.stage(self._request_for(request, paths[index]))
                     except Exception as error:  # 一张失败不中断整批——整册导入是几小时的事
@@ -152,6 +164,7 @@ class ImportAlbum:
                             file_name=paths[index].name, reason=f"{type(error).__name__}: {error}"
                         )
                         continue
+                    stage_seconds += time.perf_counter() - stage_started
                     staged[index] = outcome
                     if isinstance(outcome, StagedImport):
                         pending[index] = pool.submit(self._importer.prepare_image, outcome.asset)
@@ -166,6 +179,7 @@ class ImportAlbum:
                 if ready is None:
                     continue
                 future = pending.pop(index, None)
+                finish_started = time.perf_counter()
                 try:
                     if future is None:
                         assert isinstance(ready, ImportResult)
@@ -178,6 +192,7 @@ class ImportAlbum:
                         file_name=paths[index].name, reason=f"{type(error).__name__}: {error}"
                     )
                     continue
+                finish_seconds += time.perf_counter() - finish_started
                 if result.deduplicated:
                     deduplicated += 1
                 else:
@@ -188,14 +203,29 @@ class ImportAlbum:
                         event_ids.append(result.event_id)
                 lexical_terms += result.lexical_terms
 
+        # 事件总结在批末，单独计时——它是一次模型调用/事件，跟导入/观察不是一回事。
+        summarize_started = time.perf_counter()
+        summarize_count = self._summarize_events(event_ids)
+        summarize_seconds = time.perf_counter() - summarize_started
+        total_seconds = time.perf_counter() - t_start
+        timings = {
+            "stage": round(stage_seconds, 2),
+            "finish": round(finish_seconds, 2),
+            "summarize": round(summarize_seconds, 2),
+            # 剩余 = VLM 观察（在池里并行跑，按墙钟算才有意义）
+            "prepare": round(max(0.0, total_seconds - stage_seconds - finish_seconds - summarize_seconds), 2),
+            "total": round(total_seconds, 2),
+        }
+
         return AlbumImportResult(
+            timings=timings,
             scope_id=request.scope_id,
             directory=str(root),
             imported=imported,
             deduplicated=deduplicated,
             events=events,
             lexical_terms=lexical_terms,
-            summarized=self._summarize_events(event_ids),
+            summarized=summarize_count,
             failures=tuple(failures[index] for index in sorted(failures)),
         )
 

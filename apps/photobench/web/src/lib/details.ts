@@ -214,7 +214,17 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     return `预置 ${p.seeded_count ?? 0} 人${relationshipText} · ${fmtSeconds(phaseSeconds(phase, "upload_seconds"))}`;
   }
   if (key === "photo_import") {
-    return `导入 ${p.accepted_count ?? 0}/${p.total_media ?? p.total_photos ?? "?"} 个媒体 · 失败 ${p.failed_count ?? 0} · ${fmtSeconds(phaseSeconds(phase, "upload_seconds"))}`;
+    // **导入墙钟 ≠ 处理时间。** 2.0 的导入是同步的，VLM 观察与事件归属都在这个请求里，
+    // 不拆的话 64 分钟全叫「导入」，读起来像复制文件花了 64 分钟。
+    const timings = dict(p.timings);
+    const parts: string[] = [];
+    if (timings.prepare != null) parts.push(`观察 ${fmtSeconds(timings.prepare)}`);
+    if (timings.finish != null) parts.push(`归属 ${fmtSeconds(timings.finish)}`);
+    if (timings.summarize != null) parts.push(`总结 ${fmtSeconds(timings.summarize)}`);
+    if (timings.stage != null) parts.push(`落库 ${fmtSeconds(timings.stage)}`);
+    const breakdown = parts.length ? ` · ${parts.join(" · ")}` : "";
+    const total = timings.total != null ? fmtSeconds(timings.total) : fmtSeconds(phaseSeconds(phase, "upload_seconds"));
+    return `导入 ${p.accepted_count ?? 0}/${p.total_media ?? p.total_photos ?? "?"} 个媒体 · 失败 ${p.failed_count ?? 0} · 总计 ${total}${breakdown}`;
   }
   if (key === "pipeline_processing" && p.progress) {
     const progress = dict(p.progress);

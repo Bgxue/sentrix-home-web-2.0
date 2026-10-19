@@ -952,6 +952,7 @@ class RunExecution:
         events = 0
         summarized = 0
         failures: list[dict[str, Any]] = []
+        timings_total: dict[str, float] = {}
         per_directory: list[dict[str, Any]] = []
         for relative in directories:
             # 逐个目录检查取消（1.0 ``:2843``）：一个 7200 秒超时的导入正在跑时，
@@ -966,6 +967,10 @@ class RunExecution:
                 limit=limit,
                 timeout=request.import_timeout,
             )
+            # 同步导入把「落库 + VLM 观察 + 归属 + 总结」都装在一个请求里；
+            # 分项耗时由后端回传，这里累加后单独记进相位，别让 64 分钟全叫「导入」。
+            for key, value in (result.get("timings") or {}).items():
+                timings_total[key] = timings_total.get(key, 0.0) + float(value or 0)
             accepted += int(result.get("imported") or 0)
             deduplicated += int(result.get("deduplicated") or 0)
             events += int(result.get("events") or 0)
@@ -990,6 +995,7 @@ class RunExecution:
                     "events": result.get("events"),
                     "lexical_terms": result.get("lexical_terms"),
                     "summarized": result.get("summarized"),
+                    "timings": result.get("timings"),
                 }
             )
             state.record_phase("photo_import", "accepted_count", accepted)
@@ -1003,6 +1009,12 @@ class RunExecution:
         state.set("import_accepted_count", accepted)
         phase_result = {
             "total_seconds": round(time.perf_counter() - started, 1),
+            # **处理时间单独列出来**。`photo_import` 的 total 是整册墙钟，读起来像
+            # 「复制文件花了 64 分钟」；实际大头是 VLM 观察（prepare）与事件归属（finish）。
+            "pipeline_seconds": round(
+                timings_total.get("prepare", 0.0) + timings_total.get("finish", 0.0), 1
+            ),
+            "timings": {key: round(value, 1) for key, value in timings_total.items()},
             "total_photos": len(manifest.get("photos") or []),
             "total_videos": len(manifest.get("videos") or []),
             "total_media": total_media,
