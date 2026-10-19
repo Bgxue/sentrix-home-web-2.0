@@ -9,25 +9,42 @@
 img { image-orientation: from-image; }
 
 :root {
-  /* 基调与面 */
-  --ink: #151613;
-  --muted: #73776e;
-  --faint: #9da39a;
-  --line: #e4e8df;
+  /* 基调与面。**现代 SaaS 的灰阶**（slate 一系）：中性、不带黄绿偏色，
+   * 这样照片本身的颜色才是页面上唯一的彩色来源。
+   * 旧值（#151613 / #73776e / #e4e8df）是 1.0 的暖绿灰，照片与卡片会互相打架。 */
+  --ink: #0f172a;
+  --muted: #64748b;
+  --faint: #94a3b8;
+  --line: #e2e8f0;
   --surface: #ffffff;
-  --soft: #f5f7f1;
+  --soft: #f8fafc;
 
-  /* 强调色 */
-  --lime: #b3ff38;
-  --green: #20824f;
+  /* 强调色。**只保留一个主色**（绿），并把它拆成「底色」与「文字色」两个角色：
+   * --lime 现在只做高亮背景，--green 只做文字/描边——混用会让同一屏出现两种绿。 */
+  --lime: #dcfce7;
+  --green: #16a34a;
+  --green-strong: #15803d;
 
-  /* 头像与卡片底色 */
-  --mint: #dcece1;
-  --peach: #f4dfce;
-  --blue: #dce6f2;
-  --lavender: #e5e1f0;
+  /* 头像与卡片底色，压到低饱和，避免抢照片的注意力 */
+  --mint: #ecfdf5;
+  --peach: #fef3e2;
+  --blue: #eff6ff;
+  --lavender: #f5f3ff;
 
-  --shadow: 0 18px 50px rgba(21, 22, 19, .07);
+  /* 阴影：SaaS 的层次靠边框，阴影只做「浮起来」的那一点点 */
+  --shadow: 0 1px 2px rgba(15, 23, 42, .05), 0 8px 24px rgba(15, 23, 42, .06);
+  --shadow-pop: 0 4px 12px rgba(15, 23, 42, .08), 0 16px 40px rgba(15, 23, 42, .10);
+
+  /* 圆角与间距：全站统一，避免每个组件各写一套 */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
 
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--ink);

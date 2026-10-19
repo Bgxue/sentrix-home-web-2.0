@@ -5,7 +5,9 @@
 
 .app-shell { min-height: 100vh; display: flex; background: var(--surface); }
 
-.sidebar { width: 240px; height: 100vh; position: sticky; top: 0; align-self: flex-start; background: var(--ink); color: #fff; padding: 24px 14px 18px; display: flex; flex-direction: column; flex: 0 0 240px; overflow-y: auto; }
+/* 216px（1.0 是 240）：SaaS 风格里导航只需要放下图标 + 两三个字，
+ * 省下的 24px 直接给内容区。 */
+.sidebar { width: 216px; height: 100vh; position: sticky; top: 0; align-self: flex-start; background: var(--ink); color: #fff; padding: 22px 12px 18px; display: flex; flex-direction: column; flex: 0 0 216px; overflow-y: auto; }
 .brand-lockup { display: flex; align-items: center; gap: 10px; padding: 0 10px 26px; }
 .brand-lockup strong { display: block; font-size: 17px; letter-spacing: -.02em; }
 .brand-lockup small { display: block; color: #8e958a; font-size: 10px; margin-top: 3px; }
@@ -29,8 +31,10 @@
 .local-pulse { display: flex; align-items: center; gap: 7px; color: #c8cec2; margin-bottom: 8px; }
 .local-pulse i, .live-label i, .online-pill i{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--lime); box-shadow: 0 0 0 3px rgba(179,255,56,.1); }
 
-.main-content { min-width: 0; flex: 1; }
-.topbar { height: 72px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 34px; position: sticky; top: 0; z-index: 4; background: rgba(255,255,255,.94); backdrop-filter: blur(12px); }
+/* `min-width: 0` 是 flex 子项能收缩的前提；缺了它，宽表格/长英文串会把内容区
+ * 顶出视口，整页出现横向滚动条。 */
+.main-content { min-width: 0; flex: 1; overflow-x: clip; }
+.topbar { height: 64px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 28px; position: sticky; top: 0; z-index: 4; background: rgba(255,255,255,.92); backdrop-filter: blur(12px); }
 .breadcrumbs { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
 .breadcrumbs b { color: var(--line); }
 .breadcrumbs strong { color: var(--ink); }
@@ -52,7 +56,15 @@
 .avatar.blue, .person-avatar.blue { background: var(--blue); }
 .avatar.mint, .person-avatar.mint { background: var(--mint); }
 
-.view-root { padding: 34px 38px 80px; max-width: 1500px; margin: 0 auto; }
+.view-root { padding: 32px 32px 72px; max-width: 1600px; margin: 0 auto; min-width: 0; }
+
+/* **全局防溢出。** 用户报过「文字重叠、需要横向拉动」：根因是长文件名、长英文串和
+ * 宽表格没有换行约束。这一组是最后一道网——组件自己还是该按内容决定怎么排。 */
+.view-root :where(p, span, small, strong, b, em, td, th, li, dd, dt, code, a) {
+  overflow-wrap: anywhere;
+}
+.view-root :where(pre, table) { max-width: 100%; overflow-x: auto; }
+.view-root :where(img, video, canvas) { max-width: 100%; height: auto; }
 
 /* ── 响应式 ───────────────────────────────────────────────────────────────
    1.0 有 1100 / 780 / 500 三档（`src/styles.css:157-159`），2.0 此前**一条都没有**：

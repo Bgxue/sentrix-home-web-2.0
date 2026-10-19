@@ -237,21 +237,34 @@ function PhaseEvent({ event }: { event: AssistantProgressEvent }) {
   );
 }
 
+/**
+ * 一张卡 = 一条 1.0 的 `timeline-card`：**垂直时间轴上的一个节点**，不是折叠分组。
+ *
+ * 1.0 `app.js:399-421` 的形状是 `<article class="timeline-card {running|blocked|complete}">`
+ * + `<span class="timeline-dot">` + 标题/正文/artifact，**始终展开**——用户扫一眼就知道
+ * 助手刚才做了什么，不需要再点一次。2.0 之前做成 `<details>` 折叠分组，形态与 1.0 不同，
+ * 而且默认收起时整条推理链是「空白」的。
+ *
+ * 状态着色沿用 1.0 的三态：running（进行中）/ blocked（被拦、报错、取消）/ complete。
+ */
+const BLOCKED_STATUSES = new Set(["blocked", "denied", "error", "cancelled", "partial"]);
+
 function PhaseCard({ card }: { card: TimelineCard }) {
   const last = card.events[card.events.length - 1];
-  const status = card.events.some((event) => event.status === "running") ? "running" : last.status;
+  const running = card.events.some((event) => event.status === "running");
+  const blocked = card.events.some((event) => BLOCKED_STATUSES.has(event.status));
+  const state = running ? "running" : blocked ? "blocked" : "complete";
   return (
-    <details className={`phase-card phase-${status}`}>
-      <summary>
+    <article className={`timeline-card ${state}`}>
+      <span className="timeline-dot" aria-hidden="true" />
+      <div>
         <strong>{CARD_LABELS[card.kind]}</strong>
-        <span>{last.text}</span>
-      </summary>
-      <div className="phase-body">
+        {last.text ? <p>{last.text}</p> : null}
         {card.events.map((event) => (
           <PhaseEvent key={event.step_index} event={event} />
         ))}
       </div>
-    </details>
+    </article>
   );
 }
 
@@ -321,9 +334,13 @@ export function TurnTimeline({
           {loadError !== null ? (
             <p className="error">读取回合记录失败：{loadError}</p>
           ) : null}
-          {cards.map((card) => (
-            <PhaseCard key={card.key} card={card} />
-          ))}
+          {/* `.timeline-list` 才是那条竖线的容器（1.0 `:628` 的 `::before`）；
+              卡片自己只负责圆点与底色。 */}
+          <div className="timeline-list">
+            {cards.map((card) => (
+              <PhaseCard key={card.key} card={card} />
+            ))}
+          </div>
           {!loading && loadError === null && cards.length === 0 ? (
             <p className="turn-timeline-note">没有可展示的过程记录。</p>
           ) : null}

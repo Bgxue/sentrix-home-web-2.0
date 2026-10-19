@@ -172,3 +172,49 @@
 .result-set-next:hover:not(:disabled) { background: var(--soft); color: var(--ink); }
 .result-set-next:disabled { opacity: 0.5; cursor: not-allowed; }
 .result-set-more { border: 0; background: transparent; padding: 0; }
+
+/* ---- 推理时间线（1.0 `src/app.js:399-421` 的垂直时间轴） ------------------
+   1.0 的形状：左侧一条竖线 + 每个节点一个圆点，卡片按三态着色、**始终展开**。
+   2.0 之前把它做成了折叠分组，用户扫一眼看不出助手做了什么。 */
+
+.turn-timeline { margin-top: 12px; }
+.turn-timeline-toggle {
+  border: 0; background: transparent; padding: 4px 0;
+  color: var(--green); font-weight: 700; font-size: 11px;
+}
+.turn-timeline-body { margin-top: 10px; }
+
+.timeline-list { position: relative; display: grid; gap: 10px; padding-left: 20px; }
+.timeline-list::before {
+  content: ""; position: absolute; left: 5px; top: 12px; bottom: 12px;
+  width: 1px; background: var(--line);
+}
+.timeline-card {
+  position: relative; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface);
+  animation: timeline-arrive .24s ease-out both;
+}
+.timeline-dot {
+  position: absolute; left: -20px; top: 17px;
+  width: 9px; height: 9px; border: 2px solid var(--surface); border-radius: 50%;
+  background: var(--faint); box-shadow: 0 0 0 1px var(--line);
+}
+.timeline-card strong { display: block; font-size: 11px; color: var(--ink); }
+.timeline-card > div > p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.65; }
+
+/* 三态与 1.0 一致：进行中偏黄、被拦偏橙、完成中性。 */
+.timeline-card.running { background: #fffbeb; border-color: #fde68a; }
+.timeline-card.running .timeline-dot { background: #d97706; animation: timeline-breathe 1.6s ease-in-out infinite; }
+.timeline-card.blocked { background: #fff7ed; border-color: #fed7aa; }
+.timeline-card.blocked .timeline-dot { background: #ea580c; }
+.timeline-card.complete .timeline-dot { background: var(--green); }
+
+@keyframes timeline-arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes timeline-breathe {
+  0%, 100% { box-shadow: 0 0 0 1px var(--line), 0 0 0 0 rgba(217, 119, 6, .18); }
+  50% { box-shadow: 0 0 0 1px var(--line), 0 0 0 6px rgba(217, 119, 6, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .timeline-card, .timeline-card.running .timeline-dot { animation: none; }
+}
