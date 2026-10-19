@@ -218,3 +218,9 @@
 @media (prefers-reduced-motion: reduce) {
   .timeline-card, .timeline-card.running .timeline-dot { animation: none; }
 }
+
+/* 结果集缩略图：点开是放大（Lightbox），不是新标签打开原图。 */
+.result-set-open {
+  display: block; padding: 0; border: 0; background: transparent;
+  cursor: zoom-in; line-height: 0; border-radius: var(--radius-sm);
+}

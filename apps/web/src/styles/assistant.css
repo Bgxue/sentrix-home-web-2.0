@@ -8,3 +8,9 @@
 .rail-item strong { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-item small { color: var(--muted); font-size: 9px; }
 .rail-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 10px 0; }
+
+/* 交付照片：点开是放大（Lightbox），不是新标签打开原文件。 */
+.assistant-photo-open {
+  display: block; padding: 0; border: 0; background: transparent;
+  cursor: zoom-in; line-height: 0; border-radius: var(--radius-sm);
+}

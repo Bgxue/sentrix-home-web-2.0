@@ -1,7 +1,10 @@
+import { useState } from "react";
+
 import {
   resultSetPhotoUrl,
   type AssistantProgressEvent,
 } from "../../shared/api/client";
+import { Lightbox } from "../../shared/ui/Lightbox";
 
 /**
  * 助手这一轮检索到的结果集缩略图墙。
@@ -91,6 +94,8 @@ export interface ResultSetWallProps {
 }
 
 export function ResultSetWall({ events, scopeId, onNextPage, busy = false }: ResultSetWallProps) {
+  // Hook 必须在任何提前 return 之前——`view === null` 时也要按同样的顺序调用。
+  const [lightbox, setLightbox] = useState<{ src: string; caption: string } | null>(null);
   const view = resultSetFromEvents(events);
   if (view === null || view.handles.length === 0) return null;
 
@@ -105,18 +110,25 @@ export function ResultSetWall({ events, scopeId, onNextPage, busy = false }: Res
       <ul className="result-set-thumbs">
         {view.handles.map((handle) => (
           <li key={handle}>
-            <a
-              href={resultSetPhotoUrl(view.resultSetId, handle, scopeId, true)}
-              target="_blank"
-              rel="noreferrer"
-              title={`${handle} · 查看原图`}
+            {/* **点缩略图是放大**，不是新标签打开原图。原图仍然在
+                `resultSetPhotoUrl(..., true)` 里——那是 Lightbox 要显示的源。 */}
+            <button
+              type="button"
+              className="result-set-open"
+              title={`${handle} · 查看大图`}
+              onClick={() =>
+                setLightbox({
+                  src: resultSetPhotoUrl(view.resultSetId, handle, scopeId, true),
+                  caption: handle,
+                })
+              }
             >
               <img
                 src={resultSetPhotoUrl(view.resultSetId, handle, scopeId)}
                 alt={handle}
                 loading="lazy"
               />
-            </a>
+            </button>
           </li>
         ))}
       </ul>
@@ -136,6 +148,13 @@ export function ResultSetWall({ events, scopeId, onNextPage, busy = false }: Res
           </p>
         )
       ) : null}
+      {lightbox === null ? null : (
+        <Lightbox
+          src={lightbox.src}
+          caption={lightbox.caption}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </section>
   );
 }

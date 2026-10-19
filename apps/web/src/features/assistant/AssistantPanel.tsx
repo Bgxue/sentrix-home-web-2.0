@@ -7,6 +7,7 @@ import {
   type AssistantProgressEvent,
   type ConversationDetail,
 } from "../../shared/api/client";
+import { Lightbox } from "../../shared/ui/Lightbox";
 import { ResultSetWall } from "./ResultSetWall";
 import { TurnTimeline, isTerminalStatus } from "./TurnTimeline";
 import { useTurnStream } from "./useTurnStream";
@@ -117,6 +118,8 @@ export function AssistantPanel({
   const settled = useRef<string | null>(null);
   /** 当前这一轮是哪个会话的哪条 exchange——切换会话后到达的结果不该串台。 */
   const [live, setLive] = useState<{ conversationId: string; key: string } | null>(null);
+  // 交付照片点开是全屏看图，不是新标签打开原文件。
+  const [lightbox, setLightbox] = useState<{ src: string; caption: string } | null>(null);
   const progressRef = useRef<AssistantProgressEvent[]>([]);
   const historyToken = useRef(0);
   const sequence = useRef(0);
@@ -287,17 +290,24 @@ export function AssistantPanel({
                 <ul className="assistant-photos">
                   {exchange.attachments.map((photo) => (
                     <li key={photo.handle}>
-                      <a
-                        href={deliveredPhotoUrl(photo.asset_id, photo.file_name)}
-                        target="_blank"
-                        rel="noreferrer"
+                      {/* **点图片是放大**，不是新标签打开原文件——后者遇到 HEIC
+                          或不认识的 MIME 会被浏览器直接下载。 */}
+                      <button
+                        type="button"
+                        className="assistant-photo-open"
+                        onClick={() =>
+                          setLightbox({
+                            src: deliveredPhotoUrl(photo.asset_id, photo.file_name),
+                            caption: photo.file_name,
+                          })
+                        }
                       >
                         <img
                           src={deliveredPhotoUrl(photo.asset_id, photo.file_name)}
                           alt={photo.file_name}
                           loading="lazy"
                         />
-                      </a>
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -325,6 +335,13 @@ export function AssistantPanel({
           );
         })}
       </div>
+      {lightbox === null ? null : (
+        <Lightbox
+          src={lightbox.src}
+          caption={lightbox.caption}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </section>
   );
 }
