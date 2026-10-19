@@ -14,6 +14,7 @@ import { EmptyState } from "../../shared/ui/EmptyState";
 import { PageHeader } from "../../shared/ui/PageHeader";
 import { listAssets, type AssetSummary } from "../../shared/api/client";
 import { AssetGrid } from "./AssetGrid";
+import { countByScope } from "./scopeCounts";
 import "../../styles/library.css";
 
 type MediaFilter = "all" | "image" | "audio" | "text" | "video";
@@ -62,6 +63,11 @@ export function LibraryPage() {
     type === "all" ? assets.length : assets.filter((a) => a.media_type === type).length;
   const scopeName = spaces.find((space) => space.id === scopeId)?.name ?? "全部相册";
 
+  // 后端目前不给 `AssetSummary.scope_id`，所以这里通常是空对象；只有它真的返回时
+  // 才显示按相册的汇总。**字段缺失不等于「0 个相册」**，两者要分开呈现。
+  const scopeCounts = useMemo(() => countByScope(assets), [assets]);
+  const scopedEntries = Object.entries(scopeCounts);
+
   return (
     <>
       <PageHeader
@@ -73,6 +79,17 @@ export function LibraryPage() {
       <div className="album-summary-row">
         <strong>相册内容</strong>
         <span className="album-badge">{scopeName}</span>
+        {scopedEntries.length > 0 ? (
+          scopedEntries.map(([id, count]) => (
+            <span key={id}>
+              {spaces.find((space) => space.id === id)?.name ?? id} · {count}
+            </span>
+          ))
+        ) : (
+          <span className="scope-count-note">
+            按相册汇总需要 <code>/assets</code> 返回 <code>scope_id</code>（当前未返回）
+          </span>
+        )}
       </div>
 
       <div className="library-summary">

@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  batchConfirmPeople,
   confirmFaceCluster,
   listFaceClusters,
   listPeople,
   mergeFaceClusters,
+  putFamilyRelationship,
   rejectFaceCluster,
   renamePerson,
   splitFaceCluster,
+  type BatchConfirmItem,
   type FaceClusterSummary,
   type PersonPayload,
 } from "../../shared/api/client";
+import { BatchConfirmPanel, type BatchRelationDraft } from "./BatchConfirmPanel";
 import { FaceClusterList } from "./FaceClusterList";
+import type { ClusterRelationInput } from "./FaceClusterCard";
 import { PersonList } from "./PersonList";
 import { describeReviewError } from "./reviewErrors";
 
@@ -45,6 +50,8 @@ export function PeopleView({ scopeId }: { scopeId: string }) {
   const [people, setPeople] = useState<PersonPayload[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [targetChoice, setTargetChoice] = useState<string | null>(null);
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelected, setBatchSelected] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -116,6 +123,94 @@ export function PeopleView({ scopeId }: { scopeId: string }) {
     });
   }
 
+  function toggleBatch(clusterId: string) {
+    setBatchSelected((current) =>
+      current.includes(clusterId)
+        ? current.filter((id) => id !== clusterId)
+        : [...current, clusterId],
+    );
+  }
+
+  function exitBatch() {
+    setBatchMode(false);
+    setBatchSelected([]);
+  }
+
+  /**
+   * 批量确认 → 用回执里的 ``entity_id`` 建关系。
+   *
+   * **关系行按 person_id 记，不按姓名**：两个人可能同名，姓名映射会把关系连到错的人。
+   * 失败逐件回执，成功的确认照常保留；关系只在两端都确认成功时才建。
+   */
+  async function submitBatch(
+    items: BatchConfirmItem[],
+    relations: BatchRelationDraft[],
+  ): Promise<boolean> {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await batchConfirmPeople(items);
+      const entityByPerson = new Map(
+        result.confirmed.map((row) => [row.person_id, row.entity_id]),
+      );
+      const relationErrors: string[] = [];
+      for (const relation of relations) {
+        const subject = entityByPerson.get(relation.subjectPersonId);
+        const object = entityByPerson.get(relation.objectPersonId);
+        if (subject === undefined || object === undefined) continue;
+        try {
+          await putFamilyRelationship({
+            scopeId,
+            subjectEntityId: subject,
+            predicate: relation.predicate,
+            objectEntityId: object,
+            inversePredicate: relation.inversePredicate,
+          });
+        } catch (cause) {
+          relationErrors.push(describeReviewError(cause));
+        }
+      }
+
+      apply(await fetchPeopleData(scopeId));
+      const failures = result.failed.map(
+        (row) => `「${row.name || row.person_id}」确认失败：${row.error}`,
+      );
+      const messages = [...failures, ...relationErrors];
+      if (messages.length > 0) {
+        setError(messages.join("；"));
+        // 有失败时保留勾选，用户能看清哪些没成功、再试一次。
+        return false;
+      }
+      exitBatch();
+      return true;
+    } catch (cause) {
+      setError(describeReviewError(cause));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleConfirm(
+    clusterId: string,
+    name: string,
+    familyRole: string | null,
+    relation: ClusterRelationInput | null,
+  ): Promise<boolean> {
+    return run(async () => {
+      const confirmed = await confirmFaceCluster(clusterId, { name, family_role: familyRole });
+      if (relation !== null) {
+        await putFamilyRelationship({
+          scopeId,
+          subjectEntityId: confirmed.entity.id,
+          predicate: relation.predicate,
+          objectEntityId: relation.targetId,
+          inversePredicate: relation.inversePredicate,
+        });
+      }
+    });
+  }
+
   return (
     <section className="people">
       <header className="people-head">
@@ -130,6 +225,20 @@ export function PeopleView({ scopeId }: { scopeId: string }) {
         两种处理都不动原始照片。
       </p>
 
+      <div className="cluster-actions">
+        <button
+          type="button"
+          className="button ghost small"
+          disabled={busy || clusters.length === 0}
+          onClick={() => {
+            if (batchMode) exitBatch();
+            else setBatchMode(true);
+          }}
+        >
+          {batchMode ? "退出批量确认" : "批量确认"}
+        </button>
+      </div>
+
       {error === null ? null : (
         <p className="error" role="alert">
           {error}
@@ -140,17 +249,28 @@ export function PeopleView({ scopeId }: { scopeId: string }) {
         <p className="empty">正在读取待确认的簇…</p>
       ) : (
         <>
+          {batchMode && batchSelected.length > 0 ? (
+            <BatchConfirmPanel
+              clusters={clusters.filter((cluster) => batchSelected.includes(cluster.id))}
+              busy={busy}
+              onSubmit={submitBatch}
+              onCancel={exitBatch}
+            />
+          ) : null}
+
           <FaceClusterList
             clusters={clusters}
+            people={people}
             selectedIds={selected}
             mergeTargetId={mergeTarget}
+            batchMode={batchMode}
+            batchSelectedIds={batchSelected}
             busy={busy}
             onToggleMerge={toggleMerge}
             onChooseMergeTarget={setTargetChoice}
+            onToggleBatch={toggleBatch}
             onMerge={handleMerge}
-            onConfirm={(clusterId: string, name: string, familyRole: string | null) =>
-              run(() => confirmFaceCluster(clusterId, { name, family_role: familyRole }))
-            }
+            onConfirm={handleConfirm}
             onReject={(clusterId: string) => {
               void run(() => rejectFaceCluster(clusterId));
             }}

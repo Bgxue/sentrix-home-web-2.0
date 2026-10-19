@@ -1,0 +1,132 @@
+/* 模态框：1.0 `src/styles.css:195-205` 的 `.modal-*`，只搬 2.0 用到的部分。 */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(21, 22, 19, 0.48);
+}
+
+.modal-panel {
+  position: relative;
+  width: min(760px, 100%);
+  max-height: min(840px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 28px;
+  background: #ffffff;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(21, 22, 19, 0.2);
+}
+
+.modal-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.modal-kicker {
+  color: var(--green);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.modal-panel h2 {
+  margin: 0 32px 0 0;
+}
+
+.modal-panel label {
+  display: block;
+  margin-top: 15px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.modal-panel input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.modal-lead {
+  color: var(--muted);
+  line-height: 1.65;
+  font-size: 12px;
+}
+
+/* ---- 命令面板 ---- */
+
+.command-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.command-links .button.active {
+  border-color: var(--green);
+  background: #eefbdc;
+}
+
+.command-hint {
+  margin: 12px 0 0;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+/* ---- 使用帮助 ---- */
+
+.help-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.help-list div {
+  padding: 12px;
+  border: 1px solid var(--line);
+}
+
+.help-list strong,
+.help-list span {
+  display: block;
+}
+
+.help-list span {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.help-list code {
+  background: var(--soft);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 10px;
+}

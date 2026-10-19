@@ -1,0 +1,13 @@
+/* 导入页新增的失败态与重试动作。基础版式在 `styles/imports.css`（1.0 的类名）。 */
+
+.queue-status.failed {
+  color: #b4492b;
+}
+
+.queue-row .text-button {
+  white-space: nowrap;
+}
+
+.queue-row .text-button:disabled {
+  color: var(--faint);
+}

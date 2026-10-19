@@ -13,19 +13,23 @@ import { BrowserRouter, Route, Routes } from "react-router";
 
 import { ROUTES, SHELL } from "./app/router";
 import { ScopeProvider } from "./app/ScopeProvider";
+import { ToastProvider } from "./shared/ui/Toast";
 
 export default function App() {
   return (
     <BrowserRouter>
-      <ScopeProvider>
-        <Routes>
-          <Route element={<SHELL />}>
-            {Object.entries(ROUTES).map(([path, Page]) => (
-              <Route key={path} path={path} element={<Page />} />
-            ))}
-          </Route>
-        </Routes>
-      </ScopeProvider>
+      {/* Toast 挂在壳层外面：页面卸载时提示不该跟着消失，壳层的动作也要能用。 */}
+      <ToastProvider>
+        <ScopeProvider>
+          <Routes>
+            <Route element={<SHELL />}>
+              {Object.entries(ROUTES).map(([path, Page]) => (
+                <Route key={path} path={path} element={<Page />} />
+              ))}
+            </Route>
+          </Routes>
+        </ScopeProvider>
+      </ToastProvider>
     </BrowserRouter>
   );
 }

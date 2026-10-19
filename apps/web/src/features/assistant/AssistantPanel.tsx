@@ -1,14 +1,88 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
-import { deliveredPhotoUrl } from "../../shared/api/client";
+import {
+  deliveredPhotoUrl,
+  getConversation,
+  type AssistantAttachment,
+  type AssistantProgressEvent,
+  type ConversationDetail,
+} from "../../shared/api/client";
+import { ResultSetWall } from "./ResultSetWall";
+import { TurnTimeline, isTerminalStatus } from "./TurnTimeline";
 import { useTurnStream } from "./useTurnStream";
 
 interface Exchange {
+  key: string;
   question: string;
   answer: string;
-  attachments: { handle: string; asset_id: string; file_name: string }[];
+  attachments: AssistantAttachment[];
   status: string;
   reason: string;
+  turnId: string;
+  /** 已拿到的过程事件。历史回合这里是空的，展开时间线时才去读。 */
+  events: AssistantProgressEvent[];
+}
+
+/**
+ * 把会话详情摊成「一问一答」。
+ *
+ * 消息与回合是两个数组：`messages` 给顺序与文本，`turns` 给附件与终态。用
+ * `turn_id` 对起来——**交付的照片只存在回合那一侧**，只看 messages 会全部丢掉。
+ */
+function replayExchanges(detail: ConversationDetail): Exchange[] {
+  const turns = new Map(detail.turns.map((turn) => [turn.id, turn]));
+  const exchanges: Exchange[] = [];
+  const byTurn = new Map<string, Exchange>();
+
+  for (const message of detail.messages) {
+    if (message.role === "user") {
+      const exchange: Exchange = {
+        key: message.id,
+        question: message.content,
+        answer: "",
+        attachments: [],
+        status: "running",
+        reason: "",
+        turnId: message.turn_id,
+        events: [],
+      };
+      exchanges.push(exchange);
+      if (message.turn_id !== "") byTurn.set(message.turn_id, exchange);
+      continue;
+    }
+
+    const exchange = byTurn.get(message.turn_id);
+    if (exchange === undefined) continue;
+    const turn = turns.get(message.turn_id);
+    exchange.answer = message.content || (turn?.answer ?? "");
+    exchange.attachments = turn?.attachments ?? [];
+    exchange.status = turn?.status ?? "complete";
+    exchange.reason = turn?.termination_reason ?? "";
+  }
+
+  // 回合已落库但 assistant 消息还没写（进行中/异常退出），也要出现在回放里。
+  for (const turn of detail.turns) {
+    const exchange = byTurn.get(turn.id);
+    if (exchange !== undefined) {
+      exchange.status = turn.status;
+      exchange.reason = turn.termination_reason;
+      exchange.attachments = turn.attachments;
+      if (exchange.answer === "") exchange.answer = turn.answer;
+      continue;
+    }
+    exchanges.push({
+      key: turn.id,
+      question: turn.question,
+      answer: turn.answer,
+      attachments: turn.attachments,
+      status: turn.status,
+      reason: turn.termination_reason,
+      turnId: turn.id,
+      events: [],
+    });
+  }
+
+  return exchanges;
 }
 
 /**
@@ -17,62 +91,144 @@ interface Exchange {
  * 交付的照片只来自后端 ``complete`` 帧里的 ``attachments``——那是**模型在终止动作
  * （``final_answer``）的 ``selected_image_handles`` 字段里显式选的那些**。前端不自己从
  * 候选里挑图，也不做任何相关性判断。
+ *
+ * ``scopeId`` **只用于拼结果集照片的授权 URL**（端点要求 scope 匹配）；会话的创建与
+ * 切换仍然在 AssistantPage，面板不参与 scope 决策。
  */
 export function AssistantPanel({
   conversationId,
+  scopeId,
   initialQuestion = "",
 }: {
   conversationId: string | null;
+  scopeId: string;
   /** 概览页交过来的问题；非空时自动问一次，问过就不再重复。 */
   initialQuestion?: string;
 }) {
-  // 面板**不收 scopeId**：会话的创建与切换在 AssistantPage，scope 是那一层的事。
-  // 收一个自己不用的 prop 会让人以为这里也参与范围决策。
-  //
   // 「问过就不再重复」用一个 ref 记已消费的问题，而不是清 URL：清 URL 会触发
   // 一次导航，而用户按「后退」时那条 URL 又是对的——两件事会打架。
   const consumed = useRef<string | null>(null);
   const [text, setText] = useState("");
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const { progress, result, busy, error, ask } = useTurnStream();
+
   const settled = useRef<string | null>(null);
+  /** 当前这一轮是哪个会话的哪条 exchange——切换会话后到达的结果不该串台。 */
+  const [live, setLive] = useState<{ conversationId: string; key: string } | null>(null);
+  const progressRef = useRef<AssistantProgressEvent[]>([]);
+  const historyToken = useRef(0);
+  const sequence = useRef(0);
 
-  // 换会话就清屏。回合是落库的，历史在服务端，重新进入时由上层决定要不要回放。
   useEffect(() => {
-    setExchanges([]);
+    progressRef.current = progress;
+  }, [progress]);
+
+  // 切会话：加载并回放历史消息。换了会话就作废上一次未完成的读取。
+  useEffect(() => {
+    const token = ++historyToken.current;
     settled.current = null;
-  }, [conversationId]);
+    setLive(null);
+    setHistoryError(null);
 
-  // ``complete`` 到了就把答案补到最后一条提问上——回合是先落库再执行的，
-  // 提问在发出去的那一刻就已经显示出来了。
-  useEffect(() => {
-    if (result === null || settled.current === result.turn_id) {
+    if (conversationId === null) {
+      setExchanges([]);
+      setHistoryLoading(false);
       return;
     }
+
+    setExchanges([]);
+    setHistoryLoading(true);
+    getConversation(conversationId)
+      .then((detail) => {
+        if (token !== historyToken.current) return;
+        setExchanges(replayExchanges(detail));
+      })
+      .catch((cause: Error) => {
+        if (token !== historyToken.current) return;
+        setExchanges([]);
+        setHistoryError(cause.message);
+      })
+      .finally(() => {
+        if (token === historyToken.current) setHistoryLoading(false);
+      });
+  }, [conversationId]);
+
+  const runQuestion = useCallback(
+    (question: string) => {
+      if (conversationId === null) return;
+      const key = `live-${(sequence.current += 1)}`;
+      setLive({ conversationId, key });
+      setExchanges((previous) => [
+        ...previous,
+        {
+          key,
+          question,
+          answer: "",
+          attachments: [],
+          status: "running",
+          reason: "",
+          turnId: "",
+          events: [],
+        },
+      ]);
+      void ask(conversationId, question);
+    },
+    [ask, conversationId],
+  );
+
+  // ``complete`` 到了就补到发起它的那条提问上。**按 key 定位**，不按「最后一条」——
+  // 中途切换会话时，最后一条已经不属于这一轮了。
+  useEffect(() => {
+    if (result === null || live === null || live.conversationId !== conversationId) return;
+    if (settled.current === result.turn_id) return;
     settled.current = result.turn_id;
+    const key = live.key;
+    const events = [...progressRef.current];
     setExchanges((previous) =>
-      previous.map((item, index) =>
-        index === previous.length - 1
+      previous.map((item) =>
+        item.key === key
           ? {
               ...item,
               answer: result.answer,
               attachments: result.attachments,
               status: result.status,
               reason: result.termination_reason,
+              turnId: result.turn_id,
+              events,
             }
           : item,
       ),
     );
-  }, [result]);
+  }, [conversationId, live, result]);
 
-  // 自动提问：等会话就绪、且这个问题还没被消费过。
+  // 建回合/轮询失败时 hook 只给一句 error；把那条提问标成失败，别一直停在「处理中」。
+  useEffect(() => {
+    if (error === null || live === null) return;
+    setExchanges((previous) =>
+      previous.map((item) =>
+        item.key === live.key && item.status === "running"
+          ? { ...item, status: "failed", reason: error }
+          : item,
+      ),
+    );
+  }, [error, live]);
+
+  // 自动提问：等会话历史读完、且这个问题还没被消费过。
   useEffect(() => {
     const trimmed = initialQuestion.trim();
-    if (trimmed === "" || conversationId === null || busy) return;
+    if (trimmed === "" || conversationId === null || busy || historyLoading) return;
     if (consumed.current === `${conversationId}\u0000${trimmed}`) return;
     consumed.current = `${conversationId}\u0000${trimmed}`;
-    void ask(conversationId, trimmed);
-  }, [ask, busy, conversationId, initialQuestion]);
+    runQuestion(trimmed);
+  }, [busy, conversationId, historyLoading, initialQuestion, runQuestion]);
+
+  const storeEvents = useCallback((key: string, events: AssistantProgressEvent[]) => {
+    setExchanges((previous) =>
+      previous.map((item) => (item.key === key ? { ...item, events } : item)),
+    );
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -81,12 +237,10 @@ export function AssistantPanel({
       return;
     }
     setText("");
-    setExchanges((previous) => [
-      ...previous,
-      { question, answer: "", attachments: [], status: "running", reason: "" },
-    ]);
-    await ask(conversationId, question);
+    runQuestion(question);
   }
+
+  const lastKey = exchanges[exchanges.length - 1]?.key ?? "";
 
   return (
     <section className="assistant">
@@ -97,56 +251,79 @@ export function AssistantPanel({
           onChange={(event) => setText(event.target.value)}
           placeholder="例如：给我看看在海边的照片"
           aria-label="向助手提问"
-          disabled={conversationId === null}
+          disabled={conversationId === null || historyLoading}
         />
-        <button type="submit" disabled={busy || conversationId === null || text.trim() === ""}>
+        <button
+          type="submit"
+          disabled={busy || historyLoading || conversationId === null || text.trim() === ""}
+        >
           {busy ? "处理中…" : "发送"}
         </button>
       </form>
 
-      {error ? <p className="error">{error}</p> : null}
-
-      {busy && progress.length > 0 ? (
-        <ol className="assistant-progress">
-          {progress.map((item) => (
-            <li key={`${item.step_index}-${item.kind}`} className={`stage-${item.stage}`}>
-              {item.text}
-            </li>
-          ))}
-        </ol>
+      {error !== null ? <p className="error">{error}</p> : null}
+      {historyError !== null ? (
+        <p className="error">历史消息加载失败：{historyError}</p>
       ) : null}
+      {historyLoading ? <p className="assistant-history">正在加载历史消息…</p> : null}
 
       <div className="assistant-log">
-        {exchanges.map((exchange, index) => (
-          <article key={index} className="assistant-exchange">
-            {exchange.question ? <p className="question">{exchange.question}</p> : null}
-            {exchange.answer ? <p className="answer">{exchange.answer}</p> : null}
-            {exchange.status !== "running" && exchange.status !== "complete" ? (
-              <p className="note">
-                这一轮的状态：{exchange.status}（{exchange.reason}）
-              </p>
-            ) : null}
-            {exchange.attachments.length > 0 ? (
-              <ul className="assistant-photos">
-                {exchange.attachments.map((photo) => (
-                  <li key={photo.handle}>
-                    <a
-                      href={deliveredPhotoUrl(photo.asset_id, photo.file_name)}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <img
-                        src={deliveredPhotoUrl(photo.asset_id, photo.file_name)}
-                        alt={photo.file_name}
-                        loading="lazy"
-                      />
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </article>
-        ))}
+        {exchanges.map((exchange) => {
+          const liveExchange =
+            busy && live !== null && live.key === exchange.key && live.conversationId === conversationId;
+          const events =
+            exchange.events.length > 0 ? exchange.events : liveExchange ? progress : [];
+          return (
+            <article key={exchange.key} className="assistant-exchange">
+              {exchange.question ? <p className="question">{exchange.question}</p> : null}
+              {exchange.answer ? <p className="answer">{exchange.answer}</p> : null}
+              {exchange.status !== "running" && exchange.status !== "complete" ? (
+                <p className="note">
+                  这一轮的状态：{exchange.status}
+                  {exchange.reason !== "" ? `（${exchange.reason}）` : ""}
+                </p>
+              ) : null}
+              {exchange.attachments.length > 0 ? (
+                <ul className="assistant-photos">
+                  {exchange.attachments.map((photo) => (
+                    <li key={photo.handle}>
+                      <a
+                        href={deliveredPhotoUrl(photo.asset_id, photo.file_name)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <img
+                          src={deliveredPhotoUrl(photo.asset_id, photo.file_name)}
+                          alt={photo.file_name}
+                          loading="lazy"
+                        />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {events.length > 0 || (exchange.turnId !== "" && isTerminalStatus(exchange.status)) ? (
+                <TurnTimeline
+                  events={events}
+                  turnId={exchange.turnId}
+                  status={exchange.status}
+                  defaultOpen={liveExchange}
+                  onLoaded={(loaded) => storeEvents(exchange.key, loaded)}
+                />
+              ) : null}
+
+              <ResultSetWall
+                events={events}
+                scopeId={scopeId}
+                busy={busy}
+                onNextPage={
+                  exchange.key === lastKey ? () => runQuestion("下一页") : undefined
+                }
+              />
+            </article>
+          );
+        })}
       </div>
     </section>
   );

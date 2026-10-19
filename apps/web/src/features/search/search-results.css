@@ -1,0 +1,47 @@
+/* 检索结果。1.0 的 `.image-result-grid` 是四列图片墙；2.0 沿用全局 `.grid`，
+ * 这里只补视频与可点开卡片的行为。 */
+
+.search-result-note {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.search-results-grid li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.search-results-grid .search-result-card {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+
+.search-results-grid video {
+  width: 100%;
+  height: 140px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+  background: #000;
+}
+
+.search-result-mark {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 140px;
+  border-radius: 4px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.search-result-card[disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}

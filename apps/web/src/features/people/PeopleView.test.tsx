@@ -67,7 +67,7 @@ function person(overrides: Partial<PersonPayload> & { id: string }): PersonPaylo
 interface Call {
   url: string;
   method: string;
-  body: Record<string, string> | null;
+  body: Record<string, unknown> | null;
 }
 
 function respond(status: number, body: unknown) {
@@ -99,7 +99,9 @@ class FakeBackend {
     const method = init?.method ?? "GET";
     const url = input;
     const body =
-      typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, string>) : null;
+      typeof init?.body === "string"
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : null;
     this.calls.push({ url, method, body });
 
     if (this.failNext !== null) {
@@ -120,8 +122,8 @@ class FakeBackend {
       const id = confirm[1];
       const entity = person({
         id: `entity_for_${id}`,
-        canonical_name: body?.name ?? "",
-        family_role: body?.family_role ?? null,
+        canonical_name: typeof body?.name === "string" ? body.name : "",
+        family_role: typeof body?.family_role === "string" ? body.family_role : null,
       });
       this.clusters = this.clusters.filter((item) => item.id !== id);
       this.people = [...this.people, entity];
@@ -136,8 +138,8 @@ class FakeBackend {
     }
 
     if (method === "POST" && url === "/api/v1/face-clusters/merge") {
-      const targetId = body?.target_cluster_id ?? "";
-      const sourceId = body?.source_cluster_id ?? "";
+      const targetId = typeof body?.target_cluster_id === "string" ? body.target_cluster_id : "";
+      const sourceId = typeof body?.source_cluster_id === "string" ? body.source_cluster_id : "";
       const target = this.clusters.find((item) => item.id === targetId);
       const source = this.clusters.find((item) => item.id === sourceId);
       if (target === undefined || source === undefined) {
@@ -159,7 +161,7 @@ class FakeBackend {
     if (method === "POST" && split !== null) {
       const id = split[1];
       const source = this.clusters.find((item) => item.id === id);
-      const faceId = body?.face_instance_id ?? "";
+      const faceId = typeof body?.face_instance_id === "string" ? body.face_instance_id : "";
       const face = source?.samples.find((item) => item.face_instance_id === faceId);
       if (source === undefined || face === undefined) {
         return respond(422, {
@@ -189,6 +191,36 @@ class FakeBackend {
       return respond(200, created);
     }
 
+    if (method === "PUT" && url === "/api/v1/family-graph/relationships") {
+      return respond(200, { ok: true, relationships: [] });
+    }
+
+    if (method === "POST" && url === "/api/v1/people/batch-confirm") {
+      const items = Array.isArray(body?.items)
+        ? (body.items as { person_id: string; name: string; family_role?: string | null }[])
+        : [];
+      const confirmed = items.map((item) => {
+        const entity = person({
+          id: `entity_${item.person_id}`,
+          canonical_name: item.name,
+          family_role: item.family_role ?? null,
+        });
+        this.people = [...this.people, entity];
+        return {
+          person_id: item.person_id,
+          entity_id: entity.id,
+          name: item.name,
+          family_role: item.family_role ?? null,
+          merged: false,
+        };
+      });
+      const personIds = new Set(items.map((item) => item.person_id));
+      this.clusters = this.clusters.filter(
+        (cluster) => cluster.entity_id === null || !personIds.has(cluster.entity_id),
+      );
+      return respond(200, { confirmed, failed: [], count: confirmed.length });
+    }
+
     const rename = /^\/api\/v1\/people\/([^/]+)\/name$/.exec(url);
     if (method === "PATCH" && rename !== null) {
       const id = rename[1];
@@ -198,7 +230,7 @@ class FakeBackend {
       }
       const updated: PersonPayload = {
         ...found,
-        canonical_name: body?.name ?? "",
+        canonical_name: typeof body?.name === "string" ? body.name : "",
         aliases: [...found.aliases, found.canonical_name],
       };
       this.people = this.people.map((item) => (item.id === id ? updated : item));
@@ -279,7 +311,7 @@ describe("人脸簇审阅页", () => {
     fireEvent.click(await screen.findByRole("button", { name: "确认身份" }));
 
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "妈妈" } });
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "母亲" } });
+    fireEvent.change(screen.getByLabelText("家庭角色"), { target: { value: "母亲" } });
     fireEvent.click(screen.getByRole("button", { name: "确认并写入" }));
 
     await waitFor(() => {
@@ -295,6 +327,107 @@ describe("人脸簇审阅页", () => {
 
     await waitFor(() => expect(screen.getByText("0 个待确认簇")).toBeTruthy());
     expect(await screen.findByText("妈妈")).toBeTruthy();
+  });
+
+  it("确认簇时可选一个已确认人物并建立关系（方向：新人物为 subject）", async () => {
+    const backend = mount([twoSampleCluster("cluster_a", "待命名成员")], [
+      person({ id: "entity_mom", canonical_name: "妈妈" }),
+    ]);
+
+    render(<PeopleView scopeId="album1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "确认身份" }));
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "小明" } });
+    fireEvent.change(screen.getByLabelText("与已确认人物的关系（可选）"), {
+      target: { value: "entity_mom" },
+    });
+    // 词表第 3 项是「母亲 → 儿子」（索引 2）
+    fireEvent.change(screen.getByLabelText("关系类型（可选）"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认并写入" }));
+
+    await waitFor(() => {
+      expect(
+        backend.calls.some(
+          (call) => call.method === "PUT" && call.url === "/api/v1/family-graph/relationships",
+        ),
+      ).toBe(true);
+    });
+    const call = backend.calls.find(
+      (item) => item.method === "PUT" && item.url === "/api/v1/family-graph/relationships",
+    );
+    expect(call?.body).toEqual({
+      scope_id: "album1",
+      subject_entity_id: "entity_for_cluster_a",
+      predicate: "母亲",
+      object_entity_id: "entity_mom",
+      inverse_predicate: "儿子",
+    });
+  });
+
+  it("批量确认多选簇：一次提交确认，再用回执里的 entity_id 建关系", async () => {
+    const backend = mount([
+      cluster({
+        id: "cluster_a",
+        entity_id: "person_a",
+        canonical_name: "甲",
+        member_count: 2,
+        samples: [crop("face_1", "asset_1", "a.jpg", 0.8)],
+      }),
+      cluster({
+        id: "cluster_b",
+        entity_id: "person_b",
+        canonical_name: "乙",
+        member_count: 2,
+        samples: [crop("face_2", "asset_2", "b.jpg", 0.7)],
+      }),
+    ]);
+
+    render(<PeopleView scopeId="album1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "批量确认" }));
+    fireEvent.click(screen.getByLabelText("选中 甲 用于批量确认"));
+    fireEvent.click(screen.getByLabelText("选中 乙 用于批量确认"));
+
+    fireEvent.change(screen.getByLabelText("成员 1 姓名"), { target: { value: "爸爸" } });
+    fireEvent.change(screen.getByLabelText("成员 2 姓名"), { target: { value: "儿子" } });
+    fireEvent.change(screen.getByLabelText("关系成员 A 1"), { target: { value: "person_a" } });
+    fireEvent.change(screen.getByLabelText("关系类型 1"), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText("关系成员 B 1"), { target: { value: "person_b" } });
+    fireEvent.click(screen.getByRole("button", { name: "批量确认并建立关系" }));
+
+    await waitFor(() => {
+      expect(
+        backend.calls.some(
+          (call) => call.method === "POST" && call.url === "/api/v1/people/batch-confirm",
+        ),
+      ).toBe(true);
+    });
+    const batch = backend.calls.find(
+      (call) => call.method === "POST" && call.url === "/api/v1/people/batch-confirm",
+    );
+    expect(batch?.body).toEqual({
+      items: [
+        { person_id: "person_a", name: "爸爸", family_role: null },
+        { person_id: "person_b", name: "儿子", family_role: null },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(
+        backend.calls.some(
+          (call) => call.method === "PUT" && call.url === "/api/v1/family-graph/relationships",
+        ),
+      ).toBe(true);
+    });
+    const relation = backend.calls.find(
+      (call) => call.method === "PUT" && call.url === "/api/v1/family-graph/relationships",
+    );
+    expect(relation?.body).toEqual({
+      scope_id: "album1",
+      subject_entity_id: "entity_person_a",
+      predicate: "父亲",
+      object_entity_id: "entity_person_b",
+      inverse_predicate: "儿子",
+    });
   });
 
   it("拒绝一个簇会打到 reject 端点，并把它从列表里去掉", async () => {

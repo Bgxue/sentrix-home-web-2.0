@@ -1,0 +1,191 @@
+/* 设置页新增：服务网格与待确认事实。
+ * `.fact-review-*` 的版式来自 1.0 `src/styles.css:151`，2.0 的 `styles/settings.css`
+ * 里没有，所以放在这个页面自己的样式表里，不改全局表。 */
+
+.health-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+}
+
+.health-card {
+  min-height: 210px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 20px;
+}
+
+.health-card.dark {
+  background: var(--ink);
+  color: #fff;
+}
+
+.health-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.online-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--lime);
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.online-pill[data-state="degraded"] {
+  color: #ffb38a;
+}
+
+.online-pill[data-state="degraded"] i {
+  background: #ff8f5e;
+}
+
+.online-pill[data-state="unknown"] {
+  color: #8e958a;
+}
+
+.online-pill[data-state="unknown"] i {
+  background: #8e958a;
+}
+
+.health-card > strong {
+  display: block;
+  font-size: 25px;
+  letter-spacing: -0.05em;
+  margin: 25px 0 4px;
+}
+
+.health-card > p {
+  color: var(--muted);
+  font-size: 10px;
+  margin: 0;
+}
+
+.health-card.dark > p {
+  color: #9ca498;
+}
+
+.health-line {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 9px;
+  margin-top: 19px;
+}
+
+.health-card.dark .health-line {
+  color: #9ca498;
+}
+
+.health-line b {
+  color: var(--green);
+}
+
+.health-card.dark .health-line b {
+  color: var(--lime);
+}
+
+.health-bar {
+  height: 6px;
+  background: #343a33;
+  border-radius: 99px;
+  margin-top: 7px;
+  overflow: hidden;
+}
+
+.health-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--lime);
+  transition: width 220ms ease;
+}
+
+.service-row {
+  display: grid;
+  grid-template-columns: 65px 1fr;
+  gap: 3px 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.service-row:first-of-type {
+  margin-top: 23px;
+}
+
+.service-row span {
+  grid-row: span 2;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.service-row strong {
+  font-size: 11px;
+}
+
+.service-row small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.service-row .muted-value {
+  color: var(--faint);
+}
+
+.fact-review-list {
+  display: grid;
+  gap: 10px;
+}
+
+.fact-review-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.fact-review-row > div:first-child {
+  min-width: 0;
+}
+
+.fact-review-row strong,
+.fact-review-row small {
+  display: block;
+}
+
+.fact-review-row strong {
+  overflow-wrap: anywhere;
+}
+
+.fact-review-row small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.fact-review-row .review-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .health-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fact-review-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

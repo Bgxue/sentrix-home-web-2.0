@@ -8,7 +8,12 @@
 
 import { useState } from "react";
 
-import { assetDisplayUrl, type AssetSummary } from "../../shared/api/client";
+import {
+  assetDisplayUrl,
+  getAsset,
+  type AssetDetailResponse,
+  type AssetSummary,
+} from "../../shared/api/client";
 import { AssetDetail } from "./AssetDetail";
 
 const TYPE_MARK: Readonly<Record<string, string>> = { image: "▦", video: "▶", audio: "♪", text: "¶" };
@@ -18,13 +23,25 @@ function mediaLabel(mediaType: string): string {
 }
 
 export function AssetGrid({ assets }: { assets: readonly AssetSummary[] }) {
-  const [selected, setSelected] = useState<AssetSummary | null>(null);
+  const [selected, setSelected] = useState<AssetDetailResponse | null>(null);
+
+  /**
+   * 详情优先走 `GET /assets/{id}`：这样后端哪天在响应里补上 `observations`，
+   * 列表这边不用改就能显示。请求失败时退回列表已有的摘要，点开仍然可用。
+   */
+  async function open(asset: AssetSummary) {
+    try {
+      setSelected(await getAsset(asset.id));
+    } catch {
+      setSelected(asset);
+    }
+  }
 
   return (
     <>
       <section className="asset-grid library-grid">
         {assets.map((asset) => (
-          <button key={asset.id} type="button" className="asset-card" onClick={() => setSelected(asset)}>
+          <button key={asset.id} type="button" className="asset-card" onClick={() => void open(asset)}>
             <div className="asset-thumb">
               {asset.media_type === "image" ? (
                 <img src={assetDisplayUrl(asset)} alt={asset.file_name} loading="lazy" />

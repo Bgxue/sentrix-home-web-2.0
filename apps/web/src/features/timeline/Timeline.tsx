@@ -1,23 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  assetPreviewUrl,
-  assetFileUrl,
-  fetchTimeline,
-  type TimelineDay,
-  type TimelinePhoto,
-} from "../../shared/api/client";
+import { fetchTimeline, type TimelineDay, type TimelinePhoto } from "../../shared/api/client";
+import { TimelineEventDetail } from "./TimelineEventDetail";
+import { timelinePhotoUrl } from "./photoUrl";
 
 const PAGE_SIZE = 20;
-const HEIC_SUFFIXES = [".heic", ".heif"];
-
-/** 浏览器直接渲染不了的格式走服务端转码预览，其余走原图（与库视图同一条判断）。 */
-function photoUrl(photo: TimelinePhoto): string {
-  const lowered = photo.file_name.toLowerCase();
-  return HEIC_SUFFIXES.some((suffix) => lowered.endsWith(suffix))
-    ? assetPreviewUrl(photo.asset_id)
-    : assetFileUrl(photo.asset_id);
-}
 
 /** 相邻两页可能落在同一天，合并而不是让同一天出现两次。 */
 function mergeDays(current: TimelineDay[], incoming: TimelineDay[]): TimelineDay[] {
@@ -33,8 +20,26 @@ function mergeDays(current: TimelineDay[], incoming: TimelineDay[]): TimelineDay
   return merged;
 }
 
-export function Timeline({ scopeId }: { scopeId: string }) {
+/** 事件卡片在 DOM 里的锚点。`?event=` 定位与高亮都按它找。 */
+function eventAnchorId(eventId: string): string {
+  return `timeline-event-${eventId}`;
+}
+
+interface Props {
+  readonly scopeId: string;
+  /** 从概览页用 `?event=<id>` 带进来；非空时展开详情并滚动到卡片。 */
+  readonly focusEventId: string | null;
+  /** 打开 / 关闭详情。由页面层写 URL，刷新和前进后退都能还原。 */
+  readonly onOpenEvent: (eventId: string | null) => void;
+}
+
+export function Timeline({ scopeId, focusEventId, onOpenEvent }: Props) {
+  // 服务端筛选：后端只支持 place。
   const [place, setPlace] = useState("");
+  // 客户端筛选：只对已经加载进内存的事件生效。
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [hasPlace, setHasPlace] = useState(false);
   const [loaded, setLoaded] = useState<{ key: string; days: TimelineDay[]; total: number } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +58,22 @@ export function Timeline({ scopeId }: { scopeId: string }) {
   const days = loaded && loaded.key === key ? loaded.days : [];
   const total = loaded && loaded.key === key ? loaded.total : 0;
   const shown = days.reduce((sum, day) => sum + day.events.length, 0);
+  const clientFiltering = dateFrom !== "" || dateTo !== "" || hasPlace;
+
+  // 日期按 `day.date`（后端已经按 time_start/created_at 分好组）比较；
+  // ISO 的 yyyy-mm-dd 直接做字符串比较就是时间顺序。
+  const visibleDays = days
+    .map((day) => ({
+      date: day.date,
+      events: day.events.filter(
+        (event) =>
+          (!hasPlace || event.place.trim() !== "") &&
+          (dateFrom === "" || day.date >= dateFrom) &&
+          (dateTo === "" || day.date <= dateTo),
+      ),
+    }))
+    .filter((day) => day.events.length > 0);
+  const visibleCount = visibleDays.reduce((sum, day) => sum + day.events.length, 0);
 
   // 首屏与筛选变化：整体替换。setState 只发生在 then/catch 回调里。
   useEffect(() => {
@@ -105,6 +126,30 @@ export function Timeline({ scopeId }: { scopeId: string }) {
     return () => observer.disconnect();
   }, [loadMore, loading, loadingMore, shown, total]);
 
+  // `?event=` 定位：卡片出现后展开它所在的整天（用户可能手动折过），再滚到中间。
+  // 只做 DOM 操作，不 setState——高亮是按 focusEventId 推导的类名。
+  // 依赖 `loaded`（状态对象，新一页到达时引用才变），不是每渲染都新建的 `days`。
+  useEffect(() => {
+    if (focusEventId === null) {
+      return;
+    }
+    const node = document.getElementById(eventAnchorId(focusEventId));
+    if (node === null) {
+      return;
+    }
+    const day = node.closest("details");
+    if (day !== null) {
+      day.setAttribute("open", "");
+    }
+    node.scrollIntoView?.({ block: "center" });
+  }, [focusEventId, loaded]);
+
+  function clearClientFilters() {
+    setDateFrom("");
+    setDateTo("");
+    setHasPlace(false);
+  }
+
   return (
     <section className="timeline">
       <div className="filter-row">
@@ -116,13 +161,60 @@ export function Timeline({ scopeId }: { scopeId: string }) {
           value={place}
           onChange={(event) => setPlace(event.target.value)}
         />
-        {place ? (
-          <button type="button" className="text-button" onClick={() => setPlace("")}>
+        <label className="timeline-date-filter">
+          <span>从</span>
+          <input
+            type="date"
+            aria-label="开始日期"
+            value={dateFrom}
+            max={dateTo || undefined}
+            onChange={(event) => setDateFrom(event.target.value)}
+          />
+        </label>
+        <label className="timeline-date-filter">
+          <span>到</span>
+          <input
+            type="date"
+            aria-label="结束日期"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(event) => setDateTo(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className={hasPlace ? "filter-chip active" : "filter-chip"}
+          aria-pressed={hasPlace}
+          onClick={() => setHasPlace((value) => !value)}
+        >
+          有地点
+        </button>
+        {/* 后端的事件模型没有人物/实体字段，也没有按事件反查人物的端点。
+            留一个禁用项把缺口摆在明面上，比让它「点了没反应」好。 */}
+        <button
+          type="button"
+          className="filter-chip"
+          disabled
+          title="后端事件数据不含人物关联，暂时无法筛选"
+        >
+          有人物（暂不可用）
+        </button>
+        {place || clientFiltering ? (
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => {
+              setPlace("");
+              clearClientFilters();
+            }}
+          >
             清除筛选
           </button>
         ) : null}
         <span className="filter-spacer" />
-        <span className="timeline-count">{shown} / {total} 个事件</span>
+        <span className="timeline-count">
+          {visibleCount} / {shown} 个已加载事件 · 共 {total}
+        </span>
         <button
           type="button"
           className="icon-button bordered"
@@ -132,12 +224,13 @@ export function Timeline({ scopeId }: { scopeId: string }) {
           ↻
         </button>
       </div>
-      {/* 1.0 的筛选行还有「有人物 / 有地点」两片，那是它在**一次全量拉回的列表**上做
-          客户端筛选。2.0 的 /timeline 是分页的，照搬会变成「只在当前这一页里筛」——
-          结果看起来对、实际漏掉后面所有页，而且不报错。后端目前只有 place 一个
-          筛选参数，所以那两片等后端出了布尔参数再加。 */}
+      {/* 1.0 的「有人物 / 有地点 / 某一天」是在**一次全量拉回**的列表上筛。2.0 的
+          /timeline 是分页的，后端只有 place 一个参数；日期与「有地点」因此只对
+          **已经加载的事件**生效，这一点必须写在用户看得见的地方，否则看起来筛过了、
+          其实后面几页没参与。 */}
       <p className="timeline-filter-note">
-        按人物或有无地点筛选需要后端加参数，当前只支持按地点文字匹配。
+        日期范围与「有地点」仅过滤当前已加载的 {shown} 个事件；后端 /timeline 目前只支持地点参数，
+        人物筛选尚未提供。
       </p>
       {error ? <p className="error">{error}</p> : null}
       {days.length === 0 && !loading ? (
@@ -147,39 +240,73 @@ export function Timeline({ scopeId }: { scopeId: string }) {
           <p>{place ? "换一个地点词，或清除筛选查看全部。" : "导入并处理资料后，记忆会自动出现在这里。"}</p>
         </div>
       ) : null}
-      {days.map((day) => (
-        <div className="timeline-day" key={day.date}>
-          <h3>{day.date}</h3>
-          {day.events.map((event) => (
-            <article className="timeline-event" key={event.id}>
-              <header>
-                <strong>{event.title}</strong>
-                <span>{event.place}</span>
-              </header>
-              <p>{event.summary}</p>
-              <div className="timeline-photos">
-                {event.photos.map((photo) => (
-                  <button type="button" key={photo.asset_id} onClick={() => setOpen(photo)}>
-                    <img src={photoUrl(photo)} alt={photo.file_name} loading="lazy" />
-                    {photo.place ? <small>{photo.place}</small> : null}
-                  </button>
-                ))}
-              </div>
-            </article>
-          ))}
+      {days.length > 0 && visibleDays.length === 0 ? (
+        <div className="empty-queue">
+          <span aria-hidden="true">↕</span>
+          <strong>当前筛选条件下没有事件</strong>
+          <p>筛选只作用于已加载的事件，换一个日期范围或清除筛选再试。</p>
+          <button type="button" className="text-button" onClick={clearClientFilters}>
+            清除日期与地点筛选
+          </button>
         </div>
+      ) : null}
+      {visibleDays.map((day) => (
+        <details className="timeline-day" key={day.date} open>
+          <summary>
+            <span>{day.date}</span>
+            <small>{day.events.length} 个事件</small>
+            <b aria-hidden="true">⌄</b>
+          </summary>
+          <div className="timeline-day-events">
+            {day.events.map((event) => (
+              <article
+                className={focusEventId === event.id ? "timeline-event focused" : "timeline-event"}
+                key={event.id}
+                id={eventAnchorId(event.id)}
+                onClick={() => onOpenEvent(event.id)}
+              >
+                <header>
+                  <strong>{event.title}</strong>
+                  <span>{event.place}</span>
+                </header>
+                <p>{event.summary}</p>
+                <div className="timeline-photos" onClick={(click) => click.stopPropagation()}>
+                  {event.photos.map((photo) => (
+                    <button type="button" key={photo.asset_id} onClick={() => setOpen(photo)}>
+                      <img src={timelinePhotoUrl(photo)} alt={photo.file_name} loading="lazy" />
+                      {photo.place ? <small>{photo.place}</small> : null}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="text-button timeline-event-action"
+                  onClick={(click) => {
+                    click.stopPropagation();
+                    onOpenEvent(event.id);
+                  }}
+                >
+                  查看详情 →
+                </button>
+              </article>
+            ))}
+          </div>
+        </details>
       ))}
       <div ref={sentinel} className="timeline-sentinel">
         {loading || loadingMore ? "加载中…" : null}
       </div>
       {open ? (
         <div className="timeline-overlay" role="presentation" onClick={() => setOpen(null)}>
-          <img src={photoUrl(open)} alt={open.file_name} />
+          <img src={timelinePhotoUrl(open)} alt={open.file_name} />
           <p>
             {open.file_name} · {open.place || "（未解析出地点）"}
           </p>
         </div>
       ) : null}
+      {focusEventId === null ? null : (
+        <TimelineEventDetail eventId={focusEventId} onClose={() => onOpenEvent(null)} />
+      )}
     </section>
   );
 }

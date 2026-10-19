@@ -14,8 +14,10 @@ import { useState, type FormEvent } from "react";
 import {
   deleteFamilyRelationship,
   deliveredPhotoUrl,
+  getPerson,
   putFamilyRelationship,
   renamePerson,
+  setEntityProperty,
   setFamilyMembership,
   setFamilyPortrait,
   type FamilyMembershipValue,
@@ -23,6 +25,7 @@ import {
   type FamilyRelationship,
 } from "../../../shared/api/client";
 import { describeReviewError } from "../reviewErrors";
+import { PersonEvidence } from "../PersonEvidence";
 import { dedupeRelationships } from "./graphLayout";
 import {
   membershipLabel,
@@ -59,6 +62,10 @@ export function PersonDetail({
   const [portrait, setPortrait] = useState(person.portrait?.portrait_text ?? "");
   const [predicateIndex, setPredicateIndex] = useState(0);
   const [targetId, setTargetId] = useState(relateTarget ?? "");
+  const [aliasesOpen, setAliasesOpen] = useState(false);
+  const [aliasesLoading, setAliasesLoading] = useState(false);
+  const [aliasText, setAliasText] = useState("");
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
 
   const others = people.filter((item) => item.id !== person.id);
 
@@ -77,14 +84,16 @@ export function PersonDetail({
       };
     });
 
-  async function run(action: () => Promise<unknown>): Promise<void> {
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
     setError(null);
     try {
       await action();
       await onChanged();
+      return true;
     } catch (cause) {
       setError(describeReviewError(cause));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -93,6 +102,37 @@ export function PersonDetail({
   function submitRename(event: FormEvent) {
     event.preventDefault();
     void run(() => renamePerson(person.id, name));
+  }
+
+  /**
+   * 打开别名编辑时才取当前别名。
+   *
+   * 列表响应里没有 aliases（它给的是家庭图谱的人物投影），而别名存在
+   * `entity_properties` 的 `aliases` 键里——`GET /people/{id}` 会把它带出来。
+   * 懒加载让「只是看看详情」不发额外请求。
+   */
+  async function openAliases() {
+    setAliasesLoading(true);
+    setError(null);
+    try {
+      const detail = await getPerson(person.id);
+      setAliasText(detail.entity.aliases.join("、"));
+      setAliasesOpen(true);
+    } catch (cause) {
+      setError(describeReviewError(cause));
+    } finally {
+      setAliasesLoading(false);
+    }
+  }
+
+  function submitAliases(event: FormEvent) {
+    event.preventDefault();
+    const aliases = splitAliases(aliasText);
+    void run(async () => {
+      // `PATCH /people/{id}/name` 只收 name；别名是通用实体属性，走属性写入。
+      await setEntityProperty(person.id, "aliases", aliases);
+      setAliasesOpen(false);
+    });
   }
 
   function submitPortrait(event: FormEvent) {
@@ -150,6 +190,33 @@ export function PersonDetail({
             保存姓名
           </button>
         </form>
+
+        {aliasesOpen ? (
+          <form className="detail-form" onSubmit={submitAliases}>
+            <label>
+              其他称呼（别名，用顿号或逗号分隔）
+              <input
+                aria-label="人物别名"
+                value={aliasText}
+                placeholder="例如：小明、阿明"
+                onChange={(event) => setAliasText(event.target.value)}
+              />
+            </label>
+            <button type="submit" className="button ghost small" disabled={busy}>
+              保存别名
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            className="button ghost small"
+            disabled={busy || aliasesLoading}
+            onClick={() => void openAliases()}
+          >
+            {aliasesLoading ? "正在读取别名…" : "编辑别名"}
+          </button>
+        )}
+
         <label className="detail-field">
           家庭归属
           <select
@@ -258,7 +325,16 @@ export function PersonDetail({
       </section>
 
       <section className="detail-section">
-        <h3>证据</h3>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3>证据</h3>
+          <button
+            type="button"
+            className="button ghost small"
+            onClick={() => setEvidenceOpen(true)}
+          >
+            人脸样本与事件
+          </button>
+        </div>
         {person.representative_media.length === 0 ? (
           <p className="detail-empty">还没有代表照片。</p>
         ) : (
@@ -272,6 +348,27 @@ export function PersonDetail({
           </ul>
         )}
       </section>
+
+      {evidenceOpen ? (
+        <PersonEvidence
+          personId={person.id}
+          personName={personDisplayName(person)}
+          onClose={() => setEvidenceOpen(false)}
+        />
+      ) : null}
     </aside>
   );
+}
+
+/** 别名输入：顿号、中英文逗号都当分隔符，去空、去重（后端也会再归一一次）。 */
+function splitAliases(raw: string): string[] {
+  return [
+    ...new Set(
+      raw
+        .replace(/[、，]/g, ",")
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item !== ""),
+    ),
+  ];
 }

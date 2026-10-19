@@ -22,8 +22,14 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
-import type { FamilyPerson, FamilyRelationship } from "../../../shared/api/client";
+import {
+  deleteFamilyRelationship,
+  putFamilyRelationship,
+  type FamilyPerson,
+  type FamilyRelationship,
+} from "../../../shared/api/client";
 import { EmptyState } from "../../../shared/ui/EmptyState";
+import { describeReviewError } from "../reviewErrors";
 import {
   dedupeRelationships,
   fitTransform,
@@ -34,7 +40,12 @@ import {
   screenToWorld,
   zoomAt,
 } from "./graphLayout";
-import { membershipLabel, membershipOf, personDisplayName } from "./membership";
+import {
+  membershipLabel,
+  membershipOf,
+  personDisplayName,
+  relationChoices,
+} from "./membership";
 
 /** 命中另一个节点的半径：比节点本身松一点，拖拽时不必精确压中圆心。 */
 const DROP_RADIUS = NODE_RADIUS * 1.8;
@@ -46,6 +57,16 @@ interface Props {
   readonly selectedId: string | null;
   readonly onSelect: (personId: string) => void;
   readonly onRelate: (subjectId: string, objectId: string) => void;
+  /** 写完关系后重拉图谱（不闪 loading）。 */
+  readonly onChanged: () => Promise<void>;
+}
+
+/** 点中的边。方向保留去重后的方向；编辑时用它作为 PUT 的 subject → object。 */
+interface EdgeSelection {
+  readonly subject: string;
+  readonly object: string;
+  readonly predicate: string;
+  readonly inverse_predicate: string;
 }
 
 interface DragState {
@@ -56,7 +77,14 @@ interface DragState {
   moved: boolean;
 }
 
-export function FamilyGraphView({ people, relationships, selectedId, onSelect, onRelate }: Props) {
+export function FamilyGraphView({
+  people,
+  relationships,
+  selectedId,
+  onSelect,
+  onRelate,
+  onChanged,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const groupRef = useRef<SVGGElement | null>(null);
@@ -64,6 +92,7 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
   const [size, setSize] = useState(DEFAULT_SIZE);
   const [query, setQuery] = useState("");
   const [hovered, setHovered] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<EdgeSelection | null>(null);
   const [relatePreview, setRelatePreview] = useState<{
     from: string;
     x: number;
@@ -255,6 +284,22 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
     };
   }
 
+  // 编辑要写回的 scope 以**那条关系行自己的 scope_id** 为准：合并过相册时整张图跨多个
+  // scope，拿入参 scope 会写错册。
+  const selectedRow =
+    selectedEdge === null
+      ? undefined
+      : relationships.find(
+          (row) =>
+            row.subject_entity_id === selectedEdge.subject &&
+            row.object_entity_id === selectedEdge.object &&
+            row.predicate === selectedEdge.predicate,
+        );
+  const nameOf = (id: string): string => {
+    const person = people.find((item) => item.id === id);
+    return person === undefined ? id : personDisplayName(person);
+  };
+
   if (people.length === 0) {
     return (
       <EmptyState
@@ -297,13 +342,31 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
               const from = layout.get(edge.subject_entity_id);
               const to = layout.get(edge.object_entity_id);
               if (from === undefined || to === undefined) return null;
+              const edgeSelected =
+                selectedEdge !== null &&
+                selectedEdge.subject === edge.subject_entity_id &&
+                selectedEdge.object === edge.object_entity_id;
               const active =
+                edgeSelected ||
                 selectedId === edge.subject_entity_id ||
                 selectedId === edge.object_entity_id ||
                 hovered === edge.subject_entity_id ||
                 hovered === edge.object_entity_id;
               return (
-                <g key={`${edge.subject_entity_id}-${edge.object_entity_id}-${edge.predicate}`}>
+                <g
+                  key={`${edge.subject_entity_id}-${edge.object_entity_id}-${edge.predicate}`}
+                  data-edge-id={`${edge.subject_entity_id}->${edge.object_entity_id}`}
+                  style={{ cursor: "pointer" }}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSelectedEdge({
+                      subject: edge.subject_entity_id,
+                      object: edge.object_entity_id,
+                      predicate: edge.predicate,
+                      inverse_predicate: edge.inverse_predicate,
+                    });
+                  }}
+                >
                   <line
                     className={active ? "graph-edge active" : "graph-edge"}
                     x1={from.x}
@@ -367,7 +430,138 @@ export function FamilyGraphView({ people, relationships, selectedId, onSelect, o
           {people.length} 人 · {edges.length} 条关系
         </span>
       </div>
+
+      {selectedEdge === null ? null : (
+        <EdgeEditor
+          key={`${selectedEdge.subject}-${selectedEdge.object}-${selectedEdge.predicate}`}
+          edge={selectedEdge}
+          scopeId={selectedRow?.scope_id ?? ""}
+          subjectName={nameOf(selectedEdge.subject)}
+          objectName={nameOf(selectedEdge.object)}
+          onChanged={onChanged}
+          onClose={() => setSelectedEdge(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * 选中一条边后的编辑条：改谓词走 `PUT /family-graph/relationships`（后端会先 supersede
+ * 这一对现有的关系，再落正反两行），删除走 `DELETE`（只带两端 id，谓词不在体里）。
+ *
+ * **方向原样保留**：编辑条里的 subject → object 就是用户在图上看到的方向；选择表里的
+ * 每一项都同时带谓词与反向谓词，后端 `validate_relationship_pair` 只接受成对的标签。
+ * 当前谓词不在词表里时（模型可能写出别的关系）仍能删除，但保存需要重新选一项。
+ */
+function EdgeEditor({
+  edge,
+  scopeId,
+  subjectName,
+  objectName,
+  onChanged,
+  onClose,
+}: {
+  edge: EdgeSelection;
+  scopeId: string;
+  subjectName: string;
+  objectName: string;
+  onChanged: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const choices = relationChoices();
+  const currentIndex = choices.findIndex(
+    (choice) =>
+      choice.predicate === edge.predicate &&
+      choice.inversePredicate === edge.inverse_predicate,
+  );
+  const [choiceIndex, setChoiceIndex] = useState(currentIndex);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const choice = choices[choiceIndex];
+    if (choice === undefined || scopeId === "") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await putFamilyRelationship({
+        scopeId,
+        subjectEntityId: edge.subject,
+        predicate: choice.predicate,
+        objectEntityId: edge.object,
+        inversePredicate: choice.inversePredicate,
+      });
+      await onChanged();
+      onClose();
+    } catch (cause) {
+      setError(describeReviewError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (scopeId === "") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteFamilyRelationship({
+        scopeId,
+        subjectEntityId: edge.subject,
+        objectEntityId: edge.object,
+      });
+      await onChanged();
+      onClose();
+    } catch (cause) {
+      setError(describeReviewError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="graph-toolbar" role="region" aria-label="编辑关系">
+      <strong>
+        {subjectName} · {edge.predicate} → {objectName}
+      </strong>
+      <select
+        aria-label="关系类型"
+        value={choiceIndex}
+        onChange={(event) => setChoiceIndex(Number(event.target.value))}
+      >
+        {choiceIndex < 0 ? <option value={-1}>当前关系不在词表里，请重新选择</option> : null}
+        {choices.map((choice, index) => (
+          <option key={choice.label} value={index}>
+            {choice.label}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        className="button primary small"
+        disabled={busy || choiceIndex < 0 || scopeId === ""}
+        onClick={() => void save()}
+      >
+        保存谓词
+      </button>
+      <button
+        type="button"
+        className="button ghost small"
+        disabled={busy || scopeId === ""}
+        onClick={() => void remove()}
+      >
+        删除关系
+      </button>
+      <button type="button" className="button ghost small" disabled={busy} onClick={onClose}>
+        取消
+      </button>
+      {error === null ? null : (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 

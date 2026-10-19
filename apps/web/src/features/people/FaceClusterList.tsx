@@ -1,18 +1,31 @@
-import type { FaceClusterSummary } from "../../shared/api/client";
-import { FaceClusterCard } from "./FaceClusterCard";
+import type {
+  FaceClusterSummary,
+  PersonPayload,
+} from "../../shared/api/client";
+import { FaceClusterCard, type ClusterRelationInput } from "./FaceClusterCard";
 import { clusterDisplayName } from "./reviewErrors";
 
 export interface FaceClusterListProps {
   clusters: FaceClusterSummary[];
+  /** 已确认的人物——确认簇时可选的关系目标。 */
+  people: PersonPayload[];
   /** 已勾选用于合并的簇 id，最多两个。 */
   selectedIds: string[];
   /** 两个里保留哪一个（另一个作为来源并进来）。 */
   mergeTargetId: string | null;
+  batchMode: boolean;
+  batchSelectedIds: string[];
   busy: boolean;
   onToggleMerge: (clusterId: string) => void;
   onChooseMergeTarget: (clusterId: string) => void;
+  onToggleBatch: (clusterId: string) => void;
   onMerge: () => void;
-  onConfirm: (clusterId: string, name: string, familyRole: string | null) => Promise<boolean>;
+  onConfirm: (
+    clusterId: string,
+    name: string,
+    familyRole: string | null,
+    relation: ClusterRelationInput | null,
+  ) => Promise<boolean>;
   onReject: (clusterId: string) => void;
   onSplit: (clusterId: string, faceInstanceId: string) => void;
 }
@@ -26,11 +39,15 @@ export interface FaceClusterListProps {
  */
 export function FaceClusterList({
   clusters,
+  people,
   selectedIds,
   mergeTargetId,
+  batchMode,
+  batchSelectedIds,
   busy,
   onToggleMerge,
   onChooseMergeTarget,
+  onToggleBatch,
   onMerge,
   onConfirm,
   onReject,
@@ -45,9 +62,13 @@ export function FaceClusterList({
       <FaceClusterCard
         key={cluster.id}
         cluster={cluster}
+        people={people}
         selectedForMerge={selectedIds.includes(cluster.id)}
+        batchMode={batchMode}
+        selectedForBatch={batchSelectedIds.includes(cluster.id)}
         busy={busy}
         onToggleMerge={onToggleMerge}
+        onToggleBatch={onToggleBatch}
         onConfirm={onConfirm}
         onReject={onReject}
         onSplit={onSplit}

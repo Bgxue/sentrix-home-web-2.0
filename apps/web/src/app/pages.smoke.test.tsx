@@ -28,12 +28,18 @@ vi.mock("../shared/api/client", async (importOriginal) => {
     searchAssets: vi.fn(),
     listFaceClusters: vi.fn(),
     importAsset: vi.fn(),
+    listFacts: vi.fn(),
+    confirmFact: vi.fn(),
+    rejectFact: vi.fn(),
+    getVideo: vi.fn(),
+    reprocessVideo: vi.fn(),
   };
 });
 
 import * as client from "../shared/api/client";
 import { ScopeProvider } from "../app/ScopeProvider";
 import { ROUTES } from "../app/router";
+import { ToastProvider } from "../shared/ui/Toast";
 
 const EMPTY_SPACES = [{ id: "album1", name: "第一册", kind: "benchmark", status: "active" }];
 
@@ -81,7 +87,13 @@ function mockClient(hasData: boolean) {
     updated_at: "2026-01-01T00:00:00+00:00",
     last_message_at: "2026-01-01T00:00:00+00:00",
   });
-  vi.mocked(client.fetchHealth).mockResolvedValue({ status: "ok", version: "0.1.0", database: "ok" });
+  vi.mocked(client.fetchHealth).mockResolvedValue({
+    status: "ok",
+    version: "0.1.0",
+    database: "ok",
+    embeddings: "ok",
+  });
+  vi.mocked(client.listFacts).mockResolvedValue([]);
   vi.mocked(client.fetchTimeline).mockResolvedValue(
     hasData
       ? {
@@ -125,11 +137,13 @@ function mockClient(hasData: boolean) {
 function renderPage(path: string) {
   const Page = ROUTES[path];
   return render(
-    <MemoryRouter>
-      <ScopeProvider>
-        <Page />
-      </ScopeProvider>
-    </MemoryRouter>,
+    <ToastProvider>
+      <MemoryRouter>
+        <ScopeProvider>
+          <Page />
+        </ScopeProvider>
+      </MemoryRouter>
+    </ToastProvider>,
   );
 }
 

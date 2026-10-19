@@ -1,17 +1,39 @@
 import { useState, type FormEvent } from "react";
 
-import type { FaceClusterSummary } from "../../shared/api/client";
+import type {
+  FaceClusterSummary,
+  PersonPayload,
+} from "../../shared/api/client";
+import { relationChoices } from "./family/membership";
 import { clusterDisplayName } from "./reviewErrors";
 
 /** 1.0 确认框里的那组家庭角色（``app.js:956`` 的 ``<select>``），原样保留。 */
 const FAMILY_ROLES = ["母亲", "父亲", "孩子", "祖父母", "其他家庭成员"];
 
+/** 确认簇时顺带建的关系。方向固定：``subject`` 是**刚确认的这个人**。 */
+export interface ClusterRelationInput {
+  targetId: string;
+  predicate: string;
+  inversePredicate: string;
+}
+
 export interface FaceClusterCardProps {
   cluster: FaceClusterSummary;
+  /** 已确认的人物。关系目标只能从这里选——空目标表示这次只确认。 */
+  people: PersonPayload[];
   selectedForMerge: boolean;
+  /** 批量确认模式下显示另一个复选框；合并复选框在这时隐藏。 */
+  batchMode: boolean;
+  selectedForBatch: boolean;
   busy: boolean;
   onToggleMerge: (clusterId: string) => void;
-  onConfirm: (clusterId: string, name: string, familyRole: string | null) => Promise<boolean>;
+  onToggleBatch: (clusterId: string) => void;
+  onConfirm: (
+    clusterId: string,
+    name: string,
+    familyRole: string | null,
+    relation: ClusterRelationInput | null,
+  ) => Promise<boolean>;
   onReject: (clusterId: string) => void;
   onSplit: (clusterId: string, faceInstanceId: string) => void;
 }
@@ -27,9 +49,13 @@ export interface FaceClusterCardProps {
  */
 export function FaceClusterCard({
   cluster,
+  people,
   selectedForMerge,
+  batchMode,
+  selectedForBatch,
   busy,
   onToggleMerge,
+  onToggleBatch,
   onConfirm,
   onReject,
   onSplit,
@@ -38,18 +64,33 @@ export function FaceClusterCard({
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [familyRole, setFamilyRole] = useState("");
+  const [relationTarget, setRelationTarget] = useState("");
+  const [relationIndex, setRelationIndex] = useState(-1);
 
   const label = clusterDisplayName(cluster);
   const locked = busy || !cluster.reviewable;
+  const choices = relationChoices();
 
   async function submitConfirm(event: FormEvent) {
     event.preventDefault();
+    // 关系是可选的两项：目标与类型都给全才建，只填一半等同于「这次只确认」。
+    const choice = relationIndex >= 0 ? choices[relationIndex] : undefined;
+    const relation =
+      relationTarget !== "" && choice !== undefined
+        ? {
+            targetId: relationTarget,
+            predicate: choice.predicate,
+            inversePredicate: choice.inversePredicate,
+          }
+        : null;
     // 空名字交给后端判（那是用例的判据，400），前端只负责把结论原样显示出来。
-    const ok = await onConfirm(cluster.id, name, familyRole === "" ? null : familyRole);
+    const ok = await onConfirm(cluster.id, name, familyRole === "" ? null : familyRole, relation);
     if (ok) {
       setNaming(false);
       setName("");
       setFamilyRole("");
+      setRelationTarget("");
+      setRelationIndex(-1);
     }
   }
 
@@ -60,15 +101,29 @@ export function FaceClusterCard({
           <p className="section-kicker">人物识别</p>
           <strong>{label}</strong>
         </div>
-        <label className="cluster-pick">
-          <input
-            type="checkbox"
-            checked={selectedForMerge}
-            onChange={() => onToggleMerge(cluster.id)}
-            aria-label={`选中 ${label} 用于合并`}
-          />
-          选中用于合并
-        </label>
+        {batchMode ? (
+          <label className="cluster-pick">
+            <input
+              type="checkbox"
+              checked={selectedForBatch}
+              disabled={cluster.entity_id === null}
+              onChange={() => onToggleBatch(cluster.id)}
+              aria-label={`选中 ${label} 用于批量确认`}
+              title={cluster.entity_id === null ? "这个簇还没有可确认的人物实体" : undefined}
+            />
+            批量确认
+          </label>
+        ) : (
+          <label className="cluster-pick">
+            <input
+              type="checkbox"
+              checked={selectedForMerge}
+              onChange={() => onToggleMerge(cluster.id)}
+              aria-label={`选中 ${label} 用于合并`}
+            />
+            选中用于合并
+          </label>
+        )}
       </header>
 
       <ul className="cluster-samples">
@@ -146,6 +201,37 @@ export function FaceClusterCard({
               {FAMILY_ROLES.map((role) => (
                 <option key={role} value={role}>
                   {role}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            与已确认人物的关系（可选）
+            <select
+              name="relation_target"
+              value={relationTarget}
+              onChange={(event) => setRelationTarget(event.target.value)}
+            >
+              <option value="">暂不建立关系</option>
+              {people.map((person) => (
+                <option key={person.id} value={person.id}>
+                  {person.canonical_name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            关系类型（可选）
+            <select
+              name="relation_predicate"
+              value={relationIndex}
+              disabled={relationTarget === ""}
+              onChange={(event) => setRelationIndex(Number(event.target.value))}
+            >
+              <option value={-1}>选择关系类型…</option>
+              {choices.map((choice, index) => (
+                <option key={choice.label} value={index}>
+                  {choice.label}
                 </option>
               ))}
             </select>

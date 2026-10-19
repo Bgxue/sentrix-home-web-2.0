@@ -1,0 +1,174 @@
+/* 助手页的会话操作菜单、推理时间线与结果集缩略图。
+ *
+ * 这些类只属于 `features/assistant/`：1.0 的 `.conversation-item` / `.timeline-card` /
+ * `.result-set-thumbs`（`src/app.js:359-563`）在 2.0 没有对应样式，所以随 feature 落在这里，
+ * 不去动全局 `styles/assistant.css`（那个文件负责布局与旧类名，仍在被别处引用）。 */
+
+/* ---- 会话项：打开 / 更多操作 ------------------------------------------------ */
+
+.rail-entry { position: relative; }
+.rail-entry .rail-item { width: 100%; padding-right: 34px; }
+.rail-more {
+  position: absolute;
+  top: 7px;
+  right: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 4px;
+  border-radius: 6px;
+}
+.rail-more:hover { background: var(--surface); color: var(--ink); }
+.rail-menu {
+  position: absolute;
+  top: 32px;
+  right: 4px;
+  z-index: 20;
+  display: grid;
+  gap: 2px;
+  min-width: 116px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.rail-menu button {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.rail-menu button:hover { background: var(--soft); }
+.rail-menu button.danger { color: #b42318; }
+
+.rail-rename { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 9px; }
+.rail-rename input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.rail-rename button,
+.rail-confirm button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+.rail-rename button[type="submit"] { background: var(--ink); border-color: var(--ink); color: var(--surface); }
+.rail-rename button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.rail-confirm { display: grid; gap: 6px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
+.rail-confirm p { margin: 0; font-size: 11px; }
+.rail-confirm div { display: flex; gap: 6px; }
+.rail-confirm button.danger { border-color: #f0b4ae; color: #b42318; }
+
+.assistant-history { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+
+/* ---- 推理时间线 -------------------------------------------------------------- */
+
+.turn-timeline { margin-top: 12px; }
+.turn-timeline-toggle {
+  border: 1px solid var(--line);
+  background: var(--soft);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.turn-timeline-toggle:hover { color: var(--ink); }
+.turn-timeline-body { display: grid; gap: 6px; margin-top: 8px; }
+.turn-timeline-note { margin: 0; color: var(--muted); font-size: 11px; }
+
+.phase-card { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.phase-card > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 11px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+.phase-card > summary::-webkit-details-marker { display: none; }
+.phase-card > summary::before { content: "▸"; color: var(--faint); font-size: 9px; }
+.phase-card[open] > summary::before { content: "▾"; }
+.phase-card > summary strong { color: var(--ink); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.phase-card > summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phase-card.phase-running > summary strong { color: var(--green); }
+.phase-card.phase-denied > summary strong,
+.phase-card.phase-partial > summary strong { color: #b42318; }
+
+.phase-body { padding: 0 11px 10px 25px; display: grid; gap: 8px; }
+.phase-event { border-top: 1px dashed var(--line); padding-top: 8px; }
+.phase-event:first-child { border-top: 0; padding-top: 0; }
+.phase-event p { margin: 0; font-size: 11px; line-height: 1.65; }
+.phase-json {
+  margin: 6px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 7px;
+  background: var(--soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.phase-detail { margin-top: 5px; }
+.phase-detail > summary { cursor: pointer; color: var(--muted); font-size: 10px; }
+.phase-result { margin: 5px 0 0; padding-left: 16px; color: var(--muted); font-size: 10px; display: grid; gap: 2px; }
+.phase-duration { color: var(--faint); font-size: 10px; }
+.phase-requirements { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 3px; font-size: 10px; color: var(--muted); }
+.phase-requirements li { display: flex; gap: 6px; align-items: baseline; }
+.phase-requirements small { color: var(--faint); }
+.phase-requirements em { color: #b45309; font-style: normal; }
+.phase-guard { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.phase-guard strong { color: #b42318; }
+.phase-terminal { margin: 5px 0 0; color: var(--faint); font-size: 10px; }
+
+/* ---- 结果集缩略图墙 ---------------------------------------------------------- */
+
+.result-set-wall { margin-top: 12px; display: grid; gap: 8px; }
+.result-set-head { display: flex; align-items: baseline; gap: 8px; }
+.result-set-head strong { font-size: 11px; }
+.result-set-head small { color: var(--muted); font-size: 10px; }
+.result-set-thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.result-set-thumbs a { display: block; line-height: 0; }
+.result-set-thumbs img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 7px;
+  background: var(--soft);
+  display: block;
+}
+.result-set-next,
+.result-set-more {
+  justify-self: start;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.result-set-next:hover:not(:disabled) { background: var(--soft); color: var(--ink); }
+.result-set-next:disabled { opacity: 0.5; cursor: not-allowed; }
+.result-set-more { border: 0; background: transparent; padding: 0; }

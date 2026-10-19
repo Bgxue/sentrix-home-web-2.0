@@ -25,13 +25,15 @@ import { PersonDetail } from "./family/PersonDetail";
 import { personDisplayName } from "./family/membership";
 import { useFamilyGraph } from "./family/useFamilyGraph";
 import { PeopleView } from "./PeopleView";
+import { PersonInsights } from "./PersonInsights";
 
-type View = "roster" | "graph" | "review";
+type View = "roster" | "graph" | "review" | "insights";
 
 const TABS: readonly { value: View; label: string }[] = [
   { value: "roster", label: "名录" },
   { value: "graph", label: "关系图谱" },
   { value: "review", label: "待确认簇" },
+  { value: "insights", label: "画像治理" },
 ];
 
 export function PeoplePage() {
@@ -207,6 +209,7 @@ export function PeoplePage() {
               selectedId={selectedId}
               onSelect={(id) => selectPerson(id)}
               onRelate={(subjectId, objectId) => selectPerson(subjectId, objectId)}
+              onChanged={refresh}
             />
           )}
         </Section>
@@ -215,6 +218,12 @@ export function PeoplePage() {
       {view === "review" ? (
         <Section kicker="人物聚类 / 待确认" title="先确认身份，再进入长期记忆">
           <PeopleView scopeId={scopeId} />
+        </Section>
+      ) : null}
+
+      {view === "insights" ? (
+        <Section kicker="人物画像" title="看看系统记得的这个人，像不像他">
+          <PersonInsights scopeId={scopeId} />
         </Section>
       ) : null}
 

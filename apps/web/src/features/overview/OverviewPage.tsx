@@ -6,17 +6,19 @@
  * 提问框的行为也是照 1.0 的：那里的 `searchBar()` 是**提交进助手对话**，不是跳到
  * 检索页。2.0 用 `?q=` 交接——概览把问题塞进 URL，助手页取出后自动问一次。
  *
- * **1.0 的四张卡只搬得来三张。** 第四张是「待确认事实」，而 2.0 没有 `facts` /
- * `dashboard` 端点。留一张恒为 0 的卡比不显示更糟：它看起来像条通的链路。
+ * **1.0 的四张卡只搬得来三张。** 第四张是「待确认事实」；2.0 有 `GET /facts`
+ * （设置页在用），但概览这里没有 `dashboard` 聚合端点，单独再拉一次事实列表
+ * 只为凑一张卡并不划算。第四张留给以后有聚合端点时再接。
  */
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 
 import { useScope } from "../../app/ScopeProvider";
 import { PageHeader } from "../../shared/ui/PageHeader";
 import { Section } from "../../shared/ui/Section";
 import { StatCard } from "../../shared/ui/StatCard";
+import { useAutoRefresh } from "../../shared/ui/useAutoRefresh";
 import {
   fetchHealth,
   fetchTimeline,
@@ -35,24 +37,35 @@ export function OverviewPage() {
   const [aiReady, setAiReady] = useState<boolean | null>(null);
   const [question, setQuestion] = useState("");
 
-  useEffect(() => {
-    let cancelled = false;
-    Promise.allSettled([
+  // 自动刷新与手动首载共用这一条。`requestId` 防止换相册时旧请求晚到、把新范围的
+  // 数字盖回去——5 秒一次意味着这种竞态比手动刷新更容易撞上。
+  const requestId = useRef(0);
+  const load = useCallback(async () => {
+    const id = ++requestId.current;
+    const [assetResult, timelineResult, healthResult, peopleResult] = await Promise.allSettled([
       listAssets(scopeId),
       fetchTimeline(scopeId, 0, 5),
       fetchHealth(),
       listPeople(scopeId),
-    ]).then(([assetResult, timelineResult, healthResult, peopleResult]) => {
-      if (cancelled) return;
-      setAssets(assetResult.status === "fulfilled" ? assetResult.value.length : null);
-      setDays(timelineResult.status === "fulfilled" ? timelineResult.value.days : []);
-      setAiReady(healthResult.status === "fulfilled" && healthResult.value.status === "ok");
-      setPeople(peopleResult.status === "fulfilled" ? peopleResult.value.length : null);
-    });
-    return () => {
-      cancelled = true;
-    };
+    ]);
+    if (id !== requestId.current) return;
+    // 只写成功的那几路：静默刷新时一次网络抖动不该把已有数字清成「—」。
+    // 首次加载失败仍然显示初始的 null / 空数组。
+    if (assetResult.status === "fulfilled") setAssets(assetResult.value.length);
+    if (timelineResult.status === "fulfilled") setDays(timelineResult.value.days);
+    if (healthResult.status === "fulfilled") setAiReady(healthResult.value.status === "ok");
+    if (peopleResult.status === "fulfilled") setPeople(peopleResult.value.length);
   }, [scopeId]);
+
+  useEffect(() => {
+    void load();
+    return () => {
+      requestId.current += 1;
+    };
+  }, [load]);
+
+  // 1.0 `src/app.js:2253-2256` 的 5 秒静默刷新：不可见 / 用户编辑中自动暂停。
+  useAutoRefresh(() => void load());
 
   function ask(event: FormEvent) {
     event.preventDefault();
@@ -138,7 +151,7 @@ export function OverviewPage() {
                   key={event.id}
                   type="button"
                   className="event-row"
-                  onClick={() => navigate("/timeline")}
+                  onClick={() => navigate(`/timeline?event=${encodeURIComponent(event.id)}`)}
                 >
                   <strong>{event.title}</strong>
                   <small>{day.date} · {event.place || "未解析出地点"}</small>

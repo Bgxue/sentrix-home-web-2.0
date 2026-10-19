@@ -14,7 +14,11 @@ import { Link, Outlet, useLocation, useNavigate } from "react-router";
 
 import { NAV_ITEMS, SYSTEM_ITEMS, activeNavItem } from "./nav";
 import { useScope } from "./ScopeProvider";
+import { CommandPalette } from "./CommandPalette";
+import { HelpModal } from "./HelpModal";
+import { qaDashboardUrl } from "./qa";
 import { fetchHealth } from "../shared/api/client";
+import { useToast } from "../shared/ui/Toast";
 
 function NavButton({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
   return (
@@ -29,7 +33,33 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { scopeId, spaces, setScopeId } = useScope();
+  const { notify } = useToast();
   const [backendDown, setBackendDown] = useState(false);
+  // 1.0 的模态是全局 `state.modal`；2.0 这里只有两个壳层动作，不需要通用模态栈。
+  const [overlay, setOverlay] = useState<"command" | "help" | null>(null);
+
+  /**
+   * 切换相册。1.0 的 `select-space` 直接写 state——但写 `localStorage` 会抛
+   * （Safari 隐私模式、存储配额满），而抛出来时范围已经变了、侧边栏却停在旧值。
+   * 这里把失败接成 Toast，并且**不吞掉异常后继续**：切换失败就保持原范围。
+   */
+  function switchScope(next: string) {
+    if (next !== "" && !spaces.some((space) => space.id === next)) {
+      notify("相册切换失败：该相册已不在列表中", "error");
+      return;
+    }
+    try {
+      setScopeId(next);
+    } catch (cause) {
+      notify(`相册切换失败：${(cause as Error).message}`, "error");
+    }
+  }
+
+  function openQaDashboard() {
+    // 不探测服务是否就绪：2.0 API 没有 1.0 的 `/api/photobench/ensure`，
+    // 先 fetch 一个不存在的端点只会把「打不开」伪装成「启动中」。
+    window.open(qaDashboardUrl(window.location), "_blank", "noopener,noreferrer");
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -63,7 +93,7 @@ export function AppShell() {
             <select
               aria-label="切换全部相册或独立相册"
               value={scopeId}
-              onChange={(event) => setScopeId(event.target.value)}
+              onChange={(event) => switchScope(event.target.value)}
             >
               <option value="">全部相册</option>
               {spaces.map((space) => (
@@ -98,6 +128,20 @@ export function AppShell() {
               onClick={() => navigate(item.path)}
             />
           ))}
+          {/* 两个动作项照 1.0 `:238`：不是路由，所以不进 SYSTEM_ITEMS（那张表
+              与 ROUTES 一一对应，路由门禁会拒绝没有页面的导航项）。 */}
+          <NavButton
+            icon="?"
+            label="使用帮助"
+            active={false}
+            onClick={() => setOverlay("help")}
+          />
+          <NavButton
+            icon="▤"
+            label="QA 测评"
+            active={false}
+            onClick={openQaDashboard}
+          />
         </nav>
 
         <div className="sidebar-footer">
@@ -127,6 +171,14 @@ export function AppShell() {
             ) : null}
           </div>
           <div className="top-actions">
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="打开命令搜索"
+              onClick={() => setOverlay("command")}
+            >
+              ⌘
+            </button>
             <span className="top-user">
               <span className="avatar tiny">S</span>
               <span>{spaceLabel}</span>
@@ -137,6 +189,11 @@ export function AppShell() {
           <Outlet />
         </div>
       </div>
+
+      {overlay === "command" ? (
+        <CommandPalette onClose={() => setOverlay(null)} />
+      ) : null}
+      {overlay === "help" ? <HelpModal onClose={() => setOverlay(null)} /> : null}
     </main>
   );
 }

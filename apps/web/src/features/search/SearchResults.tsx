@@ -1,4 +1,31 @@
-import { assetDisplayUrl, type SearchHit, type SearchResponse } from "../../shared/api/client";
+/**
+ * 检索结果。
+ *
+ * 三条与 1.0 对齐的行为：
+ *
+ * 1. **结果可点开**：图片结果本身是按钮，点开复用资料库的 `AssetDetail`（不复制一份）；
+ * 2. **视频帧定位**：命中派生关键帧时，用 `source_timestamp_sec` 在源视频上
+ *    `currentTime` 定位（1.0 `mediaResults` 的 `data-evidence-timestamp` 同一条读法）；
+ * 3. **降级显式展示**：后端在降级，用户有权知道结果是怎么来的。
+ *
+ * `GET /search` 只返回 `AssetSummary`，**没有事件 id / 活动描述**。详情里的「时间、地点」
+ * 来自资产自己的 `captured_at` 与 GPS；活动描述没有数据来源，所以不编。
+ */
+
+import { useState } from "react";
+
+import {
+  assetDisplayUrl,
+  assetPreviewUrl,
+  getAsset,
+  type AssetDetailResponse,
+  type SearchHit,
+  type SearchResponse,
+} from "../../shared/api/client";
+import { AssetDetail } from "../library/AssetDetail";
+import "./search-results.css";
+
+const MEDIA_MARK: Readonly<Record<string, string>> = { audio: "♪", text: "¶" };
 
 /**
  * 展示真实相似度，而不是 ``score``。
@@ -17,7 +44,43 @@ function formatSimilarity(hit: SearchHit): string {
   return channels.map(([channel, value]) => `${channel}: ${value.toFixed(4)}`).join(" · ");
 }
 
-/** 检索结果。降级状态要显式展示——后端在降级，用户有权知道结果是怎么来的。 */
+function formatCapturedAt(value: string | null): string {
+  return value === null ? "未标注时间" : value.replace("T", " ").slice(0, 19);
+}
+
+/** 命中视频帧：命中资产是派生图片，播放的是它的源视频。 */
+function frameSource(hit: SearchHit): { videoId: string; seconds: number } | null {
+  const { parent_asset_id, source_timestamp_sec, media_type } = hit.asset;
+  if (media_type !== "image" || parent_asset_id == null || source_timestamp_sec == null) {
+    return null;
+  }
+  return { videoId: parent_asset_id, seconds: source_timestamp_sec };
+}
+
+/** 视频结果：`/preview` 优先交付浏览器可放的转码件。 */
+function VideoResult({
+  assetId,
+  startSec,
+}: {
+  assetId: string;
+  startSec: number | null;
+}) {
+  return (
+    <video
+      controls
+      preload="metadata"
+      playsInline
+      src={assetPreviewUrl(assetId)}
+      aria-label="检索命中的视频"
+      onLoadedMetadata={(event) => {
+        if (startSec !== null && Number.isFinite(startSec)) {
+          event.currentTarget.currentTime = Math.max(0, startSec);
+        }
+      }}
+    />
+  );
+}
+
 export function SearchResults({
   response,
   onClose,
@@ -25,6 +88,33 @@ export function SearchResults({
   response: SearchResponse;
   onClose: () => void;
 }) {
+  const [selected, setSelected] = useState<{
+    asset: AssetDetailResponse;
+    startSec: number | null;
+  } | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openHit(hit: SearchHit, startSec: number | null) {
+    // 普通结果直接用检索已经带回的 AssetSummary，不再多请求一次。
+    if (startSec === null || hit.asset.parent_asset_id == null) {
+      setSelected({ asset: hit.asset, startSec });
+      return;
+    }
+    // 视频帧命中：父视频的完整摘要要走 `/assets/{id}`——
+    // 关键帧自己的文件名/类型不是用户想看的那份资产。
+    setBusyId(hit.asset.id);
+    setError(null);
+    try {
+      const parent = await getAsset(hit.asset.parent_asset_id);
+      setSelected({ asset: parent, startSec });
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <section className="results">
       <header className="results-header">
@@ -40,22 +130,82 @@ export function SearchResults({
           检索正在降级（{response.backend}）：{response.degraded_reason}
         </p>
       ) : null}
+      {error !== null ? <p className="error">{error}</p> : null}
       {response.items.length === 0 ? (
         <p className="empty">
           {response.authoritative_vectors === 0 ? "还没有已索引的照片。" : "没有匹配的照片。"}
         </p>
       ) : (
-        <ul className="grid">
-          {response.items.map((item) => (
-            <li key={item.asset.id}>
-              {/* 结果一律给可打开的原图（HEIC 走服务端转码预览） */}
-              <img src={assetDisplayUrl(item.asset)} alt={item.asset.file_name} loading="lazy" />
-              <span>{item.asset.file_name}</span>
-              <small>{formatSimilarity(item)}</small>
-            </li>
-          ))}
-        </ul>
+        <>
+          <p className="search-result-note">
+            结果只携带资产本身的时间与 GPS；活动描述需要事件上下文，<code>/search</code> 不返回事件 id。
+          </p>
+          <ul className="grid search-results-grid">
+            {response.items.map((item) => {
+              const frame = frameSource(item);
+              const videoId = frame?.videoId ?? (item.asset.media_type === "video" ? item.asset.id : null);
+              const startSec = frame?.seconds ?? item.asset.source_timestamp_sec ?? null;
+              const info = (
+                <>
+                  <span>{item.asset.file_name}</span>
+                  <small>{formatCapturedAt(item.asset.captured_at)}</small>
+                  <small>
+                    {item.asset.gps
+                      ? `${item.asset.gps.latitude.toFixed(4)}, ${item.asset.gps.longitude.toFixed(4)}`
+                      : "无 GPS"}
+                  </small>
+                  {frame !== null ? <small>命中视频帧 · {frame.seconds.toFixed(2)}s</small> : null}
+                  <small>{formatSimilarity(item)}</small>
+                </>
+              );
+              const open = () => void openHit(item, startSec);
+              return (
+                <li key={item.asset.id}>
+                  {videoId !== null ? (
+                    <>
+                      {/* 视频控件不能套在 button 里：`controls` 自己就是交互元素。 */}
+                      <VideoResult assetId={videoId} startSec={startSec} />
+                      <button
+                        type="button"
+                        className="search-result-card"
+                        disabled={busyId === item.asset.id}
+                        onClick={open}
+                        title="查看详情"
+                      >
+                        {info}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="search-result-card"
+                      disabled={busyId === item.asset.id}
+                      onClick={open}
+                      title="查看详情"
+                    >
+                      {item.asset.media_type === "image" ? (
+                        <img src={assetDisplayUrl(item.asset)} alt={item.asset.file_name} loading="lazy" />
+                      ) : (
+                        <span className="search-result-mark" aria-hidden="true">
+                          {MEDIA_MARK[item.asset.media_type] ?? "▦"}
+                        </span>
+                      )}
+                      {info}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
+      {selected !== null ? (
+        <AssetDetail
+          asset={selected.asset}
+          initialTimeSec={selected.startSec}
+          onClose={() => setSelected(null)}
+        />
+      ) : null}
     </section>
   );
 }

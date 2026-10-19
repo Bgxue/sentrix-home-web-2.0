@@ -6,6 +6,8 @@
  * 人以为场景图片堆是可用的。
  */
 
+import { useSearchParams } from "react-router";
+
 import { useScope } from "../../app/ScopeProvider";
 import { PageHeader } from "../../shared/ui/PageHeader";
 import { Timeline } from "./Timeline";
@@ -14,6 +16,22 @@ import "../../styles/timeline.css";
 export function TimelinePage() {
   const { scopeId, spaces } = useScope();
   const scopeName = spaces.find((space) => space.id === scopeId)?.name ?? "全部相册";
+  const [searchParams, setSearchParams] = useSearchParams();
+  const focusedEventId = searchParams.get("event");
+
+  /**
+   * `?event=` 是详情的唯一状态：概览页跳过来、刷新、浏览器后退都能还原。
+   *
+   * **以 `window.location.search` 为准重建参数**——与 PeoplePage 的 `?person=` 同一条
+   * 理由：ScopeProvider 切相册时用 `history.replaceState` 直接写 URL，react-router
+   * 收不到那次变更，在 router 的旧参数上增删会把刚切的相册覆盖掉。
+   */
+  function openEvent(eventId: string | null) {
+    const next = new URLSearchParams(window.location.search);
+    if (eventId === null) next.delete("event");
+    else next.set("event", eventId);
+    setSearchParams(next);
+  }
 
   return (
     <>
@@ -24,7 +42,11 @@ export function TimelinePage() {
       />
       <section className="timeline-layout">
         <div className="timeline-main">
-          <Timeline scopeId={scopeId} />
+          <Timeline
+            scopeId={scopeId}
+            focusEventId={focusedEventId}
+            onOpenEvent={openEvent}
+          />
         </div>
         <aside className="side-inspector">
           <p className="section-kicker">视频记忆</p>
