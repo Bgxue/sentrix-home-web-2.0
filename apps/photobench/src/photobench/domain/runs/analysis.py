@@ -25,7 +25,7 @@ import json
 import math
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -987,11 +987,22 @@ def capability_summary(
     wall_times = [
         float(item["wall_clock_ms"]) for item in items if isinstance(item.get("wall_clock_ms"), (int, float))
     ]
-    judge_times = [
-        float(value)
-        for item in items
-        if isinstance((value := (item.get("timing_breakdown") or {}).get("judge_ms")), (int, float))
-    ]
+
+    # **`timing_breakdown` 是 1.0 的存档字段，2.0 的 run 从来不写它。** 只读它的话，
+    # `judge_llm_latency_mean_ms` / `agent_task_latency_mean_ms` 恒为 None——
+    # 8772 页面上那两行有位置、没数字。2.0 的真实来源是 item 级的 `judge_ms`
+    # 与 `wall_clock_ms`（后者减去前者就是 agent 的墙钟）。
+    def _flat_ms(item: Mapping[str, Any], key: str) -> float | None:
+        value = item.get(key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    judge_times: list[float] = []
+    for item in items:
+        saved = item.get("timing_breakdown")
+        if isinstance(saved, dict) and isinstance(saved.get("judge_ms"), (int, float)):
+            judge_times.append(float(saved["judge_ms"]))
+        elif isinstance(item.get("judge_ms"), (int, float)):
+            judge_times.append(float(item["judge_ms"]))
     judge_exclusive_ms = None
     agent_throughput_ms = None
     agent_throughput_mode = "historical_interval_estimate"
@@ -1047,11 +1058,18 @@ def capability_summary(
         )
     judge_phase = (phases or {}).get("qa_eval") or {}
     judge_phase_wall_ms = numeric_ms(judge_phase.get("judge_phase_wall_ms"))
-    agent_wall_times = [
-        float(value)
-        for item in items
-        if isinstance((value := (item.get("timing_breakdown") or {}).get("agent_wall_ms")), (int, float))
-    ]
+    agent_wall_times: list[float] = []
+    for item in items:
+        saved = item.get("timing_breakdown")
+        if isinstance(saved, dict) and isinstance(saved.get("agent_wall_ms"), (int, float)):
+            agent_wall_times.append(float(saved["agent_wall_ms"]))
+            continue
+        wall = _flat_ms(item, "wall_clock_ms")
+        judge = _flat_ms(item, "judge_ms")
+        if wall is not None and judge is not None:
+            agent_wall_times.append(max(0.0, wall - judge))
+        elif wall is not None:
+            agent_wall_times.append(wall)
     agent_loop_counts = [
         sum(
             1

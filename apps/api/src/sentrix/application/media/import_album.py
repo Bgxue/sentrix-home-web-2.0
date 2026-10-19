@@ -138,6 +138,7 @@ class ImportAlbum:
         t_start = time.perf_counter()
         stage_seconds = 0.0
         finish_seconds = 0.0
+        prepare_seconds = 0.0
         event_ids: list[str] = []
         # 按**下标**归集失败，最后按序输出——原先逐张跑时它们天然是路径序，
         # 现在 stage 与 finish 两处都可能失败，混着 append 会把顺序打乱。
@@ -179,14 +180,24 @@ class ImportAlbum:
                 if ready is None:
                     continue
                 future = pending.pop(index, None)
+                # **等模型 ≠ 归属。** `future.result()` 是 VLM 观察的等待时间，把它
+                # 算进 finish 会让「归属」看起来吃掉整段导入（实测 3175s vs 真实的
+                # 几十秒）。等待单独计到 prepare，finish 只计落库归属本身。
+                prepared = None
                 finish_started = time.perf_counter()
                 try:
+                    if future is not None:
+                        wait_started = time.perf_counter()
+                        prepared = future.result()
+                        prepare_seconds += time.perf_counter() - wait_started
+                        finish_started = time.perf_counter()
                     if future is None:
                         assert isinstance(ready, ImportResult)
                         result = ready
                     else:
                         assert isinstance(ready, StagedImport)
-                        result = self._importer.finish(ready, future.result())
+                        assert prepared is not None
+                        result = self._importer.finish(ready, prepared)
                 except Exception as error:
                     failures[index] = AlbumFailure(
                         file_name=paths[index].name, reason=f"{type(error).__name__}: {error}"
@@ -213,7 +224,16 @@ class ImportAlbum:
             "finish": round(finish_seconds, 2),
             "summarize": round(summarize_seconds, 2),
             # 剩余 = VLM 观察（在池里并行跑，按墙钟算才有意义）
-            "prepare": round(max(0.0, total_seconds - stage_seconds - finish_seconds - summarize_seconds), 2),
+            # 并行等待的累计（可能大于墙钟，因为多个 worker 同时在等）。
+            "prepare": round(prepare_seconds, 2),
+            # 墙钟里没被三段时间覆盖的部分（线程调度、文件 IO 等）。
+            "other": round(
+                max(
+                    0.0,
+                    total_seconds - stage_seconds - finish_seconds - summarize_seconds - prepare_seconds,
+                ),
+                2,
+            ),
             "total": round(total_seconds, 2),
         }
 
