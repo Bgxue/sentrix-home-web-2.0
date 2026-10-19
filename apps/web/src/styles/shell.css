@@ -53,3 +53,36 @@
 .avatar.mint, .person-avatar.mint { background: var(--mint); }
 
 .view-root { padding: 34px 38px 80px; max-width: 1500px; margin: 0 auto; }
+
+/* ── 响应式 ───────────────────────────────────────────────────────────────
+   1.0 有 1100 / 780 / 500 三档（`src/styles.css:157-159`），2.0 此前**一条都没有**：
+   240px 侧栏、4 列网格、`1fr 280px` 时间线双栏、400px 详情抽屉在窄屏全部不收缩，
+   平板与分屏下内容被挤压、图片被 `overflow-x:hidden` 裁掉。这里按 1.0 的断点补回。 */
+
+@media (max-width: 1100px) {
+  .sidebar { width: 205px; flex-basis: 205px; padding: 20px 10px 16px; }
+  .view-root { padding: 28px 24px 64px; }
+  .topbar { padding: 0 24px; }
+}
+
+@media (max-width: 780px) {
+  .sidebar { width: 64px; flex-basis: 64px; padding: 18px 9px; }
+  .brand-lockup { padding: 0 7px 24px; }
+  .brand-lockup > div, .space-switcher > div, .space-switcher > .muted,
+  .side-label, .nav-item span, .nav-item em, .sidebar-footer { display: none; }
+  .space-switcher { justify-content: center; padding: 8px 0; border: 0; }
+  .nav-item { justify-content: center; padding: 0; }
+  .nav-item .icon { width: auto; }
+  .topbar { padding: 0 18px; }
+  .view-root { padding: 26px 18px 60px; }
+  .page-heading { align-items: flex-start; flex-direction: column; }
+  .page-heading .button { width: 100%; }
+  .stats-grid { grid-template-columns: 1fr 1fr; }
+  .people-grid { grid-template-columns: 1fr; }
+  .asset-grid, .library-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 500px) {
+  .stats-grid, .asset-grid, .library-grid { grid-template-columns: 1fr; }
+  .page-heading h1 { font-size: 30px; }
+}

@@ -25,3 +25,52 @@
 .icon-button.bordered { border: 1px solid var(--line); }
 .timeline-filter-note { color: var(--faint); font-size: 10px; margin: -12px 0 18px; }
 .timeline-count { color: var(--muted); font-size: 10px; }
+
+/* ── 事件列表 ─────────────────────────────────────────────────────────────
+   这五个类此前**没有任何定义**：照片按原始像素铺开、看图遮罩只是流内 div。
+   数值取 1.0 `src/styles.css:613` 的 `.timeline-day` / `.timeline-event`，并用
+   2.0 的 token 重写——布局意图一致，颜色走体系。 */
+
+.timeline { display: block; }
+.timeline-day { margin-bottom: 18px; }
+.timeline-day > h3 {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 12px; padding: 12px 15px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--soft); color: var(--ink); font-size: 13px; font-weight: 800;
+}
+.timeline-event {
+  position: relative; margin: 0 0 18px; padding: 14px 16px;
+  border: 1px solid var(--line); border-radius: 12px; background: #fff;
+}
+.timeline-event > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.timeline-event > header strong { font-size: 14px; }
+.timeline-event > header span { color: var(--muted); font-size: 10px; }
+.timeline-event > p { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 8px 0 0; }
+.timeline-photos { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.timeline-photos button {
+  padding: 0; border: 1px solid var(--line); border-radius: 8px;
+  overflow: hidden; background: #fff; cursor: zoom-in; line-height: 0;
+}
+.timeline-photos img { width: 112px; height: 112px; object-fit: cover; display: block; }
+.timeline-photos small {
+  display: block; padding: 4px 6px; color: var(--muted); font-size: 9px;
+  line-height: 1.4; max-width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.timeline-sentinel { min-height: 24px; color: var(--muted); font-size: 10px; text-align: center; }
+.timeline-overlay {
+  position: fixed; inset: 0; z-index: 20;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  padding: 24px; background: rgba(0, 0, 0, .78); color: #fff;
+}
+.timeline-overlay img { max-width: min(92vw, 1200px); max-height: 72vh; object-fit: contain; border-radius: 8px; }
+.timeline-overlay p { margin: 0; font-size: 11px; opacity: .85; }
+
+@media (max-width: 1100px) {
+  .timeline-layout { grid-template-columns: 1fr; gap: 20px; }
+}
+@media (max-width: 780px) {
+  .timeline-main { padding-left: 18px; }
+  .timeline-photos img { width: 84px; height: 84px; }
+  .timeline-event > header { flex-direction: column; gap: 4px; }
+}

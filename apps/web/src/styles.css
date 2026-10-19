@@ -1,5 +1,7 @@
-:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-body { margin: 0; }
+/* **不要在这里写 `:root`。** 本文件在 `main.tsx` 里最后引入（旧组件还在用它的类名），
+   而它的 `:root` 会把 `tokens.css` 刻意声明的 Inter/PingFang 字体与
+   `color-scheme: light` 一起盖掉——全站字体和浅色方案会在加载后静默变化。
+   `body` 的 margin 也已由 `tokens.css` 负责，这里不再重复。 */
 .app { padding: 1.5rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.75rem; list-style: none; padding: 0; }
 .grid button { width: 100%; background: none; border: 1px solid #8884; border-radius: 8px; padding: 0.5rem; cursor: pointer; }
@@ -80,7 +82,8 @@ body { margin: 0; }
 .people { margin-top: 24px; }
 .people-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .people-head h2 { margin: 4px 0 0; font-size: 1.25rem; }
-.section-kicker { margin: 0; color: #64748b; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+/* `.section-kicker` 由 `components.css` 定义（绿色小标题）。本文件最后加载，曾经
+   用灰色 12px 把它盖掉——区块小标题的层级因此静默变灰。 */
 .result-count { color: #64748b; font-size: 13px; }
 .people-lead { max-width: 46rem; color: #475569; font-size: 14px; }
 .people-confirmed { margin-top: 28px; border-top: 1px solid #e2e8f0; padding-top: 16px; }
