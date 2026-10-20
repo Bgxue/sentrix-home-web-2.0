@@ -151,18 +151,24 @@ def _nvmap_clients_mib() -> dict[int, float] | None:
 def _process_gpu_memory_mib(
     model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
 ) -> tuple[float | None, str]:
-    """GPU/UMA memory charged to the model process, plus which source won."""
-    residual: float | None = None
-    if rss_mib is not None and host_rss_mib is not None:
-        residual = round(max(0.0, float(rss_mib) - float(host_rss_mib)), 3)
+    """GPU/UMA memory charged to the model process, plus which source supplied it.
+
+    The nvmap ledger is the allocation basis and is authoritative when readable.
+    The residual (VmRSS - smaps Rss) is a residency basis and is real only on
+    L4T >= R36.4.7; on R36.4.3 it is structurally zero because nvmap.ko does not
+    charge GPU pages to the process. A zero residual therefore means "not
+    accounted", never "not used", and must not be reported as a real value.
+    """
     table = _nvmap_clients_mib()
-    nvmap: float | None = None
     if table is not None and model_pids:
-        nvmap = round(sum(table.get(int(pid), 0.0) for pid in model_pids), 3)
-    if nvmap is None:
-        return (residual, "vmrss_residual") if residual is not None else (None, "unavailable")
-    if residual is None or nvmap >= residual:
-        return nvmap, "nvmap_iovmm"
+        # The table is complete, so an absent PID really does mean zero and a
+        # listed value outranks the residual.
+        return round(sum(table.get(int(pid), 0.0) for pid in model_pids), 3), "nvmap_iovmm"
+    if rss_mib is None or host_rss_mib is None:
+        return None, "unavailable"
+    residual = round(max(0.0, float(rss_mib) - float(host_rss_mib)), 3)
+    if residual <= 0:
+        return None, "unavailable"
     return residual, "vmrss_residual"
 
 
@@ -185,8 +191,6 @@ def unified_model_memory(
         return result
     gpu_mib, gpu_source = _process_gpu_memory_mib(model_pids, rss_mib=rss_mib, host_rss_mib=host_rss_mib)
     total = round(float(host_rss_mib) + float(gpu_mib or 0.0), 2)
-    if rss_mib is not None:
-        total = round(max(total, float(rss_mib)), 2)
     result["model_process_system_memory_used_mib"] = total
     result["model_process_system_memory_scope"] = "host_smaps_rss_plus_gpu_uma"
     result["model_process_host_memory_mib"] = round(float(host_rss_mib), 2)

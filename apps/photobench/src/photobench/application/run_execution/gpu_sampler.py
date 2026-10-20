@@ -115,6 +115,11 @@ class GpuSampler:
             sample["model_process_system_memory_used_mib"] = process_memory.get(
                 "model_process_system_memory_used_mib"
             )
+            # Jetson 的 CPU/GPU 拆分：三个字段在 unified_model_memory 里已经算好，
+            # 但样本映射不显式搬运就会在落盘前被丢掉（46 上因此少 79%）。
+            sample["model_process_host_memory_mib"] = process_memory.get("model_process_host_memory_mib")
+            sample["model_process_gpu_memory_mib"] = process_memory.get("model_process_gpu_memory_mib")
+            sample["model_process_gpu_memory_source"] = process_memory.get("model_process_gpu_memory_source")
             sample["benchmark_process_memory_used_mib"] = process_memory.get(
                 "benchmark_process_memory_used_mib"
             )

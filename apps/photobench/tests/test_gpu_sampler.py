@@ -58,6 +58,28 @@ def test_a_sample_merges_the_gpu_row_with_process_and_system_memory():
     assert sample["_t"] > 0
 
 
+def test_jetson_cpu_gpu_split_fields_survive_the_sample_mapping():
+    """Jetson 的 host/gpu/source 三字段必须进样本，否则落盘前会被丢掉。
+
+    46 上 ``unified_model_memory`` 已经算出 714.6 + 2617.9，但样本映射表没有
+    这三个键，结果 run.json 只剩 714.6（少 79%）。这条用例直接钉映射，不测算法。
+    """
+    sampler, samples, _telemetry = _sampler(
+        process_memory={
+            "model_process_system_memory_used_mib": 3332.5,
+            "model_process_host_memory_mib": 714.6,
+            "model_process_gpu_memory_mib": 2617.9,
+            "model_process_gpu_memory_source": "nvmap_iovmm",
+        }
+    )
+    sampler.sample_once()
+    sample = samples[0]
+    assert sample["model_process_system_memory_used_mib"] == 3332.5
+    assert sample["model_process_host_memory_mib"] == 714.6
+    assert sample["model_process_gpu_memory_mib"] == 2617.9
+    assert sample["model_process_gpu_memory_source"] == "nvmap_iovmm"
+
+
 def test_the_gpu_row_supplies_the_cpu_temperature_when_it_lacks_one():
     """1.0 ``:1719``：``gpu_stats`` 顶层的 ``cpu_temperature_c`` 补到**缺它的**那张卡上。
 
