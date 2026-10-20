@@ -222,6 +222,8 @@ class RunSuites:
                     model_base_url=deps.model_base_url,
                     run_id=run_id,
                     mode=mode,
+                    # 整册导入在 Mac/CPU 上可能远超默认 2h；允许按 run 放宽客户端超时。
+                    import_timeout=int(payload.get("import_timeout") or 0) or 7200,
                     # reuse 才传；full 留空让 ``execute`` 走 ``_default_scope_id``。
                     scope_id=existing_scope_id,
                     runtime_framework=deps.runtime_framework,
