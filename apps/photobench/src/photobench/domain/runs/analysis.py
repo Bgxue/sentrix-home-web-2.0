@@ -1708,6 +1708,16 @@ def publish_full_sample_phase_stats(result: dict[str, Any], live: dict[str, Any]
     result["phases"] = phases
 
 
+def _is_telemetry_series_key(key: str) -> bool:
+    """曲线键：固定清单之外的 ``runtime_*`` / ``kv_cache_*`` 也自动收。
+
+    1.0 ``:2021`` 有同样的动态兜底。2.0 的 vLLM provider 目前只产出
+    ``kv_cache_usage_pct``，但少了这层兜底，以后 provider 补字段时会在读侧
+    静默丢——那正是「字段算出来却没进曲线」的一类 bug。
+    """
+    return key in GPU_SAMPLE_FIELDS or key.startswith(("runtime_", "kv_cache_"))
+
+
 def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> None:
     """1.0 ``:5411`` 的 ``_attach_gpu_sample_history``；入参从文件路径换成原始行。
 
@@ -1725,7 +1735,7 @@ def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> Non
                 continue
             if not isinstance(item, dict):
                 continue
-            point = {k: item[k] for k in GPU_SAMPLE_FIELDS if item.get(k) is not None}
+            point = {k: item[k] for k in item if _is_telemetry_series_key(k) and item.get(k) is not None}
             if point:
                 history.append(
                     {
@@ -1817,7 +1827,16 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
     if not samples:
         return {"samples_count": 0}
     metrics: dict[str, Any] = {}
-    for key in GPU_AGGREGATE_KEYS:
+    metric_keys = list(GPU_AGGREGATE_KEYS)
+    metric_keys += sorted(
+        {
+            key
+            for sample in samples
+            for key in sample
+            if _is_telemetry_series_key(key) and key not in metric_keys
+        }
+    )
+    for key in metric_keys:
         values = [s[key] for s in samples if isinstance(s.get(key), (int, float))]
         if not values:
             continue
@@ -1864,17 +1883,27 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
             },
             **metrics,
         }
-    if latest.get("memory_unit") == "apple_phys_footprint_mib":
+    if latest.get("memory_unit") in {
+        "apple_phys_footprint_mib",
+        "apple_phys_footprint_plus_mapped_weights_mib",
+    }:
+        # 旧 run 只有 footprint；新 run 是 footprint + 映射权重。两者的
+        # method 必须分开，否则历史曲线会被误读成同一口径。
+        plus_weights = latest.get("memory_unit") == "apple_phys_footprint_plus_mapped_weights_mib"
         return {
             "samples_count": len(samples),
             "source": "apple_unified",
             "memory_profile": {
-                "method": "apple_phys_footprint_v1",
-                "memory_unit": "apple_phys_footprint_mib",
+                "method": (
+                    "apple_phys_footprint_plus_mapped_weights_v1"
+                    if plus_weights
+                    else "apple_phys_footprint_v1"
+                ),
+                "memory_unit": latest.get("memory_unit"),
                 "comparable_workload_memory_gib": None,
                 "note": (
-                    "Process physical footprint is not dedicated GPU VRAM; "
-                    "per-process GPU-only memory and KV bytes are unavailable."
+                    "Process occupancy = phys_footprint + mapped model weights; "
+                    "not dedicated GPU VRAM. Per-process GPU-only memory and KV bytes are unavailable."
                 ),
             },
             **metrics,
