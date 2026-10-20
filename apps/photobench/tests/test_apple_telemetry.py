@@ -129,6 +129,47 @@ def test_macmon_sample_maps_temperature_power_and_ratio() -> None:
     assert data["gpu_utilization_pct"] == 12.5
 
 
+def test_macmon_sample_drops_the_whole_power_set_on_one_impossible_value() -> None:
+    """325 W 是 macOS 27 上 macmon 0.8.2 的积压 flush；同组功率必须整组丢。
+
+    只丢 sys_power 会把 413 W 的 ram_power 留下，而 DRAM 计数器正是判断
+    「这个间隔的能量记账坏了」的金丝雀。
+    """
+    data = apple.parse_macmon_sample(
+        {
+            "sys_power": 325.303,
+            "cpu_power": 12.0,
+            "gpu_power": 3.0,
+            "ram_power": 413.0,
+            "temp": {"cpu_temp_avg": 41.2, "gpu_temp_avg": 38.5},
+        }
+    )
+    assert "power_draw_w" not in data
+    assert "power_scope" not in data
+    assert "cpu_power_w" not in data
+    assert "gpu_power_w" not in data
+    assert data["cpu_temperature_c"] == 41.2
+    assert data["temperature_c"] == 38.5
+
+
+def test_macmon_temperature_rejects_the_0_8_c_sensor_glitch() -> None:
+    data = apple.parse_macmon_sample({"temp": {"cpu_temp_avg": 0.8000000715255737, "gpu_temp_avg": 41.0}})
+    assert "cpu_temperature_c" not in data
+    assert data["temperature_c"] == 41.0
+    assert apple.parse_macmon_sample({"temp": {"cpu_temp_avg": -1}}) == {}
+
+
+def test_macmon_version_gate_and_power_drop() -> None:
+    assert apple.parse_macmon_version("macmon 0.8.2") == (0, 8, 2)
+    assert apple.parse_macmon_version("macmon 0.9.0") == (0, 9, 0)
+    assert apple.parse_macmon_version("junk") is None
+    assert apple.macmon_power_is_trusted(None) is True
+    assert apple.macmon_power_is_trusted((0, 8, 2)) is False
+    assert apple.macmon_power_is_trusted((0, 9, 0)) is True
+    dropped = apple._drop_power_readings({"power_draw_w": 1.0, "temperature_c": 40.0})
+    assert dropped == {"temperature_c": 40.0}
+
+
 def test_macmon_sample_ignores_non_objects() -> None:
     assert apple.parse_macmon_sample([]) == {}
     assert apple.parse_macmon_sample("junk") == {}

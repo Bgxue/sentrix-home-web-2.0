@@ -28,6 +28,8 @@ from __future__ import annotations
 import atexit
 import ctypes
 import json
+import logging
+import math
 import platform
 import re
 import shutil
@@ -56,6 +58,32 @@ SYSTEM_PROCESS_KEYWORDS = (
     "qdrant",
     "mlx",
 )
+
+log = logging.getLogger("photobench.apple_telemetry")
+
+# macmon 0.8.2 把 IOReport 的 "Energy Model" 原始计数器差分除以采样间隔算成功率，
+# 全程没有校验；macOS 27 冻结该计数器后，下一次 flush 会把积压的巨大增量倒进一个
+# 很短的间隔。实测同一台 Mac mini M4 空闲样本出现 cpu_power 8825 W、ram_power
+# 413 W，而 100% GPU 持续负载的合法峰值只有约 66 W。Mac mini 不可能超过电源功率。
+POWER_LIMIT_W = 150.0
+# macmon 对读不到的传感器返回 -1；0.8.2 的 GPU 温度还会偶发 0.8 °C（实测
+# gpu_temp_avg=0.8000000715255737，同时 cpu_temp_avg=41.1）。有源芯片不可能低于
+# 环境温度，0 °C 下限太松——0.8 会被当成合理值，在曲线上留下一个可见的坑。
+TEMPERATURE_MIN_C = 10.0
+TEMPERATURE_MAX_C = 130.0
+
+# 这些功率键都来自 macmon 未校验的能量通路，按**一组**校验：任何一个不可能值
+# 都证明这个间隔的能量记账坏了。DRAM 计数器与 sys_power 独立，正是有用的金丝雀。
+MACMON_POWER_KEYS = ("sys_power", "cpu_power", "gpu_power", "ane_power", "ram_power", "gpu_ram_power")
+
+# 0.8.2 是最后一个仍走未校验 IOReport 能量通路的版本；0.9.0 引入 CLPC 源与
+# finite/非负守卫。低于这个版本就完全不发布功率读数是必须的：POWER_LIMIT_W 只能
+# 拒绝不可能的量级，一次恰好落在 150 W 以下的 flush 无法与真实 100 W 负载区分。
+MACMON_MIN_VERSION = (0, 9, 0)
+
+# parse_macmon_sample 从 macmon 功率通道派生的字段，即旧版本必须整组丢弃的那些。
+# 温度刻意不在其中：0.9.0 与 0.8.2 的温度读数一致，版本门禁只针对能量计数器。
+MACMON_POWER_OUTPUT_KEYS = ("power_draw_w", "power_scope", "cpu_power_w", "gpu_power_w")
 
 
 def is_apple_silicon() -> bool:
@@ -92,31 +120,121 @@ def parse_vm_stat(text: str, page_size: int, total_bytes: int | None = None) -> 
     return data
 
 
+def _finite_float(value: Any) -> float | None:
+    """有限浮点，其余（bool / 字符串 / NaN / inf）一律 None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _plausible_power(value: Any) -> float | None:
+    """丢掉 IOReport 哨兵（负数）与物理上不可能的功耗。"""
+    number = _finite_float(value)
+    if number is None or number < 0.0 or number > POWER_LIMIT_W:
+        return None
+    return number
+
+
+def _plausible_temperature(value: Any) -> float | None:
+    """丢掉传感器哨兵与有源芯片不可能达到的温度。"""
+    number = _finite_float(value)
+    if number is None or number <= TEMPERATURE_MIN_C or number > TEMPERATURE_MAX_C:
+        return None
+    return number
+
+
+_power_reject_count = 0
+_power_reject_lock = threading.Lock()
+_macmon_version_warned = False
+_macmon_version_lock = threading.Lock()
+
+
+def _warn_implausible_power(payload: dict[str, Any], rejected: list[str]) -> None:
+    """丢弃功率样本时记一条日志，但不刷屏。"""
+    global _power_reject_count
+    with _power_reject_lock:
+        _power_reject_count += 1
+        count = _power_reject_count
+    if count <= 5 or count % 100 == 0:
+        detail = ", ".join(f"{key}={payload.get(key)}" for key in rejected)
+        log.warning(
+            "macmon power reading implausible (%s); dropped power for this sample (%d rejected so far)",
+            detail,
+            count,
+        )
+
+
+def parse_macmon_version(text: str) -> tuple[int, int, int] | None:
+    """从 ``macmon --version`` 输出读 ``(major, minor, patch)``；读不出返回 None。"""
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def macmon_power_is_trusted(version: tuple[int, int, int] | None) -> bool:
+    """只有**已知**低于 MACMON_MIN_VERSION 的版本才不可信。
+
+    读不出版本不是「旧版本」的证据（未来版本可能改 flag），所以保留功率、仅由
+    POWER_LIMIT_W 兜底。读到且低于下限才是证据。
+    """
+    if version is None:
+        return True
+    return tuple(version) >= MACMON_MIN_VERSION
+
+
+def _drop_power_readings(data: dict[str, Any]) -> dict[str, Any]:
+    """去掉 macmon 的功率字段，保留温度与利用率。"""
+    return {key: value for key, value in data.items() if key not in MACMON_POWER_OUTPUT_KEYS}
+
+
+def macmon_version(binary: str) -> tuple[int, int, int] | None:
+    """向已安装的 macmon 问版本；读不出返回 None。"""
+    return parse_macmon_version(_run_text([binary, "--version"], timeout=5))
+
+
 def parse_macmon_sample(payload: Any) -> dict[str, Any]:
-    """一行 ``macmon pipe`` 的 JSON → PhotoBench 的采样字段。非 dict 输入返回空表。"""
+    """一行 ``macmon pipe`` 的 JSON → PhotoBench 的采样字段。非 dict 输入返回空表。
+
+    功率按**一组**校验：任何一个不可能值都说明这个间隔的能量记账坏了，整组丢弃。
+    """
     if not isinstance(payload, dict):
         return {}
     data: dict[str, Any] = {}
     temp = payload.get("temp")
     if not isinstance(temp, dict):
         temp = {}
-    cpu_temp = temp.get("cpu_temp_avg")
-    gpu_temp = temp.get("gpu_temp_avg")
-    if isinstance(cpu_temp, (int, float)):
-        data["cpu_temperature_c"] = round(float(cpu_temp), 3)
-    if isinstance(gpu_temp, (int, float)):
-        data["temperature_c"] = round(float(gpu_temp), 3)
-    sys_power = payload.get("sys_power")
-    if isinstance(sys_power, (int, float)):
-        data["power_draw_w"] = round(float(sys_power), 3)
-        data["power_scope"] = "macmon_sys_power"
-    for source_key, target_key in (("cpu_power", "cpu_power_w"), ("gpu_power", "gpu_power_w")):
-        value = payload.get(source_key)
-        if isinstance(value, (int, float)):
-            data[target_key] = round(float(value), 3)
-    ratio = payload.get("gpu_active_ratio")
-    if isinstance(ratio, (int, float)):
-        data["gpu_utilization_pct"] = round(float(ratio) * 100, 3)
+    cpu_temp = _plausible_temperature(temp.get("cpu_temp_avg"))
+    gpu_temp = _plausible_temperature(temp.get("gpu_temp_avg"))
+    if cpu_temp is not None:
+        data["cpu_temperature_c"] = round(cpu_temp, 3)
+    if gpu_temp is not None:
+        data["temperature_c"] = round(gpu_temp, 3)
+
+    power: dict[str, float] = {}
+    rejected: list[str] = []
+    for key in MACMON_POWER_KEYS:
+        if key not in payload:
+            continue
+        value = _plausible_power(payload[key])
+        if value is None:
+            rejected.append(key)
+        else:
+            power[key] = value
+    if rejected:
+        _warn_implausible_power(payload, rejected)
+    else:
+        if "sys_power" in power:
+            data["power_draw_w"] = round(power["sys_power"], 3)
+            data["power_scope"] = "macmon_sys_power"
+        for source_key, target_key in (("cpu_power", "cpu_power_w"), ("gpu_power", "gpu_power_w")):
+            if source_key in power:
+                data[target_key] = round(power[source_key], 3)
+
+    ratio = _finite_float(payload.get("gpu_active_ratio"))
+    if ratio is not None:
+        data["gpu_utilization_pct"] = round(min(1.0, max(0.0, ratio)) * 100, 3)
     return data
 
 
@@ -132,11 +250,14 @@ class _MacmonStream:
         self._latest: dict[str, Any] = {}
         self._proc: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
+        # 版本探测通过前 fail closed：绝不能发布一个尚未核验的 macmon 样本。
+        self._trust_power = False
 
     def start(self) -> None:
         binary = shutil.which("macmon") or "/opt/homebrew/bin/macmon"
         if not Path(binary).is_file() or self._proc is not None:
             return
+        self._trust_power = self._check_version(binary)
         self._proc = subprocess.Popen(
             [binary, "pipe", "-i", "1000"],
             stdout=subprocess.PIPE,
@@ -146,6 +267,34 @@ class _MacmonStream:
         self._thread = threading.Thread(target=self._read, name="macmon-pipe", daemon=True)
         self._thread.start()
         atexit.register(self.stop)
+
+    def _check_version(self, binary: str) -> bool:
+        """这个 macmon 能否发布功率；不能时只警告一次。"""
+        version = macmon_version(binary)
+        trusted = macmon_power_is_trusted(version)
+        if trusted and version is not None:
+            return True
+        global _macmon_version_warned
+        with _macmon_version_lock:
+            if _macmon_version_warned:
+                return trusted
+            _macmon_version_warned = True
+        if version is None:
+            log.warning(
+                "could not read a version from %s (`macmon --version`); keeping power "
+                "readings, bounded only by POWER_LIMIT_W",
+                binary,
+            )
+            return True
+        log.warning(
+            "macmon %s is older than the required %s; its IOReport 'Energy Model' path "
+            "divides a frozen macOS 27 energy delta by one short interval with no "
+            "validation, so this process will not publish power readings (temperature "
+            "is unaffected). Run `brew upgrade macmon`.",
+            ".".join(str(part) for part in version),
+            ".".join(str(part) for part in MACMON_MIN_VERSION),
+        )
+        return trusted
 
     def stop(self) -> None:
         proc = self._proc
@@ -179,6 +328,10 @@ class _MacmonStream:
             parsed = parse_macmon_sample(payload)
             if not parsed:
                 continue
+            if not self._trust_power:
+                parsed = _drop_power_readings(parsed)
+                if not parsed:
+                    continue
             with self._lock:
                 self._latest = parsed
 
