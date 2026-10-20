@@ -3,6 +3,23 @@ info:
   title: Sentrix Home API
   version: 0.1.0
 paths:
+  /api/v1/health/live:
+    get:
+      tags:
+      - health
+      summary: Health Live
+      description: 轻量存活探针：不访问任何依赖，也不进线程池。
+      operationId: health_live_api_v1_health_live_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+                title: Response Health Live Api V1 Health Live Get
   /api/v1/health:
     get:
       tags:
@@ -29,7 +46,12 @@ paths:
 
         探测走 ``EmbeddingHealthProbe``，它自带 10 秒 TTL（``models/wemm.py``），
 
-        所以这个端点被高频轮询时不会每次都打一次侧车。'
+        所以这个端点被高频轮询时不会每次都打一次侧车。
+
+
+        **高频探活请用 ``/health/live``。** 本端点是完整诊断，重负载下不应作为
+
+        看门狗的 1 分钟级探针；保留它是为了不破坏既有消费方。'
       operationId: health_api_v1_health_get
       responses:
         '200':
@@ -41,6 +63,23 @@ paths:
                   type: string
                 type: object
                 title: Response Health Api V1 Health Get
+  /api/v1/diagnostics:
+    get:
+      tags:
+      - health
+      summary: Diagnostics
+      description: 完整诊断：数据库 + 嵌入侧车 + 降级原因。与 ``/health`` 同一份实现。
+      operationId: diagnostics_api_v1_diagnostics_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+                title: Response Diagnostics Api V1 Diagnostics Get
   /api/v1/media/import:
     post:
       tags:
@@ -4335,6 +4374,12 @@ components:
         summarized:
           type: integer
           title: Summarized
+        timings:
+          additionalProperties:
+            type: number
+          type: object
+          title: Timings
+          default: {}
         failures:
           items:
             $ref: '#/components/schemas/ImportFailure'
