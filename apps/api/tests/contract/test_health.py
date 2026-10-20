@@ -70,3 +70,27 @@ def test_unknown_v1_route_is_404(client: TestClient):
 def test_no_unversioned_public_routes(client: TestClient):
     """公开 API 只有 /api/v1；/api/health 这种 1.0 风格路径必须不存在。"""
     assert client.get("/api/health").status_code == 404
+
+
+def test_health_live_does_not_touch_dependencies(client: TestClient):
+    """轻量探针只证明事件循环还能回包：数据库/嵌入侧车都不许碰。
+
+    看门狗用它做 1 分钟级探活，重负载下不能因为一次慢查询/慢侧车被判死。
+    """
+
+    class _Exploding:
+        def database_healthy(self) -> bool:
+            raise AssertionError("liveness must not query the database")
+
+        @property
+        def embedding_health(self) -> object:
+            raise AssertionError("liveness must not probe embeddings")
+
+    client.app.state.container = _Exploding()
+
+    assert client.get("/api/v1/health/live").json() == {"status": "ok", "version": "0.1.0"}
+
+
+def test_diagnostics_carries_the_full_payload(client: TestClient):
+    """完整诊断与 ``/health`` 同源，保留既有消费方的字段。"""
+    assert client.get("/api/v1/diagnostics").json() == client.get("/api/v1/health").json()
