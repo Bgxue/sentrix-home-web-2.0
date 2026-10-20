@@ -1,0 +1,90 @@
+# Sentrix Home Web 2.0
+
+家庭相册记忆系统：照片/视频导入 → 记忆构建 → 自然语言检索与问答 → PhotoBench 评测。
+
+---
+
+## ⚠️ 修改代码前必读（强制）
+
+**任何人在修改本项目代码之前，必须先完整阅读：**
+
+### [`docs/architecture/module-interfaces.md`](docs/architecture/module-interfaces.md)
+
+这份文档不是“参考资料”，是**强制规则**。它规定了：
+
+- 四层架构与 11 条 import 契约；
+- 所有可替换端口（模型、嵌入、OCR、地理、存储、评测）的接口与失败语义；
+- **所有代码改动**（不只是换模块）必须遵守的十条硬规则；
+- 改动流程、验收标准（Definition of Done）、PR 检查清单与反模式；
+- 153（WeMM）与 130（legacy）两套部署的差异和迁移检查项。
+
+**没有读完就开始改，最常见的后果**：反向依赖、静默降级、外部契约被改坏、
+换了嵌入却没重建索引、PhotoBench 迁移后请求仍发往旧机器。
+
+如果你只想快速判断自己的改动是否合规，先看文档的 **§0.4 十条硬规则** 与 **§5 验收标准**。
+
+---
+
+## 快速开始
+
+### 153（默认，WeMM）
+
+```bash
+make dev            # 主 API 8191
+make pb-dev         # PhotoBench 8772
+```
+
+或单独启动：
+
+```bash
+./scripts/deploy/start_api.sh
+./scripts/deploy/start_photobench.sh
+```
+
+### Mac mini / 16 GB 机器（legacy）
+
+```bash
+./scripts/deploy/start_legacy_mac.sh
+```
+
+详见 [`docs/runbooks/mac-mini-legacy.md`](docs/runbooks/mac-mini-legacy.md)。
+
+---
+
+## 目录
+
+```
+apps/api/          主产品（sentrix.*）：api → application → domain，infrastructure 实现端口
+apps/web/          主前端（8191 挂载）
+apps/photobench/   独立评测包（photobench.*），只经 /api/v1 HTTP 访问主产品
+docs/architecture/ 设计、模块图、**强制规则与端口文档**
+docs/refactor/     重构计划、裁决、能力登记、偏离记录
+docs/runbooks/     部署与运维手册
+scripts/           开发、部署、维护脚本
+```
+
+---
+
+## 改动前检查（最低要求）
+
+```bash
+make lint format-check typecheck arch photobench-check check-docs coverage
+# 或一次跑完
+make ci
+```
+
+新增/移动 Python 文件必须同步 `docs/architecture/module-map.md`；新增能力必须同步
+`docs/refactor/capability-map.jsonl`；偏离 1.0 行为必须写 `*-deviations.md`。
+
+---
+
+## 评测
+
+PhotoBench 运行结果在 `apps/photobench/results/<run_id>/`，页面在 8772。
+QA 数据集在 `apps/photobench/datasets/`。
+
+---
+
+## 许可与数据
+
+数据集、模型权重、GeoNames dump 不进版本控制；部署方按 `docs/runbooks/` 放置。
