@@ -37,6 +37,18 @@ cd ~/GitHub/sentrix-home-web2.0
 4. 拉起 8191 API；
 5. 等 `/api/v1/health` 返回。
 
+### 2.1 PhotoBench 迁移（必做）
+
+从 153 复制 PhotoBench 配置后，**必须**改 `apps/photobench/config/runtime_connection.json`：
+
+```json
+{"sentrix_url": "http://127.0.0.1:8191", "model_base_url": "http://127.0.0.1:8100/v1", ...}
+```
+
+PhotoBench 的 `SentrixClient` 读的是这个文件，不是 `PHOTOBENCH_SENTRIX_API_URL`。
+不改的话，评测会把导入请求发回 153，表现为 `photo_import` 立即失败
+`directory not found`，且 130 的 2.0 日志里看不到 `POST /api/v1/imports`。
+
 ## 3. 验证
 
 ```bash
