@@ -223,6 +223,21 @@ SEARCH_OK = ToolOutcome(
     },
 )
 
+#: 第二页预览。压缩测试用它证明**最新的一份六图集**被保留、更老的检索轮被丢掉。
+PAGE_OK = ToolOutcome(
+    observation={"result_set_id": "rs_1", "page": 2, "has_more": False},
+    model_visible={
+        "result_set_id": "rs_1",
+        "page": 2,
+        "page_size": 6,
+        "has_more": False,
+        "preview": [
+            {"handle": "photo_7", "file_name": "g.jpg", "captured_at": "2019-01-01T00:00:00"},
+            {"handle": "photo_8", "file_name": "h.jpg", "captured_at": "2019-01-02T00:00:00"},
+        ],
+    },
+)
+
 DELIVER_OK = ToolOutcome(
     observation={"result_set_id": "rs_1", "delivered": 2, "rejected": []},
     model_visible={"result_set_id": "rs_1", "delivered": 2, "rejected": []},
@@ -902,46 +917,54 @@ def assert_tool_messages_are_paired(messages: Sequence[ChatMessage]) -> None:
         index += 1
 
 
-def test_compaction_drops_whole_tool_round_trips(env):
-    """提示词撑爆窗口时，**压缩的是整轮工具往返**，不是若干条消息。（§3.3）
+def test_compaction_drops_oldest_round_but_keeps_latest_preview(env):
+    """压缩丢**整轮**，但**最新一次检索/翻页的六图 preview 必须留下**。
 
-    丢一半会留下没有配对结果的 ``tool_calls``，端点直接 400——那是把一个可诊断的
-    「提示词太大」换成一个更难查的「请求格式不对」。
+    丢一半会留下没有配对结果的 ``tool_calls``，端点直接 400。丢最新那份六图集则更糟：
+    模型知道「有结果集」却看不见任何候选，整道题只能猜。所以这里先 search 再 page，
+    压缩时丢更老的 search 轮，保留 page 轮。
     """
     _conversations, _turns, conversation, _db = env
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
+            tool_call("get_result_page", "c2", result_set_id="rs_1", page=2),
             PromptTooLongError("提示词约 9000 token，上下文上限 6144…"),
             final_call("海边有两张。", "photo_1"),
         ]
     )
-    run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))
+    run_turn = build(
+        env,
+        model,
+        StubToolbox({"search_memories": SEARCH_OK, "get_result_page": PAGE_OK}),
+    )
     turn_id = start(run_turn, conversation)
 
     result = run_turn.run(turn_id)
 
     assert result.answer == "海边有两张。"
-    assert len(model.calls) == 3, "第三次是压缩之后的那次重试"
-    # 压缩前：模型手上确实有那一轮工具往返。
-    assert any(message.role is ChatRole.TOOL for message in model.calls[1])
-    # 压缩后：整对消失，且剩下的仍然配得上。
-    assert not any(message.role is ChatRole.TOOL for message in model.calls[2])
-    assert_tool_messages_are_paired(model.calls[2])
+    assert len(model.calls) == 4, "第四次是压缩之后的那次重试"
+    # 压缩前：两轮工具结果都在。
+    assert sum(1 for m in model.calls[2] if m.role is ChatRole.TOOL) == 2
+    # 压缩后：只剩最新的 page 轮（六图集），更老的 search 轮被丢。
+    remaining = [m for m in model.calls[3] if m.role is ChatRole.TOOL]
+    assert len(remaining) == 1
+    assert '"page": 2' in remaining[0].content
+    assert '"query": "海边"' not in remaining[0].content
+    assert_tool_messages_are_paired(model.calls[3])
 
 
 def test_a_prompt_that_still_does_not_fit_ends_the_turn_honestly(env):
-    """压到极限仍装不下时，**如实收尾**，不崩、不新造终止原因。
+    """只剩受保护的六图集时**不再往下丢**，如实收尾。
 
-    只压一次：再撑爆说明这一轮的提示词本身（system + 问题 + 最新一轮工具结果）就超了
-    窗口，继续丢只会把证据丢光还不一定装得下。
+    再压就只能删掉六图集本身——那会让模型看不见任何候选，继续跑也只是猜。宁可
+    以 ``MODEL_ERROR`` 收尾，也不产出无依据的答案。
     """
     _conversations, _turns, conversation, _db = env
     model = ScriptedModel(
         [
             tool_call("search_memories", "c1", query="海边"),
             PromptTooLongError("提示词约 9000 token，上下文上限 6144…"),
-            PromptTooLongError("提示词约 8000 token，上下文上限 6144…"),
         ]
     )
     run_turn = build(env, model, StubToolbox({"search_memories": SEARCH_OK}))

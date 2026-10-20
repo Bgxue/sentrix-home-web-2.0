@@ -23,6 +23,7 @@ from sentrix.domain.assistant.ports import (
 from sentrix.domain.assistant.tools import TOOL_SPECS, openai_tools
 from sentrix.infrastructure.assistant.chat_client import (
     MAX_ANSWER_TOKENS,
+    PROMPT_COMPACTION_RATIO,
     TOKENS_PER_CHAR,
     TOOLS_TOKENS_PER_CHAR,
     ChatModelError,
@@ -381,6 +382,25 @@ def test_a_prompt_that_leaves_no_room_is_refused_not_truncated(server: str):
     # 文案要带**真实数字**：运维据此判断该压历史还是该改部署。
     assert str(CONTEXT_TOKENS) in str(error.value)
     assert "不足以写完一次工具调用" in str(error.value)
+
+
+def test_a_prompt_over_the_soft_limit_is_refused_before_the_hard_edge(server: str):
+    """超过窗口 75% 就先压缩，不等「只剩 256 token」的硬边。
+
+    158（6144/槽）实测大量请求在 6.0–6.4k 才压缩，那时已经丢了检索结果；
+    软上限把触发点提前到 75%，给下一轮工具结果与回答留出约 1/4 窗口。
+    """
+    _Handler.received = []
+    chars = int(5000 / TOKENS_PER_CHAR)
+    with pytest.raises(PromptTooLongError) as error:
+        context_model(server).complete(
+            [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, "问" * chars)],
+            (),
+        )
+
+    assert _Handler.received == [], "超过软上限的请求不该发出去"
+    assert "超过软上限" in str(error.value)
+    assert str(int(CONTEXT_TOKENS * PROMPT_COMPACTION_RATIO)) in str(error.value)
 
 
 def test_the_output_budget_is_derived_from_the_real_window(server: str):

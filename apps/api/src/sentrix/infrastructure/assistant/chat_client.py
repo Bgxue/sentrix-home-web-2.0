@@ -81,6 +81,12 @@ MAX_ANSWER_TOKENS = 2048
 # ``final_answer`` 那种最长的一次调用留的余量。
 MIN_USABLE_OUTPUT_TOKENS = 256
 
+#: 提示词达到窗口的这个比例就**主动**压缩历史，不等只剩 256 token 的输出余量。
+#: 2026-10-20 在 158（6144/槽）上实测：大量请求在 6.0–6.4k 才触发，
+#: 压缩时已经丢掉一整轮检索结果，答案开始拼错。75% 留出约 1/4 窗口给
+#: 下一轮工具结果与回答，代价是压缩更早发生——受保护的六图集仍在（见 run_turn）。
+PROMPT_COMPACTION_RATIO = 0.75
+
 # 估算提示词 token 的权重。**两个段分开算，这是实测出来的。**
 #
 # 2026-10-10 在 8100 上实测（``qwen35-q4km``），两段的 token/字符比**差了 44%**：
@@ -339,6 +345,13 @@ class OpenAIChatModel:
                 f"提示词约 {prompt_tokens} token，单个并发槽的上下文上限 {self._context_tokens}，"
                 f"只剩 {budget} 不足以写完一次工具调用（至少需要 {MIN_USABLE_OUTPUT_TOKENS}）。"
             )
+        if self.prompt_over_soft_limit(prompt_tokens):
+            raise PromptTooLongError(
+                f"提示词约 {prompt_tokens} token，超过软上限 "
+                f"{int(self._context_tokens * PROMPT_COMPACTION_RATIO)}"
+                f"（窗口 {self._context_tokens} 的 {int(PROMPT_COMPACTION_RATIO * 100)}%）；"
+                "先压缩历史再试。"
+            )
 
         payload: dict[str, Any] = {
             "model": model_name,
@@ -356,6 +369,14 @@ class OpenAIChatModel:
                 return client.post(f"{self._base_url}/chat/completions", json=payload)
         except httpx.HTTPError as error:
             raise ModelServiceError(f"模型端点 {self._base_url} 不可达：{error}") from error
+
+    def prompt_over_soft_limit(self, prompt_tokens: int) -> bool:
+        """估算值超过窗口的 ``PROMPT_COMPACTION_RATIO`` 就要求调用方先压历史。
+
+        与「只剩不到 256 token」的硬判据分开：那条是**发出去必然失败**的底线，
+        这条是**再带上下一轮工具结果就会顶到窗口**的预警，触发得更早。
+        """
+        return prompt_tokens > int(self._context_tokens * PROMPT_COMPACTION_RATIO)
 
     @staticmethod
     def estimate_prompt_tokens(messages: Sequence[ChatMessage], tools: Sequence[ToolSpec] = ()) -> int:

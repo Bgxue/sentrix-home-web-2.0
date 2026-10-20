@@ -348,28 +348,61 @@ PLANNER_BLOCKED_ANSWER = "当前问题的证据需求无法可靠规划，因此
 MODEL_SERVICE_ANSWER = "模型服务当前不可用，因此这一轮没有开始检索。"
 
 
-def _drop_oldest_tool_round_trip(messages: Sequence[ChatMessage]) -> list[ChatMessage] | None:
-    """丢掉**最老的一整轮工具往返**；没有可丢的返回 ``None``。
+#: 「一张照片集」的两种工具：``search_memories`` 的首页预览与
+#: ``get_result_page`` 的翻页预览。模型回答问题时必须**至少能看到最新的一份六图描述**
+#: ——它包含 handle、时间、地点、人物与摘要，是后续 ``inspect_photo`` / 回答的入口。
+#: 把这一轮丢掉，模型就只剩「有结果集但看不见候选」的状态，整道题无法继续。
+_PROTECTED_PREVIEW_TOOLS = frozenset({"search_memories", "get_result_page"})
 
-    **压缩的单位必须是「一整轮」，不能按消息条数丢。** 严格 chat template 要求每个
-    ``tool_call_id`` 都有一条配对的 ``role=tool`` 结果消息，丢一半端点直接 400
-    （1.0 ``intent.py`` 的注释记过这条）。所以这里找的是第一条带 ``tool_calls`` 的
-    assistant 消息，连同**紧跟其后的全部** tool 结果一起丢。
 
-    丢最老的一轮而不是最新的一轮：最新那轮是模型刚取到的证据，正是它下一步要用的；
-    早先那些往返的内容已经体现在模型的推理与后续调用里了。
+def _round_trip_spans(messages: Sequence[ChatMessage]) -> list[tuple[int, int]]:
+    """每条 ``assistant(tool_calls)`` + 紧随其后的 ``role=tool`` 结果，算作一轮。
+
+    返回 ``(start, end)`` 半开区间。严格的 chat template 要求 ``tool_call_id`` 成对，
+    所以压缩的单位必须是整轮，不能按消息条数丢。
     """
-    kept: list[ChatMessage] = []
+    spans: list[tuple[int, int]] = []
     index = 0
     while index < len(messages):
         message = messages[index]
         if message.role is ChatRole.ASSISTANT and message.tool_calls:
+            end = index + 1
+            while end < len(messages) and messages[end].role is ChatRole.TOOL:
+                end += 1
+            spans.append((index, end))
+            index = end
+        else:
             index += 1
-            while index < len(messages) and messages[index].role is ChatRole.TOOL:
-                index += 1
-            return kept + list(messages[index:])
-        kept.append(message)
-        index += 1
+    return spans
+
+
+def _drop_oldest_tool_round_trip(messages: Sequence[ChatMessage]) -> list[ChatMessage] | None:
+    """丢掉**除最新检索/翻页预览外**最老的一整轮工具往返；没有可丢的返回 ``None``。
+
+    **保护对象：最新的一次 ``search_memories`` / ``get_result_page`` 往返。**
+    这一轮的 tool 结果里是六张候选的完整 preview（handle、时间、地点、人物、摘要），
+    是模型回答与继续 ``inspect_photo`` 的唯一入口。丢掉它，模型就不知道在说哪几张照片，
+    整道题会退化成猜——这比「少一轮精读」贵得多。
+
+    其余往返按**从老到新**丢弃：``inspect_photo`` / ``read_photo_text`` / 人物查询等
+    都只提供某一轮的细节，丢掉最老的几轮通常还能靠最新一轮继续。
+
+    若历史里**只有**受保护的那一轮（或没有可丢的），返回 ``None``：宁可让这一轮
+    如实以 ``MODEL_ERROR`` 收尾，也不删掉六图集硬答。
+    """
+    spans = _round_trip_spans(messages)
+    if not spans:
+        return None
+    # 最新的一轮获胜：同一回合里可能既有 search 又有 page，保护最后出现的那一轮。
+    protected_start: int | None = None
+    for start, _end in spans:
+        names = {call.name for call in messages[start].tool_calls}
+        if names & _PROTECTED_PREVIEW_TOOLS:
+            protected_start = start
+    for start, end in spans:
+        if start == protected_start:
+            continue
+        return list(messages[:start]) + list(messages[end:])
     return None
 
 
