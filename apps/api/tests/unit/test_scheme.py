@@ -1,43 +1,56 @@
-"""嵌入方案被钉死——2.0 不得重新引入「可切换性」。
+"""嵌入方案：**整方案原子切换**，禁止两个槽各切各的。
 
-1.0 的历史：IMAGE/TEXT 嵌入器被 env/.env 切换过（clip / chinese_clip / bge），
-memory_vectors、ANN 索引、FTS 各套并存且互不匹配，检索时好时坏。这里用「配置里
-根本没有这个开关」来保证同样的事不会再发生——不是靠约定，是靠它无处可配。
+1.0 的历史：IMAGE/TEXT 嵌入器被 env/.env 各自切换过（clip / chinese_clip / bge），
+memory_vectors、ANN 索引、FTS 各套并存且互不匹配，检索时好时坏。
+
+2026-10-20 为 16 GB Mac mini 恢复 legacy 方案时，保留的约束是：
+
+1. 只能选一个**具名方案**；
+2. 不存在「图片用 A、文本用 B」的独立开关；
+3. 默认必须是 wemm（153 不设变量即行为不变）。
 """
 
 from __future__ import annotations
+
+import pytest
 
 from sentrix.config import Settings
 from sentrix.domain.retrieval import scheme
 
 
-def test_scheme_constants_are_the_ones_in_the_behaviour_baseline():
-    """W1（2026-10-03）把方案换成了 wemm 统一空间，常量随之。
-
-    两个槽现在指向同一个模型与同一个维度——**这不是「可以切」，是「已经切完」**：
-    上面那条「配置里没有开关」的断言仍然成立，方案只有一个。
-    """
-    assert scheme.IMAGE_EMBEDDER == "wemm"
-    assert scheme.TEXT_EMBEDDER == "wemm"
-    assert scheme.IMAGE_MODEL == "tencent/WeMM-Embedding-2B"
-    assert scheme.TEXT_MODEL == "tencent/WeMM-Embedding-2B"
-    assert scheme.VISUAL_DIMENSION == 2048
-    assert scheme.TEXT_DIMENSION == 2048
-    # **三个 space 保留、不合并**：`visual` 里还住着人脸向量（buffalo_l 512 维，
-    # 靠 source_type 与 model_name 区分），合并会把它们卷进文本检索。
-    assert scheme.VISUAL_SPACE == "visual"
-    assert scheme.SEMANTIC_SPACE == "semantic"
-    assert scheme.EPISODIC_SPACE == "episodic"
+def test_default_scheme_is_wemm_and_shapes_are_pinned():
+    wemm = scheme.get_scheme("wemm")
+    assert scheme.DEFAULT_SCHEME == "wemm"
+    assert wemm.visual_model == "tencent/WeMM-Embedding-2B"
+    assert wemm.text_model == "tencent/WeMM-Embedding-2B"
+    assert wemm.visual_dimension == 2048
+    assert wemm.text_dimension == 2048
+    assert wemm.unified is True
 
 
-def test_settings_expose_no_embedder_switch(tmp_path, monkeypatch):
-    """配置里没有「选哪套嵌入/哪个向量后端」这一项。
+def test_legacy_scheme_matches_1_0():
+    legacy = scheme.get_scheme("legacy")
+    assert legacy.visual_model == "chinese-clip-ViT-L-14"
+    assert legacy.text_model == "BAAI/bge-m3"
+    assert legacy.visual_dimension == 768
+    assert legacy.text_dimension == 1024
+    # **两个独立空间**：legacy 不是统一嵌入，visual 与 semantic/episodic 各自比。
+    assert legacy.unified is False
 
-    反向验证：把上面任何一个名字加进 ``Settings``，这条测试就会红——红得对，
-    因为那正是 1.0 多套向量并存的入口。
 
-    ``text_embedder_url`` / ``wemm_url`` 不在禁用名单里：它们是**服务地址**，
-    不是模型选择。禁的是「选哪套嵌入」，不是「那套嵌入在哪台机器上」。
+def test_unknown_scheme_fails_loudly():
+    with pytest.raises(ValueError, match="未知的嵌入方案"):
+        scheme.get_scheme("clip")
+
+    with pytest.raises(ValueError, match="SENTRIX_EMBEDDING_SCHEME"):
+        Settings(embedding_scheme="clip")
+
+
+def test_settings_expose_only_the_atomic_scheme_switch(tmp_path, monkeypatch):
+    """允许 ``embedding_scheme``，仍然禁止按槽位/后端的零散开关。
+
+    ``text_embedder_url`` / ``wemm_url`` / ``legacy_clip_url`` 不在禁用名单里：
+    它们是**服务地址**，不是模型选择。禁的是「选哪套嵌入」，不是「那套嵌入在哪台机器上」。
     """
     monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
     forbidden = {
@@ -52,5 +65,6 @@ def test_settings_expose_no_embedder_switch(tmp_path, monkeypatch):
     }
 
     assert forbidden & set(Settings.model_fields) == set()
-    # 这条只是证明上面那个集合不是「对着空集断言」——字段确实读得到。
-    assert "data_dir" in Settings.model_fields
+    assert "embedding_scheme" in Settings.model_fields
+    # 默认值必须是 wemm——153 不设这个变量时不能悄悄换方案。
+    assert Settings(data_dir=tmp_path).embedding_scheme == "wemm"

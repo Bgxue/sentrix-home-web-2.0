@@ -1,23 +1,28 @@
-"""单一嵌入方案（钉死，不读 env）。
+"""嵌入方案注册表：**整方案原子切换，禁止两个槽各切各的**。
 
 历史教训（两个来源，都读过再改）：IMAGE/TEXT 嵌入器曾被 env/.env **各自**反复切换
 （clip / chinese_clip / bge），结果 memory_vectors、ANN 索引、FTS 各套并存且互不匹配，
 检索时好时坏，而且**没有任何一处会报错**。
 
-所以 2.0 不提供任何切换开关：写入、查询、重建索引三处都只认这里的常量。要换模型
-就改这个文件并重建索引，那是一次有版本、可审查的迁移，不是一次环境变量调整。
-（1.0 后来加了 ``SENTRIX_EMBEDDING_SCHEME`` 做整方案原子切换，理由是它要分阶段
-验证；2.0 的裁决是**直接钉死 wemm**，所以那条开关连同它要守的两条纪律一起不需要。）
+2.0 原先把方案钉死在 wemm。2026-10-20 为 16 GB Mac mini 重新引入 legacy 方案
+（chinese-clip 768d + bge-m3 1024d），但保留了那条教训的核心约束：
 
-**W1（2026-10-03）把方案换成 wemm：文本/图像/视频在同一个 2048 维空间里。**
+1. **一次只选一个具名方案**（``SENTRIX_EMBEDDING_SCHEME``），不存在「图片用 A、
+   文本用 B」的独立开关。方案内部的图文配对由这张表保证。
+2. **切换必须伴随重建索引**。向量按 ``model_name`` 分套；旧方案的向量可以留着，
+   但查询只会命中当前方案的行，不重建就是「索引为空」。
+3. **默认仍是 wemm**，153 不设这个变量，行为与之前完全一致。
 
-为什么两个槽仍然保留各自的名字（``IMAGE_MODEL`` / ``TEXT_MODEL`` 指向同一个字符串）：
-它们标注的是**两个不同的 space**（``visual`` 对阵 ``semantic``/``episodic``），
-而这个区分在 wemm 下仍然成立——见下面 space 那段。改名会让 20 多处按槽位引用的
-消费点全部改一遍，换不来任何语义上的准确，所以留着。
+禁止的是「零散切换」，不是「有版本、可审查的整方案迁移」。
+
+**W1（2026-10-03）把默认方案换成 wemm：文本/图像/视频在同一个 2048 维空间里。**
+legacy 是 1.0 的历史方案，只用于没有 2B 嵌入显存/内存的机器（如 16 GB Mac mini）。
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 # 1.0 ``backend/embeddings/wemm_sidecar.py:34-35`` 的模型名与原生维度。
 # 侧车在 8102，实测 ``/health`` 报 ``{"dimension": 2048,
@@ -50,3 +55,63 @@ TEXT_DIMENSION = WEMM_DIMENSION
 VISUAL_SPACE = "visual"
 SEMANTIC_SPACE = "semantic"
 EPISODIC_SPACE = "episodic"
+
+# ---- 方案注册表：整方案原子切换 ------------------------------------------------
+
+# 1.0 ``backend/embeddings/chinese_clip_visual.py`` 与 ``bge_text.py``。
+# 两个模型**不在同一个空间**：视觉 768 维、文本 1024 维，分别落在 visual 与
+# semantic/episodic 两个 space 里。检索仍成立，因为 visual 通道只与 visual 空间比，
+# 文本通道只与 semantic/episodic 比；不存在跨模态同空间的前提。
+LEGACY_VISUAL_MODEL = "chinese-clip-ViT-L-14"
+LEGACY_TEXT_MODEL = "BAAI/bge-m3"
+LEGACY_VISUAL_DIMENSION = 768
+LEGACY_TEXT_DIMENSION = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingScheme:
+    """一个具名方案。槽位（visual/text）是方案内部的决定，不是两个独立开关。"""
+
+    name: str
+    visual_embedder: str
+    text_embedder: str
+    visual_model: str
+    text_model: str
+    visual_dimension: int
+    text_dimension: int
+    unified: bool
+
+
+SCHEMES: Mapping[str, EmbeddingScheme] = {
+    "wemm": EmbeddingScheme(
+        name="wemm",
+        visual_embedder="wemm",
+        text_embedder="wemm",
+        visual_model=WEMM_MODEL,
+        text_model=WEMM_MODEL,
+        visual_dimension=WEMM_DIMENSION,
+        text_dimension=WEMM_DIMENSION,
+        unified=True,
+    ),
+    "legacy": EmbeddingScheme(
+        name="legacy",
+        visual_embedder="chinese_clip",
+        text_embedder="bge",
+        visual_model=LEGACY_VISUAL_MODEL,
+        text_model=LEGACY_TEXT_MODEL,
+        visual_dimension=LEGACY_VISUAL_DIMENSION,
+        text_dimension=LEGACY_TEXT_DIMENSION,
+        unified=False,
+    ),
+}
+
+DEFAULT_SCHEME = "wemm"
+
+
+def get_scheme(name: str) -> EmbeddingScheme:
+    """按名字取方案。**未知名字直接抛**：静默回退到默认会让「配错了」变成
+    「跑的是另一套模型」，而两套模型的向量互不兼容。"""
+    try:
+        return SCHEMES[name]
+    except KeyError:
+        raise ValueError(f"未知的嵌入方案 {name!r}；可选：{', '.join(sorted(SCHEMES))}") from None

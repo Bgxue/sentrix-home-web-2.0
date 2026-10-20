@@ -10,6 +10,7 @@ receive ports; only this module knows which concrete class implements them.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +90,11 @@ from sentrix.infrastructure.media.video_metadata import FfprobeVideoMetadataRead
 from sentrix.infrastructure.media.video_transcode import FfmpegVideoTranscoder
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
+from sentrix.infrastructure.models.legacy import (
+    BgeSidecarEmbedder,
+    ChineseClipSidecarEmbedder,
+    LegacyEmbeddingHealthProbe,
+)
 from sentrix.infrastructure.models.wemm import WeMMSidecarEmbedder
 from sentrix.infrastructure.persistence.database import Database
 from sentrix.infrastructure.persistence.repositories.appearance import SqliteAppearanceRepository
@@ -133,6 +139,8 @@ from sentrix.infrastructure.places.composite import OfflinePlaceResolver
 from sentrix.infrastructure.places.geonames import GeoNamesNearestResolver
 from sentrix.infrastructure.places.pygeocn import PyGeoCNAdminResolver
 from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
+
+log = logging.getLogger("sentrix.bootstrap.container")
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "infrastructure" / "persistence" / "migrations"
 
@@ -256,8 +264,37 @@ class Container:
         # **部署事实**，配置里那个 6144 是照部署的某一次实测抄的，部署一改它就过期。
         # 读不到才退回配置值（那说明端点没在正常服务，此时保守值不添乱）。
         served_context = probe_context_tokens(settings.vlm_base_url)
-        # 统一多模态嵌入侧车。写入与查询共用同一个实例，见下面 visual/text 两槽的注释。
-        wemm_embedder = WeMMSidecarEmbedder(settings.wemm_url)
+        # **嵌入方案是整方案原子切换**（``scheme.SCHEMES``）。默认 wemm；legacy 是
+        # 16 GB Mac mini 的回退（chinese-clip 768d + bge-m3 1024d）。两个分支都只
+        # 构造 HTTP 客户端，API 进程不 import torch。
+        visual_embedder: VisualEmbedder
+        text_embedder: TextEmbedder
+        embedding_health: EmbeddingHealthProbe
+        if settings.embedding_scheme == "legacy":
+            visual_embedder = ChineseClipSidecarEmbedder(
+                settings.legacy_clip_url,
+                timeout_s=settings.legacy_clip_timeout_s,
+            )
+            text_embedder = BgeSidecarEmbedder(
+                settings.text_embedder_url,
+                timeout_s=settings.text_embedder_timeout_s,
+            )
+            embedding_health = LegacyEmbeddingHealthProbe(visual_embedder, text_embedder)
+        else:
+            # 统一多模态嵌入侧车。**两个槽指向同一个实例**（W1 起方案是统一空间）：
+            # 建两个实例会让侧车那侧显存翻倍，熔断计数也会各自漂移。
+            wemm_embedder = WeMMSidecarEmbedder(settings.wemm_url)
+            visual_embedder = wemm_embedder
+            text_embedder = wemm_embedder
+            embedding_health = wemm_embedder
+        log.info(
+            "嵌入方案=%s 视觉=%s/%sd 文本=%s/%sd",
+            settings.embedding_scheme,
+            visual_embedder.model_id,
+            visual_embedder.dimension,
+            text_embedder.model_id,
+            text_embedder.dimension,
+        )
         # 家庭图谱仓储被两个消费方用：容器自己的字段，以及人物目录——目录要靠它回答
         # 「这个人的归属与关系」（S7c）。拿在手上传两次，而不是就地 new 两个实例。
         family = SqliteFamilyGraphRepository(database, entities)
@@ -280,12 +317,9 @@ class Container:
             audio_repository=SqliteAudioRepository(database),
             vector_repository=SqliteVectorRepository(database),
             vector_index=QdrantVectorIndex(settings.qdrant_dir),
-            # **两个槽指向同一个实例**（W1 起方案是统一空间）。建两个实例不只是浪费
-            # ——1.0 ``router.py:57-63`` 记着理由：两个实例会让侧车那侧的显存翻倍，
-            # 而且两个实例的健康状态与熔断计数会各自漂移，同一个模型却有两种可用性。
-            visual_embedder=wemm_embedder,
-            text_embedder=wemm_embedder,
-            embedding_health=wemm_embedder,
+            visual_embedder=visual_embedder,
+            text_embedder=text_embedder,
+            embedding_health=embedding_health,
             place_resolver=OfflinePlaceResolver(
                 admin=PyGeoCNAdminResolver(),
                 nearest=GeoNamesNearestResolver(settings.geo_dir),

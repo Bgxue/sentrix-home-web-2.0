@@ -13,6 +13,8 @@ from typing import Any
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sentrix.domain.retrieval.scheme import SCHEMES as EMBEDDING_SCHEMES
+
 #: ``config.py`` 的上四级是 ``sentrix`` → ``src`` → ``api`` → ``apps``，再上一级是仓库根。
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -39,6 +41,19 @@ class Settings(BaseSettings):
     # W1：检索用的统一多模态嵌入侧车（WeMM-Embedding-2B，2048 维）。与 8100 的 VLM、
     # 8101 的 bge 同一条口径——2.0 不管理模型进程的生命周期，只连它。
     wemm_url: str = "http://127.0.0.1:8102"
+
+    # ---- 嵌入方案（2026-10-20：为 16 GB Mac mini 恢复 legacy 回退） ----------------
+    # **整方案切换**，不是两个槽各切各的。默认 wemm，153 不设此变量即行为不变。
+    # 可选值与模型/维度见 ``domain/retrieval/scheme.py`` 的 ``SCHEMES``。
+    embedding_scheme: str = "wemm"
+    # legacy 方案的视觉侧车（chinese-clip ViT-L-14，768 维）。模型已在 130 上，
+    # 由 ``scripts/maintenance/legacy_clip_sidecar.py`` 拉起（默认 8103）。
+    legacy_clip_url: str = "http://127.0.0.1:8103"
+    # 侧车超时：chinese-clip 是单卡/单 MPS 进程内的编码，比 WeMM 的 2B 快，
+    # 但首次加载权重需要时间；30s 覆盖冷启动后的单张编码。
+    legacy_clip_timeout_s: float = 30.0
+    # bge-m3 侧车（8101）的查询超时，照 1.0 ``bge_text.py`` 的 10 秒。
+    text_embedder_timeout_s: float = 10.0
 
     # **模型名不在这里。** 8100 上跑 llama.cpp 还是 vLLM、名字叫什么，由部署方决定，而且
     # 会在 2.0 运行期间被换掉——2026-09-24 实测：8100 从 llama.cpp 换成 vLLM，2.0 配的
@@ -75,6 +90,11 @@ class Settings(BaseSettings):
     def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
         self.web_dist_dir = self.web_dist_dir.expanduser().resolve()
+        # **未知方案直接启动失败。** 静默回退到默认会让「配错了」变成「跑的是另一套
+        # 模型」——两套模型的向量互不兼容，而检索侧不会报错，只会算不出相似度。
+        if self.embedding_scheme not in EMBEDDING_SCHEMES:
+            available = ", ".join(sorted(EMBEDDING_SCHEMES))
+            raise ValueError(f"SENTRIX_EMBEDDING_SCHEME={self.embedding_scheme!r} 未知；可选：{available}")
 
     @computed_field  # type: ignore[prop-decorator]
     @property
