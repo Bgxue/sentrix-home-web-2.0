@@ -229,8 +229,10 @@ export function liveTelemetryRows(run: unknown): MetricRow[] {
   const fmtLive = (value: unknown, suffix = "") => value == null ? "-" : `${Number(value).toFixed(2)}${suffix}`;
   const fmtGiB = (value: unknown) => value == null ? "-" : `${(Number(value) / 1024).toFixed(2)} GiB`;
   const scope = latest.benchmark_process_memory_scope || effectivePeak.benchmark_process_memory_scope;
-  const productFormulaNote = scope === "apple_phys_footprint_related"
-    ? "相关进程 phys_footprint 加总；不再加 UMA 补偿，非 GPU 专属显存"
+  const productFormulaNote = scope === "apple_phys_footprint_plus_mapped_weights_related"
+    ? "相关进程占用（phys_footprint + 映射的模型权重）加总（含共享页重复，为上界）；不再加 UMA 补偿，非 GPU 专属显存"
+    : scope === "apple_phys_footprint_related"
+    ? "旧口径（仅 phys_footprint，未计映射权重），系统性偏低；重跑后按新口径显示"
     : scope === "all_related_pss_plus_model_uma_extra"
     ? "所有相关进程 PSS 加总 + max(0, 主模型 VmRSS - 主模型 smaps Rss)"
     : "历史记录未标记新公式 scope；该值不能按当前公式解释，需重跑";

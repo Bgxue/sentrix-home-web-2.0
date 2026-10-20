@@ -2,10 +2,12 @@
 
 移植自 1.0 ``backend/apple_telemetry.py``（418 行，基线提交 2d2cee7c）。
 
-**为什么不能用 RSS。** M4 没有独立显存，``ps`` 的 RSS 会漏掉 Metal/GPU 的分配，
-所以逐进程占用取 ``proc_pid_rusage`` 的 ``phys_footprint``。**这是进程的物理占用，
-不是「只算 GPU」的内存**——两者的差别要说清，否则读表的人会把它当成显存。
-产品总量是相关进程 footprint 的和，**不做** Orin 那套「VmRSS 减 Rss」的修正。
+**为什么不能用 RSS。** M4 没有独立显存，``ps`` 的 RSS 会漏掉 Metal/GPU 的分配；
+但只用 ``proc_pid_rusage`` 的 ``phys_footprint`` 也不够——llama-server 用 mmap 加载
+GGUF，这部分文件页不计入 footprint。逐进程占用取**两半之和**：
+``phys_footprint + 已映射的模型权重文件``。**这是进程的提交占用，不是「只算 GPU」
+的内存**——两者的差别要说清，否则读表的人会把它当成显存。产品总量是相关进程
+占用的和，**不做** Orin 那套「VmRSS 减 Rss」的修正。
 
 **宿主已用内存跟活动监视器的口径一致**：active + wired + 被压缩器占用的页。
 inactive 与 speculative 的文件缓存不算在内。
@@ -215,6 +217,94 @@ class _RUsageInfoV0(ctypes.Structure):
     ]
 
 
+_PROC_PIDREGIONPATHINFO = 8
+_MAXPATHLEN = 1024
+# 4096 是刻意大于 macOS 27 实际写回的 1272 字节：未来结构体变大也不会越界，
+# 这里只读稳定的前缀。缓冲区给小了会让 proc_pidinfo 返回 0/ENOMEM。
+_REGION_BUFFER_BYTES = 4096
+# 只认真正的模型权重文件。同一台 Mac 上逐区扫还会看到 torch/paddle 的懒映射
+# 动态库和被打开却从未触碰的 blob；全算进去曾让产品总量虚高 3.6 GiB。
+_WEIGHT_FILE_SUFFIXES = (".gguf", ".ggml", ".safetensors", ".onnx", ".mlmodel", ".mlpackage")
+
+
+class _VinfoStat(ctypes.Structure):
+    _fields_ = [
+        ("vst_dev", ctypes.c_uint32),
+        ("vst_mode", ctypes.c_uint16),
+        ("vst_nlink", ctypes.c_uint16),
+        ("vst_ino", ctypes.c_uint64),
+        ("vst_uid", ctypes.c_uint32),
+        ("vst_gid", ctypes.c_uint32),
+        ("vst_atime", ctypes.c_int64),
+        ("vst_atimensec", ctypes.c_int64),
+        ("vst_mtime", ctypes.c_int64),
+        ("vst_mtimensec", ctypes.c_int64),
+        ("vst_ctime", ctypes.c_int64),
+        ("vst_ctimensec", ctypes.c_int64),
+        ("vst_birthtime", ctypes.c_int64),
+        ("vst_birthtimensec", ctypes.c_int64),
+        ("vst_size", ctypes.c_int64),
+        ("vst_blocks", ctypes.c_int64),
+        ("vst_blksize", ctypes.c_int32),
+        ("vst_flags", ctypes.c_uint32),
+        ("vst_gen", ctypes.c_uint32),
+        ("vst_rdev", ctypes.c_uint32),
+        # macOS 27 在这里比旧文档的布局宽 8 字节。下面只读 pri_* 与 vip_path，
+        # 两者都在稳定前缀里；但总大小必须对，因为它决定 vip_path 的偏移。
+        ("vst_qspare", ctypes.c_int32 * 4),
+    ]
+
+
+class _Fsid(ctypes.Structure):
+    _fields_ = [("val", ctypes.c_int32 * 2)]
+
+
+class _VnodeInfo(ctypes.Structure):
+    _fields_ = [
+        ("vi_stat", _VinfoStat),
+        ("vi_type", ctypes.c_int),
+        ("vi_pad", ctypes.c_int),
+        ("vi_fsid", _Fsid),
+    ]
+
+
+class _VnodeInfoPath(ctypes.Structure):
+    _fields_ = [("vip_vi", _VnodeInfo), ("vip_path", ctypes.c_char * _MAXPATHLEN)]
+
+
+class _ProcRegionInfo(ctypes.Structure):
+    _fields_ = [
+        ("pri_protection", ctypes.c_uint32),
+        ("pri_max_protection", ctypes.c_uint32),
+        ("pri_inheritance", ctypes.c_uint32),
+        ("pri_flags", ctypes.c_uint32),
+        ("pri_offset", ctypes.c_uint64),
+        ("pri_behavior", ctypes.c_uint32),
+        ("pri_user_wired_count", ctypes.c_uint32),
+        ("pri_user_tag", ctypes.c_uint32),
+        ("pri_pages_resident", ctypes.c_uint32),
+        ("pri_pages_shared_now_private", ctypes.c_uint32),
+        ("pri_pages_swapped_out", ctypes.c_uint32),
+        ("pri_pages_dirtied", ctypes.c_uint32),
+        ("pri_ref_count", ctypes.c_uint32),
+        ("pri_shadow_depth", ctypes.c_uint32),
+        ("pri_share_mode", ctypes.c_uint32),
+        ("pri_private_pages_resident", ctypes.c_uint32),
+        ("pri_shared_pages_resident", ctypes.c_uint32),
+        ("pri_obj_id", ctypes.c_uint32),
+        ("pri_depth", ctypes.c_uint32),
+        ("pri_address", ctypes.c_uint64),
+        ("pri_size", ctypes.c_uint64),
+    ]
+
+
+class _ProcRegionWithPathInfo(ctypes.Structure):
+    _fields_ = [
+        ("prp_prinfo", _ProcRegionInfo),
+        ("prp_vip", _VnodeInfoPath),
+    ]
+
+
 _LIBPROC: Any = None
 _LIBPROC_LOCK = threading.Lock()
 
@@ -229,6 +319,17 @@ def _libproc() -> Any:
             ctypes.POINTER(_RUsageInfoV0),
         ]
         library.proc_pid_rusage.restype = ctypes.c_int
+        try:
+            library.proc_pidinfo.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint64,
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ]
+            library.proc_pidinfo.restype = ctypes.c_int
+        except AttributeError:  # pragma: no cover - libproc always exports it
+            pass
         _LIBPROC = library
     return _LIBPROC
 
@@ -250,6 +351,70 @@ def _phys_footprint_bytes(pid: int) -> int | None:
         return footprint
     except (OSError, AttributeError, ValueError):
         return None
+
+
+def _process_bytes(footprint: int, weight_map: int) -> int | None:
+    """进程提交内存：内核 footprint + mmap 的权重文件，两半不重叠。
+
+    macOS 把进程内存分成两本账，内核只记第一本：
+
+    * ``phys_footprint``：匿名常驻 + 压缩 + 换出 + IOKit 映射；
+    * ``weight_map``：mmap 的模型权重文件（GGUF 等）。
+
+    1.0 实测 ``phys_footprint`` 1612.8 MiB 时 llama-server 还持有 2572.9 MiB 的
+    GGUF 映射——权重对 footprint 完全不可见。反过来只看 RSS 会在压缩/换出时
+    塌到 42.8 MiB。相加得 4185.7 MiB，与停掉 llama-server 前后读 AGX
+    ``Alloc system memory`` 差分的 4282 MiB 相差 2.3%。
+    """
+    if footprint <= 0:
+        return None
+    return int(footprint) + max(int(weight_map), 0)
+
+
+def _weight_map_bytes(pid: int) -> int:
+    """该进程映射的模型权重文件字节数；没有映射时为 0。
+
+    llama-server 用 mmap 加载 GGUF，这些页正是 ``phys_footprint`` 不记的那一半。
+    ``PROC_PIDREGIONPATHINFO`` 对进程属主可读，所以既不需要 root，也不需要子进程。
+    只认权重后缀：全文件映射会把 torch/paddle 动态库和从未触碰的 blob 一起算进去。
+    """
+    try:
+        walker = getattr(_libproc(), "proc_pidinfo", None)
+        if walker is None:
+            return 0
+        raw = ctypes.create_string_buffer(_REGION_BUFFER_BYTES)
+        address = 0
+        total = 0
+        while True:
+            with _LIBPROC_LOCK:
+                written = walker(
+                    int(pid),
+                    _PROC_PIDREGIONPATHINFO,
+                    address,
+                    raw,
+                    _REGION_BUFFER_BYTES,
+                )
+            if written <= 0:
+                break
+            info = _ProcRegionWithPathInfo.from_buffer_copy(raw, 0)
+            path = info.prp_vip.vip_path.decode("utf-8", "replace")
+            if path.endswith(_WEIGHT_FILE_SUFFIXES):
+                total += int(info.prp_prinfo.pri_size)
+            size = int(info.prp_prinfo.pri_size)
+            if size == 0:
+                break
+            address = int(info.prp_prinfo.pri_address) + size
+        return total
+    except (OSError, AttributeError, ValueError):
+        return 0
+
+
+def _occupancy_bytes(pid: int) -> int | None:
+    """进程占用 = footprint + 已映射的权重文件。"""
+    private = _phys_footprint_bytes(pid)
+    if private is None:
+        return None
+    return _process_bytes(private, _weight_map_bytes(pid))
 
 
 def _run_text(command: list[str], timeout: float = 3) -> str:
@@ -389,46 +554,46 @@ class LocalAppleUnifiedTelemetryProvider:
         model_pids = {row["pid"] for row in model_rows}
         sentrix_rows = [row for row in related_rows if row["pid"] not in model_pids]
         for row in sentrix_rows + model_rows:
-            footprint = _phys_footprint_bytes(row["pid"])
-            row["footprint_mib"] = None if footprint is None else round(footprint / 1048576, 2)
+            occupancy = _occupancy_bytes(row["pid"])
+            row["occupancy_mib"] = None if occupancy is None else round(occupancy / 1048576, 2)
         data: dict[str, Any] = {}
-        # 只在**恰好一个**模型进程且 footprint 读得到时才认它是模型：多个候选时选谁
+        # 只在**恰好一个**模型进程且占用读得到时才认它是模型：多个候选时选谁
         # 都是猜，猜错比不报更糟。
-        if len(model_rows) == 1 and model_rows[0].get("footprint_mib") is not None:
+        if len(model_rows) == 1 and model_rows[0].get("occupancy_mib") is not None:
             model = model_rows[0]
             data["root_pid"] = model["pid"]
-            data["model_process_system_memory_used_mib"] = model["footprint_mib"]
-            data["model_process_system_memory_scope"] = "apple_phys_footprint"
-            data["process_memory_used_mib"] = model["footprint_mib"]
-            data["process_memory_scope"] = "apple_phys_footprint"
+            data["model_process_system_memory_used_mib"] = model["occupancy_mib"]
+            data["model_process_system_memory_scope"] = "apple_phys_footprint_plus_mapped_weights"
+            data["process_memory_used_mib"] = model["occupancy_mib"]
+            data["process_memory_scope"] = "apple_phys_footprint_plus_mapped_weights"
             data["model_system_processes"] = [
                 {
                     "pid": model["pid"],
                     "process_name": model["process_name"],
-                    "footprint_mib": model["footprint_mib"],
+                    "occupancy_mib": model["occupancy_mib"],
                     "listening_ports": model["listening_ports"],
                 }
             ]
-        # 求和前要求**每一个**相关进程的 footprint 都在：少一个就整段不写，
+        # 求和前要求**每一个**相关进程的占用都在：少一个就整段不写，
         # 因为「和」在缺项时是一个看起来正常、实际偏小的假数字。
         sentrix_complete = bool(sentrix_rows) and all(
-            row.get("footprint_mib") is not None for row in sentrix_rows
+            row.get("occupancy_mib") is not None for row in sentrix_rows
         )
-        model_complete = bool(model_rows) and all(row.get("footprint_mib") is not None for row in model_rows)
+        model_complete = bool(model_rows) and all(row.get("occupancy_mib") is not None for row in model_rows)
         if sentrix_complete:
-            sentrix = round(sum(row["footprint_mib"] for row in sentrix_rows), 2)
+            sentrix = round(sum(row["occupancy_mib"] for row in sentrix_rows), 2)
             data["sentrix_stack_pss_mib"] = sentrix
-            data["sentrix_stack_pss_scope"] = "apple_phys_footprint_excluding_model"
+            data["sentrix_stack_pss_scope"] = "apple_phys_footprint_plus_mapped_weights_excluding_model"
         if sentrix_complete and model_complete and len(model_rows) == 1:
-            product = round(sum(row["footprint_mib"] for row in sentrix_rows + model_rows), 2)
+            product = round(sum(row["occupancy_mib"] for row in sentrix_rows + model_rows), 2)
             data["product_stack_memory_mib"] = product
             data["benchmark_process_memory_used_mib"] = product
-            data["benchmark_process_memory_scope"] = "apple_phys_footprint_related"
+            data["benchmark_process_memory_scope"] = "apple_phys_footprint_plus_mapped_weights_related"
             data["benchmark_processes"] = [
                 {
                     "pid": row["pid"],
                     "process_name": row["process_name"],
-                    "footprint_mib": row["footprint_mib"],
+                    "occupancy_mib": row["occupancy_mib"],
                     "listening_ports": row["listening_ports"],
                 }
                 for row in (sentrix_rows + model_rows)[:50]
@@ -440,8 +605,8 @@ class LocalAppleUnifiedTelemetryProvider:
         if self._system_baseline_mib is not None and isinstance(used, (int, float)):
             data["system_memory_baseline_mib"] = round(self._system_baseline_mib, 2)
             data["system_memory_delta_mib"] = round(float(used) - self._system_baseline_mib, 2)
-        data["memory_unit"] = "apple_phys_footprint_mib"
-        data["memory_profile"] = {"method": "apple_phys_footprint_v1"}
+        data["memory_unit"] = "apple_phys_footprint_plus_mapped_weights_mib"
+        data["memory_profile"] = {"method": "apple_phys_footprint_plus_mapped_weights_v1"}
         return data
 
     def gpu_stats(self) -> dict[str, Any]:
@@ -450,7 +615,7 @@ class LocalAppleUnifiedTelemetryProvider:
         # 设备采样里的字段只在 data 没有同名字段时补进来（进程归属的字段优先）。
         data.update({key: value for key, value in device.items() if key not in data})
         self._last_memory = {"status": "available", "source": self.source, "data": data}
-        gpu: dict[str, Any] = {"index": 0, "memory_unit": "apple_phys_footprint_mib"}
+        gpu: dict[str, Any] = {"index": 0, "memory_unit": "apple_phys_footprint_plus_mapped_weights_mib"}
         for key in (
             "gpu_utilization_pct",
             "gpu_allocated_unified_memory_mib",

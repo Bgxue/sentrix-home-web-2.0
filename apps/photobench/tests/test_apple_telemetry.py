@@ -224,14 +224,31 @@ def apple_host(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(apple, "_MACMON", _FakeMacmon(MACMON_SAMPLE))
     monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: {100: 128 * MIB, 200: 512 * MIB}[pid])
+    # 模型进程另有 128 MiB 的 GGUF 映射：footprint 不记这半，占用必须加上。
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 128 * MIB if pid == 200 else 0)
 
 
-def test_gpu_stats_sums_related_footprints_and_reports_the_model(apple_host: None) -> None:
+def test_process_bytes_adds_the_two_non_overlapping_halves() -> None:
+    assert apple._process_bytes(512 * MIB, 128 * MIB) == 640 * MIB
+    assert apple._process_bytes(512 * MIB, 0) == 512 * MIB
+    assert apple._process_bytes(0, 128 * MIB) is None
+    assert apple._process_bytes(-1, 128 * MIB) is None
+
+
+def test_occupancy_is_footprint_plus_weight_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: 100 * MIB)
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 2573 * MIB)
+    assert apple._occupancy_bytes(42) == 2673 * MIB
+    monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: None)
+    assert apple._occupancy_bytes(42) is None
+
+
+def test_gpu_stats_sums_related_occupancy_and_reports_the_model(apple_host: None) -> None:
     data = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100").gpu_stats()["data"]
     assert data["gpus"] == [
         {
             "index": 0,
-            "memory_unit": "apple_phys_footprint_mib",
+            "memory_unit": "apple_phys_footprint_plus_mapped_weights_mib",
             "gpu_utilization_pct": 12.5,
             "gpu_allocated_unified_memory_mib": 1.0,
             "gpu_in_use_unified_memory_mib": 0.5,
@@ -246,15 +263,15 @@ def test_process_memory_attributes_model_and_sentrix_separately(apple_host: None
     provider = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100")
     data = provider.process_memory()["data"]
     assert data["root_pid"] == 200
-    assert data["model_process_system_memory_used_mib"] == 512.0
-    assert data["model_process_system_memory_scope"] == "apple_phys_footprint"
-    assert data["process_memory_used_mib"] == 512.0
+    assert data["model_process_system_memory_used_mib"] == 640.0
+    assert data["model_process_system_memory_scope"] == "apple_phys_footprint_plus_mapped_weights"
+    assert data["process_memory_used_mib"] == 640.0
     assert data["sentrix_stack_pss_mib"] == 128.0
-    assert data["sentrix_stack_pss_scope"] == "apple_phys_footprint_excluding_model"
-    assert data["product_stack_memory_mib"] == 640.0
-    assert data["benchmark_process_memory_used_mib"] == 640.0
-    assert data["memory_unit"] == "apple_phys_footprint_mib"
-    assert data["memory_profile"] == {"method": "apple_phys_footprint_v1"}
+    assert data["sentrix_stack_pss_scope"] == "apple_phys_footprint_plus_mapped_weights_excluding_model"
+    assert data["product_stack_memory_mib"] == 768.0
+    assert data["benchmark_process_memory_used_mib"] == 768.0
+    assert data["memory_unit"] == "apple_phys_footprint_plus_mapped_weights_mib"
+    assert data["memory_profile"] == {"method": "apple_phys_footprint_plus_mapped_weights_v1"}
     assert data["system_memory_scope"] == "apple_app_wired_compressed"
     # 基线就是第一次采到的已用量，所以这次 delta 为 0。
     assert data["system_memory_delta_mib"] == 0.0
@@ -297,6 +314,7 @@ def test_two_model_candidates_are_not_guessed_into_one(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         apple, "_phys_footprint_bytes", lambda pid: {100: 128 * MIB, 200: 512 * MIB, 201: 256 * MIB}[pid]
     )
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 0)
     data = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100").process_memory()["data"]
     assert "root_pid" not in data
     assert "benchmark_process_memory_used_mib" not in data
@@ -315,6 +333,7 @@ def test_a_missing_footprint_suppresses_the_sum(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr(apple, "_MACMON", _FakeMacmon({}))
     monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: 512 * MIB if pid == 200 else None)
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 0)
     data = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100").process_memory()["data"]
     assert "sentrix_stack_pss_mib" not in data
     assert "product_stack_memory_mib" not in data
