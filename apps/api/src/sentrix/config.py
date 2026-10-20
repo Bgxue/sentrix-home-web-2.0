@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     legacy_clip_timeout_s: float = 30.0
     # bge-m3 侧车（8101）的查询超时，照 1.0 ``bge_text.py`` 的 10 秒。
     text_embedder_timeout_s: float = 10.0
+    # 单个 Agent 回合的墙钟上限。180 是 153（GPU）的默认；Mac/CPU 上 4 并发时
+    # 一次 inspect_photo 就可能 30-60s，正常回合会被截成 timeout，可放宽到 600。
+    agent_wall_time_s: float = 180.0
 
     # **模型名不在这里。** 8100 上跑 llama.cpp 还是 vLLM、名字叫什么，由部署方决定，而且
     # 会在 2.0 运行期间被换掉——2026-09-24 实测：8100 从 llama.cpp 换成 vLLM，2.0 配的
