@@ -89,7 +89,7 @@ function telemetrySeriesDefinitions(
     { key: "product_stack_memory_mib", name: "整套产品 RAM（相关进程 PSS + 主模型 GPU 页）", color: "#8b6de8" },
     { key: "sentrix_stack_pss_mib", name: "Sentrix 周边 PSS（不含模型）", color: "#a78bfa" },
     { key: "model_process_memory_used_mib", name: "主模型 GPU 显存（nvidia-smi 按 PID）", color: "#ef8a4b" },
-    { key: "model_process_system_memory_used_mib", name: "主模型 RAM（进程 VmRSS）", color: "#f2b84b" },
+    { key: "model_process_system_memory_used_mib", name: "主模型 RAM（进程 smaps Rss）", color: "#f2b84b" },
   ];
 }
 
@@ -358,7 +358,7 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
           </span>
           <span>
             <b>含义：</b>包含 Python/vLLM 或 llama.cpp runtime、tokenizer、调度结构、mmap
-            页、共享库和 CUDA 用户态开销等；不表示模型权重在 RAM 里又完整复制了一份。VmRSS
+            页、共享库和 CUDA 用户态开销等；不表示模型权重在 RAM 里又完整复制了一份。smaps Rss
             缺失时不改用 PSS 或其它字段补写。
           </span>
         </div>

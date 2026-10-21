@@ -130,7 +130,7 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
       "整卡 GPU 显存",
       "整机 RAM",
       "主模型 GPU 显存（nvidia-smi 按 PID）",
-      "主模型 RAM（进程 VmRSS）",
+      "主模型 RAM（进程 smaps Rss）",
     ]);
     // MiB → GiB：1024/2048/3072 MiB → 1/2/3 GiB。
     expect(option.series[0]?.data).toEqual([1, 2, 3]);
