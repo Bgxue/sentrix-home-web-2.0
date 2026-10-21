@@ -30,8 +30,13 @@ export interface UseQaBrowserOptions {
 }
 
 export function useQaBrowser({ sentrixUrl = "", manifests = [] }: UseQaBrowserOptions = {}) {
-  const [qaBrowserAlbum, setQaBrowserAlbum] = useState("album3");
-  const [qaBrowserSet, setQaBrowserSet] = useState("full-album3-38q");
+  // 初始值从当前 manifests 里取：153 有 album3，就先选 album3；只有 album3-14 的
+  // 机器直接选 album3-14，避免先发一个必然 404 的请求。manifests 还没到时留空，
+  // 由下面的同步 effect 补。
+  const initialManifest =
+    manifests.find((manifest) => manifest.album_id === "album3") || manifests[0] || null;
+  const [qaBrowserAlbum, setQaBrowserAlbum] = useState(initialManifest?.album_id || "");
+  const [qaBrowserSet, setQaBrowserSet] = useState(initialManifest?.qa_sets?.[0] || "");
   const [qaBrowserItems, setQaBrowserItems] = useState<QaRow[]>([]);
   const [qaBrowserSearch, setQaBrowserSearch] = useState("");
   const [qaBrowserTag, setQaBrowserTag] = useState("");
@@ -60,6 +65,8 @@ export function useQaBrowser({ sentrixUrl = "", manifests = [] }: UseQaBrowserOp
     const sets = selected.qa_sets || [];
     if (sets.length && !sets.includes(qaBrowserSet)) {
       setQaBrowserSet(sets[0]!);
+    } else if (!sets.length && qaBrowserSet) {
+      setQaBrowserSet("");
     }
   }, [manifests, qaBrowserAlbum, qaBrowserSet]);
 
