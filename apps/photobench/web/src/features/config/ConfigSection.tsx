@@ -192,9 +192,11 @@ export function ConfigSection({
                     </option>
                   ))}
                 </select>
-                {reuse.runMode === "build" && (
-                  <span className="config-help">图片、视频与身份来源，处理后相册保留</span>
-                )}
+                <span className="config-help">
+                  {reuse.runMode === "build"
+                    ? "本次要导入的照片、视频范围；处理后相册保留。"
+                    : "本次要导入的照片、视频范围；相册越大，准备越久。"}
+                </span>
               </label>
             )}
             {reuse.runMode === "reuse" && (
@@ -219,9 +221,11 @@ export function ConfigSection({
                     </option>
                   ))}
                 </select>
-                {reuse.runMode === "reuse" && (
-                  <span className="config-help">题目与对照随所选现有相册自动匹配</span>
-                )}
+                <span className="config-help">
+                  {reuse.runMode === "reuse"
+                    ? "题目与对照随现有相册匹配；这里选择题量。"
+                    : "从当前相册的题目集中选题；10 题适合快速验证。"}
+                </span>
               </label>
             )}
           </div>

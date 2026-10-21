@@ -139,7 +139,7 @@ describe("ConfigSection 工作模式切换（可见性 + 可选项）", () => {
     const reuseSelect = screen.getByRole("combobox", { name: /^复用基座/ }) as HTMLSelectElement;
     expect(within(reuseSelect).getByRole("option", { name: "albumX · prof · scope" })).toBeTruthy();
     expect(screen.getByRole("combobox", { name: /^QA 数据集/ })).toBeTruthy();
-    expect(screen.getByText("题目与对照随所选现有相册自动匹配")).toBeTruthy();
+    expect(screen.getByText("题目与对照随现有相册匹配；这里选择题量。")).toBeTruthy();
   });
 
   it("切到 build：照片在（带构建提示）、复用基座与 QA 数据集都消失", () => {
@@ -149,7 +149,7 @@ describe("ConfigSection 工作模式切换（可见性 + 可选项）", () => {
     expect(screen.getByRole("combobox", { name: /^照片/ })).toBeTruthy();
     expect(screen.queryByRole("combobox", { name: /^复用基座/ })).toBeNull();
     expect(screen.queryByRole("combobox", { name: /^QA 数据集/ })).toBeNull();
-    expect(screen.getByText("图片、视频与身份来源，处理后相册保留")).toBeTruthy();
+    expect(screen.getByText("本次要导入的照片、视频范围；处理后相册保留。")).toBeTruthy();
   });
 });
 
