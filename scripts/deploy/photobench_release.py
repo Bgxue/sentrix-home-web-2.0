@@ -98,7 +98,7 @@ def process_environment(pid: int) -> dict[str, str]:
     return result
 
 
-def local_url(value: str) -> str:
+def local_url(value: str, *, preserve_local: bool = False) -> str:
     parsed = urlparse(value)
     # Only an operator-verified local address may be normalized. Never convert a
     # genuinely remote dependency into a different local service accidentally.
@@ -114,6 +114,8 @@ def local_url(value: str) -> str:
         probe.close()
     if parsed.hostname not in local_ips:
         raise RuntimeError(f"Dependency is not on this host: {parsed.hostname}")
+    if preserve_local:
+        return value
     port = f":{parsed.port}" if parsed.port else ""
     return urlunparse(parsed._replace(netloc=f"127.0.0.1{port}"))
 
@@ -141,7 +143,7 @@ def wait_ready(revision: str | None, timeout: float = 180) -> None:
     raise RuntimeError(f"New stack did not become ready: {last_error}")
 
 
-def activate(root: Path, previous: Path, runtime: Path) -> None:
+def activate(root: Path, previous: Path, runtime: Path, local_model_url: str | None = None) -> None:
     manifest = verify(root)
     runtime.mkdir(parents=True, exist_ok=True)
     binding_path = runtime / "bindings.json"
@@ -160,8 +162,14 @@ def activate(root: Path, previous: Path, runtime: Path) -> None:
         shutil.copytree(config, target_config)
         connection_path = target_config / "runtime_connection.json"
         connection = read_json(connection_path)
+        if local_model_url:
+            if urlparse(local_model_url).port != urlparse(connection["model_base_url"]).port:
+                raise RuntimeError("A local address override cannot change the selected model port")
+            connection["model_base_url"] = local_url(local_model_url, preserve_local=True)
         for key in ("sentrix_url", "model_base_url"):
-            connection[key] = local_url(connection[key])
+            connection[key] = local_url(
+                connection[key], preserve_local=bool(local_model_url and key == "model_base_url")
+            )
         embedding = connection.get("embedding") or {}
         mode = embedding.get("mode")
         for key in ["wemm_url"] if mode == "unified_multimodal" else ["text_url", "image_url"]:
@@ -190,6 +198,7 @@ def activate(root: Path, previous: Path, runtime: Path) -> None:
                 "removed_standalone_services": removed,
                 "qdrant_embedded_in_api": embedded_qdrant,
                 "inference_lifecycle": "external_fixed_local_endpoint",
+                "local_model_endpoint_override": local_model_url,
             },
         )
         write_json(connection_path, connection)
@@ -278,7 +287,11 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
             BENCH_VLLM_BASE_URL=connection["model_base_url"],
             BENCH_VLLM_API_URL="",
         )
-        env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost,::1"
+        model_host = urlparse(connection["model_base_url"]).hostname
+        local_hosts = ["127.0.0.1", "localhost", "::1"]
+        if model_host and model_host not in local_hosts:
+            local_hosts.append(model_host)
+        env["NO_PROXY"] = env["no_proxy"] = ",".join(local_hosts)
         check = subprocess.check_output(
             [
                 str(root / ".venv/bin/python"),
@@ -325,6 +338,9 @@ def main() -> None:
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--previous", type=Path)
     parser.add_argument("--runtime", type=Path)
+    parser.add_argument(
+        "--local-model-url", help="Explicit same-host listener address; does not change model port"
+    )
     args = parser.parse_args()
     root = args.root.resolve()
     if args.action == "package":
@@ -340,7 +356,7 @@ def main() -> None:
     else:
         if args.previous is None or args.runtime is None:
             parser.error("--previous and --runtime are required")
-        activate(root, args.previous.resolve(), args.runtime.resolve())
+        activate(root, args.previous.resolve(), args.runtime.resolve(), args.local_model_url)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.deploy.photobench_release import (  # noqa: E402
     digest,
     listener,
+    local_url,
     process_environment,
     read_json,
     verify,
@@ -106,9 +107,12 @@ def epoch(value: Any) -> float | None:
         return None
 
 
-def local_listener(url: str) -> dict[str, Any]:
+def local_listener(url: str, *, allow_local_address: bool = False) -> dict[str, Any]:
     parsed = urlparse(url)
-    require(parsed.hostname in {"127.0.0.1", "localhost", "::1"}, f"Non-loopback dependency: {url}")
+    if allow_local_address:
+        local_url(url, preserve_local=True)
+    else:
+        require(parsed.hostname in {"127.0.0.1", "localhost", "::1"}, f"Non-loopback dependency: {url}")
     require(not parsed.username and not parsed.password, "Credentials in local dependency URL")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     pid = listener(port)
@@ -237,12 +241,19 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
     runs = http("http://127.0.0.1:8872/api/v1/runs")
     require(runs.get("active_count", 0) == 0, "Active orphan/run remains")
     model_url = connection["model_base_url"].rstrip("/")
-    main = local_listener(model_url)
+    adjustments = read_json(runtime / "topology-adjustments.json")
+    override = adjustments.get("local_model_endpoint_override")
+    require(not override or override.rstrip("/") == model_url, "Undeclared model address override")
+    main = local_listener(model_url, allow_local_address=bool(override))
     api_pid = listener(8291)
     require(api_pid, "No product listener")
     effective = process_environment(int(api_pid or 0))
     require(effective.get("SENTRIX_VLM_BASE_URL") == model_url, "Product/PB model topology mismatch")
-    require(effective.get("NO_PROXY") == "127.0.0.1,localhost,::1", "Local HTTP may use a proxy")
+    local_hosts = ["127.0.0.1", "localhost", "::1"]
+    model_host = urlparse(model_url).hostname
+    if model_host and model_host not in local_hosts:
+        local_hosts.append(model_host)
+    require(effective.get("NO_PROXY") == ",".join(local_hosts), "Local HTTP may use a proxy")
     weights = face_weights(effective)
     model_list = http(model_url + "/models")
     model_id = model_list["data"][0]["id"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import socket
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,16 @@ def test_unknown_total_cannot_pass_as_zero():
     assert not acceptance.expected_total([10, None], 10)
     assert not acceptance.expected_total([None], 0)
     assert acceptance.expected_total([0, 10], 10)
+
+
+def test_preserved_lan_endpoint_must_belong_to_this_host(monkeypatch):
+    release = script("photobench_release")
+    monkeypatch.setattr(socket, "gethostbyname_ex", lambda name: (name, [], ["192.168.0.118"]))
+    endpoint = "http://192.168.0.118:8103/v1"
+    assert release.local_url(endpoint, preserve_local=True) == endpoint
+    assert release.local_url(endpoint) == "http://127.0.0.1:8103/v1"
+    with pytest.raises(RuntimeError, match="not on this host"):
+        release.local_url("http://203.0.113.88:8103/v1", preserve_local=True)
 
 
 def test_raw_statistics_detect_downsampled_or_null_coerced_summary():
