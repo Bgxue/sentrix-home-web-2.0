@@ -44,6 +44,32 @@ def _root(env_name: str, default: Path) -> Path:
     return Path(raw).expanduser() if raw else default
 
 
+VALID_DEPLOYMENT_PROFILES = frozenset({"server", "mac"})
+
+
+def deployment_profile() -> str:
+    """部署形态：``server``（默认）或 ``mac``。
+
+    与主产品读同一个 ``SENTRIX_DEPLOYMENT_PROFILE``。它只提供**评测侧默认值**：
+    Mac 上 QA 并发 2、整册导入超时 86400s；server 维持端点探测与 7200s。
+    显式的 ``PHOTOBENCH_QA_CONCURRENCY`` / ``payload.import_timeout`` 永远优先。
+    """
+    raw = os.environ.get("SENTRIX_DEPLOYMENT_PROFILE", "server").strip().lower()
+    if raw not in VALID_DEPLOYMENT_PROFILES:
+        raise ValueError(
+            f"SENTRIX_DEPLOYMENT_PROFILE={raw!r} 未知；可选：{', '.join(sorted(VALID_DEPLOYMENT_PROFILES))}"
+        )
+    return raw
+
+
+def default_qa_concurrency() -> int | None:
+    return 2 if deployment_profile() == "mac" else None
+
+
+def default_import_timeout() -> int:
+    return 86400 if deployment_profile() == "mac" else 7200
+
+
 #: 2.0 主 API 的默认启动命令。与仓库 ``Makefile`` 的 ``dev`` 目标逐字一致——那一条就是
 #: 2.0 的进程入口（``uvicorn --factory sentrix.main:create_app --port 8191
 #: --app-dir apps/api/src``）。换部署形态（容器 / systemd / 另一个端口）只需覆盖
@@ -80,6 +106,8 @@ class Settings:
     #: ``SystemdSentrixProcess``——重启走 ``systemctl --user``，运行端点读单元环境。
     #: 生产（``deploy/systemd/`` 的单元）填 ``sentrix-api.service``。
     sentrix_service_unit: str = ""
+    #: 部署形态（``server`` / ``mac``）。只读，用于诊断；默认值见上面的 helpers。
+    deployment_profile: str = "server"
 
     @classmethod
     def load(cls) -> Settings:
@@ -96,4 +124,5 @@ class Settings:
             sentrix_pid_file=_root("PHOTOBENCH_SENTRIX_PID_FILE", APP_ROOT / "logs" / "sentrix-process.json"),
             sentrix_log_path=_root("PHOTOBENCH_SENTRIX_LOG_PATH", APP_ROOT / "logs" / "sentrix.log"),
             sentrix_service_unit=os.environ.get("PHOTOBENCH_SENTRIX_SERVICE_UNIT", "").strip(),
+            deployment_profile=deployment_profile(),
         )

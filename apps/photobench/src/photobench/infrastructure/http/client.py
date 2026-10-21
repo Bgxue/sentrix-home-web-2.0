@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
@@ -40,6 +41,16 @@ from typing import Any
 import httpx
 
 from photobench.domain.http.ports import HttpStream
+
+_RETRIES = 3
+_RETRY_BACKOFF_S = 0.2
+_RETRYABLE = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
 
 
 def build_multipart(fields: Mapping[str, str], files: Sequence[tuple[str, str, bytes]]) -> tuple[bytes, str]:
@@ -95,8 +106,23 @@ class HttpxJsonClient:
     """
 
     def __init__(self, client: httpx.Client | None = None) -> None:
+        # **不保留 keep-alive 连接。** 2026-10-21 的 158 全流程里 131/487 题以
+        # ``Server disconnected without sending a response`` / ``Bad file descriptor``
+        # 失败：进程级 ``httpx.Client`` 复用了 uvicorn 已关闭的连接（默认 keep-alive 5s），
+        # 而长回合让连接大段空闲。本机回环上每次重新握手几乎无成本，换掉这个失败面。
         self._client = (
-            client if client is not None else httpx.Client(verify=False, follow_redirects=True, timeout=120)
+            client
+            if client is not None
+            else httpx.Client(
+                verify=False,
+                follow_redirects=True,
+                timeout=120,
+                limits=httpx.Limits(
+                    max_connections=32,
+                    max_keepalive_connections=0,
+                    keepalive_expiry=0.0,
+                ),
+            )
         )
 
     def request_json(
@@ -110,8 +136,22 @@ class HttpxJsonClient:
         content = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
         headers = {"Content-Type": "application/json"}
         headers.update(extra_headers or {})
+        # **连接错误重试。** 只重试「连接没建立/被对端提前关闭」这一类；业务 4xx/5xx
+        # 与读超时不重试（后者对 POST 可能已经处理过，重试会制造重复回合）。三次是
+        # 经验值：换连接后第一次就能恢复，剩下的只覆盖对端刚好在重启的窗口。
+        for attempt in range(_RETRIES):
+            try:
+                response = self._client.request(
+                    method, url, content=content, headers=headers, timeout=timeout
+                )
+                break
+            except _RETRYABLE:
+                if attempt == _RETRIES - 1:
+                    raise
+                time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
+        else:  # pragma: no cover - 上面的 raise/break 已覆盖
+            raise RuntimeError("unreachable")
         try:
-            response = self._client.request(method, url, content=content, headers=headers, timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             response = exc.response

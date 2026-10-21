@@ -206,3 +206,35 @@ def test_request_multipart_rewrites_a_non_2xx_into_the_shared_message():
     with pytest.raises(RuntimeError) as excinfo:
         _client(handler).request_multipart("http://sentrix/api/v1/people/seed", {}, [])
     assert str(excinfo.value).endswith(": 文件里没有检测到人脸")
+
+
+def test_a_transient_disconnect_is_retried(monkeypatch):
+    """2026-10-21 的 158 全流程里 131/487 题死在 ``Server disconnected``。
+
+    进程级 client 复用了 uvicorn 已关闭的 keep-alive 连接，且没有重试。这里钉住
+    「换一条连接后能恢复」：第一次抛 ``RemoteProtocolError``，第二次正常返回。
+    """
+    monkeypatch.setattr("photobench.infrastructure.http.client.time.sleep", lambda _: None)
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return httpx.Response(200, json={"ok": True})
+
+    assert _client(handler).request_json("http://sentrix/api/x") == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_a_persistent_disconnect_is_raised_after_the_retry_budget(monkeypatch):
+    monkeypatch.setattr("photobench.infrastructure.http.client.time.sleep", lambda _: None)
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        _client(handler).request_json("http://sentrix/api/x")
+    assert len(calls) == 3

@@ -57,6 +57,7 @@ from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSampler
 from photobench.application.run_execution.judge import InlineImages, JudgeRunner
 from photobench.application.run_execution.state import RunState
+from photobench.config import default_qa_concurrency
 from photobench.domain.datasets.ports import AlbumSource
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.results.ports import RunResultWriter
@@ -1261,7 +1262,8 @@ class RunExecution:
         """``PHOTOBENCH_QA_CONCURRENCY``（1.0 ``:3642-3648``）。读不到或写坏了返回 ``None``。"""
         raw = str(os.environ.get("PHOTOBENCH_QA_CONCURRENCY") or "").strip()
         if not raw:
-            return None
+            # profile 只提供默认值：mac → 2，server → None（继续问端点槽位）。
+            return default_qa_concurrency()
         try:
             return max(1, int(raw))
         except ValueError:
