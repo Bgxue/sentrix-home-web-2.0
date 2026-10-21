@@ -23,7 +23,7 @@ if [ "$_profile" = "auto" ]; then
   esac
 fi
 
-export SENTRIX_PIPELINE_MAX_WORKERS="${SENTRIX_PIPELINE_MAX_WORKERS:-8}"
+export SENTRIX_PIPELINE_MAX_WORKERS="${SENTRIX_PIPELINE_MAX_WORKERS:-4}"
 export SENTRIX_VLM_BASE_URL="${SENTRIX_VLM_BASE_URL:-http://127.0.0.1:8100/v1}"
 
 case "$_profile" in

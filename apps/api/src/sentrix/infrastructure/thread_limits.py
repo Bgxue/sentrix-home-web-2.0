@@ -21,7 +21,7 @@ import os
 from typing import Any
 
 ENV_KEY = "SENTRIX_LIB_THREADS"
-_DEFAULT_CONCURRENCY = 8
+_DEFAULT_CONCURRENCY = 4
 
 
 def lib_threads() -> int:
@@ -45,7 +45,9 @@ def _derive_threads() -> int:
         concurrency = _DEFAULT_CONCURRENCY
     if concurrency < 1:
         concurrency = 1
-    return max(1, cores // concurrency)
+    # 上限 4：153 的 32 核 ÷ 4 也是 4；低核设备（46/158）至少 2，
+    # 避免 1 线程把纯 CPU 的人脸/视觉流水线拖成「看起来卡住」。
+    return max(1, min(4, cores // concurrency))
 
 
 def ort_intra_op_threads() -> int:
