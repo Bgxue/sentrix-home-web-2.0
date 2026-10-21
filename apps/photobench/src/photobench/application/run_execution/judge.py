@@ -34,6 +34,7 @@ from typing import Any
 
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.runs.analysis import (
+    JUDGE_CONSISTENCY_VERSION,
     judge_score_consistency,
     now_iso,
 )
@@ -309,6 +310,7 @@ class JudgeRunner:
                     reason = "judge_inconsistent_score_reason"
             return {
                 "score": score,
+                "consistency_version": JUDGE_CONSISTENCY_VERSION,
                 "reason": reason,
                 "input": payload,
                 "raw_text": text,
@@ -318,6 +320,7 @@ class JudgeRunner:
         except Exception as exc:  # noqa: BLE001 —— 1.0 ``:4312``：判分失败不抛，落成 failed
             return {
                 "score": None,
+                "consistency_version": JUDGE_CONSISTENCY_VERSION,
                 "reason": f"judge_error: {exc}",
                 "input": payload,
                 "judge_status": "failed",

@@ -22,6 +22,12 @@
   uses measured monotonic wall time, including overlap, never sums item latency.
 - Optional build identifiers are exposed through existing config/diagnostics
   responses. Existing URLs, error envelopes and required fields remain unchanged.
+- New answer-quality Judge results add optional `judge.consistency_version=2`.
+  Consistency checks must stay within punctuation-delimited clauses and must not
+  mistake question answerability or the reference answer for praise of the model.
+  A legitimate zero remains zero; contradictory praise still triggers one retry.
+  Unversioned historical Judge records retain version 1 semantics. Missing scores
+  cannot be recovered from an earlier raw response when retry facts are absent.
 
 ## Accounting and historical compatibility
 

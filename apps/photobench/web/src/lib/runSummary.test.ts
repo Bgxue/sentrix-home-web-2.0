@@ -46,6 +46,18 @@ describe("micro（按题汇总）vs macro（按题平均）必须给出不同答
 });
 
 describe("effectiveRunSummary：已存 summary 优先于现算（1.0 的 `saved.X ?? 现算`）", () => {
+  it("新版一致性事实保留合法0分并排除缺分", () => {
+    const result = effectiveRunSummary({
+      items: [
+        { judge: { score: 0, consistency_version: 2 } },
+        { judge: { score: 2, consistency_version: 2 } },
+        { judge: { score: null, consistency_version: 2 } },
+      ],
+    } as unknown as Run);
+    expect(result.judge_valid_count).toBe(2);
+    expect(result.answer_quality_mean).toBe(1);
+  });
+
   // 后端存的值与 items 现算**故意不同**：把 `??` 改成「一律现算」这条必须挂。
   const run = {
     run_id: "saved-wins",

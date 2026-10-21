@@ -749,7 +749,7 @@ S9b-2 把 1.0 `BenchmarkRun`（`benchmark_orchestrator.py:1895`）的六个相�
 | judge 重试 | `PHOTOBENCH_JUDGE_RETRY_ATTEMPTS` 默认 **6**；退避 `PHOTOBENCH_JUDGE_RETRY_BACKOFF_SECONDS` 默认 **5 s**，上限 `..._MAX_SECONDS` 默认 **60 s**，外加 `+U(0, min(2, 0.2*delay))` 抖动（1.0 `:206-215` / `:4508`） | `application/run_execution/judge.py` |
 | judge 4xx 不重试 | 400/401/403/404/422…**立刻抛**；**408 与 429 排除**（它们重试才对症，`Retry-After` 就是给它们的） | `JudgeRunner._client_error_code` |
 | judge 请求间隔 | `PHOTOBENCH_JUDGE_REQUEST_INTERVAL_SECONDS` 默认 **0.5 s**，多个 worker 之间错开 | `_wait_for_request_slot` |
-| 分数—理由一致性 | `score=0` 而理由里出现「回答正确 / 与参考答案一致 / 符合预期 / 核心信息完整」→ **重问一次**（system 里追加一致性提示）；仍不一致则 `score=None` + `reason="judge_inconsistent_score_reason"`（1.0 `:4272`） | `JudgeRunner.judge` / `analysis.judge_score_consistency` |
+| 分数—理由一致性 | `score=0` 而理由明确肯定回答正确 → **重问一次**；仍矛盾则`score=None`，原失败语义保持。新结果`judge.consistency_version=2`，褒义匹配限同一标点分句，排除问题“可回答/可以回答”，不能把下一句的正确参考事实当成模型回答正确；未带版本历史保留v1，不从缺失重问事实回填分数 | `JudgeRunner.judge` / `analysis.judge_score_consistency` |
 | 判分失败的形状 | `judge_status="failed"` 且 `score=None`——**判分失败不是 0 分**（0 是合法分数） | 同上 |
 | 证据判分开关 | `BENCH_EVIDENCE_JUDGE=1` 才开（默认关）；判分前把召回的图缩到 **896 px** 再转 JPEG data URL（1.0 `:1549`） | `JudgeRunner._inline_images` |
 | 一个 item 的判分粒度 | **每一轮各判一次**（任务行为 + 回答质量并发），item 级取**最后一轮**；任一子判分 failed → item `judge_status="failed"` | `JudgeRunner.judge_item` |

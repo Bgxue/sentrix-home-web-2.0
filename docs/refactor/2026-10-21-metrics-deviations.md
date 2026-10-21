@@ -19,7 +19,7 @@
   [dense首token实现](https://github.com/FlagOpen/FlagEmbedding/blob/master/FlagEmbedding/finetune/embedder/encoder_only/m3/modeling.py)。
   同时核实NX已部署llama.cpp的`send_embedding`：pooling=none返回原始token，忽略`embd_normalize`。
 - AGX主模型只绑定192.168.0.118:8103，用户批准保留同机LAN地址以遵守不重启模型约束；发布显式登记、校验本机接口及端口、加入NO_PROXY，验收拒绝未登记或非本机例外。
-- 3090现有WeMM权重在CPU运行，Transformers5.2.0禁用CUDA FLA入口以选择其原生PyTorch后备实现。无假向量、无权重/算法更换；模型设备差异进验收记录。
+- 早期3090 WeMM恢复入口可按原权重CPU运行，Transformers5.2.0禁用CUDA FLA入口以选择原生PyTorch后备实现；最终现场实际侧车为CUDA，以每轮health/PID/原始显存记录为准，不从该入口推断现场设备。无假向量、无权重/算法更换。
 - 四机真实run发现Mac进程快照包含采集器刚启动的`ps`，它退出后将产品总量持续判为不完整。精确排除本次观察进程PID，保留同名真实工作进程及其他PID消失的不可用语义。
 - 发布新API后未登记进程控制记录，首次full run会将“无记录”误当端点变化而重启8291。发布登记已启动的API PID与端点，并显式绑定控制记录/日志到runtime；端点一致时保持API PID，预检可验证全过程连续性。
 
@@ -50,3 +50,9 @@ Jetson显示RSS/nvmap/PSS各分量及板级/轨级功耗，Mac显示容量估计
 历史投影从已有时间事实派生、标device_freshness_version=1，不改原文；
 缺TTL旧记录采用显式3秒兼容门槛，不补造真实刷新频率。验收器独立从时间戳核验。
 此修复须形成新固定SHA，四机统一发布后重新full 10QA，旧轮次全部保留。
+
+2026-10-22四机运行追加暴露Judge一致性误判：旧正则跨“问题可回答，正确地点”命中，
+把合法0分丢成None。新judge.consistency_version=2仅在同一标点分句判断，排除可回答/可以回答，
+否定短语不能删除后拼接出新的褒义。真正矛盾仍只重问一次、失败保留None；评分rubric不变。
+未带版本的旧Judge保留v1语义，不根据早先raw_text猜测未保存的重问结果，不改历史原文。
+API列表与详情、前端类型及OpenAPI同步添加可选版本字段。新SHA必须四机重新完整回归。

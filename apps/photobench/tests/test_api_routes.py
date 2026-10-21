@@ -121,6 +121,26 @@ def test_get_run_item_by_index(client: TestClient):
     assert client.get("/api/v1/runs/run-a/items/9").status_code == 404
 
 
+def test_versioned_judge_zero_survives_both_item_projections(client: TestClient):
+    container = client.app.state.container
+    path = container.settings.results_root / "run-a" / "run.json"
+    state = json.loads(path.read_text())
+    state["items"][0]["judge"] = {
+        "score": 0,
+        "reason": "问题可回答，正确地点已知；模型未给出答案。",
+        "consistency_version": 2,
+    }
+    path.write_text(json.dumps(state))
+    for url in ["/api/v1/runs/run-a/items", "/api/v1/runs/run-a/items/0"]:
+        response = client.get(url)
+        assert response.status_code == 200
+        body = response.json()
+        item = body["items"][0] if "items" in body else body["item"]
+        assert item["judge"]["score"] == 0
+        assert item["judge"]["consistency_version"] == 2
+        assert item["judge"].get("consistency_status") != "inconsistent"
+
+
 def test_reviews_route_accepts_a_write_on_a_finished_run(client: TestClient):
     """写侧在 S9b-3 接上：``run-a`` 已 ``completed``，所以评审可写（1.0 ``:4988``）。
 

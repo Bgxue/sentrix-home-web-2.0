@@ -106,3 +106,7 @@ run保存唯一请求和响应，`album3-14 / compact-10q / mode=full / models=[
 历史投影从已有时间事实派生、标device_freshness_version=1，不改原文；
 缺TTL旧记录采用显式3秒兼容门槛，不补造真实刷新频率。验收器独立从时间戳核验。
 此修复须形成新固定SHA，四机统一发布后重新full 10QA，旧轮次全部保留。
+
+Judge一致性规则核验：新正式run的回答质量judge必须记录consistency_version=2；
+合法0分计入有效分母，缺分保持null。旧无版本原文继续v1；禁止从不完整重问轨迹补分。
+任何该规则代码修复也必须新SHA、完整make ci及四机新scope full10QA，不能重判旧run代替。

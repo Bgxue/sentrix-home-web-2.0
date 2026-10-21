@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from photobench.domain.runs import analysis
 
 
@@ -35,6 +37,39 @@ def test_a_negated_praise_does_not_trip_the_inconsistency_rule():
     """否定式褒义（「回答不正确」）不该被当成夸奖——1.0 ``:705`` 那句正则的用意。"""
     assert analysis.judge_score_consistency(0, "回答不正确") is True
     assert analysis.judge_score_for_summary({"score": 0, "reason": "回答不正确"}) == 0
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "该问题可回答，正确地点已由参考答案给出。模型未给出正确答案，因此得0分。",
+        "问题可以回答。正确时间已知，但模型未回答核心问题。",
+        "该问题可回答且正确地点已知，但模型没有回答。",
+        "模型未回答，正确答案见参考信息。",
+    ],
+)
+def test_zero_score_is_not_rejected_for_praise_of_the_question_or_reference(reason: str):
+    assert analysis.judge_score_consistency(0, reason) is True
+    current = {"score": 0, "reason": reason, "consistency_version": 2}
+    assert analysis.judge_score_for_summary(current) == 0
+    assert analysis.item_summary({"judge": current}, 0)["judge"]["consistency_version"] == 2
+
+
+def test_unversioned_judge_records_keep_their_original_consistency_policy():
+    reason = "该问题可回答，正确地点已知；模型没有回答。"
+    assert analysis.judge_score_for_summary({"score": 0, "reason": reason}) is None
+    assert (
+        analysis.judge_score_for_summary({"score": None, "raw_text": '{"score":0}', "consistency_version": 2})
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "reason", ["模型回答正确，与参考答案一致", "回答基本准确", "与标准答案完全一致", "核心信息完整，符合预期"]
+)
+def test_version_two_still_rejects_a_praising_zero(reason: str):
+    assert analysis.judge_score_consistency(0, reason) is False
+    assert analysis.judge_score_for_summary({"score": 0, "reason": reason, "consistency_version": 2}) is None
 
 
 def test_a_non_zero_score_is_always_consistent():

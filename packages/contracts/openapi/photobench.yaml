@@ -424,9 +424,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Run Items Api V1 Runs  Run Id  Items Get
+                $ref: '#/components/schemas/RunItemsResponse'
         '422':
           description: Validation Error
           content:
@@ -459,9 +457,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Run Item Api V1 Runs  Run Id  Items  Item Index  Get
+                $ref: '#/components/schemas/RunItemResponse'
         '422':
           description: Validation Error
           content:
@@ -991,6 +987,23 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    JudgeObservation:
+      properties:
+        score:
+          title: Score
+        consistency_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Consistency Version
+        consistency_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Consistency Status
+      additionalProperties: true
+      type: object
+      title: JudgeObservation
     MemoryObservation:
       properties:
         memory_accounting:
@@ -1085,6 +1098,36 @@ components:
       additionalProperties: true
       type: object
       title: MemoryObservation
+    RunItemObservation:
+      properties:
+        judge:
+          anyOf:
+          - $ref: '#/components/schemas/JudgeObservation'
+          - type: 'null'
+      additionalProperties: true
+      type: object
+      title: RunItemObservation
+    RunItemResponse:
+      properties:
+        item:
+          anyOf:
+          - $ref: '#/components/schemas/RunItemObservation'
+          - type: 'null'
+      additionalProperties: true
+      type: object
+      title: RunItemResponse
+    RunItemsResponse:
+      properties:
+        items:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/RunItemObservation'
+            type: array
+          - type: 'null'
+          title: Items
+      additionalProperties: true
+      type: object
+      title: RunItemsResponse
     RunMetricsResponse:
       properties:
         metrics_contract_version:

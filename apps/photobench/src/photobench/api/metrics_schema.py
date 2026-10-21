@@ -42,3 +42,26 @@ class RunMetricsResponse(BaseModel):
     build_revision: str | None = None
     runtime_snapshot: dict[str, Any] | None = None
     telemetry_live: TelemetryProjection | None = None
+
+
+class JudgeObservation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    # Preserve legacy raw values; validation belongs to the versioned domain rule.
+    score: Any = None
+    consistency_version: int | None = None
+    consistency_status: str | None = None
+
+
+class RunItemObservation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    judge: JudgeObservation | None = None
+
+
+class RunItemResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    item: RunItemObservation | None = None
+
+
+class RunItemsResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    items: list[RunItemObservation] | None = None

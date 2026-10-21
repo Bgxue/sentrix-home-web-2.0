@@ -207,6 +207,7 @@ export interface Judge {
   status?: string | null;
   rejudge_id?: string | null;
   consistency_status?: string | null;
+  consistency_version?: number | null;
   reason?: string | null;
   [key: string]: unknown;
 }

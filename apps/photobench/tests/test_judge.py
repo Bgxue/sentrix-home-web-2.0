@@ -158,6 +158,16 @@ def test_a_retry_that_stays_inconsistent_yields_no_score_not_zero():
     assert result["reason"] == "judge_inconsistent_score_reason"
 
 
+def test_an_answerable_question_does_not_turn_a_valid_judge_zero_into_a_missing_score():
+    http = FakeHttpClient(
+        [judge_reply('{"score":0,"reason":"该问题可回答，正确地点已知。模型未给出正确答案，因此得0分。"}')]
+    )
+    result = _runner(http).judge("q", "ref", "answer")
+    assert result["score"] == 0
+    assert result["consistency_version"] == 2
+    assert len(http.calls) == 1
+
+
 def test_a_client_error_is_not_retried():
     """4xx 是请求本身的问题，重试改变不了任何事（1.0 ``:4445`` 的实测代价：195 秒/题）。
 

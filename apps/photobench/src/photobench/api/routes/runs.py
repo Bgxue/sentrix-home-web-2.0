@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from photobench.api.deps import get_container
-from photobench.api.metrics_schema import RunMetricsResponse
+from photobench.api.metrics_schema import RunItemResponse, RunItemsResponse, RunMetricsResponse
 from photobench.domain.errors import InvalidRequestError
 
 router = APIRouter(tags=["runs"])
@@ -42,7 +42,7 @@ def get_run(request: Request, run_id: str) -> dict[str, Any]:
     return get_container(request).runs.get_run(run_id)
 
 
-@router.get("/runs/{run_id}/items")
+@router.get("/runs/{run_id}/items", response_model=RunItemsResponse, response_model_exclude_unset=True)
 def get_run_items(
     request: Request,
     run_id: str,
@@ -79,7 +79,11 @@ def get_run_items(
     )
 
 
-@router.get("/runs/{run_id}/items/{item_index}")
+@router.get(
+    "/runs/{run_id}/items/{item_index}",
+    response_model=RunItemResponse,
+    response_model_exclude_unset=True,
+)
 def get_run_item(request: Request, run_id: str, item_index: str) -> dict[str, Any]:
     """1.0 ``:7735``。"""
     try:

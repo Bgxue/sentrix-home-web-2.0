@@ -637,6 +637,11 @@ legacy文本HTTP协议：优先`POST /embed`，仅404时协商`/v1/embeddings`�
 
 换非 OpenAI 响应形状才需要改 `JudgeRunner._request` 与三个 judge 方法。
 
+T006 Judge一致性v2：新增可选`judge.consistency_version=2`，规则仍在domain，
+重问编排仍在application；只检查同一标点分句中的回答褒义，不能把问题可回答性或参考事实
+当成模型回答正确。合法0分保留，真正矛盾的单次重问与None失败语义不变。
+历史无版本继续v1，不回填未保存的重问分数。接口契约、列表/详情投影及前端类型同步。
+
 #### 4.12.2 换推理后端
 
 实现 `InferenceProvider` + `LifecycleProvider` + `TelemetryProvider`，替换：

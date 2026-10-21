@@ -35,6 +35,7 @@ from photobench.domain.runtime.metrics import apple_power, apple_temperature, de
 # 1.0 ``:933`` / ``:1261``。
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 RANKING_KS = (1, 5, 10)
+JUDGE_CONSISTENCY_VERSION = 2
 
 
 def now_iso() -> str:
@@ -47,15 +48,24 @@ def now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
-def judge_score_consistency(score: int | None, reason: str) -> bool:
-    """拒绝「文字夸奖、分数判死」的 judge 输出。1.0 ``:701``。"""
+def judge_score_consistency(
+    score: int | None, reason: str, *, version: int = JUDGE_CONSISTENCY_VERSION
+) -> bool:
+    """Reject praise of an answer scored zero; retain v1 for unversioned history."""
     if score != 0:
         return True
     text = str(reason or "")
+    if version >= 2:
+        # A reference fact in the next clause is not praise of the model answer.
+        text = re.sub(r"[，,。；;！？!?\r\n]+", "\n", text)
     # 先把否定式褒义短语剥掉，免得「不符合预期」/「回答不正确」被当成褒义命中。
-    cleaned = re.sub(r"(?:未|不|没有|并非).{0,10}(?:正确|准确|一致|完整|符合|预期)", "", text)
+    cleaned = re.sub(
+        r"(?:未|不|没有|并非).{0,10}(?:正确|准确|一致|完整|符合|预期)",
+        "\n" if version >= 2 else "",
+        text,
+    )
     positive_patterns = (
-        r"(?:回答|模型回答).{0,12}(?:正确|准确)",
+        (r"(?<!可)(?<!可以)" if version >= 2 else "") + r"(?:回答|模型回答).{0,12}(?:正确|准确)",
         r"与.{0,24}(?:参考答案|标准答案).{0,12}一致",
         r"(?:参考答案|标准答案).{0,24}(?:回答|结论).{0,12}一致",
         r"符合.{0,8}预期",
@@ -67,7 +77,8 @@ def judge_score_consistency(score: int | None, reason: str) -> bool:
 def judge_consistency_status(judge: dict[str, Any] | None) -> str | None:
     """1.0 ``:718``。"""
     judge = judge or {}
-    if not judge_score_consistency(judge.get("score"), str(judge.get("reason") or "")):
+    version = JUDGE_CONSISTENCY_VERSION if judge.get("consistency_version") == 2 else 1
+    if not judge_score_consistency(judge.get("score"), str(judge.get("reason") or ""), version=version):
         return "inconsistent"
     value = judge.get("consistency_status")
     return str(value) if value is not None else None
@@ -1616,6 +1627,7 @@ def item_summary(item: dict[str, Any], index: int, review: dict[str, Any] | None
             "status": judge.get("status"),
             "rejudge_id": judge.get("rejudge_id"),
             "consistency_status": judge_consistency_status(judge),
+            "consistency_version": judge.get("consistency_version"),
         },
         "task_judge": item.get("task_judge") or {},
         "task_judges": item.get("task_judges") or [],
