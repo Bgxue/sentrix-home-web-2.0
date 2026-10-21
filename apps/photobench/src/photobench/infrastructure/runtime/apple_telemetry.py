@@ -611,6 +611,22 @@ def _occupancy_bytes(pid: int, *, components: dict[str, Any] | None = None) -> i
 
 def _run_text(command: list[str], timeout: float = 3) -> str:
     try:
+        if command[:2] == ["ps", "-ax"]:
+            # ps includes itself in its output. It exits before footprint collection,
+            # so following PB descendants would otherwise invalidate EVERY total.
+            # Exclude only this exact observer PID, never arbitrary ps processes.
+            with subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            ) as observer:
+                try:
+                    output, _ = observer.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    observer.kill()
+                    observer.communicate()
+                    return ""
+                return "\n".join(
+                    line for line in output.splitlines() if line.split(None, 1)[:1] != [str(observer.pid)]
+                )
         completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError):
         return ""

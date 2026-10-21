@@ -880,6 +880,7 @@ T006 指标 v2 的可选契约见 [photobench-metrics-contract.md](photobench-me
 | `PHOTOBENCH_CONFIG_ROOT` | 配置根；优先于旧单文件路径覆盖 |
 | `PHOTOBENCH_RUNTIME_CONNECTION` / `PHOTOBENCH_RUNTIME_SERVICES` | 旧单文件路径入口，未指定CONFIG_ROOT时兼容 |
 | `PHOTOBENCH_DATA_ROOT` / `PHOTOBENCH_RESULTS_ROOT` | 数据集及结果根；发布显式绑定原路径 |
+| `PHOTOBENCH_SENTRIX_PID_FILE` / `PHOTOBENCH_SENTRIX_LOG_PATH` | 既有进程控制参数；固定release绑定runtime内控制记录和日志，登记新API避免首轮无必要重启 |
 | `build-info.json` | 固定release的SHA与指标契约版本；缺文件为development |
 | `SENTRIX_WEB_DIST_DIR` / `PHOTOBENCH_WEB_DIST_ROOT` | 统一构建的前端dist根 |
 | `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | 回归发布设置为1；缺权重在preflight暴露 |

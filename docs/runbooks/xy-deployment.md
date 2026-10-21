@@ -50,6 +50,14 @@ AGX激活额外指定`--local-model-url http://192.168.0.118:8103/v1`。该显�
 
 激活器只核验并停止8291/8872的uvicorn，活跃run拒绝发布；不管理模型服务，不动8091/8191/8771/8772。人脸固定CPU，自动线程上限在数值库导入前生效；0表示不限制。权重必须预先本地存在，正式运行设离线模式。启动后等待两个服务回显同一SHA，保存日志、PID及activation记录。
 
+API启动后将其真实PID和模型端点登记于`runtime/sentrix-process.json`；PhotoBench通过既有
+`PHOTOBENCH_SENTRIX_PID_FILE`读取该记录，`PHOTOBENCH_SENTRIX_LOG_PATH`指向同一runtime的`api.log`。
+full run端点一致时不能再次重启API；源码release内不保存这些可变控制文件。
+
+2026-10-21用户批准的第二个现场例外：NX既有CLIP8103的CUDA内核不兼容，健康200但编码500。
+原权重离线CPU验证图片及文本编码通过后，仅该侧车按显式授权重启为CPU；8100主模型及8101文本嵌入不重启。
+该变更不由产品应用管理，部署证据另存，四机同版本重新执行完整测评。
+
 ```bash
 <old>/.venv/bin/python <release>/scripts/deploy/photobench_release.py rollback \
   --root <release> --runtime <runtime>

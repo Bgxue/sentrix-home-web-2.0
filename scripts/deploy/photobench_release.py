@@ -278,6 +278,8 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
             PHOTOBENCH_SENTRIX_API_URL="http://127.0.0.1:8291",
             PHOTOBENCH_SENTRIX_REPO_ROOT=str(root),
             PHOTOBENCH_SENTRIX_START_COMMAND=f"bash {root}/scripts/deploy/start_api.sh auto",
+            PHOTOBENCH_SENTRIX_PID_FILE=str(runtime / "sentrix-process.json"),
+            PHOTOBENCH_SENTRIX_LOG_PATH=str(runtime / "api.log"),
             FACE_PROVIDERS="CPUExecutionProvider",
             RETINAFACE_PROVIDERS="CPUExecutionProvider",
         )
@@ -314,6 +316,13 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
                 start_new_session=True,
             )
         write_json(runtime / f"{role}.pid.json", {"pid": process.pid, "port": port})
+        if role == "api":
+            # start_api.sh execs uvicorn, preserving this PID. Register the process
+            # we just launched so a full run recognizes the already-bound endpoint.
+            write_json(
+                runtime / "sentrix-process.json",
+                {"pid": process.pid, "endpoint": connection["model_base_url"]},
+            )
     wait_ready(revision)
     activation_path = runtime / "activation.json"
     if activation_path.exists():

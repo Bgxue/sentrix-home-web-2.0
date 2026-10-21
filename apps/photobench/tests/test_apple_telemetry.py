@@ -85,6 +85,32 @@ def make_dispatcher(*, ps: str = "", lsof: str = "", vm_stat: str = VM_STAT):
     return dispatch
 
 
+def test_ps_observer_excludes_only_its_own_pid(monkeypatch):
+    class Observer:
+        pid = 300
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def communicate(self, timeout=None):
+            assert timeout == 3
+            return (
+                " 100 1 python photobench\n"
+                " 200 100 ps real-product-worker\n"
+                " 300 100 ps -ax -o pid= -o ppid= -o command=\n",
+                "",
+            )
+
+    monkeypatch.setattr(apple.subprocess, "Popen", lambda *args, **kwargs: Observer())
+    rows = apple._process_rows()
+    assert [row["pid"] for row in rows] == [100, 200]
+    # Preserve a real product child even when it happens to be named ps.
+    assert rows[1]["ppid"] == 100
+
+
 # ---- 解析层（纯函数）--------------------------------------------------------------
 
 

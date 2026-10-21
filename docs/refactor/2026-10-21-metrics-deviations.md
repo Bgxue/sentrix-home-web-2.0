@@ -20,5 +20,7 @@
   同时核实NX已部署llama.cpp的`send_embedding`：pooling=none返回原始token，忽略`embd_normalize`。
 - AGX主模型只绑定192.168.0.118:8103，用户批准保留同机LAN地址以遵守不重启模型约束；发布显式登记、校验本机接口及端口、加入NO_PROXY，验收拒绝未登记或非本机例外。
 - 3090现有WeMM权重在CPU运行，Transformers5.2.0禁用CUDA FLA入口以选择其原生PyTorch后备实现。无假向量、无权重/算法更换；模型设备差异进验收记录。
+- 四机真实run发现Mac进程快照包含采集器刚启动的`ps`，它退出后将产品总量持续判为不完整。精确排除本次观察进程PID，保留同名真实工作进程及其他PID消失的不可用语义。
+- 发布新API后未登记进程控制记录，首次full run会将“无记录”误当端点变化而重启8291。发布登记已启动的API PID与端点，并显式绑定控制记录/日志到runtime；端点一致时保持API PID，预检可验证全过程连续性。
 
 兼容：新增字段均可选，两份OpenAPI和前端同步；TelemetryProvider四方法不变。旧结果只允许基于完整事实的带版本派生。排除vLLM专项补齐，严格验收不改变生产fail-open语义。

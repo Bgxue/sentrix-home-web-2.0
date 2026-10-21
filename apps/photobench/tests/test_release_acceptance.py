@@ -27,6 +27,55 @@ def test_relative_paths_bind_to_the_old_deployment(tmp_path):
     assert release.bound_path(tmp_path / "absolute", tmp_path / "other") == tmp_path / "absolute"
 
 
+def test_release_registers_the_launched_api_so_full_run_does_not_restart_it(tmp_path, monkeypatch):
+    release = script("photobench_release")
+    from photobench.application.deploy.service import SentrixModelSwitch
+    from photobench.infrastructure.deploy.sentrix_process import SubprocessSentrixProcess
+
+    root, runtime, config = (tmp_path / name for name in ("release", "runtime", "config"))
+    for path in (root, runtime, config):
+        path.mkdir()
+    endpoint = "http://127.0.0.1:8100/v1"
+    release.write_json(
+        config / "runtime_connection.json",
+        {"model_base_url": endpoint, "sentrix_url": "http://127.0.0.1:8291"},
+    )
+    environments = []
+
+    class Child:
+        def __init__(self, *args, **kwargs):
+            self.pid = 100 + len(environments)
+            environments.append(kwargs["env"])
+
+    monkeypatch.setattr(release, "listener", lambda port: None)
+    monkeypatch.setattr(release.subprocess, "Popen", Child)
+    monkeypatch.setattr(
+        release.subprocess,
+        "check_output",
+        lambda *args, **kwargs: (
+            f"{root}/apps/api/src/sentrix/__init__.py\n{root}/apps/photobench/src/photobench/__init__.py\n"
+        ),
+    )
+    monkeypatch.setattr(release, "wait_ready", lambda revision: None)
+    bindings = {key: str(tmp_path / key) for key in ("venv", "data", "datasets", "results")}
+    bindings.update(config=str(config), environments={"api": {}, "photobench": {}})
+    release.launch(root, runtime, bindings, "fixed")
+    record = runtime / "sentrix-process.json"
+    assert json.loads(record.read_text()) == {"pid": 100, "endpoint": endpoint}
+    assert environments[1]["PHOTOBENCH_SENTRIX_PID_FILE"] == str(record)
+    process = SubprocessSentrixProcess(
+        api_url="http://127.0.0.1:8291",
+        start_command=["must-not-spawn"],
+        cwd=root,
+        pid_file=record,
+        log_path=runtime / "api.log",
+        http=object(),
+        alive=lambda pid: pid == 100,
+    )
+    outcome = SentrixModelSwitch(process).ensure_endpoint(endpoint)
+    assert outcome.ok and not outcome.restarted
+
+
 def test_unknown_total_cannot_pass_as_zero():
     acceptance = script("photobench_acceptance")
     assert acceptance.expected_total([10, None], None)
