@@ -154,9 +154,9 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
     const option = echartsMock.instance.setOption.mock.calls[0]?.[0] as { series: Array<{ name: string }> };
     expect(option.series.map((series) => series.name)).toEqual([
       "整机内存（App+Wired+Compressed）",
-      "整套产品内存（相关进程 phys_footprint）",
-      "Sentrix 周边（不含主模型，phys_footprint）",
-      "主模型进程 phys_footprint",
+      "整套产品内存（相关进程 footprint+权重）",
+      "Sentrix 周边（不含主模型，footprint+权重）",
+      "主模型进程占用（footprint+权重映射）",
     ]);
   });
 });

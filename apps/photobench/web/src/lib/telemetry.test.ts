@@ -127,7 +127,7 @@ describe("liveTelemetryRows (:941-991)", () => {
   it("apple_unified 走另一套行；PSS source 改标签", () => {
     const apple = liveTelemetryRows({ status: "running", telemetry_live: { source: "apple_unified", samples_count: 2, latest: { gpu_utilization_pct: 12 }, peak: {} } });
     expect(apple[0][0]).toBe("当前阶段");
-    expect(apple.some((row) => row[0] === "主模型 phys_footprint")).toBe(true);
+    expect(apple.some((row) => row[0] === "主模型占用（footprint+权重）")).toBe(true);
     const orin = liveTelemetryRows({ status: "running", telemetry_live: { source: "orin_ssh_pss", samples_count: 1, latest: {}, peak: {} } });
     expect(orin.some((row) => row[0] === "主模型 PSS（Orin UMA）")).toBe(true);
   });
@@ -207,7 +207,7 @@ describe("liveTelemetryPhaseRows (:1126-1150)", () => {
     const rows = liveTelemetryPhaseRows(run);
     expect(rows[0][0]).toBe("QA 评测");
     expect(rows[0][1]).toBe("3.00 GiB");
-    expect(rows[0][2]).toContain("主模型 phys_footprint峰值");
+    expect(rows[0][2]).toContain("主模型占用（footprint+权重）峰值");
   });
 });
 
@@ -368,7 +368,7 @@ describe("gpuMetricRows (:785-856)", () => {
   it("apple_unified / orin 分支行数与首标签不同", () => {
     const apple = gpuMetricRows({ source: "apple_unified", samples_count: 4, model_process_system_memory_used_mib: { peak: 1024, mean: 512 } });
     expect(apple).toHaveLength(11);
-    expect(apple[0][0]).toBe("主模型 phys_footprint");
+    expect(apple[0][0]).toBe("主模型占用（footprint+权重）");
     const orin = gpuMetricRows({ source: "orin_ssh_pss", samples_count: 4 });
     expect(orin).toHaveLength(9);
     expect(orin[0][0]).toBe("Orin 模型进程占用（VmRSS）");
@@ -382,6 +382,10 @@ describe("jetsonUnifiedFromRun", () => {
     ).toBe(true);
     expect(jetsonUnifiedFromRun({ memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } })).toBe(true);
     expect(jetsonUnifiedFromRun({ phases: { gpu_metrics: { memory_profile: { scope: "vmrss_only" } } } })).toBe(false);
+    // 本次实测的 46 run：memory_profile 还是旧 PSS，但拆分字段已经落盘。
+    expect(
+      jetsonUnifiedFromRun({ phases: { gpu_metrics: { model_process_host_memory_mib: { peak: 1670.84 } } } }),
+    ).toBe(true);
     expect(jetsonUnifiedFromRun(null)).toBe(false);
   });
 

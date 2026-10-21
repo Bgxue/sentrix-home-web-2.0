@@ -80,11 +80,11 @@ export function gpuMetricRows(rawPhase: unknown = {}): MetricRow[] {
   const processLimit = phase.model_process_memory_limit_mib;
   const processLimitLabel = processLimit == null ? "模型进程显存上限" : `${fmtMemory(processLimit)} 上限告警`;
   if (phase.source === "apple_unified") return [
-    ["主模型 phys_footprint", fmtMemory(dict(phase.model_process_system_memory_used_mib).peak), `均值 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).mean)} · 进程物理占用，非 GPU 专属显存`, true],
+    ["主模型占用（footprint+权重）", fmtMemory(dict(phase.model_process_system_memory_used_mib).peak), `均值 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).mean)} · 进程提交占用（footprint+权重映射），非 GPU 专属显存`, true],
     ["全机 GPU 在用统一内存", fmtMemory(dict(phase.gpu_in_use_unified_memory_mib).peak), "AGXAccelerator 设备级；包含其他进程，不能归因给主模型"],
     ["全机 GPU 已分配统一内存", fmtMemory(dict(phase.gpu_allocated_unified_memory_mib).peak), "AGXAccelerator 设备级；分配量不等于实际在用量"],
-    ["整套产品内存", fmtMemory(dict(phase.product_stack_memory_mib).peak), "Sentrix 周边 + 主模型的 phys_footprint 加总，即整套产品占用 · 不再加 UMA 补偿"],
-    ["Sentrix 周边", fmtMemory(dict(phase.sentrix_stack_pss_mib).peak), "除主模型外所有 Sentrix 相关进程的 phys_footprint 加总"],
+    ["整套产品内存", fmtMemory(dict(phase.product_stack_memory_mib).peak), "Sentrix 周边 + 主模型的占用（footprint+权重映射）加总，即整套产品占用 · 不再加 UMA 补偿"],
+    ["Sentrix 周边", fmtMemory(dict(phase.sentrix_stack_pss_mib).peak), "除主模型外所有 Sentrix 相关进程的占用（footprint+权重映射）加总"],
     ["整机内存", fmtMemory(dict(phase.system_memory_used_mib).peak), "整机已用内存 = App + Wired + Compressed，不含文件缓存"],
     ["GPU 利用率", fmtNumber(util.mean, "%"), `片上 GPU Device Utilization 峰值 ${fmtNumber(util.peak, "%")}`],
     ["GPU 温度", fmtNumber(temp.mean, "°C"), `峰值 ${fmtNumber(temp.peak, "°C")} · macmon，未安装时留空`],
@@ -95,7 +95,9 @@ export function gpuMetricRows(rawPhase: unknown = {}): MetricRow[] {
   if (["orin_ssh_pss", "jetson_local_pss"].includes(phase.source)) {
     // 1.0 `:786-799`：口径由 `memory_profile.scope` 决定。同一台 Orin 上旧 run 是
     // VmRSS-only，新 run 是「主机 smaps Rss + GPU/UMA 页」，写死其中一种都会读错。
-    const unified = dict(phase.memory_profile).scope === "host_smaps_rss_plus_gpu_uma";
+    const unified =
+      dict(phase.memory_profile).scope === "host_smaps_rss_plus_gpu_uma" ||
+      phase.model_process_host_memory_mib != null;
     return [
     [unified ? "主模型占用（smaps Rss + GPU）" : "Orin 模型进程占用（VmRSS）", fmtMemory(dict(phase.model_process_system_memory_used_mib).peak), `均值 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).mean)} · P95 ${fmtMemory(dict(phase.model_process_system_memory_used_mib).p95)} · ${unified ? "主机 smaps Rss + GPU/UMA 页（GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)），两半不重叠" : "进程驻留，含部分统一内存"}`, true],
     ["整机 RAM 相对本 run 基线", fmtMemory(dict(phase.system_memory_delta_mib).peak), "首个采样为 0；测评中会掺其他进程"],
@@ -242,11 +244,11 @@ export function liveTelemetryRows(run: unknown): MetricRow[] {
       : (EXECUTION_PHASES.find((item) => item.key === (live.current_phase || r.current_phase))?.label || "运行中");
     return [
       ["当前阶段", stage, `已采样 ${live.samples_count || 0} 次`],
-      ["主模型 phys_footprint", fmtGiB(latest.model_process_system_memory_used_mib), `峰值 ${fmtGiB(effectivePeak.model_process_system_memory_used_mib)} · 进程物理占用，非 GPU 专属显存`],
+      ["主模型占用（footprint+权重）", fmtGiB(latest.model_process_system_memory_used_mib), `峰值 ${fmtGiB(effectivePeak.model_process_system_memory_used_mib)} · 进程提交占用（footprint+权重映射），非 GPU 专属显存`],
       ["全机 GPU 在用统一内存", fmtGiB(latest.gpu_in_use_unified_memory_mib), `峰值 ${fmtGiB(effectivePeak.gpu_in_use_unified_memory_mib)} · 设备级，非主模型归因`],
       ["全机 GPU 已分配统一内存", fmtGiB(latest.gpu_allocated_unified_memory_mib), `峰值 ${fmtGiB(effectivePeak.gpu_allocated_unified_memory_mib)} · 设备级，不等于实际在用`],
       ["整套产品内存", fmtGiB(latest.product_stack_memory_mib), `峰值 ${fmtGiB(effectivePeak.product_stack_memory_mib)} · ${productFormulaNote}；输入缺失则不记录`],
-      ["Sentrix 周边", fmtGiB(latest.sentrix_stack_pss_mib), `峰值 ${fmtGiB(effectivePeak.sentrix_stack_pss_mib)} · 不含主模型，phys_footprint 加总`],
+      ["Sentrix 周边", fmtGiB(latest.sentrix_stack_pss_mib), `峰值 ${fmtGiB(effectivePeak.sentrix_stack_pss_mib)} · 不含主模型，footprint+权重映射加总`],
       ["整机内存", fmtGiB(latest.system_memory_used_mib), `峰值 ${fmtGiB(effectivePeak.system_memory_used_mib)} · App + Wired + Compressed，不含文件缓存`],
       ["GPU 利用率", fmtLive(latest.gpu_utilization_pct, "%"), `峰值 ${fmtLive(effectivePeak.gpu_utilization_pct, "%")} · macmon gpu_active_ratio`],
       ["GPU 温度", fmtLive(latest.temperature_c, " °C"), `峰值 ${fmtLive(effectivePeak.temperature_c, " °C")} · macmon gpu_temp_avg`],
@@ -359,7 +361,13 @@ export function telemetryChart(run: unknown): TelemetryChartData | null {
 export function jetsonUnifiedFromRun(run: unknown): boolean {
   const r = dict(run);
   if (dict(r.memory_profile).scope === "host_smaps_rss_plus_gpu_uma") return true;
-  return dict(dict(dict(r.phases).gpu_metrics).memory_profile).scope === "host_smaps_rss_plus_gpu_uma";
+  const gpu = dict(dict(r.phases).gpu_metrics);
+  if (dict(gpu.memory_profile).scope === "host_smaps_rss_plus_gpu_uma") return true;
+  // 兼容本次实测已落盘、但 memory_unit 仍是旧值的 run：拆分字段存在就说明
+  // 后端采的是 smaps Rss + GPU，不能继续按 VmRSS 解释。
+  if (gpu.model_process_host_memory_mib != null) return true;
+  const latest = dict(dict(r.telemetry_live).latest);
+  return latest.model_process_host_memory_mib != null;
 }
 
 // ── 1.0 :1126-1150 相位快照行 ────────────────────────────────────────────
@@ -373,10 +381,10 @@ export function liveTelemetryPhaseRows(run: unknown): MetricRow[] {
   const isOrin = isApple || ["orin_ssh_pss", "jetson_local_pss"].includes(source);
   const modelKey = isOrin ? "model_process_system_memory_used_mib" : "model_process_memory_used_mib";
   const modelLabel = isApple
-    ? "主模型 phys_footprint"
+    ? "主模型占用（footprint+权重）"
     : isOrin
       ? jetsonUnifiedFromRun(run)
-        ? "主模型占用（smaps Rss + GPU）"
+        ? "主模型占用（smaps Rss + GPU/UMA 页）"
         : "主模型 VmRSS"
       : "主模型 GPU";
   const history = telemetryHistory(run);
@@ -413,11 +421,20 @@ export function comparableMemoryProfile(run: unknown): Dict | null {
   const gpu = dict(r.phases).gpu_metrics;
   if (!gpu) return { source: "pending", status: "pending", memory_profile: {}, questions_completed: r.summary?.completed, questions_total: r.summary?.total };
   if (!dict(gpu).memory_profile) return { source: "pending", status: gpu.status, memory_profile: {}, questions_completed: r.summary?.completed, questions_total: r.summary?.total };
+  const profile = { ...dict(gpu.memory_profile) };
+  if (dict(gpu).model_process_host_memory_mib != null && profile.method === "orin_process_pss_uma_v1") {
+    // 本次实测已落盘、但聚合时还没写新 method 的 run：按拆分字段纠偏，
+    // 否则卡片会继续按 PSS/VmRSS 口径解释 smaps+GPU 的数字。
+    profile.method = "orin_smaps_rss_plus_gpu_uma_v1";
+    profile.memory_unit = "host_smaps_rss_plus_gpu_mib";
+    profile.scope = "host_smaps_rss_plus_gpu_uma";
+  }
   return {
     status: gpu.status,
     source: "gpu_metrics",
-    memory_profile: gpu.memory_profile,
+    memory_profile: profile,
     model_process_memory_used_mib: gpu.model_process_memory_used_mib,
+    model_process_system_memory_used_mib: gpu.model_process_system_memory_used_mib,
     questions_completed: r.summary?.completed,
     questions_total: r.summary?.total,
   };
@@ -441,6 +458,13 @@ export function memoryProfileRows(rawProfile: unknown = {}): MetricRow[] {
     ];
   }
   const processMemory = dict(profile.model_process_memory_used_mib);
+  if (memory.method === "orin_smaps_rss_plus_gpu_uma_v1") return [
+    ["主模型占用峰值（smaps Rss + GPU/UMA）", fmtMemory(dict(profile.model_process_system_memory_used_mib).peak), "主机页 + 设备页，两半不重叠；不是 VmRSS，也不是独立显存", true],
+    ["工作负载内存估算", "不可计算", "当前 llama.cpp 未提供可靠的 KV Cache 实际使用量"],
+    ["KV Cache 已用峰值", memory.kv_cache_used_peak_tokens == null ? "-" : `${Number(memory.kv_cache_used_peak_tokens).toLocaleString("en-US")} token`, `使用率峰值 ${fmtNumber(memory.kv_cache_usage_peak_pct, "%")}`],
+    ["KV 实际字节数", "不可用", "未验证模型每 token KV 字节数；不以 token 数伪造 GiB"],
+    ["数据来源", "本机 smaps Rss + nvmap/GPU 页 + tegrastats", "GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)"],
+  ];
   if (memory.method === "orin_process_pss_uma_v1") return [
     ["进程物理内存峰值（PSS）", fmtMemory(processMemory.peak), "Orin 统一物理内存平台的进程峰值；不是独立显存，也不是工作负载估算", true],
     ["工作负载内存估算", "不可计算", "当前 llama.cpp 未提供可靠的 KV Cache 实际使用量"],
@@ -534,7 +558,7 @@ export function keyMetricRows(run: unknown, summary: unknown): KeyMetric[] {
     ? dict(gpu.model_process_system_memory_used_mib).peak
     : dict(gpu.model_process_memory_used_mib).peak;
   const processMemoryNote = isUnified
-    ? "主模型 phys_footprint 峰值 · 统一内存的进程物理占用，不是 GPU 专属显存"
+    ? "主模型占用峰值（footprint+权重映射）· 进程提交占用，不是 GPU 专属显存"
     : isOrin
       ? jetsonUnifiedFromRun(run)
         ? "主模型占用峰值 · 主机 smaps Rss + GPU/UMA 页（GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)，两半不重叠）"
