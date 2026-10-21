@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import socket
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -104,3 +107,29 @@ def test_typed_media_arithmetic_keeps_types_and_exclusions():
     assert "media_retrieval_recall_arithmetic" in acceptance.check_retrieval_summary(
         items, {**good, "media_retrieval_recall_micro": 1}
     )
+
+
+def test_preflight_native_bge_probe_uses_cls_not_token_mean(monkeypatch):
+    acceptance = script("photobench_acceptance")
+    calls = []
+
+    def request(url, body, timeout=180):
+        calls.append(url)
+        if url.endswith("/embed"):
+            raise HTTPError(url, 404, "not found", {}, io.BytesIO(b"{}"))
+        if url.endswith("/v1/embeddings"):
+            detail = {
+                "error": {
+                    "message": (
+                        "Pooling type 'none' is not OAI compatible. Please use a different pooling type"
+                    )
+                }
+            }
+            raise HTTPError(url, 400, "bad request", {}, io.BytesIO(json.dumps(detail).encode()))
+        return [{"index": 0, "embedding": [[3, 4] + [0] * 1022, [99] * 1024]}]
+
+    monkeypatch.setattr(acceptance, "http_value", request)
+    result, protocol = acceptance.probe_text_embedding("http://127.0.0.1:8101", False)
+    assert result["vector"] == [0.6, 0.8] + [0.0] * 1022
+    assert protocol == "llama_cpp_bge_m3_cls_l2"
+    assert len(calls) == 3

@@ -69,6 +69,8 @@ AGX激活额外指定`--local-model-url http://192.168.0.118:8103/v1`。该显�
 
 preflight要求版本一致、完整diagnostics正常、没有活跃孤儿；核对有效产品环境与PhotoBench配置；检查实际本机监听进程，拒绝代理/重定向/远程卸载；分别执行主文本、主视觉、文本嵌入、图像嵌入真实请求并校验向量维度及有效值。核对CPU人脸环境，并在独立进程实际加载本地RetinaFace、SCRFD、ArcFace权重，记录哈希与实际CPU provider。存储使用本机数据路径，不下载权重。Judge采用独立配置，不把密钥写入报告。
 
+NX文本8101现为BGE-M3 q8_0 GGUF、llama.cpp pooling=none；产品和独立预检均须实际执行有界协议协商，不能用`/health`200作为编码成功。原生token矩阵使用官方CLS+L2，报告`text_embedding_protocol=llama_cpp_bge_m3_cls_l2`；禁止mean pooling或重启模型规避协议问题。Mac/AGX原Python侧车继续使用`/embed`。
+
 run保存唯一请求和响应，`album3-14 / compact-10q / mode=full / models=["__current__"]`，创建新scope，QA并发1、turn_timeout900秒、import_timeout14400秒。每次尝试使用独立runtime记录，旧请求与结果不得覆盖。需要重试时明确记录原因和前一run，不能挑选或删除失败题。
 
 完成后：

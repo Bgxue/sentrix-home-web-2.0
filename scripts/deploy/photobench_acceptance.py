@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeGuard
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -35,15 +36,58 @@ class NoRedirect(HTTPRedirectHandler):
         raise RuntimeError("Local dependencies must not redirect")
 
 
-def http(url: str, body: dict[str, Any] | None = None, timeout: int = 180) -> dict[str, Any]:
+def http_value(url: str, body: dict[str, Any] | None = None, timeout: int = 180) -> Any:
     request = Request(
         url,
         data=json.dumps(body).encode() if body is not None else None,
         headers={"Content-Type": "application/json"},
     )
     with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
-        value: dict[str, Any] = json.load(response)
-        return value
+        return json.load(response)
+
+
+def http(url: str, body: dict[str, Any] | None = None, timeout: int = 180) -> dict[str, Any]:
+    value = http_value(url, body, timeout)
+    require(isinstance(value, dict), "Expected a JSON object")
+    result: dict[str, Any] = value
+    return result
+
+
+def probe_text_embedding(url: str, unified: bool) -> tuple[dict[str, Any], str]:
+    try:
+        return http(url + ("/embed_text" if unified else "/embed"), {"text": "测试图像"}), "sidecar"
+    except HTTPError as error:
+        if unified or error.code != 404:
+            raise
+    try:
+        result = http(url + "/v1/embeddings", {"input": "测试图像"})
+    except HTTPError as error:
+        if error.code != 400:
+            raise
+        detail = json.load(error)
+        require(
+            (detail.get("error") or {}).get("message")
+            == "Pooling type 'none' is not OAI compatible. Please use a different pooling type",
+            "Unrecognized text embedding protocol error",
+        )
+        rows = http_value(url + "/embedding", {"content": "测试图像"})
+        require(
+            isinstance(rows, list) and len(rows) == 1 and rows[0].get("index") == 0,
+            "Native embedding must return one input",
+        )
+        tokens = rows[0].get("embedding") or []
+        require(
+            tokens and isinstance(tokens[0], list) and len(tokens[0]) == 1024,
+            "Native BGE-M3 CLS must have 1024 dimensions",
+        )
+        cls = tokens[0]
+        require(all(finite(v) for v in cls), "Non-finite native BGE-M3 CLS")
+        norm = math.sqrt(sum(v * v for v in cls))
+        require(finite(norm) and norm > 0, "Invalid native BGE-M3 CLS norm")
+        return {"vector": [v / norm for v in cls]}, "llama_cpp_bge_m3_cls_l2"
+    rows = result.get("data") or []
+    require(len(rows) == 1, "Text embedding must return one vector")
+    return {"vector": rows[0].get("embedding")}, "openai_compatible"
 
 
 def finite(value: Any) -> TypeGuard[int | float]:
@@ -284,8 +328,7 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
     from PIL import Image
 
     Image.new("RGB", (96, 96), (220, 50, 50)).save(image)
-    text_path = "/embed_text" if unified else "/embed"
-    text_result = http(text_url.rstrip("/") + text_path, {"text": "测试图像"})
+    text_result, text_protocol = probe_text_embedding(text_url.rstrip("/"), unified)
     image_result = http(image_url.rstrip("/") + "/embed_image", {"path": str(image)})
     dimensions: dict[str, int] = {}
     for name, response, expected in (
@@ -332,6 +375,7 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
         "services": services,
         "models": model_list,
         "embedding_dimensions": dimensions,
+        "text_embedding_protocol": text_protocol,
         "face_weights": weights,
         "dataset": dataset_hash(album),
         "api_pid": api_pid,

@@ -818,3 +818,9 @@ S9b-2 把 1.0 `BenchmarkRun`（`benchmark_orchestrator.py:1895`）的六个相�
 NX/AGX共用RSS+nvmap与产品PSS+主/辅助nvmap估计；NVIDIA的RAM与VRAM分开，端口明确不扩大进程名匹配；Mac拆footprint和映射权重容量估计。必要分量未知时总量null，确认不存在的辅助才为0。功耗保留电源轨与范围，采集流退出/超期失效。nearest-rank P95，完整有效样本统计后降采样。
 
 生产继续允许缺失遥测；独立四机验收检查新鲜度/完整性/算术与全链路，详见架构指标契约和xy部署手册。历史原文件不改写，仅据现存事实派生；不得补造归属或解析事实。
+
+NX真实预检暴露BGE-M3的llama.cpp接口与Python侧车不同：`/embed`404，
+`/v1/embeddings`明确拒绝pooling=none。legacy适配器按404及特定错误做有界协议协商；
+原生token矩阵取CLS并L2归一化，成功后缓存协议。普通400/401/429/500不触发切换，
+空/错维度/非有限/零CLS/多输入返回失败空表。独立验收器重新计算向量并登记协议，
+真实本地HTTP测试覆盖此故障，不重启或改变模型服务。

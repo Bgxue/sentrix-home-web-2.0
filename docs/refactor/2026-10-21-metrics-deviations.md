@@ -12,6 +12,12 @@
 - 会话详情契约测试等待后台回合终态，再断言用户/助手完整消息序列，消除“线程还没完成”的时序假设。
 - 独立验收额外核对监听PID后代与显存归属、typed media微平均算术，并实际加载本地三份人脸ONNX权重确认CPU provider；不修改生产失败语义。
 - 实际四机预检发现legacy文本探针路由有别于WeMM，按既有适配器契约使用`/embed`；不将预检404误报成模型不可用。
+- NX实际BGE-M3是GGUF q8_0、llama.cpp pooling=none；产品原先只会调用Python侧车`/embed`，健康200仍无法编码。适配器增加有界HTTP协议协商；明确pooling=none时原生token矩阵按官方CLS+L2生成1024维dense向量。错误维度/非有限/零CLS/多输入拒绝；普通HTTP错误不切换协议，模型进程保持原样。新scope避免与旧查询轨迹混用。
+
+  依据：[BGE-M3官方模型说明](https://huggingface.co/BAAI/bge-m3)、
+  [FlagEmbedding M3默认CLS及归一化](https://github.com/FlagOpen/FlagEmbedding/blob/master/FlagEmbedding/inference/embedder/encoder_only/m3.py)、
+  [dense首token实现](https://github.com/FlagOpen/FlagEmbedding/blob/master/FlagEmbedding/finetune/embedder/encoder_only/m3/modeling.py)。
+  同时核实NX已部署llama.cpp的`send_embedding`：pooling=none返回原始token，忽略`embd_normalize`。
 - AGX主模型只绑定192.168.0.118:8103，用户批准保留同机LAN地址以遵守不重启模型约束；发布显式登记、校验本机接口及端口、加入NO_PROXY，验收拒绝未登记或非本机例外。
 - 3090现有WeMM权重在CPU运行，Transformers5.2.0禁用CUDA FLA入口以选择其原生PyTorch后备实现。无假向量、无权重/算法更换；模型设备差异进验收记录。
 

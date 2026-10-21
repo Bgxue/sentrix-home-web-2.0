@@ -485,6 +485,12 @@ class VisualEmbedder(Protocol):
   按 `(space, model, dimension)` 分套；不重建就是“索引为空”。
 - 2.0 不提供“某个槽单独换模型”的能力。要换就改 `SCHEMES` 并整方案迁移。
 
+legacy文本HTTP协议：优先`POST /embed`，仅404时协商`/v1/embeddings`；
+仅对BGE-M3及服务明确返回的`pooling=none`错误，使用原生`/embedding`的首token（CLS）
+并在客户端L2归一化。不是mean pooling，不依赖原生接口忽略的`embd_normalize`。
+维度/非有限/零CLS/多输入响应必须失败并保留`load_error`；端口和失败空表语义不变。
+这是同一模型的传输协议兼容，不切换嵌入方案。量化差异记录在运行部署证据中，完整回归使用新scope。
+
 ---
 
 ### 4.6 向量索引（`VectorIndex`）
