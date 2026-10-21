@@ -1,7 +1,7 @@
 """遥测归因的“当前 run 用了哪些本机服务”配置。
 
 整机/整卡始终全量采样；这份配置只决定 product / auxiliary / main 的归属。
-文件不进 git，模板见 ``telemetry_services.example.json``。
+唯一来源是 ``runtime_connection.json``；不再有第二份遥测配置文件。
 """
 
 from __future__ import annotations
@@ -15,9 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-TELEMETRY_SERVICES_ENV = "PHOTOBENCH_TELEMETRY_SERVICES"
 RUNTIME_CONNECTION_DEFAULT = "apps/photobench/config/runtime_connection.json"
-TELEMETRY_SERVICES_DEFAULT = "apps/photobench/config/telemetry_services.json"
 
 
 def _local_hosts() -> set[str]:
@@ -71,22 +69,15 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def load_telemetry_services() -> dict[str, Any] | None:
-    # 唯一来源：runtime_connection.json；两个旧文件只作为未迁移设备的兼容回退。
-    candidates = [
-        Path(os.environ.get(TELEMETRY_SERVICES_ENV) or RUNTIME_CONNECTION_DEFAULT),
-        Path(TELEMETRY_SERVICES_DEFAULT),
-    ]
-    for path in candidates:
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            continue
-        if not isinstance(raw, dict):
-            continue
-        mapped = _from_runtime_connection(raw) if path.name == "runtime_connection.json" else raw
-        if mapped is not None:
-            return mapped
-    return None
+    # 唯一来源：runtime_connection.json。没有第二份遥测配置文件。
+    path = Path(os.environ.get("PHOTOBENCH_RUNTIME_CONNECTION") or RUNTIME_CONNECTION_DEFAULT)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return _from_runtime_connection(raw)
 
 
 def matches_service(row: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
@@ -121,8 +112,6 @@ def dedupe_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 __all__ = [
     "RUNTIME_CONNECTION_DEFAULT",
-    "TELEMETRY_SERVICES_DEFAULT",
-    "TELEMETRY_SERVICES_ENV",
     "dedupe_rows",
     "load_telemetry_services",
     "matches_service",

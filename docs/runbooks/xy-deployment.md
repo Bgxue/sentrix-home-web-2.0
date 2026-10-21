@@ -93,12 +93,12 @@ POST http://127.0.0.1:8872/api/v1/runs
 ## 7. 遥测服务范围（run 级归因）
 
 整机 RAM / 整卡 GPU 仍全量采样；细分归因只算当前 run 实际使用的本机服务。
-每台设备放一份 `apps/photobench/config/telemetry_services.json`（不进 git，
-模板见 `telemetry_services.example.json`），PhotoBench 启动时读取；改配置后重启 8872。
+每台设备只维护 `apps/photobench/config/runtime_connection.json`（不进 git），
+主模型、嵌入、Sentrix、product 都在这一份里；PhotoBench 启动时读取，改配置后重启 8872。
 
 ```json
 {
-  "main_model": {"local": true, "ports": [8100]},
+  "model_base_url": "http://127.0.0.1:8100/v1",
   "embedding": {
     "mode": "unified_multimodal",
     "profiles": {
