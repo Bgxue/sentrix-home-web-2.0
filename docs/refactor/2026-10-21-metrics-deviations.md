@@ -30,3 +30,5 @@
 以内容哈希寻址、原子发布的只读runtime_connection.json作为既有PHOTOBENCH_CONFIG_ROOT。
 实际启动脚本不能重新读取后续全局配置。控制记录同时保留无密钥拓扑；同模型但嵌入拓扑不同
 不得视为already_pointing_here。旧未注入快照入口保留；端口方法和公开schema不变。
+
+独立验收器同样保留unknown：API重启时benchmark_processes缺席不能把仅有的nvmap分量相加当成产品总量。缺进程PSS时null合计正确，伪造0或部分和仍拒绝；必需阶段的缺失/超过3秒缺口继续严格失败。

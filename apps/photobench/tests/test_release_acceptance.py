@@ -88,6 +88,24 @@ def test_unknown_total_cannot_pass_as_zero():
     assert acceptance.expected_total([0, 10], 10)
 
 
+def test_jetson_acceptance_requires_process_pss_before_summing_allocations():
+    acceptance = script("photobench_acceptance")
+    sample = {
+        "benchmark_processes": [],
+        "model_process_gpu_memory_mib": 100,
+        "sentrix_auxiliary_model_uma_mib": 20,
+        "product_stack_memory_mib": None,
+    }
+    assert acceptance.check_jetson_product_total(sample)
+    sample["product_stack_memory_mib"] = 120
+    assert not acceptance.check_jetson_product_total(sample)
+    sample["benchmark_processes"] = [{"pid": 1, "pss_mib": 30}]
+    sample["product_stack_memory_mib"] = 150
+    assert acceptance.check_jetson_product_total(sample)
+    sample["benchmark_processes"][0]["pss_mib"] = None
+    assert not acceptance.check_jetson_product_total(sample)
+
+
 def test_preserved_lan_endpoint_must_belong_to_this_host(monkeypatch):
     release = script("photobench_release")
     monkeypatch.setattr(socket, "gethostbyname_ex", lambda name: (name, [], ["192.168.0.118"]))

@@ -104,6 +104,15 @@ def expected_total(parts: list[Any], actual: Any, tolerance: float = 0.1) -> boo
     return actual is None if expected is None else finite(actual) and abs(actual - expected) <= tolerance
 
 
+def check_jetson_product_total(sample: dict[str, Any]) -> bool:
+    rows = sample.get("benchmark_processes") or []
+    # An absent process observation is unknown, including while the API restarts.
+    # GPU allocations alone cannot stand in for the missing related-process PSS.
+    parts = [row.get("pss_mib") for row in rows] if rows else [None]
+    parts += [sample.get("model_process_gpu_memory_mib"), sample.get("sentrix_auxiliary_model_uma_mib")]
+    return expected_total(parts, sample.get("product_stack_memory_mib"))
+
+
 def check_statistics(samples: list[dict[str, Any]], saved: dict[str, Any], api: dict[str, Any]) -> list[str]:
     """Independent arithmetic over raw values, without importing production formulas."""
     errors = []
@@ -547,12 +556,7 @@ def audit(runtime: Path) -> dict[str, Any]:
                 and (not finite(actual) or abs(actual - expected) > 0.05)
             ):
                 metric_errors.append(f"{index}:jetson_main_total")
-            parts = [p.get("pss_mib") for p in sample.get("benchmark_processes") or []]
-            parts += [
-                sample.get("model_process_gpu_memory_mib"),
-                sample.get("sentrix_auxiliary_model_uma_mib"),
-            ]
-            if not expected_total(parts, sample.get("product_stack_memory_mib")):
+            if not check_jetson_product_total(sample):
                 metric_errors.append(f"{index}:jetson_product_total")
             formulas_checked += 1
         elif accounting == "apple_capacity_estimate":
