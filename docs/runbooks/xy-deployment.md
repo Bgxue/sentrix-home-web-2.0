@@ -75,3 +75,17 @@ POST http://127.0.0.1:8872/api/v1/runs
 - 158 若有在跑的 run，不要重启它的 8191/8772；新栈用 8291/8872。
 - 任一新栈失败：只停新栈，原服务不动；记录 PID、命令行、日志路径。
 - 46 的 2.0 若 health 报 `embeddings=unavailable`，先起 8101/8103（legacy）或 8102（wemm）再评测。
+
+## 6. 遥测口径（2.0 现行）
+
+- **Orin 本机（46）**：`memory_unit=host_smaps_rss_plus_gpu_mib`、
+  `memory_profile.method=orin_smaps_rss_plus_gpu_uma_v1`、
+  `scope=host_smaps_rss_plus_gpu_uma`。主模型 = 主机 `smaps Rss` + 设备侧 GPU/UMA 页；
+  GPU 侧优先 `nvmap` 按 PID 求和，账本不可读时才用 `VmRSS − smaps Rss` 兜底。
+  历史 run 没有拆分字段时仍按 `orin_process_pss_uma_v1`（PSS/VmRSS）解释。
+- **Mac（158）**：`memory_unit=apple_phys_footprint_plus_mapped_weights_mib`、
+  `method=apple_phys_footprint_plus_mapped_weights_v1`。主模型 =
+  `phys_footprint + 已映射的模型权重文件`；不是 GPU 专属显存。
+- **整套产品**：周边 PSS + 主模型 PSS + 主模型 GPU/UMA 页；不是
+  `VmRSS − smaps` 的“补偿”。只有 `scope=all_related_pss_plus_model_uma_extra`
+  的 run 才按此公式解释。
