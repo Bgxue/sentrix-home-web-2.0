@@ -422,7 +422,7 @@ COMPUTE = [
 ]
 
 
-def test_model_services_are_excluded_from_sentrix_neighbors() -> None:
+def test_model_services_are_classified_for_auxiliary_split() -> None:
     """llama-server/vLLM/嵌入侧车不是 Sentrix 周边，不能把模型内存算进紫线。"""
     assert providers._is_model_service_process(
         {"identity": "llama-server -m model.gguf", "listening_ports": []}
@@ -455,9 +455,30 @@ def test_attribution_sums_related_pss_plus_model_uma_extra(monkeypatch: pytest.M
     assert data["benchmark_process_memory_used_mib"] == 200.0
     assert data["benchmark_process_memory_scope"] == "all_related_pss_plus_model_uma_extra"
     assert data["sentrix_stack_pss_mib"] == 50.0
+    assert data["sentrix_product_pss_mib"] == 50.0
+    assert data["sentrix_auxiliary_model_pss_mib"] == 0.0
     # 只有落在「相关进程」集合里的 compute 进程才计入 GPU 归属：11 + 22 = 33，999 不算。
     assert data["benchmark_process_gpu_memory_mib"] == 33.0
     assert data["all_processes_memory_mib"] == 66.0
+
+
+def test_auxiliary_model_services_stay_in_sentrix_without_double_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主模型只排除一次；嵌入/辅助服务计入 Sentrix，但单独记一份。"""
+    rows = [
+        {"pid": 100, "process_name": "python", "rss_mib": 100.0, "listening_ports": ["8771"], "identity": "python benchmark_orchestrator.py"},
+        {"pid": 200, "process_name": "llama-server", "rss_mib": 200.0, "listening_ports": ["8100"], "identity": "llama-server --port 8100"},
+        {"pid": 300, "process_name": "python", "rss_mib": 75.0, "listening_ports": ["8104"], "identity": "/home/asus/github/sentrix-home-web/freeret_sidecar.py --port 8104"},
+    ]
+    monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in rows])
+    monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: 50.0, 200: 150.0, 300: 75.0}[pid])
+    monkeypatch.setattr(providers, "_process_smaps_field_mib", lambda pid, field: {100: 100.0, 200: 200.0, 300: 100.0}[pid])
+    data = providers._augment_host_process_memory({"root_pid": 200}, model_pids={200}, compute_apps=[])
+    assert data["sentrix_stack_pss_mib"] == 125.0
+    assert data["sentrix_product_pss_mib"] == 50.0
+    assert data["sentrix_auxiliary_model_pss_mib"] == 75.0
+    assert data["sentrix_stack_pss_scope"] == "all_non_main_related_pss"
 
 
 def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(

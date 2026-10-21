@@ -136,6 +136,10 @@ class GpuSampler:
             sample["system_memory_baseline_mib"] = process_memory.get("system_memory_baseline_mib")
             sample["llama_server_args"] = process_memory.get("llama_server_args")
             sample["sentrix_stack_pss_mib"] = process_memory.get("sentrix_stack_pss_mib")
+            sample["sentrix_product_pss_mib"] = process_memory.get("sentrix_product_pss_mib")
+            sample["sentrix_auxiliary_model_pss_mib"] = process_memory.get(
+                "sentrix_auxiliary_model_pss_mib"
+            )
             sample["product_stack_memory_mib"] = process_memory.get("product_stack_memory_mib")
             sample["memory_scope"] = process_memory.get("memory_scope") or sample.get("memory_scope")
             sample["process_memory_scope"] = process_memory.get("process_memory_scope")

@@ -1650,6 +1650,8 @@ GPU_SAMPLE_FIELDS = (
     "system_memory_total_mib",
     "system_memory_delta_mib",
     "sentrix_stack_pss_mib",
+    "sentrix_product_pss_mib",
+    "sentrix_auxiliary_model_pss_mib",
     "product_stack_memory_mib",
 )
 
@@ -1806,6 +1808,8 @@ GPU_AGGREGATE_KEYS = (
     "model_process_gpu_memory_source",
     "system_memory_delta_mib",
     "sentrix_stack_pss_mib",
+    "sentrix_product_pss_mib",
+    "sentrix_auxiliary_model_pss_mib",
     "product_stack_memory_mib",
 )
 

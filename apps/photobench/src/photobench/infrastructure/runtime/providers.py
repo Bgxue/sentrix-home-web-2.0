@@ -401,11 +401,20 @@ def _augment_host_process_memory(
     # 调用方给了确切的模型 PID 就地认它，**不许把 PID 选中的模型重新摊成所有匹配
     # 通用 hint 的进程**（1.0 的注释，照搬）。
     model_pids_found = {row["pid"] for row in model_rows}
-    sentrix_rows = [
+    # Sentrix 周边的语义是「不含主模型」，不是「不含所有模型」。嵌入/辅助模型服务
+    # （WeMM、text/CLIP、freeret、另一套模型栈）也是产品开销，必须计入紫线；但单独
+    # 记一份 auxiliary，便于解释。主模型按 PID 排除，三个集合按 PID 互斥，不重复。
+    auxiliary_rows = [
+        row
+        for row in system_rows
+        if row["pid"] not in model_pids_found and _is_model_service_process(row)
+    ]
+    product_rows = [
         row
         for row in system_rows
         if row["pid"] not in model_pids_found and not _is_model_service_process(row)
     ]
+    sentrix_rows = product_rows + auxiliary_rows
     for row in system_rows:
         row["pss_mib"] = _process_pss_mib(int(str(row["pid"])))
         row["smaps_rss_mib"] = _process_smaps_field_mib(int(str(row["pid"])), "Rss:")
@@ -423,7 +432,17 @@ def _augment_host_process_memory(
         ]
     if sentrix_pss is not None:
         data["sentrix_stack_pss_mib"] = sentrix_pss
-        data["sentrix_stack_pss_scope"] = "sentrix_related_pss_excluding_all_model_services"
+        product_pss_value = _sum_mib(product_rows, "pss_mib")
+        auxiliary_pss_value = _sum_mib(auxiliary_rows, "pss_mib")
+        data["sentrix_product_pss_mib"] = (
+            product_pss_value if product_pss_value is not None else (0.0 if not product_rows else None)
+        )
+        data["sentrix_auxiliary_model_pss_mib"] = (
+            auxiliary_pss_value
+            if auxiliary_pss_value is not None
+            else (0.0 if not auxiliary_rows else None)
+        )
+        data["sentrix_stack_pss_scope"] = "all_non_main_related_pss"
     # 产品总量只有在**每个相关进程的 PSS 都在**、且模型的 VmRSS / smaps-Rss 两个
     # 补偿输入也都在时才写。RSS 仍然是独立的「模型 VmRSS」指标，但**不许悄悄变成
     # 产品总量**（1.0 的注释，照搬）。
