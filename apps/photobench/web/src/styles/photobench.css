@@ -937,3 +937,6 @@ details.qa-results-body[open] > summary::before { content:"▾ "; }
   .config-section .section-head { align-items:flex-start; flex-direction:column; }
   .config-section .section-head-actions { justify-content:flex-start; }
 }
+.config-group-model-advanced { background:#fff; }
+.config-group-model-advanced .model-manager-empty { grid-column:auto; grid-row:auto; }
+.config-group-model-advanced .config-model-manager { margin-top:2px; }

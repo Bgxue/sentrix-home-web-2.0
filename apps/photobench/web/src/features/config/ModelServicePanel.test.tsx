@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CurrentModelInfo } from "../../api/types.ts";
-import { ModelServicePanel, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
+import { ModelAdvancedPanel, ModelServicePanel, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
 
 function makeProps(overrides: Partial<ModelServicePanelProps> = {}): ModelServicePanelProps {
   return {
@@ -116,11 +116,11 @@ describe("ModelServicePanel 换模型的新语义", () => {
   });
 });
 
-describe("ModelServicePanel 勾选集合", () => {
+describe("ModelAdvancedPanel 勾选集合", () => {
   it("模型注册表在有管理器地址时才出现，勾选走 setSelectedModels(new Set)", () => {
     const setSelectedModels = vi.fn();
     render(
-      <ModelServicePanel
+      <ModelAdvancedPanel
         {...makeProps({
           vllmManagerUrl: "127.0.0.1:8500",
           profiles: [{ id: "reg1", available: true }],
@@ -135,7 +135,7 @@ describe("ModelServicePanel 勾选集合", () => {
   });
 
   it("没有管理器地址时不显示注册表，改显示 model-manager-empty 说明", () => {
-    render(<ModelServicePanel {...makeProps()} />);
+    render(<ModelAdvancedPanel {...makeProps()} />);
     expect(screen.queryByText("模型注册表（可多选，串行测试）")).toBeNull();
     expect(screen.getByText(/未配置模型管理器/)).toBeTruthy();
   });

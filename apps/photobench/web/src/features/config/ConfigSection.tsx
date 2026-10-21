@@ -13,7 +13,7 @@
  */
 import type { useConfig } from "../../hooks/useConfig.ts";
 import type { useReuseMode } from "../../hooks/useReuseMode.ts";
-import { ModelServicePanel, type CloudModelProfile, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
+import { ModelAdvancedPanel, ModelServicePanel, type CloudModelProfile, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
 import { ReuseBasePicker } from "./ReuseBasePicker.tsx";
 import { StartActions, type StartActionsProps } from "./StartActions.tsx";
 import { albumCountLabel, qaOptionsFor, RUN_MODES_UI, runModeMeta } from "./rules.ts";
@@ -311,6 +311,7 @@ export function ConfigSection({
               </label>
             </div>
           </div>
+          <ModelAdvancedPanel {...model} cloudModelProfile={cloudModelProfile} />
         </div>
       </details>
 
