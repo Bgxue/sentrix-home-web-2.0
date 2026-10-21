@@ -9,6 +9,7 @@ apps/photobench/config/judge_providers.json
 apps/photobench/config/runtime_connection.json
 apps/photobench/config/*.bak-*
 apps/photobench/config/vllm_targets.json
+apps/photobench/config/telemetry_services.json
 
 .pytest_cache/
 .ruff_cache/

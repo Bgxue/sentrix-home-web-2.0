@@ -40,6 +40,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from photobench.infrastructure.runtime.providers import (
+    _dedupe_rows,
+    _load_telemetry_services,
+    _service_rows,
+)
+
 # 与 providers.py 的同名常量**刻意不同源**：1.0 这里是一份写死的 set/tuple，
 # 不读 PHOTOBENCH_SYSTEM_PROCESS_* 环境变量，而且关键词多一个 "mlx"。照搬这个差别，
 # 不合并——合并会悄悄改变 Apple 主机上的进程归属结果。
@@ -633,7 +639,7 @@ def _listening_ports(ports: set[str]) -> dict[int, set[str]]:
             pid = int(line[1:]) if line[1:].isdigit() else None
         elif pid is not None and line.startswith("n"):
             match = re.search(r":(\d+)$", line[1:])
-            if match and match.group(1) in ports:
+            if match and (not ports or match.group(1) in ports):
                 found.setdefault(pid, set()).add(match.group(1))
     return found
 
@@ -693,7 +699,7 @@ class LocalAppleUnifiedTelemetryProvider:
         if time.monotonic() - self._last_port_probe < 2.0:
             return self._ports_by_pid
         self._last_port_probe = time.monotonic()
-        self._ports_by_pid = _listening_ports(SYSTEM_PROCESS_PORTS)
+        self._ports_by_pid = _listening_ports(set())
         return self._ports_by_pid
 
     def _augment(self) -> dict[str, Any]:
@@ -702,11 +708,38 @@ class LocalAppleUnifiedTelemetryProvider:
         rows = _process_rows()
         for row in rows:
             row["listening_ports"] = sorted(ports.get(row["pid"], set()), key=int)
-        model_rows = [row for row in rows if _is_model_process(row, self.port)]
-        related_rows = [row for row in rows if _is_related(row)]
-        model_pids = {row["pid"] for row in model_rows}
-        sentrix_rows = [row for row in related_rows if row["pid"] not in model_pids]
-        for row in sentrix_rows + model_rows:
+        scope = _load_telemetry_services()
+        if scope:
+            main_spec = dict(scope.get("main_model") or {})
+            model_rows = _service_rows(rows, main_spec) if main_spec.get("local") is not False else []
+            model_pids = {row["pid"] for row in model_rows}
+            embedding = dict(scope.get("embedding") or {})
+            mode = str(embedding.get("mode") or "")
+            profile = dict((embedding.get("profiles") or {}).get(mode) or {})
+            if embedding.get("local") is False or profile.get("local") is False:
+                profile = {}
+            auxiliary_rows = [row for row in _service_rows(rows, profile) if row["pid"] not in model_pids]
+            auxiliary_pids = {row["pid"] for row in auxiliary_rows}
+            product_rows: list[dict[str, Any]] = []
+            for product_spec in scope.get("product") or []:
+                if isinstance(product_spec, dict):
+                    product_rows.extend(_service_rows(rows, product_spec))
+            product_rows = [
+                row
+                for row in _dedupe_rows(product_rows)
+                if row["pid"] not in model_pids and row["pid"] not in auxiliary_pids
+            ]
+            sentrix_rows = _dedupe_rows(product_rows + auxiliary_rows)
+        else:
+            model_rows = [row for row in rows if _is_model_process(row, self.port)]
+            related_rows = [row for row in rows if _is_related(row)]
+            model_pids = {row["pid"] for row in model_rows}
+            sentrix_rows = [row for row in related_rows if row["pid"] not in model_pids]
+            auxiliary_rows = [row for row in sentrix_rows if _is_model_process(row, self.port)]
+            product_rows = [
+                row for row in sentrix_rows if row["pid"] not in {r["pid"] for r in auxiliary_rows}
+            ]
+        for row in sentrix_rows + model_rows + product_rows + auxiliary_rows:
             occupancy = _occupancy_bytes(row["pid"])
             row["occupancy_mib"] = None if occupancy is None else round(occupancy / 1048576, 2)
         data: dict[str, Any] = {}
@@ -736,6 +769,10 @@ class LocalAppleUnifiedTelemetryProvider:
         if sentrix_complete:
             sentrix = round(sum(row["occupancy_mib"] for row in sentrix_rows), 2)
             data["sentrix_stack_pss_mib"] = sentrix
+            data["sentrix_product_pss_mib"] = round(sum(row["occupancy_mib"] for row in product_rows), 2)
+            data["sentrix_auxiliary_model_pss_mib"] = round(
+                sum(row["occupancy_mib"] for row in auxiliary_rows), 2
+            )
             data["sentrix_stack_pss_scope"] = "apple_phys_footprint_plus_mapped_weights_excluding_model"
         if sentrix_complete and model_complete and len(model_rows) == 1:
             product = round(sum(row["occupancy_mib"] for row in sentrix_rows + model_rows), 2)

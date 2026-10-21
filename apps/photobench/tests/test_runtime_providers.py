@@ -510,6 +510,76 @@ def test_auxiliary_model_services_stay_in_sentrix_without_double_count(
     assert data["sentrix_stack_pss_scope"] == "all_non_main_related_pss"
 
 
+def test_telemetry_services_scope_excludes_inactive_and_unrelated_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置了当前服务清单后，只算清单里的本机进程；旧栈/未启用方案不算。"""
+    rows = [
+        {
+            "pid": 100,
+            "process_name": "python",
+            "rss_mib": 100.0,
+            "listening_ports": ["8771"],
+            "identity": "photobench",
+        },
+        {
+            "pid": 200,
+            "process_name": "llama-server",
+            "rss_mib": 200.0,
+            "listening_ports": ["8100"],
+            "identity": "llama-server",
+        },
+        {
+            "pid": 300,
+            "process_name": "python",
+            "rss_mib": 75.0,
+            "listening_ports": ["8102"],
+            "identity": "wemm_embedder_sidecar",
+        },
+        {
+            "pid": 400,
+            "process_name": "python",
+            "rss_mib": 50.0,
+            "listening_ports": ["8103"],
+            "identity": "legacy_clip_sidecar",
+        },
+        {
+            "pid": 500,
+            "process_name": "python",
+            "rss_mib": 25.0,
+            "listening_ports": ["8773"],
+            "identity": "old photobench",
+        },
+    ]
+    scope = {
+        "main_model": {"local": True, "ports": [8100]},
+        "embedding": {
+            "mode": "unified_multimodal",
+            "profiles": {"unified_multimodal": {"local": True, "ports": [8102]}},
+        },
+        "product": [{"id": "photobench", "ports": [8771]}],
+    }
+    monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in rows])
+    monkeypatch.setattr(
+        providers,
+        "_process_pss_mib",
+        lambda pid: {100: 50.0, 200: 150.0, 300: 75.0, 400: 50.0, 500: 25.0}[pid],
+    )
+    monkeypatch.setattr(
+        providers,
+        "_process_smaps_field_mib",
+        lambda pid, field: {100: 100.0, 200: 200.0, 300: 100.0, 400: 100.0, 500: 100.0}[pid],
+    )
+    monkeypatch.setattr(providers, "_load_telemetry_services", lambda: scope)
+    data = providers._augment_host_process_memory({"root_pid": 200}, model_pids={200}, compute_apps=[])
+    assert data["sentrix_stack_pss_mib"] == 125.0
+    assert data["sentrix_product_pss_mib"] == 50.0
+    assert data["sentrix_auxiliary_model_pss_mib"] == 75.0
+    assert data["benchmark_processes"]  # product total 只来自 100/200/300
+    pids = {row["pid"] for row in data["benchmark_processes"]}
+    assert pids == {100, 200, 300}
+
+
 def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

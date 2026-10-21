@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import json
 import os
 import re
 import subprocess
@@ -198,7 +199,9 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
 
 
 def _host_process_rows() -> list[dict[str, Any]]:
-    ports_by_pid = _listening_ports_by_pid(SYSTEM_PROCESS_PORTS)
+    # 先读全部监听端口：端口配置（8291/8872/8102/18101…）可能不在
+    # SYSTEM_PROCESS_PORTS 里；由后面的服务清单/关键词决定是否计入。
+    ports_by_pid = _listening_ports_by_pid(set())
     rows: list[dict[str, Any]] = []
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
@@ -245,6 +248,51 @@ MODEL_SERVICE_KEYWORDS = (
     "text_embedder_sidecar",
     "legacy_clip_sidecar",
 )
+
+# 细分归因的“当前 run 实际用了哪些本机服务”清单。整机/整卡仍然全量采样；
+# 这份文件只决定 product/auxiliary 的归属，避免把未启用的旧栈、另一套嵌入方案
+# 也算进当前 run。文件不进 git，模板见 telemetry_services.example.json。
+TELEMETRY_SERVICES_ENV = "PHOTOBENCH_TELEMETRY_SERVICES"
+TELEMETRY_SERVICES_DEFAULT = "apps/photobench/config/telemetry_services.json"
+
+
+def _load_telemetry_services() -> dict[str, Any] | None:
+    path = Path(os.environ.get(TELEMETRY_SERVICES_ENV) or TELEMETRY_SERVICES_DEFAULT)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _matches_service(row: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
+    if spec.get("local") is False:
+        return False
+    pids = {str(pid) for pid in spec.get("pids") or []}
+    if pids and str(row.get("pid")) in pids:
+        return True
+    ports = {str(port) for port in spec.get("ports") or []}
+    row_ports = {str(port) for port in row.get("listening_ports") or []}
+    if ports & row_ports:
+        return True
+    identity = str(row.get("identity") or "").lower()
+    return any(keyword and str(keyword).lower() in identity for keyword in spec.get("keywords") or [])
+
+
+def _service_rows(rows: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows if _matches_service(row, spec)]
+
+
+def _dedupe_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[int] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        pid = int(row["pid"])
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append(dict(row))
+    return out
 
 
 def _is_model_service_process(row: Mapping[str, Any]) -> bool:
@@ -385,42 +433,88 @@ def _augment_host_process_memory(
         if str((process or {}).get("pid") or "").isdigit():
             known_model_pids.add(int(str(process["pid"])))
 
-    hint = str(process_hint or "").lower()
-    port = str(endpoint_port or "")
-    model_rows: list[dict[str, Any]] = []
-    for row in process_rows:
-        identity = str(row.get("identity") or "")
-        if known_model_pids:
-            is_model = row["pid"] in known_model_pids
-        else:
-            is_model = bool((hint and hint in identity) or (port and port in identity))
-        if is_model:
-            model_rows.append(row)
+    scope = _load_telemetry_services()
+    if scope:
+        main_spec = dict(scope.get("main_model") or {})
+        main_local = main_spec.get("local") is not False
+        model_rows: list[dict[str, Any]] = []
+        if main_local:
+            model_rows = _service_rows(process_rows, main_spec)
+            if known_model_pids:
+                known_rows = [
+                    dict(row)
+                    for row in process_rows
+                    if int(row["pid"]) in known_model_pids
+                ]
+                model_rows = _dedupe_rows(model_rows + known_rows)
+        model_pids_found = {int(row["pid"]) for row in model_rows}
 
-    system_rows = [row for row in process_rows if _is_system_related_process(row)]
+        embedding = dict(scope.get("embedding") or {})
+        mode = str(embedding.get("mode") or "")
+        profile = dict((embedding.get("profiles") or {}).get(mode) or {})
+        if embedding.get("local") is False or not profile or profile.get("local") is False:
+            profile = {}
+        auxiliary_rows = [
+            row
+            for row in _service_rows(process_rows, profile)
+            if int(row["pid"]) not in model_pids_found
+        ]
+        auxiliary_pids = {int(row["pid"]) for row in auxiliary_rows}
+
+        product_rows: list[dict[str, Any]] = []
+        for product_spec in scope.get("product") or []:
+            if not isinstance(product_spec, dict):
+                continue
+            product_rows.extend(_service_rows(process_rows, product_spec))
+        product_rows = [
+            row
+            for row in _dedupe_rows(product_rows)
+            if int(row["pid"]) not in model_pids_found
+            and int(row["pid"]) not in auxiliary_pids
+        ]
+        sentrix_rows = _dedupe_rows(product_rows + auxiliary_rows)
+        system_rows = _dedupe_rows(model_rows + sentrix_rows)
+    else:
+        hint = str(process_hint or "").lower()
+        port = str(endpoint_port or "")
+        model_rows = []
+        for row in process_rows:
+            identity = str(row.get("identity") or "")
+            if known_model_pids:
+                is_model = row["pid"] in known_model_pids
+            else:
+                is_model = bool((hint and hint in identity) or (port and port in identity))
+            if is_model:
+                model_rows.append(row)
+
+        system_rows = [row for row in process_rows if _is_system_related_process(row)]
+        model_pids_found = {row["pid"] for row in model_rows}
+        auxiliary_rows = [
+            row
+            for row in system_rows
+            if row["pid"] not in model_pids_found and _is_model_service_process(row)
+        ]
+        product_rows = [
+            row
+            for row in system_rows
+            if row["pid"] not in model_pids_found and not _is_model_service_process(row)
+        ]
+        sentrix_rows = product_rows + auxiliary_rows
+
     system_pids = {row["pid"] for row in system_rows}
     system_gpu_rows = [row for row in compute_apps if row.get("pid") in system_pids]
-
     # 调用方给了确切的模型 PID 就地认它，**不许把 PID 选中的模型重新摊成所有匹配
     # 通用 hint 的进程**（1.0 的注释，照搬）。
-    model_pids_found = {row["pid"] for row in model_rows}
-    # Sentrix 周边的语义是「不含主模型」，不是「不含所有模型」。嵌入/辅助模型服务
-    # （WeMM、text/CLIP、freeret、另一套模型栈）也是产品开销，必须计入紫线；但单独
-    # 记一份 auxiliary，便于解释。主模型按 PID 排除，三个集合按 PID 互斥，不重复。
-    auxiliary_rows = [
-        row
-        for row in system_rows
-        if row["pid"] not in model_pids_found and _is_model_service_process(row)
-    ]
-    product_rows = [
-        row
-        for row in system_rows
-        if row["pid"] not in model_pids_found and not _is_model_service_process(row)
-    ]
-    sentrix_rows = product_rows + auxiliary_rows
     for row in system_rows:
         row["pss_mib"] = _process_pss_mib(int(str(row["pid"])))
         row["smaps_rss_mib"] = _process_smaps_field_mib(int(str(row["pid"])), "Rss:")
+    # scope 模式下 model_rows / sentrix_rows 可能是 _service_rows 的副本，不共享
+    # system_rows 的字典；补一次，避免 _sum_mib 看不到 pss。
+    for row in model_rows + sentrix_rows + product_rows + auxiliary_rows:
+        if "pss_mib" not in row:
+            row["pss_mib"] = _process_pss_mib(int(str(row["pid"])))
+        if "smaps_rss_mib" not in row:
+            row["smaps_rss_mib"] = _process_smaps_field_mib(int(str(row["pid"])), "Rss:")
     model_rss = _sum_mib(model_rows, "rss_mib")
     sentrix_pss = _sum_mib(sentrix_rows, "pss_mib")
     product_pss = _sum_mib(system_rows, "pss_mib")

@@ -89,3 +89,35 @@ POST http://127.0.0.1:8872/api/v1/runs
 - **整套产品**：周边 PSS + 主模型 PSS + 主模型 GPU/UMA 页；不是
   `VmRSS − smaps` 的“补偿”。只有 `scope=all_related_pss_plus_model_uma_extra`
   的 run 才按此公式解释。
+
+## 7. 遥测服务范围（run 级归因）
+
+整机 RAM / 整卡 GPU 仍全量采样；细分归因只算当前 run 实际使用的本机服务。
+每台设备放一份 `apps/photobench/config/telemetry_services.json`（不进 git，
+模板见 `telemetry_services.example.json`），PhotoBench 启动时读取；改配置后重启 8872。
+
+```json
+{
+  "main_model": {"local": true, "ports": [8100]},
+  "embedding": {
+    "mode": "unified_multimodal",
+    "profiles": {
+      "unified_multimodal": {"local": true, "ports": [8102]},
+      "split_text_image": {"local": true, "ports": [8101, 8103]},
+      "no_local_embedding": {"local": false}
+    }
+  },
+  "product": [
+    {"id": "sentrix_api", "ports": [8291]},
+    {"id": "photobench", "ports": [8872]},
+    {"id": "qdrant", "ports": [6333]}
+  ]
+}
+```
+
+- `unified_multimodal`：一个多模态嵌入侧车（WeMM 8102）。
+- `split_text_image`：文本 + 图像两个侧车（8101/8103 或 18101/18103）。
+- `no_local_embedding`：嵌入在远程，本机不记。
+- `main_model.local=false`：模型在远程，本机不记主模型。
+- 未列出的旧栈、另一套嵌入方案、旧 2.0/1.0 进程不进入 product/auxiliary。
+- 主模型 / product / auxiliary 按 PID 互斥；产品总量只加一次，再加主模型 GPU 页。
