@@ -412,8 +412,6 @@ class OpenAIChatModel:
         ``PromptTooLongError``，调用方压缩历史再试。见 ``ports.PromptTooLongError``。
         """
         available = (
-            self._context_tokens
-            - self.estimate_prompt_tokens(messages, tools)
-            - CONTEXT_SAFETY_TOKENS
+            self._context_tokens - self.estimate_prompt_tokens(messages, tools) - CONTEXT_SAFETY_TOKENS
         )
         return min(MAX_ANSWER_TOKENS, available)

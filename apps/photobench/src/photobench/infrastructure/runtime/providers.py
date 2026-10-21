@@ -441,11 +441,7 @@ def _augment_host_process_memory(
         if main_local:
             model_rows = _service_rows(process_rows, main_spec)
             if known_model_pids:
-                known_rows = [
-                    dict(row)
-                    for row in process_rows
-                    if int(row["pid"]) in known_model_pids
-                ]
+                known_rows = [dict(row) for row in process_rows if int(row["pid"]) in known_model_pids]
                 model_rows = _dedupe_rows(model_rows + known_rows)
         model_pids_found = {int(row["pid"]) for row in model_rows}
 
@@ -455,9 +451,7 @@ def _augment_host_process_memory(
         if embedding.get("local") is False or not profile or profile.get("local") is False:
             profile = {}
         auxiliary_rows = [
-            row
-            for row in _service_rows(process_rows, profile)
-            if int(row["pid"]) not in model_pids_found
+            row for row in _service_rows(process_rows, profile) if int(row["pid"]) not in model_pids_found
         ]
         auxiliary_pids = {int(row["pid"]) for row in auxiliary_rows}
 
@@ -469,8 +463,7 @@ def _augment_host_process_memory(
         product_rows = [
             row
             for row in _dedupe_rows(product_rows)
-            if int(row["pid"]) not in model_pids_found
-            and int(row["pid"]) not in auxiliary_pids
+            if int(row["pid"]) not in model_pids_found and int(row["pid"]) not in auxiliary_pids
         ]
         sentrix_rows = _dedupe_rows(product_rows + auxiliary_rows)
         system_rows = _dedupe_rows(model_rows + sentrix_rows)
@@ -535,9 +528,7 @@ def _augment_host_process_memory(
             product_pss_value if product_pss_value is not None else (0.0 if not product_rows else None)
         )
         data["sentrix_auxiliary_model_pss_mib"] = (
-            auxiliary_pss_value
-            if auxiliary_pss_value is not None
-            else (0.0 if not auxiliary_rows else None)
+            auxiliary_pss_value if auxiliary_pss_value is not None else (0.0 if not auxiliary_rows else None)
         )
         data["sentrix_stack_pss_scope"] = "all_non_main_related_pss"
     # 产品总量只有在**每个相关进程的 PSS 都在**、且模型的 VmRSS / smaps-Rss 两个
