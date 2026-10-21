@@ -73,3 +73,21 @@ def test_without_smaps_split_the_whole_vmrss_is_kept(monkeypatch: pytest.MonkeyP
 
 def test_no_inputs_writes_nothing() -> None:
     assert jetson.unified_model_memory({42}, rss_mib=None, host_rss_mib=None) == {}
+
+
+def test_unified_metadata_replaces_the_legacy_pss_unit() -> None:
+    data = {
+        "model_process_host_memory_mib": 1670.84,
+        "model_process_gpu_memory_mib": 5094.35,
+    }
+    jetson.apply_jetson_memory_metadata(data)
+    assert data["memory_unit"] == "host_smaps_rss_plus_gpu_mib"
+    assert data["memory_scope"] == "host_smaps_rss_plus_gpu_uma"
+    assert data["memory_profile"]["method"] == "orin_smaps_rss_plus_gpu_uma_v1"
+
+
+def test_no_split_fields_keeps_the_legacy_unit() -> None:
+    data = {"memory_unit": "process_pss_uma_mib"}
+    jetson.apply_jetson_memory_metadata(data)
+    assert data["memory_unit"] == "process_pss_uma_mib"
+    assert "memory_profile" not in data

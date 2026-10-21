@@ -172,6 +172,31 @@ def _process_gpu_memory_mib(
     return residual, "vmrss_residual"
 
 
+JETSON_UNIFIED_MEMORY_UNIT = "host_smaps_rss_plus_gpu_mib"
+JETSON_UNIFIED_MEMORY_METHOD = "orin_smaps_rss_plus_gpu_uma_v1"
+JETSON_UNIFIED_MEMORY_SCOPE = "host_smaps_rss_plus_gpu_uma"
+
+
+def apply_jetson_memory_metadata(data: dict[str, Any]) -> dict[str, Any]:
+    """统一口径的样本必须带独立的 unit/method/scope。
+
+    只写 ``model_process_host_memory_mib`` 而不改 ``memory_unit``，读侧会继续按
+    旧的 ``process_pss_uma_mib`` / ``orin_process_pss_uma_v1`` 解释，前端就会把
+    「smaps Rss + GPU」显示成 VmRSS。这里把三处元数据一次改齐；没有拆分字段时
+    保持旧口径（远端 PSS provider / 历史样本）。
+    """
+    if data.get("model_process_host_memory_mib") is None:
+        return data
+    data["memory_unit"] = JETSON_UNIFIED_MEMORY_UNIT
+    data["memory_scope"] = JETSON_UNIFIED_MEMORY_SCOPE
+    data["memory_profile"] = {
+        "method": JETSON_UNIFIED_MEMORY_METHOD,
+        "memory_unit": JETSON_UNIFIED_MEMORY_UNIT,
+        "scope": JETSON_UNIFIED_MEMORY_SCOPE,
+    }
+    return data
+
+
 def unified_model_memory(
     model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
 ) -> dict[str, Any]:
@@ -699,10 +724,8 @@ class LocalJetsonLlamaCppTelemetryProvider:
         if self._last_memory.get("status") == "available":
             data: dict[str, Any] = self._last_memory.get("data") or {}
             pid = int(data["root_pid"]) if str(data.get("root_pid") or "").isdigit() else None
-            return {
-                **self._last_memory,
-                "data": _augment_local_process_memory(data, model_pid=pid, endpoint_port=str(self.port)),
-            }
+            augmented = _augment_local_process_memory(data, model_pid=pid, endpoint_port=str(self.port))
+            return {**self._last_memory, "data": apply_jetson_memory_metadata(augmented)}
         return self._last_memory
 
     def system_memory(self) -> dict[str, Any]:

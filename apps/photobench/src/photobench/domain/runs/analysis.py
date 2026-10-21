@@ -1859,6 +1859,29 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(sample.get("model_process_memory_over_limit"), bool)
     ]
     latest = samples[-1]
+    if (
+        latest.get("memory_unit") == "host_smaps_rss_plus_gpu_mib"
+        or latest.get("model_process_host_memory_mib") is not None
+    ):
+        # 新口径：主机 smaps Rss + GPU/UMA 页。旧 run 的 memory_unit 可能还是
+        # process_pss_uma_mib，但只要有拆分字段就按新口径解释，避免前端继续显示
+        # VmRSS。历史 run 没有拆分字段时仍走下面的 PSS 分支。
+        return {
+            "samples_count": len(samples),
+            "source": ("jetson_local_pss" if latest.get("source") == "jetson_local_pss" else "orin_ssh_pss"),
+            "memory_profile": {
+                "method": "orin_smaps_rss_plus_gpu_uma_v1",
+                "memory_unit": "host_smaps_rss_plus_gpu_mib",
+                "scope": "host_smaps_rss_plus_gpu_uma",
+                "kv_cache_used_peak_tokens": (metrics.get("kv_cache_used_tokens") or {}).get("peak"),
+                "kv_cache_usage_peak_pct": (metrics.get("kv_cache_usage_pct") or {}).get("peak"),
+                "note": (
+                    "Host smaps Rss + GPU/UMA pages (nvmap per PID in preference to "
+                    "VmRSS - smaps residual); the two halves do not overlap."
+                ),
+            },
+            **metrics,
+        }
     if latest.get("memory_unit") == "process_pss_uma_mib":
         pss_sample_count = len(
             {s["pss_sampled_at_monotonic"] for s in samples if s.get("pss_sampled_at_monotonic") is not None}
