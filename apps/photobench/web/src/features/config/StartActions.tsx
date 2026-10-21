@@ -23,6 +23,9 @@ export function StartActions(props: StartActionsProps) {
   const {
     runMode,
     hasRunning,
+    suiteRunning,
+    deleteScopeAfterRun,
+    onDeleteScopeAfterRunChange,
     onStart,
     onStop,
   } = props;
@@ -32,6 +35,20 @@ export function StartActions(props: StartActionsProps) {
 
   return (
     <div className="actions">
+      {runMode === "full" && (
+        <label
+          className="check action-delete-after"
+          title="只在完整链路测试结束后删除本次生成的相册，谨慎开启"
+        >
+          <input
+            type="checkbox"
+            checked={deleteScopeAfterRun}
+            disabled={suiteRunning || hasRunning}
+            onChange={(event) => onDeleteScopeAfterRunChange(event.target.checked)}
+          />
+          完成后删除相册
+        </label>
+      )}
       <button
         className="btn"
         type="button"

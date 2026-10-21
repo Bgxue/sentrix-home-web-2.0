@@ -234,7 +234,7 @@ export function ConfigSection({
         <summary>
           <span>
             <strong>高级设置</strong>
-            <small>评测服务、Judge 认证、模型管理器、云端模型和完成后删除相册</small>
+            <small>评测服务、Judge 认证、模型管理器和云端模型</small>
           </span>
           <span className="config-advanced-hint">默认收起</span>
         </summary>
@@ -307,18 +307,6 @@ export function ConfigSection({
               </label>
             </div>
           </div>
-          {reuse.runMode === "full" && (
-            <label className="check config-delete-after">
-              <input
-                type="checkbox"
-                checked={start.deleteScopeAfterRun}
-                disabled={start.suiteRunning || start.hasRunning}
-                onChange={(event) => start.onDeleteScopeAfterRunChange(event.target.checked)}
-              />
-              完成后删除相册
-              <span className="config-help">只在完整链路测试结束后删除本次生成的相册，谨慎开启。</span>
-            </label>
-          )}
         </div>
       </details>
 

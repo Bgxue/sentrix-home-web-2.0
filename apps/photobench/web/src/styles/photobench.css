@@ -920,8 +920,8 @@ details.qa-results-body[open] > summary::before { content:"▾ "; }
 .config-advanced-body { display:grid; gap:10px; padding:11px; border-top:1px solid #eef1f6; }
 .config-advanced-body .config-group { background:#fff; }
 .config-advanced-body .config-grid-judge { grid-template-columns:repeat(2,minmax(0,1fr)); }
-.config-delete-after { width:max-content; max-width:100%; margin:0; padding:6px 9px; border-color:#f0d8ca; background:#fff9f5; }
-.config-delete-after .config-help { display:inline; margin:0 0 0 5px; }
+.config-section > .actions .action-delete-after { width:max-content; max-width:100%; margin:0 4px 0 0; padding:5px 9px; border-color:#e6e9f2; background:#f7f8fb; color:#4a556f; font-size:11px; }
+.config-section > .actions .action-delete-after:hover { border-color:#f0c9b8; background:#fff8f4; }
 .config-section > .actions { align-items:center; margin-top:14px; padding-top:12px; border-top:1px solid #edf0f6; }
 .config-section > .actions .btn { min-height:36px; padding:8px 18px; }
 @media (max-width:1000px) {
