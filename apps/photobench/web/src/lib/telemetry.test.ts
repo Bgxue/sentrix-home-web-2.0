@@ -94,6 +94,24 @@ describe("gpuMetricsView (:857-935)", () => {
 });
 
 describe("liveTelemetryRows (:941-991)", () => {
+  it("v2 metadata controls live formulas and power scope despite a legacy source label", () => {
+    const rows = liveTelemetryRows({ status: "running", telemetry_live: {
+      source: "nvidia_smi", latest: { memory_accounting: "jetson_pss_plus_nvmap_estimate",
+        model_process_system_memory_used_mib: null, model_process_host_memory_mib: 100,
+        model_process_gpu_memory_mib: null, product_stack_memory_mib: null,
+        power_draw_w: 4, power_scope: "rail", power_rail: "VDD_GPU_SOC" },
+    } });
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("主模型占用（smaps RSS + nvmap）")?.[1]).toBe("-");
+    expect(byLabel.get("主模型 smaps RSS")?.[1]).toBe("0.10 GiB");
+    expect(byLabel.get("主模型 GPU/UMA 分量")?.[1]).toBe("-");
+    expect(byLabel.get("整套产品内存")?.[1]).toBe("-");
+    expect(byLabel.get("电源轨功耗")?.[2]).toContain("VDD_GPU_SOC");
+    expect(rows.some((row) => row[0].includes("GPU 显存"))).toBe(false);
+    const apple = liveTelemetryRows({ telemetry_live: { latest: { memory_accounting: "apple_capacity_estimate" } } });
+    expect(apple.find((row) => row[0] === "整机内存")?.[2]).toContain("active + wired + compressor");
+    expect(apple.find((row) => row[0] === "整套产品内存")?.[2]).toContain("容量估计");
+  });
   it("非 apple：缺字段回 `-`、`0` 保留为 `0.00%`、KV 缺字段各有专门文案", () => {
     const run = {
       status: "running",
@@ -193,6 +211,32 @@ describe("telemetryChart (:1011-1026)", () => {
 });
 
 describe("liveTelemetryPhaseRows (:1126-1150)", () => {
+  it("unknown phase peaks stay unavailable while observed zero remains zero", () => {
+    const run = { telemetry_live: {
+      source: "apple_unified", latest: { memory_accounting: "apple_capacity_estimate" },
+      phase_snapshots: { photo_import: { peak: {} }, qa_eval: { peak: {} } },
+      history: [
+        { phase: "photo_import", model_process_system_memory_used_mib: null },
+        { phase: "photo_import", model_process_system_memory_used_mib: false },
+        { phase: "photo_import", model_process_system_memory_used_mib: "" },
+        { phase: "qa_eval", model_process_system_memory_used_mib: 0 },
+      ],
+    } };
+    const rows = liveTelemetryPhaseRows(run);
+    expect(rows[0][1]).toBe("-");
+    expect(rows[0][2]).toContain("主模型占用（footprint+权重）");
+    expect(rows[1][1]).toBe("0.00 GiB");
+    expect(liveTelemetryPhaseRows({ telemetry_live: { ...run.telemetry_live, source: "nvidia_smi" } })).toEqual(rows);
+  });
+
+  it("downsampled phase history cannot replace a missing saved peak", () => {
+    const rows = liveTelemetryPhaseRows({ telemetry_live: { source: "nvidia_smi", samples_count: 20,
+      history: [{ phase: "qa_eval", model_process_memory_used_mib: 1024 }],
+      phase_snapshots: { qa_eval: { peak: { model_process_memory_used_mib: false, memory_used_mib: "", system_memory_used_mib: false } } },
+    } });
+    expect(rows[0][1]).toBe("-");
+    expect(rows[0][2]).toContain("整卡 - · 整机 RAM -");
+  });
   it("按 source 选模型指标键与标签；peak 缺失时从历史取该相位峰值", () => {
     const run = {
       telemetry_source: "nvidia_smi",

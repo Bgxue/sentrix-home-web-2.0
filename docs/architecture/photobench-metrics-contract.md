@@ -58,3 +58,8 @@ Judge denominators remain visible. General telemetry remains optional.
 题目顶层无该字段。步数内完成率必须按实际回合读取；多轮题全部回合满足终止原因、非空答案、
 状态与预算才算完成，已知失败优先于其他回合的缺失。只有事实缺失时保留null，不回填预算。
 独立验收从回合原始事实复核完成率、工具参数JSON分母及阶段墙钟吞吐，防止顶层夹具掩盖真实结构差异。
+
+2026-10-22补齐前端实际投影：阶段快照的峰值回退只接受有限数值，null/布尔/空串不转0；
+降采样历史不得冒充缺失的完整阶段峰值。实时行与阶段行优先使用memory_accounting，
+Jetson显示RSS/nvmap/PSS各分量及板级/轨级功耗，Mac显示容量估计与active+wired+compressor；
+旧无指标定义的历史source仅用于兼容。生产schema与失败语义不变。
