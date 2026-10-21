@@ -62,6 +62,58 @@ def test_native_completion_does_not_require_legacy_turn_outcome() -> None:
     assert result["json_parse_total"] is None
 
 
+@pytest.mark.parametrize(
+    ("second_reason", "second_answer", "second_status", "second_steps", "expected"),
+    [
+        ("answered", "answer", "completed", 4, True),
+        ("answered_with_gap", "answer", "completed", 4, True),
+        ("step_budget_exhausted", "answer", "completed", 4, False),
+        ("answered", "", "completed", 4, False),
+        ("answered", "answer", "failed", 4, False),
+        ("answered", "answer", "completed", 5, False),
+        ("answered", "answer", "completed", None, None),
+    ],
+)
+def test_completion_uses_real_nested_turn_budgets(
+    second_reason, second_answer, second_status, second_steps, expected
+) -> None:
+    first = {
+        "termination_reason": "answered",
+        "answer": "first answer",
+        "agent_status": "completed",
+        "agent2_trace": {"budget_outcome": {"model_steps": 2, "max_steps": 4}},
+    }
+    second = {
+        "termination_reason": second_reason,
+        "answer": second_answer,
+        "agent_status": second_status,
+        "agent2_trace": {"budget_outcome": {"model_steps": second_steps, "max_steps": 4}},
+    }
+    item = {
+        "metrics_contract_version": 2,
+        "answer": "last answer",
+        "termination_reason": "answered",
+        "runtime_turns": [first, second],
+    }
+    stability = analysis.agent_stability(item)
+    assert stability["completed_within_steps"] is expected
+    item["agent_stability"] = stability
+    summary = analysis.capability_summary([item])
+    assert summary["qa_completion_valid_count"] == (0 if expected is None else 1)
+    assert summary["qa_completion_within_steps_rate"] == (None if expected is None else float(expected))
+
+
+def test_later_answer_does_not_hide_a_failed_earlier_turn() -> None:
+    item = {
+        "metrics_contract_version": 2,
+        "runtime_turns": [
+            {"termination_reason": "timeout"},
+            {"termination_reason": "answered", "answer": "answer"},
+        ],
+    }
+    assert analysis.agent_stability(item)["completed_within_steps"] is False
+
+
 def test_endpoint_attribution_tracks_descendants_and_port_reuse() -> None:
     from photobench.infrastructure.runtime.telemetry_scope import service_rows
 

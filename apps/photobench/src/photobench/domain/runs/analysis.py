@@ -332,6 +332,29 @@ def trace_action(step: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _native_turn_completion(turn: dict[str, Any]) -> bool | None:
+    termination = str(turn.get("termination_reason") or "").lower()
+    if termination not in {"answered", "answered_with_gap"}:
+        return False if termination else None
+    budget = (turn.get("agent2_trace") or {}).get("budget_outcome") or {}
+    steps, maximum = budget.get("model_steps"), budget.get("max_steps")
+    if (
+        not isinstance(steps, int)
+        or isinstance(steps, bool)
+        or steps < 0
+        or not isinstance(maximum, int)
+        or isinstance(maximum, bool)
+        or maximum < 0
+    ):
+        return None
+    status = str(turn.get("agent_status") or turn.get("status") or turn.get("turn_status") or "").lower()
+    return (
+        bool(str(turn.get("answer") or "").strip())
+        and status not in {"partial", "error", "timeout", "failed", "cancelled", "canceled"}
+        and steps <= maximum
+    )
+
+
 def agent_stability(item: dict[str, Any]) -> dict[str, Any]:
     """1.0 ``:4532``。"""
     trace = [step for step in item.get("execution_trace") or [] if isinstance(step, dict)]
@@ -359,20 +382,9 @@ def agent_stability(item: dict[str, Any]) -> dict[str, Any]:
     )
     complete: bool | None
     if native:
-        budget = (item.get("agent2_trace") or {}).get("budget_outcome") or {}
-        steps, maximum = budget.get("model_steps"), budget.get("max_steps")
-        if termination in {"answered", "answered_with_gap"}:
-            complete = (
-                (
-                    bool(str(item.get("answer") or "").strip())
-                    and status not in failed_statuses
-                    and steps <= maximum
-                )
-                if isinstance(steps, int) and isinstance(maximum, int)
-                else None
-            )
-        else:
-            complete = False if termination else None
+        turns = item.get("runtime_turns") or [item]
+        outcomes = [_native_turn_completion(turn) if isinstance(turn, dict) else None for turn in turns]
+        complete = False if False in outcomes else (None if None in outcomes else True)
     else:
         complete = (
             (

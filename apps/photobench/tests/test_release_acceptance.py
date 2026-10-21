@@ -116,6 +116,44 @@ def test_preserved_lan_endpoint_must_belong_to_this_host(monkeypatch):
         release.local_url("http://203.0.113.88:8103/v1", preserve_local=True)
 
 
+def test_agent_acceptance_uses_nested_budgets_and_measured_phase_wall():
+    acceptance = script("photobench_acceptance")
+    items = [
+        {
+            "runtime_turns": [
+                {
+                    "termination_reason": "answered",
+                    "answer": "answer",
+                    "agent2_trace": {"budget_outcome": {"model_steps": 3, "max_steps": 4}},
+                }
+            ],
+            "execution_trace": [
+                {
+                    "stage": "model",
+                    "tool_argument_parse_facts": [{"json_object_valid": False}],
+                }
+            ],
+        }
+    ]
+    phase = {"agent_phase_wall_ms": 2000, "agent_completed": 1}
+    good = {
+        "tool_argument_json_total": 1,
+        "tool_argument_json_success": 0,
+        "tool_argument_json_rate": 0,
+        "qa_completion_valid_count": 1,
+        "qa_completion_within_steps_rate": 1,
+        "json_parse_success_rate": None,
+        "agent_throughput_latency_ms": 2000,
+        "agent_throughput_qa_per_s": 0.5,
+    }
+    assert acceptance.check_agent_summary(items, good, phase) == []
+    bad = {**good, "qa_completion_valid_count": 0, "agent_throughput_latency_ms": 1500}
+    assert set(acceptance.check_agent_summary(items, bad, phase)) == {
+        "agent_summary:qa_completion_valid_count",
+        "agent_summary:agent_throughput_latency_ms",
+    }
+
+
 def test_raw_statistics_detect_downsampled_or_null_coerced_summary():
     acceptance = script("photobench_acceptance")
     points = [{"system_memory_used_mib": value} for value in (None, 0, 20)]

@@ -113,6 +113,61 @@ def check_jetson_product_total(sample: dict[str, Any]) -> bool:
     return expected_total(parts, sample.get("product_stack_memory_mib"))
 
 
+def check_agent_summary(
+    items: list[dict[str, Any]], summary: dict[str, Any], phase: dict[str, Any]
+) -> list[str]:
+    facts = [
+        fact
+        for item in items
+        for step in item.get("execution_trace") or []
+        if (step.get("stage") or step.get("type")) == "model"
+        and (step.get("call_type") or "agent") in {"agent", "recovery"}
+        for fact in step.get("tool_argument_parse_facts") or []
+        if isinstance(fact.get("json_object_valid"), bool)
+    ]
+    completions = []
+    for item in items:
+        outcomes: list[bool | None] = []
+        for turn in item.get("runtime_turns") or [item]:
+            reason = turn.get("termination_reason")
+            budget = (turn.get("agent2_trace") or {}).get("budget_outcome") or {}
+            n, maximum = budget.get("model_steps"), budget.get("max_steps")
+            if reason and reason not in {"answered", "answered_with_gap"}:
+                outcomes.append(False)
+            elif not reason or not all(type(v) is int and v >= 0 for v in (n, maximum)):
+                outcomes.append(None)
+            else:
+                assert isinstance(n, int) and isinstance(maximum, int)
+                outcomes.append(
+                    n <= maximum
+                    and bool(str(turn.get("answer") or "").strip())
+                    and (turn.get("agent_status") or turn.get("status") or turn.get("turn_status"))
+                    not in {"partial", "error", "timeout", "failed", "cancelled", "canceled"}
+                )
+        if False in outcomes:
+            completions.append(False)
+        elif None not in outcomes:
+            completions.append(True)
+    successes = sum(fact["json_object_valid"] for fact in facts)
+    expected = {
+        "tool_argument_json_total": len(facts) or None,
+        "tool_argument_json_success": successes if facts else None,
+        "tool_argument_json_rate": round(successes / len(facts), 3) if facts else None,
+        "qa_completion_valid_count": len(completions),
+        "qa_completion_within_steps_rate": round(sum(completions) / len(completions), 3)
+        if completions
+        else None,
+        "json_parse_success_rate": None,
+    }
+    wall, count = phase.get("agent_phase_wall_ms"), phase.get("agent_completed")
+    if finite(wall) and wall > 0 and type(count) is int and count > 0:
+        expected.update(
+            agent_throughput_latency_ms=round(wall / count, 1),
+            agent_throughput_qa_per_s=round(1000 * count / wall, 3),
+        )
+    return [f"agent_summary:{key}" for key, value in expected.items() if summary.get(key) != value]
+
+
 def check_statistics(samples: list[dict[str, Any]], saved: dict[str, Any], api: dict[str, Any]) -> list[str]:
     """Independent arithmetic over raw values, without importing production formulas."""
     errors = []
@@ -597,6 +652,9 @@ def audit(runtime: Path) -> dict[str, Any]:
     for projection in (saved, api):
         summary = projection.get("summary") or {}
         metric_errors.extend(check_retrieval_summary(items, summary))
+        metric_errors.extend(
+            check_agent_summary(items, summary, (saved.get("phases") or {}).get("qa_eval") or {})
+        )
         aqm = round(sum(scores) / len(scores), 3) if scores else None
         if summary.get("answer_quality_mean") != aqm or summary.get("judge_valid_count") != len(scores):
             metric_errors.append("judge_summary_arithmetic")
