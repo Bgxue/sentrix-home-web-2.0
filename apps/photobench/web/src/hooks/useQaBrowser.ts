@@ -47,6 +47,22 @@ export function useQaBrowser({ sentrixUrl = "", manifests = [] }: UseQaBrowserOp
     };
   }, []);
 
+  // 不同设备只装了不同相册：默认值不能再写死 album3/full-album3-38q。
+  // manifests 异步到达，或当前选择在新机器上不存在时，落到本机真实存在的第一个相册/题集。
+  useEffect(() => {
+    if (!manifests.length) return;
+    const selected = manifests.find((manifest) => manifest.album_id === qaBrowserAlbum);
+    if (!selected) {
+      const fallback = manifests.find((manifest) => manifest.album_id === "album3") || manifests[0]!;
+      setQaBrowserAlbum(fallback.album_id);
+      return;
+    }
+    const sets = selected.qa_sets || [];
+    if (sets.length && !sets.includes(qaBrowserSet)) {
+      setQaBrowserSet(sets[0]!);
+    }
+  }, [manifests, qaBrowserAlbum, qaBrowserSet]);
+
   /** 1.0 `loadQaBrowser`（`:2779-2788`）。 */
   const loadQaBrowser = useCallback(async () => {
     setQaBrowserLoading(true);
