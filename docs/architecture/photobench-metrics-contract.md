@@ -46,3 +46,9 @@ it does not redefine `run_valid`. Four devices run the same committed release,
 dataset and 10 QA in full mode. Every service is local except cloud Judge. Each
 required dependency is exercised before starting; all recorded failures and
 Judge denominators remain visible. General telemetry remains optional.
+
+
+运行拓扑冻结同样覆盖产品重启：bootstrap按run快照构造subprocess/systemd控制器，
+以内容哈希寻址、原子发布的只读runtime_connection.json作为既有PHOTOBENCH_CONFIG_ROOT。
+实际启动脚本不能重新读取后续全局配置。控制记录同时保留无密钥拓扑；同模型但嵌入拓扑不同
+不得视为already_pointing_here。旧未注入快照入口保留；端口方法和公开schema不变。

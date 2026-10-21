@@ -14,6 +14,11 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +27,11 @@ from fakes_execution import FakeHttpClient
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.domain.deploy.ports import RestartOutcome
+from photobench.domain.runtime.ports import RunRuntimeSnapshot
 from photobench.infrastructure.deploy.sentrix_process import (
     VLM_BASE_URL_ENV,
     SubprocessSentrixProcess,
+    _snapshot_config_root,
 )
 
 ENDPOINT = "http://127.0.0.1:8100/v1"
@@ -113,6 +120,61 @@ def test_the_new_endpoint_is_exported_to_the_child_environment(tmp_path: Path):
     assert cwd == Path("/repo")
 
 
+def test_restart_uses_frozen_model_and_embedding_even_after_global_config_changes(tmp_path, monkeypatch):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    path = global_root / "runtime_connection.json"
+    connection = {
+        "model_base_url": ENDPOINT,
+        "embedding": {
+            "mode": "split_text_image",
+            "text_url": "http://127.0.0.1:8101",
+            "image_url": "http://127.0.0.1:8103",
+        },
+    }
+    path.write_text(json.dumps(connection))
+    snapshot = RunRuntimeSnapshot(path.read_text())
+    path.write_text(
+        json.dumps(
+            {
+                "model_base_url": OTHER_ENDPOINT,
+                "embedding": {"mode": "unified_multimodal", "wemm_url": "http://other-device:8102"},
+            }
+        )
+    )
+    monkeypatch.setenv("PHOTOBENCH_CONFIG_ROOT", str(global_root))
+    harness = _Harness()
+    process = SubprocessSentrixProcess(
+        api_url="http://127.0.0.1:8291",
+        start_command=["not-executed"],
+        cwd=tmp_path,
+        pid_file=tmp_path / "process.json",
+        log_path=tmp_path / "api.log",
+        http=FakeHttpClient([{"status": "ok"}]),
+        runtime_snapshot=snapshot,
+        spawn=harness.spawn,
+        alive=harness.alive,
+        discover=harness.discover,
+        terminate=harness.terminate,
+        sleep=lambda seconds: None,
+        clock=harness.clock,
+    )
+    assert process.restart(endpoint=ENDPOINT).ok
+    env = harness.spawned[0][1]
+    frozen_root = Path(env["PHOTOBENCH_CONFIG_ROOT"])
+    assert frozen_root != global_root
+    assert json.loads((frozen_root / "runtime_connection.json").read_text()) == connection
+    # Exercise the real startup export script, which previously overwrote the passed target.
+    script = Path(__file__).resolve().parents[3] / "scripts/deploy/runtime_connection_env.py"
+    exports = subprocess.check_output([sys.executable, str(script)], env={**os.environ, **env}, text=True)
+    assert ENDPOINT in exports and OTHER_ENDPOINT not in exports
+    assert "http://127.0.0.1:8101" in exports and "other-device" not in exports
+    assert process.running_endpoint() == ENDPOINT
+    changed = RunRuntimeSnapshot(json.dumps({**connection, "embedding": {"mode": "no_local_embedding"}}))
+    process._runtime_snapshot = changed
+    assert process.running_endpoint() == ""  # Same model does not imply the same embedding topology.
+
+
 def test_the_recorded_process_reports_the_endpoint_it_was_started_with(tmp_path: Path):
     """pid 记录是「当前端点」的真相来源——第二个实例读得到，才能判「要不要重启」。
 
@@ -127,6 +189,22 @@ def test_the_recorded_process_reports_the_endpoint_it_was_started_with(tmp_path:
 
     second = _process(harness, FakeHttpClient([]), pid_file)
     assert second.running_endpoint() == ENDPOINT
+
+
+def test_startup_snapshot_is_published_atomically_and_refuses_modified_content(tmp_path):
+    connection = {"model_base_url": ENDPOINT, "embedding": {"mode": "no_local_embedding"}}
+    snapshot = RunRuntimeSnapshot(json.dumps(connection))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        roots = list(pool.map(lambda _: _snapshot_config_root(snapshot, ENDPOINT, tmp_path), range(24)))
+    assert len(set(roots)) == 1
+    path = roots[0] / "runtime_connection.json"
+    assert json.loads(path.read_text()) == connection
+    assert path.stat().st_mode & 0o777 == 0o400
+    assert list(roots[0].iterdir()) == [path]
+    path.chmod(0o600)
+    path.write_text("{}")
+    with pytest.raises(OSError, match="modified"):
+        _snapshot_config_root(snapshot, ENDPOINT, tmp_path)
 
 
 def test_the_old_process_is_stopped_before_the_new_one_starts(tmp_path: Path):

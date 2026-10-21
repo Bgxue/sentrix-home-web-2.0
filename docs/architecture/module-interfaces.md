@@ -843,6 +843,7 @@ def test_chat_model_maps_prompt_too_long():
 T006 指标 v2 的可选契约见 [photobench-metrics-contract.md](photobench-metrics-contract.md)。
 运行拓扑值对象 `RunRuntimeSnapshot` 定义于 `photobench/domain/runtime/ports.py`；
 由配置端口读出并在application建run时冻结，bootstrap的 `runtime_providers_for_run` 注入HTTP与遥测。
+按run构造的SentrixProcess同样注入快照；重启脚本通过既有PHOTOBENCH_CONFIG_ROOT读取原子发布的只读快照文件，模型及嵌入均不得被后续全局配置覆盖。
 旧 `runtime_providers` 装配入口保留一个发布周期。`TelemetryProvider` 四方法签名不变；
 失败继续返回unavailable/not_applicable并附原因。严格遥测仅由独立回归验收器判定。
 产品调用轨迹新增解析尝试/成功数与错误耗时等通用事实，不在产品层定义benchmark规则。

@@ -321,7 +321,11 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
             # we just launched so a full run recognizes the already-bound endpoint.
             write_json(
                 runtime / "sentrix-process.json",
-                {"pid": process.pid, "endpoint": connection["model_base_url"]},
+                {
+                    "pid": process.pid,
+                    "endpoint": connection["model_base_url"],
+                    "runtime_connection": connection,
+                },
             )
     wait_ready(revision)
     activation_path = runtime / "activation.json"

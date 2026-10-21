@@ -204,6 +204,7 @@ class Container:
         http: JsonHttpClient = HttpxJsonClient()
         sentrix: SentrixClient = HttpxSentrixClient(http, lambda: config.sentrix_url)
         result_writer: RunResultWriter = FileResultWriter(settings.results_root)
+
         # 换模型 = 重启 2.0（T923）。健康探测复用同一个 ``JsonHttpClient``——那一层
         # 本来就管「怎么打一个 HTTP 并解 JSON」，不必为部署另造一个。
         #
@@ -213,22 +214,28 @@ class Container:
         # ``make dev`` 的开发机、也有 ``systemd --user`` 的部署机，删除任何一种都是
         # 砍掉一条仍然成立的部署方式。端口类型不变，业务侧（``ensure_endpoint``）
         # 看不见这个分叉。
-        sentrix_process: SentrixProcess = (
-            SystemdSentrixProcess(
-                api_url=settings.sentrix_api_url,
-                unit=settings.sentrix_service_unit,
-                http=http,
+        def sentrix_process_for_run(snapshot: RunRuntimeSnapshot | None = None) -> SentrixProcess:
+            api_url = str(snapshot.connection()["sentrix_url"]) if snapshot else settings.sentrix_api_url
+            return (
+                SystemdSentrixProcess(
+                    api_url=api_url,
+                    unit=settings.sentrix_service_unit,
+                    http=http,
+                    runtime_snapshot=snapshot,
+                )
+                if settings.sentrix_service_unit
+                else SubprocessSentrixProcess(
+                    api_url=api_url,
+                    start_command=shlex.split(settings.sentrix_start_command),
+                    cwd=settings.sentrix_repo_root,
+                    pid_file=settings.sentrix_pid_file,
+                    log_path=settings.sentrix_log_path,
+                    http=http,
+                    runtime_snapshot=snapshot,
+                )
             )
-            if settings.sentrix_service_unit
-            else SubprocessSentrixProcess(
-                api_url=settings.sentrix_api_url,
-                start_command=shlex.split(settings.sentrix_start_command),
-                cwd=settings.sentrix_repo_root,
-                pid_file=settings.sentrix_pid_file,
-                log_path=settings.sentrix_log_path,
-                http=http,
-            )
-        )
+
+        sentrix_process = sentrix_process_for_run()
 
         def run_execution(request: RunRequest) -> RunExecution:
             """一 run 一个 ``RunExecution``：它是**有状态**的（跑一轮带一份 item 表），
@@ -282,7 +289,7 @@ class Container:
                 telemetry_source=providers.source,
                 inline_images=judge_images,
                 # 一 run 一个 switch：它只是 ``sentrix_process`` 的薄包装，无状态。
-                sentrix_switch=SentrixModelSwitch(sentrix_process),
+                sentrix_switch=SentrixModelSwitch(sentrix_process_for_run(snapshot)),
             )
 
         # **``run_suites`` 先建、``runs`` 后建**：列表页要叠加「还在跑的 run」，

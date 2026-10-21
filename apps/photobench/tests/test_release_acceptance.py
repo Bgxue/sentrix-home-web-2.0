@@ -61,7 +61,11 @@ def test_release_registers_the_launched_api_so_full_run_does_not_restart_it(tmp_
     bindings.update(config=str(config), environments={"api": {}, "photobench": {}})
     release.launch(root, runtime, bindings, "fixed")
     record = runtime / "sentrix-process.json"
-    assert json.loads(record.read_text()) == {"pid": 100, "endpoint": endpoint}
+    assert json.loads(record.read_text()) == {
+        "pid": 100,
+        "endpoint": endpoint,
+        "runtime_connection": {"model_base_url": endpoint, "sentrix_url": "http://127.0.0.1:8291"},
+    }
     assert environments[1]["PHOTOBENCH_SENTRIX_PID_FILE"] == str(record)
     process = SubprocessSentrixProcess(
         api_url="http://127.0.0.1:8291",

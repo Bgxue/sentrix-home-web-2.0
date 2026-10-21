@@ -829,3 +829,9 @@ NX真实预检暴露BGE-M3的llama.cpp接口与Python侧车不同：`/embed`404�
 随后退出令全部产品合计不可用。只按实际启动的观察进程PID排除它，不能按进程名过滤真实工作进程；
 其他相关PID消失仍保留不可用语义。固定release发布将API的PID/端点登记到独立runtime路径，
 PhotoBench的控制器复用该记录，端点一致的首个full run不得再次重启API；控制日志同样绑定runtime。
+
+
+运行拓扑冻结同样覆盖产品重启：bootstrap按run快照构造subprocess/systemd控制器，
+以内容哈希寻址、原子发布的只读runtime_connection.json作为既有PHOTOBENCH_CONFIG_ROOT。
+实际启动脚本不能重新读取后续全局配置。控制记录同时保留无密钥拓扑；同模型但嵌入拓扑不同
+不得视为already_pointing_here。旧未注入快照入口保留；端口方法和公开schema不变。

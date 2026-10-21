@@ -24,3 +24,9 @@
 - 发布新API后未登记进程控制记录，首次full run会将“无记录”误当端点变化而重启8291。发布登记已启动的API PID与端点，并显式绑定控制记录/日志到runtime；端点一致时保持API PID，预检可验证全过程连续性。
 
 兼容：新增字段均可选，两份OpenAPI和前端同步；TelemetryProvider四方法不变。旧结果只允许基于完整事实的带版本派生。排除vLLM专项补齐，严格验收不改变生产fail-open语义。
+
+
+运行拓扑冻结同样覆盖产品重启：bootstrap按run快照构造subprocess/systemd控制器，
+以内容哈希寻址、原子发布的只读runtime_connection.json作为既有PHOTOBENCH_CONFIG_ROOT。
+实际启动脚本不能重新读取后续全局配置。控制记录同时保留无密钥拓扑；同模型但嵌入拓扑不同
+不得视为already_pointing_here。旧未注入快照入口保留；端口方法和公开schema不变。

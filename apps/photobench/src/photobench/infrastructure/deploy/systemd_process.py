@@ -30,6 +30,7 @@ systemd），见 ``bootstrap/container.py``。
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -40,7 +41,12 @@ from typing import NamedTuple
 
 from photobench.domain.deploy.ports import RestartOutcome
 from photobench.domain.http.ports import JsonHttpClient
-from photobench.infrastructure.deploy.sentrix_process import HEALTH_PATH, VLM_BASE_URL_ENV
+from photobench.domain.runtime.ports import RunRuntimeSnapshot
+from photobench.infrastructure.deploy.sentrix_process import (
+    HEALTH_PATH,
+    VLM_BASE_URL_ENV,
+    _snapshot_config_root,
+)
 
 #: systemctl 命令的参数超时。``daemon-reload`` / ``restart`` 正常在秒级返回。
 _SYSTEMCTL_TIMEOUT = 120.0
@@ -109,6 +115,7 @@ class SystemdSentrixProcess:
         api_url: str,
         unit: str,
         http: JsonHttpClient,
+        runtime_snapshot: RunRuntimeSnapshot | None = None,
         systemctl: _SystemctlFn | None = None,
         config_home: Path | None = None,
         vlm_env_var: str = VLM_BASE_URL_ENV,
@@ -123,6 +130,7 @@ class SystemdSentrixProcess:
         self._api_url = api_url.rstrip("/")
         self._unit = unit if unit.endswith(".service") else f"{unit}.service"
         self._http = http
+        self._runtime_snapshot = runtime_snapshot
         self._systemctl = systemctl or _run_systemctl
         self._config_home = config_home or _default_config_home()
         self._vlm_env_var = vlm_env_var
@@ -143,6 +151,14 @@ class SystemdSentrixProcess:
         fields = self._show("ActiveState", "Environment")
         if fields.get("ActiveState") != "active":
             return ""
+        if self._runtime_snapshot is not None:
+            config_root = _environment_value(fields.get("Environment", ""), "PHOTOBENCH_CONFIG_ROOT")
+            try:
+                observed = json.loads((Path(config_root) / "runtime_connection.json").read_text())
+                if observed.get("embedding") != self._runtime_snapshot.connection().get("embedding"):
+                    return ""
+            except (OSError, ValueError, AttributeError):
+                return ""
         return _environment_value(fields.get("Environment", ""), self._vlm_env_var)
 
     def restart(self, *, endpoint: str, timeout: float = 60) -> RestartOutcome:
@@ -244,8 +260,18 @@ class SystemdSentrixProcess:
         """
         path = self._dropin_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        escaped = endpoint.replace("\\", "\\\\").replace('"', '\\"')
-        path.write_text(f'[Service]\nEnvironment="{self._vlm_env_var}={escaped}"\n', encoding="utf-8")
+        values = {self._vlm_env_var: endpoint}
+        if self._runtime_snapshot is not None:
+            values["PHOTOBENCH_CONFIG_ROOT"] = str(
+                _snapshot_config_root(
+                    self._runtime_snapshot, endpoint, self._config_home / "photobench/startup-snapshots"
+                )
+            )
+        lines = ["[Service]"]
+        for key, value in values.items():
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'Environment="{key}={escaped}"')
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _dropin_path(self) -> Path:
         return self._config_home / "systemd" / "user" / f"{self._unit}.d" / _DROPIN_NAME
