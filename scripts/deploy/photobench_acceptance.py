@@ -273,7 +273,8 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
     from PIL import Image
 
     Image.new("RGB", (96, 96), (220, 50, 50)).save(image)
-    text_result = http(text_url.rstrip("/") + "/embed_text", {"text": "测试图像"})
+    text_path = "/embed_text" if unified else "/embed"
+    text_result = http(text_url.rstrip("/") + text_path, {"text": "测试图像"})
     image_result = http(image_url.rstrip("/") + "/embed_image", {"path": str(image)})
     dimensions: dict[str, int] = {}
     for name, response, expected in (
