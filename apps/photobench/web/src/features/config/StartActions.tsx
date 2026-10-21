@@ -36,16 +36,20 @@ export function StartActions(props: StartActionsProps) {
   return (
     <div className="actions">
       {runMode === "full" && (
-        <button
-          className={`btn danger delete-scope-toggle${deleteScopeAfterRun ? " active" : ""}`}
-          type="button"
-          aria-pressed={deleteScopeAfterRun}
+        <label
+          className={`btn danger delete-scope-toggle${deleteScopeAfterRun ? " active" : ""}${
+            suiteRunning || hasRunning ? " disabled" : ""
+          }`}
           title="只在完整链路测试结束后删除本次生成的相册，谨慎开启"
-          disabled={suiteRunning || hasRunning}
-          onClick={() => onDeleteScopeAfterRunChange(!deleteScopeAfterRun)}
         >
+          <input
+            type="checkbox"
+            checked={deleteScopeAfterRun}
+            disabled={suiteRunning || hasRunning}
+            onChange={(event) => onDeleteScopeAfterRunChange(event.target.checked)}
+          />
           完成后删除相册
-        </button>
+        </label>
       )}
       <button
         className="btn"
