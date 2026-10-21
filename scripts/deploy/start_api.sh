@@ -13,7 +13,7 @@ if [ -f deploy/thread-limits.env ]; then
   . deploy/thread-limits.env
 fi
 # 服务拓扑的唯一来源；没有这份文件时保持旧的环境变量启动方式。
-if [ -f apps/photobench/config/runtime_services.json ]; then
+if [ -f apps/photobench/config/runtime_connection.json ]; then
   eval "$(.venv/bin/python scripts/deploy/runtime_services_env.py)"
 fi
 

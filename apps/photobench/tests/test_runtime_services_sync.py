@@ -18,7 +18,7 @@ class _Secrets:
         return None
 
 
-def test_save_updates_runtime_services_topology(tmp_path: Path) -> None:
+def test_save_preserves_service_topology_in_runtime_connection(tmp_path: Path) -> None:
     (tmp_path / "judge_providers.json").write_text(
         json.dumps(
             {
@@ -37,8 +37,16 @@ def test_save_updates_runtime_services_topology(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (tmp_path / "runtime_services.json").write_text(
-        json.dumps({"product": [{"id": "photobench", "ports": [8872]}]}), encoding="utf-8"
+    (tmp_path / "runtime_connection.json").write_text(
+        json.dumps(
+            {
+                "model_base_url": "http://127.0.0.1:8100/v1",
+                "endpoint_model": "old",
+                "embedding": {"mode": "split_text_image", "text_url": "http://127.0.0.1:8101"},
+                "product": [{"id": "photobench", "ports": [8872]}],
+            }
+        ),
+        encoding="utf-8",
     )
     service = ConfigService(JsonConfigStore(tmp_path), _Secrets())
     service.persist_runtime_connection(
@@ -51,9 +59,8 @@ def test_save_updates_runtime_services_topology(tmp_path: Path) -> None:
             "judge_provider_id": "cloud",
         }
     )
-    saved = json.loads((tmp_path / "runtime_services.json").read_text(encoding="utf-8"))
-    assert saved["main_model"]["base_url"] == "http://127.0.0.1:8103/v1"
-    assert saved["main_model"]["ports"] == [8103]
-    assert saved["main_model"]["local"] is True
-    assert saved["sentrix"]["ports"] == [8291]
+    saved = json.loads((tmp_path / "runtime_connection.json").read_text(encoding="utf-8"))
+    assert saved["model_base_url"] == "http://127.0.0.1:8103/v1"
+    assert saved["endpoint_model"] == "qwen35-mixed-3p1"
+    assert saved["embedding"]["text_url"] == "http://127.0.0.1:8101"
     assert saved["product"] == [{"id": "photobench", "ports": [8872]}]

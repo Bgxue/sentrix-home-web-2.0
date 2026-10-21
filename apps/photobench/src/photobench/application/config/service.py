@@ -21,10 +21,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
-import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -33,7 +31,6 @@ from photobench.domain.errors import InvalidRequestError
 from photobench.domain.runs.judge import JUDGE_PROMPT, JUDGE_PROMPT_KINDS
 
 RUNTIME_CONNECTION_NAME = "runtime_connection.json"
-RUNTIME_SERVICES_NAME = "runtime_services.json"
 JUDGE_PROVIDERS_NAME = "judge_providers.json"
 VLLM_TARGETS_NAME = "vllm_targets.json"
 CUSTOM_JUDGE_PROMPT_NAME = "custom_judge_prompt.json"
@@ -88,25 +85,6 @@ def secret_hint(value: str | None) -> str:
     return f"{secret[:2]}{'*' * min(8, len(secret) - 4)}{secret[-2:]}"
 
 
-def _local_hosts() -> set[str]:
-    hosts = {"127.0.0.1", "localhost", "::1"}
-    with contextlib.suppress(OSError):
-        hosts.update(socket.gethostbyname_ex(socket.gethostname())[2])
-    with contextlib.suppress(OSError):
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            probe.connect(("8.8.8.8", 80))
-            hosts.add(probe.getsockname()[0])
-        finally:
-            probe.close()
-    return hosts
-
-
-def _service_port(value: str, fallback: int | None = None) -> int | None:
-    parsed = urlparse(value)
-    return parsed.port or (443 if parsed.scheme == "https" else 80) or fallback
-
-
 class ConfigService:
     """进程内**当前生效**的配置。写回之后就地更新，与 1.0 的 ``global`` 等价。"""
 
@@ -117,23 +95,16 @@ class ConfigService:
         # （``:116``）——**必须先于读 judge_api_key**，否则文件里的密钥不会被看到。
         self._load_dotenv()
         self._runtime = self._load_runtime_connection()
-        self._runtime_services = self._load_runtime_services()
         self.judge_provider_id, self.judge_providers = self._load_judge_providers()
         self.vllm_target_id, self.vllm_targets = self._load_vllm_targets()
 
-        services_sentrix = self._runtime_services.get("sentrix") or {}
-        sentrix_fallback = str(services_sentrix.get("url") or "http://127.0.0.1:8191")
         self.sentrix_url = self._configured_url(
-            "BENCH_SENTRIX_URL", "sentrix_url", fallback=sentrix_fallback
+            "BENCH_SENTRIX_URL", "sentrix_url", fallback="http://127.0.0.1:8191"
         )
         # 2.0 不建 model-manager：8500 由 1.0 的 sentrix-vllm-api.service 提供，
         # 这里只是可选的 HTTP 消费（设计文档 §2.1「2.0 不管理模型进程生命周期」）。
         self.vllm_manager_url = self._configured_url("BENCH_VLLM_API_URL", "vllm_manager_url")
-        services_main = self._runtime_services.get("main_model") or {}
-        model_fallback = str(services_main.get("base_url") or "")
-        self.model_base_url = self._configured_url(
-            "BENCH_VLLM_BASE_URL", "model_base_url", fallback=model_fallback
-        )
+        self.model_base_url = self._configured_url("BENCH_VLLM_BASE_URL", "model_base_url")
         # 1.0 ``:345-350``：没配 base_url 时退回默认 target 的地址（去掉尾斜杠）。
         if not self.model_base_url and "model_base_url" not in self._runtime:
             target = self.vllm_targets.get(self.vllm_target_id, {})
@@ -175,13 +146,6 @@ class ConfigService:
         """
         try:
             value = self._store.read_json(RUNTIME_CONNECTION_NAME)
-        except ValueError:
-            return {}
-        return value if isinstance(value, dict) else {}
-
-    def _load_runtime_services(self) -> dict[str, Any]:
-        try:
-            value = self._store.read_json(RUNTIME_SERVICES_NAME)
         except ValueError:
             return {}
         return value if isinstance(value, dict) else {}
@@ -443,28 +407,11 @@ class ConfigService:
         }
         if not values["judge_model"]:
             raise InvalidRequestError("Judge model is required")
+        # 同一份 runtime_connection.json 里保留服务拓扑；遥测/API 都读它。
+        for key in ("embedding", "product"):
+            if key in self._runtime:
+                values[key] = self._runtime[key]
         self._store.write_json(RUNTIME_CONNECTION_NAME, values)
-        # 同一份服务拓扑也给遥测/API 用；runtime_connection 保留给旧 UI 读取。
-        services = dict(self._runtime_services)
-        main = dict(services.get("main_model") or {})
-        main["base_url"] = values["model_base_url"]
-        main["model"] = values["endpoint_model"]
-        main["local"] = (urlparse(values["model_base_url"]).hostname or "") in _local_hosts()
-        port = _service_port(values["model_base_url"])
-        main["ports"] = [port] if port and main["local"] else []
-        services["main_model"] = main
-        sentrix = dict(services.get("sentrix") or {})
-        sentrix["url"] = values["sentrix_url"]
-        sentrix_port = _service_port(values["sentrix_url"], 8291)
-        sentrix["ports"] = [sentrix_port] if sentrix_port else []
-        services["sentrix"] = sentrix
-        services["judge"] = {
-            "url": values["judge_url"],
-            "model": values["judge_model"],
-            "provider_id": provider_id,
-        }
-        self._store.write_json(RUNTIME_SERVICES_NAME, services)
-        self._runtime_services = services
         self._runtime = dict(values)
         self.sentrix_url = values["sentrix_url"]
         self.judge_url = values["judge_url"]

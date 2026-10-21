@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PATH = Path(
     __import__("os").environ.get("PHOTOBENCH_RUNTIME_SERVICES")
-    or ROOT / "apps/photobench/config/runtime_services.json"
+    or ROOT / "apps/photobench/config/runtime_connection.json"
 )
 
 
@@ -22,11 +22,10 @@ def main() -> None:
         data = json.loads(PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    main_model = data.get("main_model") or {}
     embedding = data.get("embedding") or {}
     exports: dict[str, str] = {}
-    if isinstance(main_model, dict) and main_model.get("base_url"):
-        exports["SENTRIX_VLM_BASE_URL"] = str(main_model["base_url"])
+    if data.get("model_base_url"):
+        exports["SENTRIX_VLM_BASE_URL"] = str(data["model_base_url"])
     if isinstance(embedding, dict):
         mode = str(embedding.get("mode") or "")
         if mode == "unified_multimodal":
