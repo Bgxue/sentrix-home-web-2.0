@@ -253,6 +253,12 @@ def test_apple_keyword_set_stays_the_1_0_one() -> None:
 # ---- 提供者 -----------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_telemetry_services_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这些用例验的是主机口径；不让设备上的 telemetry_services.json 改变预期。"""
+    monkeypatch.setattr(apple, "_load_telemetry_services", lambda: None)
+
+
 @pytest.fixture
 def apple_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(

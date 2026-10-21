@@ -20,7 +20,7 @@ from photobench.domain.runtime.ports import (
     RuntimeProviders,
     TelemetryProvider,
 )
-from photobench.infrastructure.runtime import providers
+from photobench.infrastructure.runtime import jetson_telemetry, providers
 from photobench.infrastructure.runtime.apple_telemetry import LocalAppleUnifiedTelemetryProvider
 from photobench.infrastructure.runtime.hardware import read_cpu_temperature_c
 from photobench.infrastructure.runtime.providers import (
@@ -40,6 +40,12 @@ from photobench.infrastructure.runtime.providers import (
 )
 
 MEMINFO = "MemTotal:       16384000 kB\nMemAvailable:    8192000 kB\n"
+
+
+@pytest.fixture(autouse=True)
+def _no_telemetry_services_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """单测默认验主机口径；设备上的 telemetry_services.json 不参与。"""
+    monkeypatch.setattr(providers, "_load_telemetry_services", lambda: None)
 
 
 @pytest.fixture
@@ -586,6 +592,9 @@ def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES[:2]])
     monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: None, 200: 150.0}[pid])
     monkeypatch.setattr(providers, "_process_smaps_field_mib", lambda pid, field: 100.0)
+    # 在真 Jetson 上 nvmap 账本可读时，缺失 PID 表示 0，不会走 VmRSS 残差；
+    # 这个用例验的是残差兜底，所以显式关掉账本。
+    monkeypatch.setattr(jetson_telemetry, "_nvmap_clients_mib", lambda: None)
     data = providers._augment_host_process_memory(
         {"root_pid": 200, "product_stack_memory_mib": 999.0},
         process_hint="llama-server",
