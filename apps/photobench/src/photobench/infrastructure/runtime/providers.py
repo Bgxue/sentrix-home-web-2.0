@@ -229,6 +229,29 @@ def _is_system_related_process(row: Mapping[str, Any]) -> bool:
     return any(keyword and keyword in identity for keyword in SYSTEM_PROCESS_KEYWORDS)
 
 
+# 模型/嵌入服务端口。它们会被 SYSTEM_PROCESS_KEYWORDS（llama-server / vllm /
+# sentrix 等）命中，但**不属于 Sentrix 周边**；否则同一台机上多个模型栈会把
+# `sentrix_stack_pss_mib` 堆到几十 GB，标签却写「不含模型」。
+MODEL_SERVICE_PORTS = frozenset({"8100", "8101", "8102", "8103", "8104", "18101", "18103"})
+MODEL_SERVICE_KEYWORDS = (
+    "llama-server",
+    "vllm serve",
+    "ollama serve",
+    "freeret_sidecar",
+    "wemm_embedder_sidecar",
+    "text_embedder_sidecar",
+    "legacy_clip_sidecar",
+)
+
+
+def _is_model_service_process(row: Mapping[str, Any]) -> bool:
+    identity = str(row.get("identity") or "").lower()
+    ports = {str(port) for port in row.get("listening_ports") or []}
+    if ports & MODEL_SERVICE_PORTS:
+        return True
+    return any(keyword in identity for keyword in MODEL_SERVICE_KEYWORDS)
+
+
 def _query_compute_apps() -> list[dict[str, Any]]:
     """``nvidia-smi --query-compute-apps``。**非零退出直接抛**，由调用方兜底成空表。"""
     result = subprocess.run(
@@ -378,7 +401,11 @@ def _augment_host_process_memory(
     # 调用方给了确切的模型 PID 就地认它，**不许把 PID 选中的模型重新摊成所有匹配
     # 通用 hint 的进程**（1.0 的注释，照搬）。
     model_pids_found = {row["pid"] for row in model_rows}
-    sentrix_rows = [row for row in system_rows if row["pid"] not in model_pids_found]
+    sentrix_rows = [
+        row
+        for row in system_rows
+        if row["pid"] not in model_pids_found and not _is_model_service_process(row)
+    ]
     for row in system_rows:
         row["pss_mib"] = _process_pss_mib(int(str(row["pid"])))
         row["smaps_rss_mib"] = _process_smaps_field_mib(int(str(row["pid"])), "Rss:")
@@ -396,7 +423,7 @@ def _augment_host_process_memory(
         ]
     if sentrix_pss is not None:
         data["sentrix_stack_pss_mib"] = sentrix_pss
-        data["sentrix_stack_pss_scope"] = "sentrix_related_pss_excluding_model"
+        data["sentrix_stack_pss_scope"] = "sentrix_related_pss_excluding_all_model_services"
     # 产品总量只有在**每个相关进程的 PSS 都在**、且模型的 VmRSS / smaps-Rss 两个
     # 补偿输入也都在时才写。RSS 仍然是独立的「模型 VmRSS」指标，但**不许悄悄变成
     # 产品总量**（1.0 的注释，照搬）。

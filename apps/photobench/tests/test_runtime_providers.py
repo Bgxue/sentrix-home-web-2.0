@@ -422,6 +422,25 @@ COMPUTE = [
 ]
 
 
+def test_model_services_are_excluded_from_sentrix_neighbors() -> None:
+    """llama-server/vLLM/嵌入侧车不是 Sentrix 周边，不能把模型内存算进紫线。"""
+    assert providers._is_model_service_process(
+        {"identity": "llama-server -m model.gguf", "listening_ports": []}
+    )
+    assert providers._is_model_service_process(
+        {"identity": "python -m vllm serve /model --port 8000", "listening_ports": []}
+    )
+    assert providers._is_model_service_process(
+        {"identity": "python freeret_sidecar.py", "listening_ports": ["8104"]}
+    )
+    assert providers._is_model_service_process(
+        {"identity": "python wemm_embedder_sidecar.py --port 8102", "listening_ports": []}
+    )
+    assert not providers._is_model_service_process(
+        {"identity": "python benchmark_orchestrator.py", "listening_ports": ["8771"]}
+    )
+
+
 def test_attribution_sums_related_pss_plus_model_uma_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES])
     monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: 50.0, 200: 150.0}[pid])
