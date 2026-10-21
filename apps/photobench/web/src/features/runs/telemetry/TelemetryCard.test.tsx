@@ -65,9 +65,20 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
     view.rerender(<TelemetryCard run={run({ status: "completed" })} />);
     view.rerender(<TelemetryCard run={run({ status: "failed" })} />);
     expect(echartsMock.init).toHaveBeenCalledTimes(1);
+    // 只是状态变了、历史采样没变：不 setOption，避免把 tooltip 重置掉。
+    const afterStatus = echartsMock.instance.setOption.mock.calls.length;
 
-    // 每次数据变化都重画（1.0 `:2834` 的 deep watch）。
-    expect(echartsMock.instance.setOption.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // 历史采样点变化 → 必须重画（1.0 `:2834` 的 deep watch）。
+    const before = run();
+    const next = run({
+      telemetry_live: {
+        ...before.telemetry_live,
+        samples_count: 4,
+        history: [...(before.telemetry_live?.history || []), { t: 180, phase: "qa_eval", memory_used_mib: 3200 }],
+      },
+    });
+    view.rerender(<TelemetryCard run={next} />);
+    expect(echartsMock.instance.setOption.mock.calls.length).toBeGreaterThan(afterStatus);
   });
 
   it("卸载时 dispose 实例（1.0 :2837）", () => {

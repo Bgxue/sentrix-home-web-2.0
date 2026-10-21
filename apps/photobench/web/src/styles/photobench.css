@@ -886,3 +886,52 @@ details.qa-results-body[open] > summary::before { content:"▾ "; }
 /* 召回指标：关键指标卡只放主值 R@5，明细单独折叠在下方 */
 .recall-metric-card { margin-top:8px; }
 .recall-metric-card .phase-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
+
+/* 评测配置重排：核心（任务/模型）在前，连接与高级参数收进 details。 */
+.config-section { padding:18px 20px 16px; }
+.config-section .section-title { display:flex; min-width:0; flex-direction:column; gap:3px; }
+.config-section .section-title h2 { font-size:18px; letter-spacing:-.01em; }
+.config-section .section-title p { margin:0; color:var(--muted); font-size:11px; line-height:1.45; }
+.config-overview { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:10px 0 12px; padding:8px 10px; border:1px solid #e3e7f1; border-radius:8px; background:#f8f9fd; }
+.config-overview-item { display:inline-flex; align-items:baseline; gap:5px; min-width:0; max-width:100%; padding:3px 8px; border-radius:999px; color:#33405f; background:#fff; border:1px solid #e3e7f1; font-size:11px; line-height:1.4; overflow-wrap:anywhere; }
+.config-overview-item b { color:#7b849b; font-size:9px; font-weight:700; letter-spacing:.04em; }
+.config-core-grid { display:grid; grid-template-columns:minmax(0,1.02fr) minmax(0,.98fr); align-items:stretch; gap:12px; }
+.config-core-grid > .config-group { height:100%; background:#fff; }
+.config-core-grid .config-grid-scope { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.config-core-grid .config-group-head { margin-bottom:9px; padding-bottom:7px; border-bottom:1px solid #eef1f6; }
+.config-core-grid .config-group-head strong { font-size:13px; }
+.config-group-model { grid-column:auto; display:block; }
+.config-group-model .config-model-endpoint { display:block; }
+.config-group-model .config-model-manager { margin-top:0; }
+.config-group-model .model-current-choice { grid-column:auto; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:7px 8px; margin-top:8px; padding-top:8px; }
+.config-group-model .model-picker { grid-column:auto; }
+.config-group-model .model-manager-empty { grid-column:auto; grid-row:auto; }
+.config-subadvanced, .config-advanced { margin-top:11px; border:1px solid #e1e5ef; border-radius:8px; background:#fbfcff; }
+.config-subadvanced > summary, .config-advanced > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; color:#3d4865; cursor:pointer; font-size:11px; font-weight:650; list-style:none; user-select:none; }
+.config-subadvanced > summary::-webkit-details-marker, .config-advanced > summary::-webkit-details-marker { display:none; }
+.config-subadvanced > summary::before, .config-advanced > summary::before { content:"▸"; color:#8792ab; font-size:10px; }
+.config-subadvanced[open] > summary::before, .config-advanced[open] > summary::before { content:"▾"; }
+.config-subadvanced > summary span, .config-advanced > summary small { color:var(--muted); font-size:10px; font-weight:400; }
+.config-subadvanced-body { padding:0 11px 10px; border-top:1px solid #eef1f6; }
+.config-advanced > summary { align-items:flex-start; }
+.config-advanced > summary > span:first-child { display:flex; min-width:0; flex-direction:column; gap:2px; }
+.config-advanced > summary strong { font-size:12px; }
+.config-advanced > summary .config-advanced-hint { flex:none; color:#96a0b5; font-size:9px; font-weight:500; }
+.config-advanced-body { display:grid; gap:10px; padding:11px; border-top:1px solid #eef1f6; }
+.config-advanced-body .config-group { background:#fff; }
+.config-advanced-body .config-grid-judge { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.config-delete-after { width:max-content; max-width:100%; margin:0; padding:6px 9px; border-color:#f0d8ca; background:#fff9f5; }
+.config-delete-after .config-help { display:inline; margin:0 0 0 5px; }
+.config-section > .actions { align-items:center; margin-top:14px; padding-top:12px; border-top:1px solid #edf0f6; }
+.config-section > .actions .btn { min-height:36px; padding:8px 18px; }
+@media (max-width:1000px) {
+  .config-core-grid { grid-template-columns:1fr; }
+  .config-core-grid .config-grid-scope, .config-advanced-body .config-grid-judge { grid-template-columns:1fr; }
+}
+@media (max-width:700px) {
+  .config-section { padding:14px; }
+  .config-overview { align-items:flex-start; flex-direction:column; }
+  .config-overview-item { width:100%; }
+  .config-section .section-head { align-items:flex-start; flex-direction:column; }
+  .config-section .section-head-actions { justify-content:flex-start; }
+}

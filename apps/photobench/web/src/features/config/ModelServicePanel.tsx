@@ -235,6 +235,12 @@ export function ModelServicePanel(props: ModelServicePanelProps) {
           {currentModelError && <span className="config-help error">{currentModelError}</span>}
         </label>
       </div>
+      <details className="config-subadvanced">
+        <summary>
+          <strong>高级模型设置</strong>
+          <span>模型管理器、云端模型和注册表；通常无需修改</span>
+        </summary>
+        <div className="config-subadvanced-body">
       <div className="config-model-manager">
         <label>
           模型管理器地址（可选）
@@ -353,6 +359,8 @@ export function ModelServicePanel(props: ModelServicePanelProps) {
           未配置模型管理器。Ollama、llama.cpp 等端点只会按请求使用上方选中的模型；测评服务不会自动启停或切换模型。
         </div>
       )}
+        </div>
+      </details>
     </div>
   );
 }
