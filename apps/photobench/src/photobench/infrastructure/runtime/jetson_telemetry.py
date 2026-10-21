@@ -26,15 +26,18 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
+from photobench.domain.runtime.metrics import component_total, system_used
 from photobench.infrastructure.runtime.telemetry_scope import (
     dedupe_rows,
     load_telemetry_services,
+    service_resolved,
     service_rows,
 )
 
@@ -206,26 +209,32 @@ def apply_jetson_memory_metadata(data: dict[str, Any]) -> dict[str, Any]:
 def unified_model_memory(
     model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
 ) -> dict[str, Any]:
-    """One accounting rule for every host: CPU pages + GPU/UMA pages.
+    """Jetson CPU residency + GPU allocation estimate, with explicit unknowns.
 
-    ``host_rss_mib`` is the summed smaps ``Rss:`` of the model process, which
-    excludes device mappings, so adding the GPU figure never double-counts.
+    PSS and nvmap are different accounting views; no universal physical-page
+    deduplication is claimed across driver versions or shared GPU buffers.
     """
     result: dict[str, Any] = {}
     if rss_mib is None and host_rss_mib is None:
         return result
     if host_rss_mib is None:
-        # Cannot split host from GPU; keep the legacy whole-process figure.
-        result["model_process_system_memory_used_mib"] = rss_mib
-        result["model_process_system_memory_scope"] = "host_process_vmrss"
+        # Unknown host residency cannot be replaced by a different accounting basis.
+        result["model_process_system_memory_used_mib"] = None
+        result["model_process_host_memory_mib"] = None
+        result["model_process_gpu_memory_mib"] = None
+        result["memory_complete"] = False
+        result["memory_accounting"] = "jetson_pss_plus_nvmap_estimate"
+        result["model_process_system_memory_scope"] = "host_smaps_rss_plus_gpu_uma"
         result["model_process_gpu_memory_source"] = "unavailable"
         return result
     gpu_mib, gpu_source = _process_gpu_memory_mib(model_pids, rss_mib=rss_mib, host_rss_mib=host_rss_mib)
-    total = round(float(host_rss_mib) + float(gpu_mib or 0.0), 2)
+    total = component_total([host_rss_mib, gpu_mib])
+    result["memory_accounting"] = "jetson_pss_plus_nvmap_estimate"
+    result["memory_complete"] = total is not None
     result["model_process_system_memory_used_mib"] = total
     result["model_process_system_memory_scope"] = "host_smaps_rss_plus_gpu_uma"
     result["model_process_host_memory_mib"] = round(float(host_rss_mib), 2)
-    result["model_process_gpu_memory_mib"] = round(total - float(host_rss_mib), 2)
+    result["model_process_gpu_memory_mib"] = round(gpu_mib, 2) if gpu_mib is not None else None
     result["model_process_gpu_memory_source"] = gpu_source
     return result
 
@@ -277,6 +286,13 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
     return result
 
 
+def _process_parent_pid(pid: int) -> int | None:
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _host_process_rows() -> list[dict[str, Any]]:
     ports_by_pid = _listening_ports_by_pid(set())
     rows = []
@@ -291,6 +307,7 @@ def _host_process_rows() -> list[dict[str, Any]]:
         rows.append(
             {
                 "pid": pid,
+                "ppid": _process_parent_pid(pid),
                 "process_name": Path(cmdline.split(" ", 1)[0]).name if cmdline else "",
                 "rss_mib": rss_mib,
                 "listening_ports": sorted(ports_by_pid.get(pid, set()), key=lambda value: int(value)),
@@ -309,8 +326,9 @@ def _is_system_related_process(row: dict[str, Any]) -> bool:
 
 
 def _sum_mib(rows: list[dict[str, Any]], key: str) -> float | None:
-    values = [float(row[key]) for row in rows if isinstance(row.get(key), (int, float))]
-    return round(sum(values), 2) if values else None
+    if not rows or any(not isinstance(row.get(key), (int, float)) for row in rows):
+        return None
+    return round(sum(float(row[key]) for row in rows), 2)
 
 
 def _process_smaps_field_mib(pid: int, field: str) -> float | None:
@@ -339,20 +357,33 @@ def _is_model_process(row: dict[str, Any], *, model_pid: int | None, endpoint_po
 
 
 def _augment_local_process_memory(
-    data: dict[str, Any] | None, *, model_pid: int | None, endpoint_port: str
+    data: dict[str, Any] | None,
+    *,
+    model_pid: int | None,
+    endpoint_port: str,
+    telemetry_services: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """产品占用 = Sentrix 侧 PSS 之和 + llama 的 VmRSS。
-
-    RSS 相加会把共享库重复计数，PSS 不会；但 llama 的 CUDA UMA 常常不体现在 PSS 里，
-    所以模型那一项用 VmRSS。**缺任何一项就不写产品总量**——把缺失补成 0 等于把一次
-    探活失败记成「模型不占内存」（1.0 的注释，照搬）。
-    """
-    data = dict(data or {})
+    """Fresh related-PID PSS plus main/auxiliary nvmap allocation estimates."""
+    # Never let a disappeared PID or failed smaps read inherit a previous total.
+    data = {
+        key: value
+        for key, value in (data or {}).items()
+        if not key.startswith(
+            ("model_process_", "model_system_", "sentrix_", "product_stack_", "benchmark_process_")
+        )
+    }
+    data.update(
+        model_process_system_memory_used_mib=None,
+        model_process_host_memory_mib=None,
+        model_process_gpu_memory_mib=None,
+        model_process_gpu_memory_source="unavailable",
+        memory_accounting="jetson_pss_plus_nvmap_estimate",
+    )
     try:
         rows = _host_process_rows()
     except Exception:
         rows = []
-    scope = load_telemetry_services()
+    scope = telemetry_services if telemetry_services is not None else load_telemetry_services()
     if scope:
         main_spec = dict(scope.get("main_model") or {})
         model_rows = service_rows(rows, main_spec) if main_spec.get("local") is not False else []
@@ -368,6 +399,7 @@ def _augment_local_process_memory(
         for product_spec in scope.get("product") or []:
             if isinstance(product_spec, dict):
                 product_rows.extend(service_rows(rows, product_spec))
+        product_rows.extend(service_rows(rows, dict(scope.get("sentrix") or {})))
         product_rows = [
             row
             for row in dedupe_rows(product_rows)
@@ -385,10 +417,15 @@ def _augment_local_process_memory(
             row for row in product_rows if row.get("pid") not in {item.get("pid") for item in model_rows}
         ]
         auxiliary_rows = []
+    observations = {
+        int(row["pid"]): (
+            _process_pss_mib(int(row["pid"])),
+            _process_smaps_field_mib(int(row["pid"]), "Rss:"),
+        )
+        for row in dedupe_rows(sentrix_rows + model_rows)
+    }
     for row in sentrix_rows + model_rows + product_rows + auxiliary_rows:
-        pid = int(row["pid"])
-        row["pss_mib"] = _process_pss_mib(pid)
-        row["smaps_rss_mib"] = _process_smaps_field_mib(pid, "Rss:")
+        row["pss_mib"], row["smaps_rss_mib"] = observations[int(row["pid"])]
     model_pids = {row["pid"] for row in model_rows}
     model_rss = _sum_mib(model_rows, "rss_mib")
     model_pss = _sum_mib(model_rows, "pss_mib")
@@ -400,16 +437,48 @@ def _augment_local_process_memory(
         rss_mib=_sum_mib(auxiliary_rows, "rss_mib"),
         host_rss_mib=_sum_mib(auxiliary_rows, "smaps_rss_mib"),
     )
-    auxiliary_uma = auxiliary_memory.get("model_process_gpu_memory_mib")
+    auxiliary_expected = (
+        bool(
+            embedding.get("local") is not False
+            and (profile.get("ports") or profile.get("pids") or profile.get("keywords"))
+        )
+        if scope
+        else bool(auxiliary_rows)
+    )
+    auxiliary_uma = (
+        auxiliary_memory.get("model_process_gpu_memory_mib") if auxiliary_rows or auxiliary_expected else 0.0
+    )
     model_memory = unified_model_memory(model_pids, rss_mib=model_rss, host_rss_mib=model_smaps_rss)
-    if model_memory:
+    main_complete = bool(model_rows) and (not scope or service_resolved(rows, main_spec))
+    data["root_pid"] = next(
+        (
+            row["pid"]
+            for row in model_rows
+            if str(endpoint_port) in {str(p) for p in row.get("listening_ports") or []}
+        ),
+        None,
+    )
+    data["process_memory_used_mib"] = model_pss if main_complete else None
+    data["model_system_processes"] = []
+    if model_memory and main_complete:
         data.update(model_memory)
         data["model_system_processes"] = [
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
             for row in model_rows[:20]
         ]
-    sentrix_pss_complete = bool(sentrix_rows) and all(row.get("pss_mib") is not None for row in sentrix_rows)
-    model_pss_complete = bool(model_rows) and all(row.get("pss_mib") is not None for row in model_rows)
+    roles_complete = not scope or all(
+        service_resolved(rows, spec)
+        for spec in [dict(scope.get("sentrix") or {}), profile, *(scope.get("product") or [])]
+        if isinstance(spec, dict)
+    )
+    sentrix_pss_complete = (
+        roles_complete
+        and (bool(sentrix_rows) or bool(scope))
+        and all(row.get("pss_mib") is not None for row in sentrix_rows)
+    )
+    if not sentrix_rows and sentrix_pss_complete:
+        sentrix_pss = 0.0
+    model_pss_complete = main_complete and all(row.get("pss_mib") is not None for row in model_rows)
     if sentrix_pss is not None and sentrix_pss_complete:
         data["sentrix_stack_pss_mib"] = sentrix_pss
         product_pss = _sum_mib(product_rows, "pss_mib")
@@ -420,13 +489,18 @@ def _augment_local_process_memory(
         data["sentrix_auxiliary_model_pss_mib"] = (
             auxiliary_pss if auxiliary_pss is not None else (0.0 if not auxiliary_rows else None)
         )
-        if auxiliary_uma is not None:
-            data["sentrix_auxiliary_model_uma_mib"] = round(float(auxiliary_uma), 2)
+        data["sentrix_auxiliary_model_uma_mib"] = (
+            round(float(auxiliary_uma), 2) if auxiliary_uma is not None else None
+        )
         data["sentrix_stack_pss_scope"] = "sentrix_related_pss_excluding_llama"
         data["sentrix_processes"] = [
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
             for row in sentrix_rows[:50]
         ]
+    data["sentrix_auxiliary_model_uma_mib"] = auxiliary_uma
+    if auxiliary_expected and not auxiliary_rows:
+        data["sentrix_auxiliary_model_pss_mib"] = None
+    data["product_stack_memory_mib"] = None
     # 每个相关进程的 PSS 都在、且模型的两个补偿输入（VmRSS / smaps-Rss）也在时才写总量。
     if (
         sentrix_pss is not None
@@ -437,10 +511,10 @@ def _augment_local_process_memory(
         and model_smaps_rss is not None
         and model_memory.get("model_process_gpu_memory_mib") is not None
         and auxiliary_uma is not None
+        and (not auxiliary_expected or bool(auxiliary_rows))
     ):
-        cpu_pages = sentrix_pss + model_pss
         uma_extra = float(model_memory["model_process_gpu_memory_mib"])
-        product = round(cpu_pages + uma_extra + float(auxiliary_uma or 0.0), 2)
+        product = component_total([sentrix_pss, model_pss, uma_extra, auxiliary_uma])
         data["product_stack_memory_mib"] = product
         data["benchmark_process_memory_used_mib"] = product
         data["benchmark_process_memory_scope"] = "all_related_pss_plus_model_uma_extra"
@@ -449,6 +523,11 @@ def _augment_local_process_memory(
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
             for row in (sentrix_rows + model_rows)[:50]
         ]
+    data["memory_complete"] = (
+        data.get("model_process_system_memory_used_mib") is not None
+        and data.get("product_stack_memory_mib") is not None
+    )
+    data["pss_sampled_at_monotonic"] = time.monotonic()
     return data
 
 
@@ -485,11 +564,12 @@ def _meminfo_mib() -> dict[str, Any]:
     except (OSError, ValueError, IndexError):
         return {}
     total = values.get("MemTotal")
-    available = values.get("MemAvailable", values.get("MemFree"))
-    if total is None or available is None:
+    available = values.get("MemAvailable")
+    used = system_used(total, available)
+    if used is None or total is None or available is None:
         return {}
     return {
-        "system_memory_used_mib": round(max(0.0, total - available), 3),
+        "system_memory_used_mib": used,
         "system_memory_total_mib": round(total, 3),
         "system_memory_available_mib": round(max(0.0, available), 3),
         "system_memory_scope": "host_all_processes",
@@ -501,7 +581,6 @@ def _parse_tegrastats_line(line: str) -> dict[str, Any]:
     for key, pattern, scale in (
         ("system_memory_used_mib", r"RAM\s+(\d+)/(\d+)MB", 1),
         ("gpu_utilization_pct", r"GR3D_FREQ\s+(\d+)%", 1),
-        ("power_draw_w", r"VDD_GPU_SOC\s+(\d+)mW", 0.001),
         ("temperature_c", r"(?:gpu|tj)@([\d.]+)C", 1),
     ):
         match = re.search(pattern, line)
@@ -514,6 +593,25 @@ def _parse_tegrastats_line(line: str) -> dict[str, Any]:
                 max(0.0, sample["system_memory_total_mib"] - sample[key]), 3
             )
             sample["system_memory_scope"] = "host_all_processes"
+    rails = {
+        name: round(float(current) / 1000, 3)
+        for name, current in re.findall(r"(VDD_[A-Z0-9_]+)\s+(\d+)mW", line)
+    }
+    if rails:
+        sample["power_rails_average_w"] = {
+            name: round(float(average) / 1000, 3)
+            for name, average in re.findall(r"(VDD_[A-Z0-9_]+)\s+\d+mW/(\d+)mW", line)
+        }
+        rail = next(
+            (name for name in ("VDD_IN", "VDD_GPU_SOC", "VDD_CPU_GPU_CV", "VDD_SOC") if name in rails),
+            next(iter(rails)),
+        )
+        sample.update(
+            power_draw_w=rails[rail],
+            power_rails_w=rails,
+            power_rail=rail,
+            power_scope="board" if rail == "VDD_IN" else "rail",
+        )
     cpu = re.search(r"cpu@([\d.]+)C", line)
     if cpu:
         sample["cpu_temperature_c"] = round(float(cpu.group(1)), 3)
@@ -530,17 +628,31 @@ class _TegrastatsStream:
         self._proc: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
         self._latest = ""
+        self._observed_at = float("-inf")
+        self._restart_at = 0.0
+        self._failures = 0
 
     def latest_line(self) -> str:
         self._ensure()
         with self._lock:
+            if (
+                self._proc is None
+                or self._proc.poll() is not None
+                or time.monotonic() - self._observed_at > 3 * self.interval_ms / 1000
+            ):
+                return ""
             return self._latest
 
     def _ensure(self) -> None:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return
+            if time.monotonic() < self._restart_at:
+                return
+            self._latest = ""
             self._stop.clear()
+            self._restart_at = time.monotonic() + min(30, 2 ** min(self._failures, 5))
+            self._failures += 1
             try:
                 self._proc = subprocess.Popen(
                     ["tegrastats", "--interval", str(self.interval_ms)],
@@ -567,7 +679,10 @@ class _TegrastatsStream:
             text = line.strip()
             if text:
                 with self._lock:
-                    self._latest = text
+                    if self._proc is proc:
+                        self._latest = text
+                        self._observed_at = time.monotonic()
+                        self._failures = 0
 
 
 _TEGRASTATS = _TegrastatsStream(int(JETSON_SAMPLE_INTERVAL_SECONDS * 1000))
@@ -581,7 +696,15 @@ class LocalJetsonLlamaCppTelemetryProvider:
     独立 VRAM——这是这一路与 ``HostNvidiaTelemetryProvider`` 最根本的区别）。
     """
 
-    def __init__(self, endpoint_url: str, *, pid_file: str | None = None, pss_interval: float | None = None):
+    def __init__(
+        self,
+        endpoint_url: str,
+        *,
+        pid_file: str | None = None,
+        pss_interval: float | None = None,
+        telemetry_services: Mapping[str, Any] | None = None,
+    ):
+        self.telemetry_services = telemetry_services
         parsed = urlparse(endpoint_url)
         if parsed.scheme not in {"http", "https"} or not parsed.port:
             raise ValueError("a local llama.cpp endpoint with an explicit port is required")
@@ -704,14 +827,20 @@ class LocalJetsonLlamaCppTelemetryProvider:
         return data
 
     def _device(self) -> dict[str, Any]:
-        if time.monotonic() - self._last_device_probe < self.device_interval and self._device_sample:
-            return self._device_sample
+        # Revalidate stream liveness on every read; a device cache must not extend
+        # the source TTL or keep a terminated tegrastats process alive on paper.
         self._last_device_probe = time.monotonic()
         sample = _meminfo_mib()
         line = _TEGRASTATS.latest_line()
         if line:
             parsed = _parse_tegrastats_line(line)
+            parsed.pop("system_memory_used_mib", None)
+            parsed.pop("system_memory_total_mib", None)
+            parsed.pop("system_memory_available_mib", None)
+            parsed.pop("system_memory_scope", None)
             sample.update(parsed)
+            sample["device_observed_at_monotonic"] = _TEGRASTATS._observed_at
+            sample["device_observation_age_seconds"] = time.monotonic() - _TEGRASTATS._observed_at
         self._device_sample = sample
         return self._device_sample
 
@@ -771,15 +900,21 @@ class LocalJetsonLlamaCppTelemetryProvider:
         }
 
     def process_memory(self) -> dict[str, Any]:
-        if self._last_memory.get("status") == "available":
+        try:
             data: dict[str, Any] = self._last_memory.get("data") or {}
-            pid = int(data["root_pid"]) if str(data.get("root_pid") or "").isdigit() else None
-            augmented = _augment_local_process_memory(data, model_pid=pid, endpoint_port=str(self.port))
-            return {**self._last_memory, "data": apply_jetson_memory_metadata(augmented)}
-        return self._last_memory
+            augmented = _augment_local_process_memory(
+                data, model_pid=None, endpoint_port=str(self.port), telemetry_services=self.telemetry_services
+            )
+            return {
+                "status": "available",
+                "source": "jetson_local_pss",
+                "data": apply_jetson_memory_metadata(augmented),
+            }
+        except Exception as error:
+            return {"status": "unavailable", "source": "jetson_local_pss", "reason": str(error)}
 
     def system_memory(self) -> dict[str, Any]:
-        data: dict[str, Any] = self._device_sample.copy()
+        data: dict[str, Any] = _meminfo_mib()
         keys = {
             "system_memory_used_mib",
             "system_memory_total_mib",

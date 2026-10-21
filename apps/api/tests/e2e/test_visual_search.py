@@ -186,6 +186,9 @@ def test_locked_index_still_answers_with_the_right_photo(real_client: TestClient
         [sys.executable, "-c", _LOCK_HOLDER, str(locked_dir)],
         stdout=subprocess.PIPE,
         text=True,
+        # Permit posix_spawn: forking after BLAS/PyTorch started threads can
+        # crash the macOS child before exec. Python-created FDs are CLOEXEC.
+        close_fds=False,
     )
     try:
         assert holder.stdout is not None

@@ -99,7 +99,7 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const parseTotals = items.map((item) => item.agent_stability?.json_parse_total).filter(Number.isFinite);
   const parseSuccesses = items.map((item) => item.agent_stability?.json_parse_success).filter(Number.isFinite);
   const completion = items.map((item) => item.agent_stability?.completed_within_steps).filter((value) => typeof value === "boolean");
-  const agentTaskLatencies = items.map((item) => Number(item.timing_breakdown?.agent_wall_ms)).filter(Number.isFinite);
+  const agentTaskLatencies = items.map((item) => item.timing_breakdown?.agent_wall_ms ?? (item.metrics_contract_version === 2 ? item.wall_clock_ms : undefined)).filter(Number.isFinite);
   const agentLoopCounts = items.map((item) => {
     const calls: Loose[] = itemCallMetrics(item);
     return calls.some((call) => call.call_type)

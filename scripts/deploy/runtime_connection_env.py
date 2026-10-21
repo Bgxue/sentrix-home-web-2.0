@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 runtime_services.json 的服务拓扑导出成 API 环境变量。
+"""把 runtime_connection.json 的服务拓扑导出成 API 环境变量。
 
 只处理非密钥的主模型/嵌入连接；端口/进程归属由 PhotoBench 遥测直接读同一份文件。
 """
@@ -7,12 +7,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = Path(
-    __import__("os").environ.get("PHOTOBENCH_RUNTIME_SERVICES")
+    Path(os.environ["PHOTOBENCH_CONFIG_ROOT"]) / "runtime_connection.json"
+    if os.environ.get("PHOTOBENCH_CONFIG_ROOT")
+    else os.environ.get("PHOTOBENCH_RUNTIME_CONNECTION")
+    or os.environ.get("PHOTOBENCH_RUNTIME_SERVICES")
     or ROOT / "apps/photobench/config/runtime_connection.json"
 )
 

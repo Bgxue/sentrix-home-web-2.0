@@ -38,6 +38,7 @@ from collections.abc import Callable
 from typing import Any
 
 from photobench.domain.runs.analysis import aggregate_gpu_samples
+from photobench.domain.runtime.metrics import finite_number
 from photobench.domain.runtime.ports import TelemetryProvider
 
 #: 采样行会带上相位标签，读侧就不必去 run.json 里反查「这条样本属于哪一段」。
@@ -76,6 +77,8 @@ class GpuSampler:
         self.samples: list[dict[str, Any]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._sample_lock = threading.Lock()
+        self._source = ""
 
     def start(self) -> None:
         self._stop.clear()
@@ -95,22 +98,61 @@ class GpuSampler:
         跑一轮——那种用例既慢，又在负载高的机器上随机红，而它要断言的东西（样本的
         字段映射）与线程毫无关系。``_run`` 与它共用同一段逻辑，不存在第二条路径。
         """
-        gpu_result = self.provider.gpu_stats()
-        memory_result = self.provider.process_memory()
-        system_result = self.provider.system_memory()
-        if gpu_result.get("status") != "available":
+
+        with self._sample_lock:
+            self._sample_once()
+
+    def _sample_once(self) -> None:
+        def probe(callback: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+            try:
+                return callback()
+            except Exception as error:
+                return {"status": "unavailable", "error": str(error)}
+
+        gpu_result = probe(self.provider.gpu_stats)
+        memory_result = probe(self.provider.process_memory)
+        system_result = probe(self.provider.system_memory)
+        if self._stop.is_set():
             return
-        data = gpu_result.get("data") or {}
+        data = (gpu_result.get("data") or {}) if gpu_result.get("status") == "available" else {}
         # 进程归属拿不到时**仍然保留进程与系统内存**——绝不把「没找到模型进程」
         # 变成一个看起来有意义的 0（1.0 ``:1713-1716`` 的注释）。
-        process_memory = memory_result.get("data") or {}
-        system_memory = system_result.get("data") or {}
+        process_memory = (
+            (memory_result.get("data") or {}) if memory_result.get("status") == "available" else {}
+        )
+        system_memory = (
+            (system_result.get("data") or {}) if system_result.get("status") == "available" else {}
+        )
         timestamp = time.perf_counter()
-        for gpu in data.get("gpus", []):
+        for gpu in data.get("gpus") or [{"index": 0}]:
             sample = dict(gpu)
             if sample.get("cpu_temperature_c") is None and data.get("cpu_temperature_c") is not None:
                 sample["cpu_temperature_c"] = data["cpu_temperature_c"]
             sample["_t"] = timestamp
+            sample["observed_at_epoch"] = time.time()
+            sample["metrics_contract_version"] = 2
+            sample["source_status"] = {
+                "device": gpu_result.get("status"),
+                "process": memory_result.get("status"),
+                "system": system_result.get("status"),
+            }
+            sample["source_diagnostics"] = {
+                role: {key: result[key] for key in ("reason", "error", "source") if key in result}
+                for role, result in (
+                    ("device", gpu_result),
+                    ("process", memory_result),
+                    ("system", system_result),
+                )
+            }
+            for key in (
+                "memory_accounting",
+                "memory_complete",
+                "model_process_footprint_mib",
+                "model_process_mapped_weights_mib",
+                "product_stack_footprint_mib",
+                "product_stack_mapped_weights_mib",
+            ):
+                sample[key] = process_memory.get(key)
             sample["model_process_memory_used_mib"] = process_memory.get("process_memory_used_mib")
             sample["model_process_system_memory_used_mib"] = process_memory.get(
                 "model_process_system_memory_used_mib"
@@ -160,8 +202,26 @@ class GpuSampler:
             sample["model_process_memory_limit_mib"] = process_memory.get("process_memory_limit_mib")
             sample["model_process_memory_over_limit"] = process_memory.get("process_memory_over_limit")
             sample["model_process_pid"] = process_memory.get("root_pid")
+            sample["component_validity"] = {
+                key: "valid"
+                if (value := finite_number(sample.get(key))) is not None and value >= 0
+                else "unavailable"
+                for key in (
+                    "system_memory_used_mib",
+                    "model_process_host_memory_mib",
+                    "model_process_gpu_memory_mib",
+                    "product_stack_memory_mib",
+                    "model_process_system_memory_used_mib",
+                    "model_process_footprint_mib",
+                    "model_process_mapped_weights_mib",
+                )
+            }
+            sample["process_observed_at_monotonic"] = process_memory.get(
+                "pss_sampled_at_monotonic", timestamp
+            )
             sample["memory_unit"] = process_memory.get("memory_unit") or sample.get("memory_unit")
-            sample["source"] = gpu_result.get("source") or self.provider.__class__.__name__
+            self._source = gpu_result.get("source") or memory_result.get("source") or self._source
+            sample["source"] = self._source or self.provider.__class__.__name__
             sample["pss_sampled_at_monotonic"] = process_memory.get("pss_sampled_at_monotonic")
             sample["kv_cache_used_tokens"] = process_memory.get("kv_cache_used_tokens")
             vllm_metrics = process_memory.get("vllm_metrics") or {}

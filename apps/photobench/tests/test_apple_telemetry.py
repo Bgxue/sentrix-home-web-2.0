@@ -265,7 +265,7 @@ def apple_host(monkeypatch: pytest.MonkeyPatch) -> None:
         apple,
         "_run_text",
         make_dispatcher(
-            ps="  100 python benchmark_orchestrator.py\n  200 llama-server --port 8100\n",
+            ps="  100 1 python benchmark_orchestrator.py\n  200 1 llama-server --port 8100\n",
             lsof="p100\nf13\nn*:8771\np200\nf8\nn*:8100\n",
         ),
     )
@@ -331,7 +331,7 @@ def test_process_memory_without_a_model_process_writes_no_product_total(
         apple,
         "_run_text",
         make_dispatcher(
-            ps="  100 python benchmark_orchestrator.py\n",
+            ps="  100 1 python benchmark_orchestrator.py\n",
             lsof="p100\nf13\nn*:8771\n",
         ),
     )
@@ -350,9 +350,9 @@ def test_two_model_candidates_are_not_guessed_into_one(monkeypatch: pytest.Monke
         "_run_text",
         make_dispatcher(
             ps=(
-                "  100 python benchmark_orchestrator.py\n"
-                "  200 llama-server --port 8100\n"
-                "  201 llama-server --port 8100\n"
+                "  100 1 python benchmark_orchestrator.py\n"
+                "  200 1 llama-server --port 8100\n"
+                "  201 1 llama-server --port 8100\n"
             ),
             lsof="p100\nf13\nn*:8771\np200\nf8\nn*:8100\np201\nf9\nn*:8100\n",
         ),
@@ -374,7 +374,7 @@ def test_a_missing_footprint_suppresses_the_sum(monkeypatch: pytest.MonkeyPatch)
         apple,
         "_run_text",
         make_dispatcher(
-            ps="  100 python benchmark_orchestrator.py\n  200 llama-server --port 8100\n",
+            ps="  100 1 python benchmark_orchestrator.py\n  200 1 llama-server --port 8100\n",
             lsof="p100\nf13\nn*:8771\np200\nf8\nn*:8100\n",
         ),
     )

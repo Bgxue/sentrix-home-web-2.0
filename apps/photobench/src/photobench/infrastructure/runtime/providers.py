@@ -40,15 +40,16 @@ from urllib.parse import urlparse
 
 import httpx
 
+from photobench.domain.runtime.metrics import component_total, system_used
 from photobench.domain.runtime.ports import LifecycleProvider, RuntimeProviders, TelemetryProvider
 from photobench.infrastructure.runtime.hardware import read_cpu_temperature_c
-from photobench.infrastructure.runtime.jetson_telemetry import unified_model_memory
 from photobench.infrastructure.runtime.telemetry_scope import (
     dedupe_rows as _dedupe_rows,
 )
 from photobench.infrastructure.runtime.telemetry_scope import (
     load_telemetry_services as _load_telemetry_services,
 )
+from photobench.infrastructure.runtime.telemetry_scope import service_resolved
 from photobench.infrastructure.runtime.telemetry_scope import (
     service_rows as _service_rows,
 )
@@ -144,13 +145,14 @@ def _read_linux_system_memory() -> dict[str, Any]:
                 values[key] = float(raw.strip().split()[0]) / 1024.0
         total = values.get("MemTotal")
         available = values.get("MemAvailable")
-        if total is None or available is None:
+        used = system_used(total, available)
+        if used is None or total is None or available is None:
             raise ValueError("MemTotal/MemAvailable missing")
         return {
             "status": "available",
             "source": "proc_meminfo",
             "data": {
-                "system_memory_used_mib": round(max(0.0, total - available), 2),
+                "system_memory_used_mib": used,
                 "system_memory_total_mib": round(total, 2),
                 "system_memory_available_mib": round(available, 2),
                 "system_memory_scope": "host_all_processes",
@@ -220,9 +222,13 @@ def _host_process_rows() -> list[dict[str, Any]]:
         # 两个都读不到的行直接丢掉：那多半是已经退出的进程留下的目录项。
         if rss_mib is None and not cmdline:
             continue
+        ppid: int | None = None
+        with contextlib.suppress(OSError, ValueError, IndexError):
+            ppid = int((proc / "stat").read_text().rsplit(")", 1)[1].split()[1])
         rows.append(
             {
                 "pid": pid,
+                "ppid": ppid,
                 "process_name": Path(cmdline.split(" ", 1)[0]).name if cmdline else "",
                 "rss_mib": rss_mib,
                 "listening_ports": sorted(ports_by_pid.get(pid, set()), key=lambda value: int(value)),
@@ -357,176 +363,113 @@ def _augment_host_process_memory(
     endpoint_port: str = "",
     model_pids: set[int] | None = None,
     compute_apps: list[dict[str, Any]] | None = None,
+    telemetry_services: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """给遥测数据补上「宿主 RAM 归属」与「PhotoBench 相关进程的 GPU 归属」。
-
-    这些字段全部是**尽力而为**：拿不到就不写，**缺失绝不能被读成 0**。
-
-    归属规则（1.0 的原文，照搬）：有 ``model_pids`` 就**只认这批 PID**，否则才退回
-    用 ``process_hint`` / ``endpoint_port`` 去命令行里模糊匹配。后半条是给「没有
-    Manager、不知道 PID」的端点用的；前者是权威，不能被模糊匹配冲淡。
-    """
+    """NVIDIA RAM attribution is PSS; device allocations are a separate pool."""
     data = dict(data or {})
-    # 上一轮可能留下过这几个字段（同一个 data 被反复增强），先清掉再重算。
-    for key in (
-        "product_stack_memory_mib",
-        "benchmark_process_memory_used_mib",
-        "benchmark_process_memory_scope",
-        "sentrix_stack_pss_mib",
-        "sentrix_stack_pss_scope",
-    ):
-        data.pop(key, None)
     try:
-        process_rows = _host_process_rows()
+        rows = _host_process_rows()
     except Exception:
-        process_rows = []
+        rows = []
     try:
-        compute_apps = list(compute_apps) if compute_apps is not None else _query_compute_apps()
+        apps = list(compute_apps) if compute_apps is not None else _query_compute_apps()
     except Exception:
-        compute_apps = []
-
-    known_model_pids = {int(pid) for pid in (model_pids or set()) if str(pid).isdigit()}
-    for key in ("root_pid",):
-        if str(data.get(key) or "").isdigit():
-            known_model_pids.add(int(str(data[key])))
-    for pid in data.get("tracked_pids") or []:
-        if str(pid).isdigit():
-            known_model_pids.add(int(str(pid)))
-    for process in data.get("processes") or data.get("model_processes") or []:
-        if str((process or {}).get("pid") or "").isdigit():
-            known_model_pids.add(int(str(process["pid"])))
-
-    scope = _load_telemetry_services()
+        apps = []
+    model_pids = model_pids or ({int(data["root_pid"])} if data.get("root_pid") else set())
+    scope = telemetry_services if telemetry_services is not None else _load_telemetry_services()
     if scope:
         main_spec = dict(scope.get("main_model") or {})
-        main_local = main_spec.get("local") is not False
-        model_rows: list[dict[str, Any]] = []
-        if main_local:
-            model_rows = _service_rows(process_rows, main_spec)
-            if known_model_pids:
-                known_rows = [dict(row) for row in process_rows if int(row["pid"]) in known_model_pids]
-                model_rows = _dedupe_rows(model_rows + known_rows)
-        model_pids_found = {int(row["pid"]) for row in model_rows}
-
+        model_rows = _service_rows(rows, main_spec)
         embedding = dict(scope.get("embedding") or {})
-        mode = str(embedding.get("mode") or "")
-        profile = dict((embedding.get("profiles") or {}).get(mode) or {})
-        if embedding.get("local") is False or not profile or profile.get("local") is False:
-            profile = {}
-        auxiliary_rows = [
-            row for row in _service_rows(process_rows, profile) if int(row["pid"]) not in model_pids_found
-        ]
-        auxiliary_pids = {int(row["pid"]) for row in auxiliary_rows}
-
-        product_rows: list[dict[str, Any]] = []
-        for product_spec in scope.get("product") or []:
-            if not isinstance(product_spec, dict):
-                continue
-            product_rows.extend(_service_rows(process_rows, product_spec))
-        product_rows = [
-            row
-            for row in _dedupe_rows(product_rows)
-            if int(row["pid"]) not in model_pids_found and int(row["pid"]) not in auxiliary_pids
-        ]
-        sentrix_rows = _dedupe_rows(product_rows + auxiliary_rows)
-        system_rows = _dedupe_rows(model_rows + sentrix_rows)
+        profile = dict((embedding.get("profiles") or {}).get(embedding.get("mode")) or {})
+        auxiliary_rows = _service_rows(rows, profile) if embedding.get("local") is not False else []
+        product_rows = []
+        for spec in scope.get("product") or []:
+            if isinstance(spec, dict):
+                product_rows.extend(_service_rows(rows, spec))
+        product_rows.extend(_service_rows(rows, dict(scope.get("sentrix") or {})))
     else:
-        hint = str(process_hint or "").lower()
-        port = str(endpoint_port or "")
-        model_rows = []
-        for row in process_rows:
-            identity = str(row.get("identity") or "")
-            if known_model_pids:
-                is_model = row["pid"] in known_model_pids
-            else:
-                is_model = bool((hint and hint in identity) or (port and port in identity))
-            if is_model:
-                model_rows.append(row)
-
-        system_rows = [row for row in process_rows if _is_system_related_process(row)]
-        model_pids_found = {row["pid"] for row in model_rows}
-        auxiliary_rows = [
+        model_rows = [
             row
-            for row in system_rows
-            if row["pid"] not in model_pids_found and _is_model_service_process(row)
+            for row in rows
+            if (
+                row["pid"] in model_pids
+                if model_pids
+                else (
+                    endpoint_port in {str(p) for p in row.get("listening_ports") or []}
+                    if endpoint_port
+                    else bool(process_hint and process_hint.lower() in str(row.get("identity", "")))
+                )
+            )
         ]
-        product_rows = [
-            row
-            for row in system_rows
-            if row["pid"] not in model_pids_found and not _is_model_service_process(row)
-        ]
-        sentrix_rows = product_rows + auxiliary_rows
+        related = [row for row in rows if _is_system_related_process(row)]
+        auxiliary_rows = [row for row in related if _is_model_service_process(row)]
+        product_rows = [row for row in related if not _is_model_service_process(row)]
+    found = {row["pid"] for row in model_rows}
+    auxiliary_rows = _dedupe_rows([row for row in auxiliary_rows if row["pid"] not in found])
+    auxiliary_pids = {row["pid"] for row in auxiliary_rows}
+    product_rows = _dedupe_rows([row for row in product_rows if row["pid"] not in found | auxiliary_pids])
+    sentrix_rows = _dedupe_rows(product_rows + auxiliary_rows)
+    system_rows = _dedupe_rows(model_rows + sentrix_rows)
+    pss_by_pid = {int(row["pid"]): _process_pss_mib(int(row["pid"])) for row in system_rows}
+    for row in system_rows + model_rows + sentrix_rows + product_rows + auxiliary_rows:
+        row["pss_mib"] = pss_by_pid.get(int(row["pid"]))
 
-    system_pids = {row["pid"] for row in system_rows}
-    system_gpu_rows = [row for row in compute_apps if row.get("pid") in system_pids]
-    # 调用方给了确切的模型 PID 就地认它，**不许把 PID 选中的模型重新摊成所有匹配
-    # 通用 hint 的进程**（1.0 的注释，照搬）。
-    for row in system_rows:
-        row["pss_mib"] = _process_pss_mib(int(str(row["pid"])))
-        row["smaps_rss_mib"] = _process_smaps_field_mib(int(str(row["pid"])), "Rss:")
-    # scope 模式下 model_rows / sentrix_rows 可能是 _service_rows 的副本，不共享
-    # system_rows 的字典；补一次，避免 _sum_mib 看不到 pss。
-    for row in model_rows + sentrix_rows + product_rows + auxiliary_rows:
-        if "pss_mib" not in row:
-            row["pss_mib"] = _process_pss_mib(int(str(row["pid"])))
-        if "smaps_rss_mib" not in row:
-            row["smaps_rss_mib"] = _process_smaps_field_mib(int(str(row["pid"])), "Rss:")
-    model_rss = _sum_mib(model_rows, "rss_mib")
-    sentrix_pss = _sum_mib(sentrix_rows, "pss_mib")
-    product_pss = _sum_mib(system_rows, "pss_mib")
-    model_smaps_rss = _sum_mib(model_rows, "smaps_rss_mib")
-    system_gpu = _sum_mib(system_gpu_rows, "used_memory_mib")
-    model_memory = unified_model_memory(model_pids_found, rss_mib=model_rss, host_rss_mib=model_smaps_rss)
-    if model_memory:
-        data.update(model_memory)
-        data["model_system_processes"] = [
-            {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
-            for row in model_rows[:20]
-        ]
-    if sentrix_pss is not None:
-        data["sentrix_stack_pss_mib"] = sentrix_pss
-        product_pss_value = _sum_mib(product_rows, "pss_mib")
-        auxiliary_pss_value = _sum_mib(auxiliary_rows, "pss_mib")
-        data["sentrix_product_pss_mib"] = (
-            product_pss_value if product_pss_value is not None else (0.0 if not product_rows else None)
+    def complete_pss(selected: list[dict[str, Any]]) -> float | None:
+        if not selected or any(row.get("pss_mib") is None for row in selected):
+            return None
+        total = component_total([row["pss_mib"] for row in selected])
+        return round(total, 2) if total is not None else None
+
+    model_ram = complete_pss(model_rows)
+    if scope and not service_resolved(rows, main_spec):
+        model_ram = None
+    roles_complete = not scope or all(
+        service_resolved(rows, spec)
+        for spec in [dict(scope.get("sentrix") or {}), profile, *(scope.get("product") or [])]
+        if isinstance(spec, dict)
+    )
+    product_ram = complete_pss(system_rows) if roles_complete and model_ram is not None else None
+    auxiliary_complete = not scope or service_resolved(rows, profile)
+    product_complete = not scope or all(
+        service_resolved(rows, spec)
+        for spec in [dict(scope.get("sentrix") or {}), *(scope.get("product") or [])]
+    )
+    data.update(
+        memory_accounting="nvidia_pss_and_vram",
+        memory_unit="nvidia_device_mib",
+        model_process_system_memory_used_mib=model_ram,
+        model_process_host_memory_mib=model_ram,
+        model_process_system_memory_scope="selected_model_pss",
+        model_process_host_memory_scope="selected_model_pss",
+        product_stack_memory_mib=product_ram,
+        benchmark_process_memory_used_mib=product_ram,
+        benchmark_process_memory_scope="all_related_pss",
+        sentrix_stack_pss_mib=(complete_pss(sentrix_rows) if sentrix_rows else 0.0)
+        if roles_complete
+        else None,
+        sentrix_stack_pss_scope="all_non_main_related_pss",
+        sentrix_product_pss_mib=(complete_pss(product_rows) if product_rows else 0.0)
+        if product_complete
+        else None,
+        sentrix_auxiliary_model_pss_mib=(complete_pss(auxiliary_rows) if auxiliary_rows else 0.0)
+        if auxiliary_complete
+        else None,
+        sentrix_auxiliary_model_uma_mib=0.0,
+        memory_complete=model_ram is not None and product_ram is not None,
+        model_system_processes=model_rows,
+        benchmark_processes=system_rows,
+        process_attribution="endpoint_listener" if model_rows else "unavailable",
+    )
+    related_pids = {row["pid"] for row in system_rows}
+    gpu_rows = [row for row in apps if row.get("pid") in related_pids]
+    if apps:
+        data["benchmark_process_gpu_memory_mib"] = round(
+            sum(float(row["used_memory_mib"]) for row in gpu_rows), 2
         )
-        data["sentrix_auxiliary_model_pss_mib"] = (
-            auxiliary_pss_value if auxiliary_pss_value is not None else (0.0 if not auxiliary_rows else None)
-        )
-        data["sentrix_stack_pss_scope"] = "all_non_main_related_pss"
-    # 产品总量只有在**每个相关进程的 PSS 都在**、且模型的 VmRSS / smaps-Rss 两个
-    # 补偿输入也都在时才写。RSS 仍然是独立的「模型 VmRSS」指标，但**不许悄悄变成
-    # 产品总量**（1.0 的注释，照搬）。
-    pss_complete = bool(system_rows) and all(row.get("pss_mib") is not None for row in system_rows)
-    model_pss_complete = bool(model_rows) and all(row.get("pss_mib") is not None for row in model_rows)
-    if (
-        product_pss is not None
-        and pss_complete
-        and model_rss is not None
-        and model_smaps_rss is not None
-        and model_pss_complete
-        and model_memory.get("model_process_gpu_memory_mib") is not None
-    ):
-        uma_extra = float(model_memory["model_process_gpu_memory_mib"])
-        product_memory = round(product_pss + uma_extra, 2)
-        data["product_stack_memory_mib"] = product_memory
-        data["benchmark_process_memory_used_mib"] = product_memory
-        data["benchmark_process_memory_scope"] = "all_related_pss_plus_model_uma_extra"
-        data["model_uma_extra_mib"] = round(uma_extra, 2)
-        data["benchmark_processes"] = [
-            {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
-            for row in system_rows[:50]
-        ]
-    if system_gpu is not None:
-        data["benchmark_process_gpu_memory_mib"] = system_gpu
-        data["benchmark_process_gpu_memory_scope"] = "photobench_related_gpu_compute_processes"
-        data["benchmark_gpu_processes"] = system_gpu_rows[:50]
-    if compute_apps and data.get("all_processes_memory_mib") is None:
-        data["all_processes_memory_mib"] = round(
-            sum(float(row["used_memory_mib"]) for row in compute_apps), 2
-        )
-        data["all_processes"] = compute_apps
-        data["all_processes_scope"] = "gpu_compute_processes"
+        data["benchmark_gpu_processes"] = gpu_rows
+        data["all_processes_memory_mib"] = round(sum(float(row["used_memory_mib"]) for row in apps), 2)
+        data["all_processes"] = apps
     return data
 
 
@@ -865,7 +808,14 @@ class HostNvidiaTelemetryProvider:
 
     framework = "generic"
 
-    def __init__(self, process_hint: str = "", endpoint_url: str = ""):
+    def __init__(
+        self,
+        process_hint: str = "",
+        endpoint_url: str = "",
+        *,
+        telemetry_services: Mapping[str, Any] | None = None,
+    ):
+        self.telemetry_services = telemetry_services
         self.process_hint = str(process_hint or "").strip().lower()
         self.endpoint_url = normalize_service_url(endpoint_url)
 
@@ -937,6 +887,10 @@ class HostNvidiaTelemetryProvider:
                     )
                 except (ValueError, TypeError):
                     continue
+            process_rows = _host_process_rows() if self.endpoint_port else []
+            listener_pids = {
+                row["pid"] for row in _service_rows(process_rows, {"ports": [self.endpoint_port]})
+            }
             hints = [self.process_hint]
             matches: list[dict[str, Any]] = []
             for item in candidates:
@@ -951,12 +905,10 @@ class HostNvidiaTelemetryProvider:
                 except (OSError, ValueError):
                     pass
                 item["identity"] = identity[:500]
-                if any(hint and hint in identity for hint in hints):
-                    matches.append(item)
-                elif self.endpoint_port and self.endpoint_port in identity:
-                    # 一个通用名字的可执行文件（python）会把运行时的名字藏起来；
-                    # 命令行绑在这个端口的进程仍然是「尽力而为」的有效信号
-                    # （1.0 的注释，照搬）。
+                if self.endpoint_port:
+                    if item["pid"] in listener_pids:
+                        matches.append(item)
+                elif any(hint and hint in identity for hint in hints):
                     matches.append(item)
             if not matches:
                 data = _augment_host_process_memory(
@@ -971,11 +923,14 @@ class HostNvidiaTelemetryProvider:
                     process_hint=self.process_hint,
                     endpoint_port=self.endpoint_port,
                     compute_apps=candidates,
+                    telemetry_services=self.telemetry_services,
                 )
                 return {
-                    "status": "unavailable",
+                    "status": "available"
+                    if data.get("model_process_system_memory_used_mib") is not None
+                    else "unavailable",
                     "source": "host_nvidia_smi",
-                    "reason": "matching_model_process_not_found",
+                    "reason": "matching_gpu_process_not_found",
                     "data": data,
                 }
             others = [item for item in candidates if item not in matches]
@@ -996,13 +951,35 @@ class HostNvidiaTelemetryProvider:
                 endpoint_port=self.endpoint_port,
                 model_pids={int(item["pid"]) for item in matches},
                 compute_apps=candidates,
+                telemetry_services=self.telemetry_services,
             )
             # _augment_host_process_memory 可能补上 RAM 归属，但「模型 GPU 内存」这个
             # 指标**仍然是上面那份 nvidia-smi 的 PID 求和**，不许被增强改写。
             data["process_memory_used_mib"] = model_gpu_memory_mib
             return {"status": "available", "source": "host_nvidia_smi", "data": data}
         except Exception as exc:
-            return {"status": "unavailable", "source": "host_nvidia_smi", "error": str(exc)}
+            data = _augment_host_process_memory(
+                {},
+                process_hint=self.process_hint,
+                endpoint_port=self.endpoint_port,
+                compute_apps=[],
+                telemetry_services=self.telemetry_services,
+            )
+            for key in (
+                "process_memory_used_mib",
+                "benchmark_process_gpu_memory_mib",
+                "all_processes_memory_mib",
+                "other_processes_memory_mib",
+            ):
+                data[key] = None
+            return {
+                "status": "available"
+                if data.get("model_process_system_memory_used_mib") is not None
+                else "unavailable",
+                "source": "host_nvidia_smi",
+                "error": str(exc),
+                "data": data,
+            }
 
     def kv_cache(self) -> dict[str, Any]:
         return {
@@ -1016,8 +993,10 @@ class HostNvidiaTelemetryProvider:
 class LlamaCppTelemetryProvider(HostNvidiaTelemetryProvider):
     framework = "llama.cpp"
 
-    def __init__(self, endpoint_url: str = ""):
-        super().__init__(process_hint="llama-server", endpoint_url=endpoint_url)
+    def __init__(self, endpoint_url: str = "", *, telemetry_services: Mapping[str, Any] | None = None):
+        super().__init__(
+            process_hint="llama-server", endpoint_url=endpoint_url, telemetry_services=telemetry_services
+        )
 
 
 class VllmTelemetryProvider(HostNvidiaTelemetryProvider):
@@ -1025,15 +1004,19 @@ class VllmTelemetryProvider(HostNvidiaTelemetryProvider):
 
     framework = "vllm"
 
-    def __init__(self, endpoint_url: str = ""):
-        super().__init__(process_hint="vllm", endpoint_url=endpoint_url)
+    def __init__(self, endpoint_url: str = "", *, telemetry_services: Mapping[str, Any] | None = None):
+        super().__init__(
+            process_hint="vllm", endpoint_url=endpoint_url, telemetry_services=telemetry_services
+        )
 
 
 class OllamaTelemetryProvider(HostNvidiaTelemetryProvider):
     framework = "ollama"
 
-    def __init__(self, endpoint_url: str = ""):
-        super().__init__(process_hint="ollama", endpoint_url=endpoint_url)
+    def __init__(self, endpoint_url: str = "", *, telemetry_services: Mapping[str, Any] | None = None):
+        super().__init__(
+            process_hint="ollama", endpoint_url=endpoint_url, telemetry_services=telemetry_services
+        )
 
 
 class OrinLlamaCppTelemetryProvider:
@@ -1049,7 +1032,7 @@ class OrinLlamaCppTelemetryProvider:
     remote = "orin@192.168.0.118"
     pid_file = "/home/orin/VLM/gemma4/results/orin/server_photobench_8100.pid"
 
-    def __init__(self, endpoint_url: str = ""):
+    def __init__(self, endpoint_url: str = "", *, telemetry_services: Mapping[str, Any] | None = None):
         parsed = urlparse(normalize_service_url(endpoint_url))
         if parsed.hostname != "192.168.0.118" or parsed.port != 8100:
             raise ValueError("Orin telemetry is only configured for the 118:8100 endpoint")

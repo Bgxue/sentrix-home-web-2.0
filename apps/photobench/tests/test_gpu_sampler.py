@@ -112,7 +112,7 @@ def test_process_lists_default_to_empty_lists_not_none():
         assert samples[0][key] == []
 
 
-def test_an_unavailable_gpu_probe_produces_no_sample_at_all():
+def test_an_unavailable_gpu_probe_preserves_fresh_memory():
     """探不到就**不产出样本**，而不是产出一条全 0 的。
 
     0 是一个合法的测量结果（真的 0% 利用率），缺失不是——1.0 ``:1712`` 的判据就是
@@ -125,7 +125,9 @@ def test_an_unavailable_gpu_probe_produces_no_sample_at_all():
     """
     sampler = GpuSampler(_UnavailableWithStaleData(), on_sample=lambda _sample: None)
     sampler.sample_once()
-    assert sampler.samples == []
+    assert len(sampler.samples) == 1
+    assert sampler.samples[0].get("temperature_c") is None
+    assert sampler.samples[0]["source_status"]["device"] == "unavailable"
 
 
 def test_a_failing_callback_does_not_stop_the_sampling_loop():
@@ -207,3 +209,26 @@ class _UnavailableWithStaleData(_LayeredTelemetry):
 class _RaisingTelemetry(_LayeredTelemetry):
     def gpu_stats(self) -> dict[str, Any]:
         raise RuntimeError("nvidia-smi 不在 PATH 上")
+
+
+def test_all_sources_failed_preserves_reason_and_null_without_reusing_old_values():
+    class Failed:
+        def gpu_stats(self):
+            return {"status": "unavailable", "reason": "exited", "data": {"gpus": [{"power_draw_w": 50}]}}
+
+        def process_memory(self):
+            return {"status": "unavailable", "reason": "permission_denied"}
+
+        def system_memory(self):
+            return {"status": "unavailable", "reason": "read_failed"}
+
+    sampler = GpuSampler(Failed())
+    sampler.sample_once()
+    sample = sampler.samples[0]
+    assert sample.get("power_draw_w") is None
+    assert sample["model_process_system_memory_used_mib"] is None
+    assert sample["source_diagnostics"]["device"]["reason"] == "exited"
+    assert sample["source_diagnostics"]["process"]["reason"] == "permission_denied"
+    sampler.stop()
+    sampler.sample_once()
+    assert len(sampler.samples) == 1

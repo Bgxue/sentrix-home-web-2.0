@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -241,6 +242,29 @@ def _read_tool_calls(raw: object) -> tuple[ToolCall, ...]:
     return tuple(calls)
 
 
+def _tool_parse_facts(raw: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(raw, list):
+        return ()
+    facts: list[Mapping[str, Any]] = []
+    for index, item in enumerate(raw):
+        function = item.get("function") if isinstance(item, dict) else None
+        arguments = function.get("arguments") if isinstance(function, dict) else None
+        valid = False
+        if isinstance(arguments, str):
+            with contextlib.suppress(ValueError):
+                valid = isinstance(json.loads(arguments), dict)
+        elif isinstance(arguments, dict):
+            valid = True
+        facts.append(
+            {
+                "index": index,
+                "json_object_valid": valid,
+                "envelope_valid": isinstance(function, dict) and bool(function.get("name")),
+            }
+        )
+    return tuple(facts)
+
+
 class OpenAIChatModel:
     """同步 HTTP 客户端。2.0 不管理 8100 的进程，只连它。
 
@@ -331,6 +355,7 @@ class OpenAIChatModel:
             thought=thought,
             tool_calls=_read_tool_calls(message.get("tool_calls")),
             finish_reason=str(choice.get("finish_reason") or ""),
+            tool_argument_parse_facts=_tool_parse_facts(message.get("tool_calls")),
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
         )

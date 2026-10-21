@@ -341,7 +341,7 @@ def test_host_nvidia_never_claims_every_gpu_process_is_the_model(
     provider = HostNvidiaTelemetryProvider(endpoint_url="http://127.0.0.1:8100/v1")
     result = provider.process_memory()
     assert result["status"] == "unavailable"
-    assert result["reason"] == "matching_model_process_not_found"
+    assert result["reason"] == "matching_gpu_process_not_found"
 
 
 def test_vllm_provider_separates_the_model_from_other_gpu_processes(
@@ -456,7 +456,7 @@ def test_model_services_are_classified_for_auxiliary_split() -> None:
     )
 
 
-def test_attribution_sums_related_pss_plus_model_uma_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nvidia_attribution_keeps_pss_and_vram_separate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES])
     monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: 50.0, 200: 150.0}[pid])
     monkeypatch.setattr(
@@ -465,10 +465,10 @@ def test_attribution_sums_related_pss_plus_model_uma_extra(monkeypatch: pytest.M
     data = providers._augment_host_process_memory(
         {"root_pid": 200}, process_hint="vllm", model_pids={200}, compute_apps=COMPUTE
     )
-    assert data["model_process_system_memory_used_mib"] == 200.0
+    assert data["model_process_system_memory_used_mib"] == 150.0
     # 50（sentrix PSS）+ 150（模型 PSS）+ max(0, 200-200)（UMA 补偿）= 200
     assert data["benchmark_process_memory_used_mib"] == 200.0
-    assert data["benchmark_process_memory_scope"] == "all_related_pss_plus_model_uma_extra"
+    assert data["benchmark_process_memory_scope"] == "all_related_pss"
     assert data["sentrix_stack_pss_mib"] == 50.0
     assert data["sentrix_product_pss_mib"] == 50.0
     assert data["sentrix_auxiliary_model_pss_mib"] == 0.0
@@ -603,12 +603,12 @@ def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(
         compute_apps=[],
     )
     # 传进来的旧产品总量必须先被清掉：留着它会被读成这一轮的测量值。
-    assert "product_stack_memory_mib" not in data
-    assert "benchmark_process_memory_used_mib" not in data
-    assert data["model_process_system_memory_used_mib"] == 200.0
+    assert data["product_stack_memory_mib"] is None
+    assert data["benchmark_process_memory_used_mib"] is None
+    assert data["model_process_system_memory_used_mib"] == 150.0
 
 
-def test_missing_model_smaps_rss_does_not_write_product_total(
+def test_nvidia_pss_does_not_require_jetson_smaps_rss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES[:2]])
@@ -621,8 +621,8 @@ def test_missing_model_smaps_rss_does_not_write_product_total(
         model_pids={200},
         compute_apps=[],
     )
-    assert "product_stack_memory_mib" not in data
-    assert "benchmark_process_memory_used_mib" not in data
+    assert data["product_stack_memory_mib"] == 300.0
+    assert data["benchmark_process_memory_used_mib"] == 300.0
 
 
 def test_known_model_pids_win_over_the_generic_hint(monkeypatch: pytest.MonkeyPatch) -> None:

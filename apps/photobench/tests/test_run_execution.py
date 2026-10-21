@@ -940,11 +940,13 @@ def test_sampling_writes_labelled_samples_and_is_stopped_at_the_end():
 
     sampler_module.GpuSampler.start = start_and_sample  # type: ignore[method-assign]
     try:
-        execution.execute(_request())
+        result = execution.execute(_request())
     finally:
         sampler_module.GpuSampler.start = original  # type: ignore[method-assign]
     assert writer.resets == ["run_test"]
-    assert len(writer.gpu_samples) == 1
+    assert len(writer.gpu_samples) == 4
+    assert {s["phase"] for _, s in writer.gpu_samples} >= {"photo_import", "pipeline_processing", "qa_eval"}
+    assert result["phases"]["gpu_metrics"]["samples_count"] == len(writer.gpu_samples)
     _run_id, sample = writer.gpu_samples[0]
     assert sample["temperature_c"] == 60.0
     assert sample["model_process_memory_used_mib"] == 1234

@@ -471,11 +471,13 @@ def traces_from_progress(
                     "stage": "model",
                     "type": "model_call",
                     "call_type": str(call.get("call_type") or "agent"),
-                    "status": "complete",
+                    "status": call.get("status", "complete"),
+                    "tool_argument_parse_facts": call.get("tool_argument_parse_facts"),
+                    "error_type": call.get("error_type"),
+                    "attempt": call.get("attempt"),
                     # ``action`` 是「这一步做了什么」：调了哪个工具，或者就是收口。
                     # ``agent_stability`` 的 ``parsed_success`` 按它判「这一步解析出了动作」。
                     "action": tools[0] if tools else "final",
-                    "parse_status": "success",
                     "prompt_tokens": call.get("prompt_tokens"),
                     "completion_tokens": call.get("completion_tokens"),
                     "duration_ms": call.get("duration_ms"),

@@ -92,6 +92,12 @@ export type RunPhases = Record<string, Phase | undefined>;
  * 下存在的可空字段。
  */
 export interface TelemetryLive {
+  metrics_contract_version?: number;
+  memory_accounting?: "nvidia_pss_and_vram" | "jetson_pss_plus_nvmap_estimate" | "apple_capacity_estimate";
+  memory_complete?: boolean;
+  field_stats?: Record<string, { peak?: number; mean?: number; p95?: number; valid_count?: number }>;
+  rejected_samples?: Record<string, number>;
+  sampling?: Record<string, unknown>;
   source?: string;
   status?: string;
   samples_count?: number;
@@ -133,6 +139,9 @@ export interface RejudgeTask {
 
 /** 一条 run。字段来自 `/api/v1/runs` 实测响应（2026-10-06，8771）。 */
 export interface Run {
+  metrics_contract_version?: number;
+  build_revision?: string;
+  runtime_snapshot?: Readonly<Record<string, unknown>> | null;
   run_id: string;
   /** `full` / `reuse` / `build`（`RUN_MODES_UI` `:2540`）。 */
   mode?: string;

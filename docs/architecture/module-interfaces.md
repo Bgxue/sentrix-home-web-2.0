@@ -834,6 +834,13 @@ def test_chat_model_maps_prompt_too_long():
 > 切换方案必须重建向量（旧 `model_name` 的行不会命中）。新增任何同类开关前，
 > 先回答 §5.7 的问题：它是不是部署事实？
 
+T006 指标 v2 的可选契约见 [photobench-metrics-contract.md](photobench-metrics-contract.md)。
+运行拓扑值对象 `RunRuntimeSnapshot` 定义于 `photobench/domain/runtime/ports.py`；
+由配置端口读出并在application建run时冻结，bootstrap的 `runtime_providers_for_run` 注入HTTP与遥测。
+旧 `runtime_providers` 装配入口保留一个发布周期。`TelemetryProvider` 四方法签名不变；
+失败继续返回unavailable/not_applicable并附原因。严格遥测仅由独立回归验收器判定。
+产品调用轨迹新增解析尝试/成功数与错误耗时等通用事实，不在产品层定义benchmark规则。
+
 ### 6.2 非 `Settings` 的环境变量
 
 | 变量 | 作用 | 默认 | 所属 |
@@ -854,6 +861,8 @@ def test_chat_model_maps_prompt_too_long():
 | `SENTRIX_FACE_GPU_MAX_CONCURRENCY` | 人脸 GPU 并发 | `1` | 人脸闸门 |
 | `SENTRIX_PLANNER_MAX_ATTEMPTS` | 规划重试 | `3` | application |
 | `SENTRIX_PERSON_INSIGHT_SCOPES` | 画像允许列表 | 空 | application |
+| `SENTRIX_LIB_THREADS` | 数值库/ORT/torch/OpenCV线程上限；入口先设置OMP等 | 空=自动，0=不限制 | process entry / infrastructure |
+| `SENTRIX_PIPELINE_MAX_WORKERS` | 自动线程推导的并发分母 | 4 | thread limits |
 
 ### 6.3 评测侧
 
@@ -861,6 +870,13 @@ def test_chat_model_maps_prompt_too_long():
 |---|---|
 | `PHOTOBENCH_JUDGE_CONCURRENCY` | Judge 并发覆盖（默认 `min(8, qa_concurrency)`） |
 | `judge_providers.json` | Judge 端点/模型/密钥 env 名 |
+| `runtime_connection.json` | 主模型、Sentrix、嵌入及产品服务拓扑唯一配置源；每run冻结，已运行快照不变 |
+| `PHOTOBENCH_CONFIG_ROOT` | 配置根；优先于旧单文件路径覆盖 |
+| `PHOTOBENCH_RUNTIME_CONNECTION` / `PHOTOBENCH_RUNTIME_SERVICES` | 旧单文件路径入口，未指定CONFIG_ROOT时兼容 |
+| `PHOTOBENCH_DATA_ROOT` / `PHOTOBENCH_RESULTS_ROOT` | 数据集及结果根；发布显式绑定原路径 |
+| `build-info.json` | 固定release的SHA与指标契约版本；缺文件为development |
+| `SENTRIX_WEB_DIST_DIR` / `PHOTOBENCH_WEB_DIST_ROOT` | 统一构建的前端dist根 |
+| `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | 回归发布设置为1；缺权重在preflight暴露 |
 | `custom_judge_prompt.json` | 自定义评分提示词 |
 | run 请求字段 | 单轮覆盖 judge URL/model |
 

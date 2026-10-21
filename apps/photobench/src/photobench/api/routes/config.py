@@ -29,7 +29,12 @@ MAX_JUDGE_PROMPT_LENGTH = 50000
 @router.get("/config")
 def get_config(request: Request) -> dict[str, Any]:
     """1.0 ``:7536``。"""
-    return get_container(request).config.public_config()
+    container = get_container(request)
+    return {
+        **container.config.public_config(),
+        "build_revision": container.build_revision,
+        "metrics_contract_version": 2,
+    }
 
 
 @router.post("/config")

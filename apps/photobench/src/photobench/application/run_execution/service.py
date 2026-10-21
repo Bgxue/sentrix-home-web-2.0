@@ -47,6 +47,7 @@ import concurrent.futures
 import contextlib
 import json
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -88,6 +89,7 @@ from photobench.domain.runs.execution import (
 from photobench.domain.runtime.ports import (
     InferenceProvider,
     LifecycleProvider,
+    RunRuntimeSnapshot,
     TelemetryProvider,
 )
 from photobench.domain.sentrix.ports import SentrixClient
@@ -195,6 +197,7 @@ class RunRequest:
     judge_api_key: str = ""
     judge_prompts: Mapping[str, str | None] = field(default_factory=dict)
     evidence_judge_enabled: bool = False
+    runtime_snapshot: RunRuntimeSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +236,7 @@ class RunExecution:
     judge_settings: JudgeSettings | None = None
     #: 选中的遥测来源（``select_runtime_providers`` 的 ``source``）。写进 run.json
     #: 供读侧与运维判断这轮的数字是什么口径（1.0 ``:1977`` 的 ``telemetry_source``）。
+    runtime_snapshot: RunRuntimeSnapshot | None = None
     telemetry_source: str = ""
     #: 召回图 → data URL 的实现（要用 PIL）。由装配点注入，application 不许 import PIL。
     inline_images: InlineImages | None = None
@@ -358,6 +362,8 @@ class RunExecution:
                 current = name
                 state.set("current_phase", name)
                 state.phase_start(name)
+                if sampling and name in {"photo_import", "pipeline_processing", "qa_eval"}:
+                    sampler.sample_once()
                 phase(state, request)
                 state.persist()
             partial = any(
@@ -381,6 +387,11 @@ class RunExecution:
         finally:
             if sampling:
                 sampler.stop()
+                # The last in-flight sample may finish after gpu_metrics was
+                # aggregated. Persist statistics over the same complete raw set.
+                if (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "done":
+                    for key, value in sampler.aggregate().items():
+                        state.record_phase("gpu_metrics", key, value)
             state.set("current_phase", None)
             state.set("finished_at", now_iso())
             snapshots = dict(state.get("hardware_snapshots") or {})
@@ -415,6 +426,11 @@ class RunExecution:
     ) -> dict[str, Any]:
         rows = self.albums.qa_rows(album_id, request.qa_set)
         return {
+            "metrics_contract_version": 2,
+            "build_revision": self.runtime_snapshot.build_revision
+            if self.runtime_snapshot
+            else "development",
+            "runtime_snapshot": self.runtime_snapshot.connection() if self.runtime_snapshot else None,
             "run_id": run_id,
             # **这两个键以前是硬编码的**（``"full"`` / ``"created_by_import"``），
             # 所以 run.json 里的 mode 永远是 full——复用过的 run 与新建的 run
@@ -523,9 +539,9 @@ class RunExecution:
         def on_sample(sample: dict[str, Any]) -> None:
             phase = str(state.get("current_phase") or "unassigned")
             label = PHASE_LABELS.get(phase, phase)
+            sample.setdefault("phase", phase)
+            sample.setdefault("phase_label", label)
             persisted = dict(sample)
-            persisted.setdefault("phase", phase)
-            persisted.setdefault("phase_label", label)
             self.writer.append_gpu_sample(state.run_id, persisted)
             live = state.mutate("telemetry_live")
             with state.lock:
@@ -1360,6 +1376,8 @@ class RunExecution:
         state.set("judge_concurrency", judge_concurrency if judge is not None else 0)
         state.record_phase("qa_eval", "agent_total", len(rows))
         state.record_phase("qa_eval", "agent_phase_started_at", now_iso())
+        agent_phase_started = time.perf_counter()
+        judge_phase_started: float | None = None
         if judge is not None:
             state.record_phase("qa_eval", "judge_total", len(rows))
 
@@ -1394,6 +1412,18 @@ class RunExecution:
         record_progress(len(items))
         judge_futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
         judge_done = 0
+        judge_bounds: list[tuple[float, float, str, str]] = []
+        judge_bounds_lock = threading.Lock()
+
+        def run_judge(item: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+            begin, begin_iso = time.perf_counter(), now_iso()
+            try:
+                assert judge is not None
+                return judge.judge_item(item, row, assets_by_name)
+            finally:
+                with judge_bounds_lock:
+                    judge_bounds.append((begin, time.perf_counter(), begin_iso, now_iso()))
+
         judge_pool = (
             concurrent.futures.ThreadPoolExecutor(
                 max_workers=judge_concurrency, thread_name_prefix="qa-judge"
@@ -1434,9 +1464,10 @@ class RunExecution:
                     else:
                         item.setdefault("judge_status", "pending")
                         if judge is not None and judge_pool is not None:
-                            judge_futures[
-                                judge_pool.submit(judge.judge_item, item, rows[index], assets_by_name)
-                            ] = index
+                            if judge_phase_started is None:
+                                judge_phase_started = time.perf_counter()
+                                state.record_phase("qa_eval", "judge_phase_started_at", now_iso())
+                            judge_futures[judge_pool.submit(run_judge, item, rows[index])] = index
                     items[index] = item
                     # 1.0 ``:3536-3538``：``completed`` 数的是**成功**的那些，不是「轮到
                     # 了的」那些。用 ``len(items)`` 的话，取消时进度条显示 487/487 而实际
@@ -1450,6 +1481,12 @@ class RunExecution:
                     with state.lock:
                         state.data["items"] = [items[i] for i in sorted(items)]
                     state.persist()
+                state.record_phase("qa_eval", "agent_phase_finished_at", now_iso())
+                state.record_phase(
+                    "qa_eval",
+                    "agent_phase_wall_ms",
+                    round((time.perf_counter() - agent_phase_started) * 1000, 1),
+                )
                 for judge_future in concurrent.futures.as_completed(tuple(judge_futures)):
                     index = judge_futures[judge_future]
                     try:
@@ -1465,6 +1502,12 @@ class RunExecution:
         finally:
             if judge_pool is not None:
                 judge_pool.shutdown(wait=True)
+            if judge_bounds:
+                first = min(judge_bounds, key=lambda bound: bound[0])
+                last = max(judge_bounds, key=lambda bound: bound[1])
+                state.record_phase("qa_eval", "judge_phase_started_at", first[2])
+                state.record_phase("qa_eval", "judge_phase_finished_at", last[3])
+                state.record_phase("qa_eval", "judge_phase_wall_ms", round((last[1] - first[0]) * 1000, 1))
         with state.lock:
             ordered = [items[i] for i in sorted(items)]
             for item in ordered:
@@ -1706,6 +1749,7 @@ class RunExecution:
                     "retrieval_recall": metrics["media"]["recall"],
                     "retrieval_precision": metrics["media"]["precision"],
                     "retrieval_f1": metrics["media"]["f1"],
+                    "metrics_contract_version": 2,
                     "wall_clock_ms": round((time.perf_counter() - started) * 1000, 1),
                     # judge 三个占位与 1.0 同一位置同一文案（``:3555-3557``）。
                     # 本切片不打分，所以它们**必须**是 pending 而不是 0——
@@ -1738,6 +1782,7 @@ class RunExecution:
                     "media_retrieval_precision": None,
                     "media_retrieval_f1": None,
                     "judge": {"score": None, "reason": "error"},
+                    "metrics_contract_version": 2,
                     "wall_clock_ms": round((time.perf_counter() - started) * 1000, 1),
                 }
             )

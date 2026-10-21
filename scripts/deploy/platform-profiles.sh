@@ -28,7 +28,9 @@ export SENTRIX_VLM_BASE_URL="${SENTRIX_VLM_BASE_URL:-http://127.0.0.1:8100/v1}"
 
 case "$_profile" in
   153)
-    # 153 有 24 GB 独显：WeMM 侧车 8102 常驻，人脸走 CUDA（不显式声明 CPU）。
+    # 153: reserve the device for its local main/embedding models; faces run on CPU.
+    export FACE_PROVIDERS="${FACE_PROVIDERS:-CPUExecutionProvider}"
+    export RETINAFACE_PROVIDERS="${RETINAFACE_PROVIDERS:-CPUExecutionProvider}"
     export SENTRIX_EMBEDDING_SCHEME="${SENTRIX_EMBEDDING_SCHEME:-wemm}"
     export SENTRIX_WEMM_URL="${SENTRIX_WEMM_URL:-http://127.0.0.1:8102}"
     ;;

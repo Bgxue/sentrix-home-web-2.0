@@ -62,13 +62,13 @@ def test_unified_total_is_host_plus_gpu_without_double_counting(
     assert data["model_process_system_memory_scope"] == "host_smaps_rss_plus_gpu_uma"
 
 
-def test_without_smaps_split_the_whole_vmrss_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_without_smaps_split_the_total_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jetson, "_nvmap_clients_mib", lambda: {42: 2617.9})
     data = jetson.unified_model_memory({42}, rss_mib=714.6, host_rss_mib=None)
-    assert data["model_process_system_memory_used_mib"] == 714.6
-    assert data["model_process_system_memory_scope"] == "host_process_vmrss"
+    assert data["model_process_system_memory_used_mib"] is None
+    assert data["model_process_system_memory_scope"] == "host_smaps_rss_plus_gpu_uma"
     assert data["model_process_gpu_memory_source"] == "unavailable"
-    assert "model_process_host_memory_mib" not in data
+    assert data["model_process_host_memory_mib"] is None
 
 
 def test_no_inputs_writes_nothing() -> None:

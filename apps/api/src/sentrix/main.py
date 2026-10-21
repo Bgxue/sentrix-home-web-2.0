@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+# The ASGI factory is also launched directly, without start_api.sh. Apply the
+# process policy before route/container imports can initialize numpy/BLAS.
+from sentrix.infrastructure.thread_limits import configure_thread_environment
+
+configure_thread_environment()
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path

@@ -13,11 +13,10 @@ if [ -f deploy/thread-limits.env ]; then
   . deploy/thread-limits.env
 fi
 # 服务拓扑的唯一来源；没有这份文件时保持旧的环境变量启动方式。
-if [ -f apps/photobench/config/runtime_connection.json ]; then
-  eval "$(.venv/bin/python scripts/deploy/runtime_connection_env.py)"
-fi
+eval "$(.venv/bin/python scripts/deploy/runtime_connection_env.py)"
 
-export SENTRIX_LIB_THREADS="${SENTRIX_LIB_THREADS:-}"
+# Resolve auto before any numerical library is imported. Explicit 0 remains unlimited.
+export SENTRIX_LIB_THREADS="$(.venv/bin/python -c 'from sentrix.infrastructure.thread_limits import lib_threads; print(lib_threads())')"
 if [ -n "$SENTRIX_LIB_THREADS" ] && [ "$SENTRIX_LIB_THREADS" != "0" ]; then
   export OMP_NUM_THREADS="$SENTRIX_LIB_THREADS"
   export MKL_NUM_THREADS="$SENTRIX_LIB_THREADS"

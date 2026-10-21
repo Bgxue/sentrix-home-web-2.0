@@ -75,6 +75,7 @@ from sentrix.domain.spaces.ports import SpaceRepository
 from sentrix.infrastructure.assistant.chat_client import OpenAIChatModel
 from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
 from sentrix.infrastructure.assistant.model_endpoint import ServedModel, probe_context_tokens
+from sentrix.infrastructure.build import read_build_revision
 from sentrix.infrastructure.media.audio_metadata import FfprobeAudioMetadataReader
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
@@ -245,6 +246,7 @@ class Container:
     # 内存里的实时事件流。它没有持久化的一面——历史事件在 agent_turn_events 表里，
     # 两半合起来才构成完整的 SSE 语义（见 domain/assistant/ports.py 的 TurnEventBroker）。
     turn_event_broker: TurnEventBroker
+    build_revision: str = "development"
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -299,6 +301,7 @@ class Container:
         # 「这个人的归属与关系」（S7c）。拿在手上传两次，而不是就地 new 两个实例。
         family = SqliteFamilyGraphRepository(database, entities)
         return cls(
+            build_revision=read_build_revision(),
             settings=settings,
             database=database,
             spaces=SqliteSpaceRepository(database),

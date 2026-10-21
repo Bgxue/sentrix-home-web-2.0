@@ -45,8 +45,9 @@ from __future__ import annotations
 
 import os
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -169,7 +170,12 @@ def detect_runtime_framework(
 
 
 def select_runtime_providers(
-    manager_url: str, endpoint_url: str, framework: str, *, cloud: bool = False
+    manager_url: str,
+    endpoint_url: str,
+    framework: str,
+    *,
+    cloud: bool = False,
+    telemetry_services: Mapping[str, Any] | None = None,
 ) -> SelectedRuntime:
     """1.0 ``:176`` 逐分支照搬。
 
@@ -195,11 +201,19 @@ def select_runtime_providers(
     jetson = is_jetson_host()
     if not cloud and framework in {"llama.cpp", "llamacpp"} and jetson and host in local_hosts:
         return SelectedRuntime(
-            lifecycle, LocalJetsonLlamaCppTelemetryProvider(endpoint_url=endpoint_url), "jetson_local_pss"
+            lifecycle,
+            LocalJetsonLlamaCppTelemetryProvider(
+                endpoint_url=endpoint_url, telemetry_services=telemetry_services
+            ),
+            "jetson_local_pss",
         )
     if not cloud and is_apple_silicon() and is_local_endpoint:
         return SelectedRuntime(
-            lifecycle, LocalAppleUnifiedTelemetryProvider(endpoint_url=endpoint_url), "apple_unified"
+            lifecycle,
+            LocalAppleUnifiedTelemetryProvider(
+                endpoint_url=endpoint_url, telemetry_services=telemetry_services
+            ),
+            "apple_unified",
         )
     if not cloud and not jetson and host in local_hosts:
         telemetry_class = {
@@ -208,7 +222,11 @@ def select_runtime_providers(
             "ollama": OllamaTelemetryProvider,
             "vllm": VllmTelemetryProvider,
         }.get(framework, HostNvidiaTelemetryProvider)
-        return SelectedRuntime(lifecycle, telemetry_class(endpoint_url=endpoint_url), "host_nvidia_smi")
+        return SelectedRuntime(
+            lifecycle,
+            telemetry_class(endpoint_url=endpoint_url, telemetry_services=telemetry_services),
+            "host_nvidia_smi",
+        )
     return SelectedRuntime(lifecycle, UnavailableTelemetryProvider(), "unavailable")
 
 

@@ -25,6 +25,21 @@ import {
 // 让缺字段的几种回退（`-` / `0` / `未提供` / `未标注范围`）互不相同。
 
 describe("gpuMetricsView (:857-935)", () => {
+  it("降采样曲线不能覆盖完整样本统计，空值不进入均值", () => {
+    const view = gpuMetricsView({
+      status: "running",
+      telemetry_live: {
+        samples_count: 500,
+        history: [{ gpu_utilization_pct: 1 }, { gpu_utilization_pct: null }],
+        field_stats: { gpu_utilization_pct: { peak: 80, mean: 35, p95: 65, valid_count: 400 } },
+      },
+    });
+    expect(view.gpu_utilization_pct).toEqual({ peak: 80, mean: 35, p95: 65, valid_count: 400 });
+    const sparse = gpuMetricsView({ status: "running", telemetry_live: {
+      samples_count: 3, history: [{ gpu_utilization_pct: null }, { gpu_utilization_pct: 0 }, { gpu_utilization_pct: 20 }],
+    } });
+    expect(sparse.gpu_utilization_pct).toEqual({ peak: 20, mean: 10, p95: 20 });
+  });
   it("有 ≥20 个历史采样时：peak=max、mean=算术平均、p95=floor(n*0.95) 位（不是 max）", () => {
     const history = Array.from({ length: 21 }, (_, i) => ({ gpu_utilization_pct: i + 1 }));
     const run = {
@@ -49,14 +64,14 @@ describe("gpuMetricsView (:857-935)", () => {
     expect(view.gpu_utilization_pct).toEqual({ peak: 30, mean: 20, p95: 30 });
   });
 
-  it("历史为空时退回 live.latest/peak（mean 取 latest，peak/p95 取 peak）", () => {
+  it("缺少完整历史时不伪造均值和 P95", () => {
     const run = {
       status: "running",
       telemetry_source: "nvidia_smi",
       telemetry_live: { samples_count: 5, latest: { gpu_utilization_pct: 5 }, peak: { gpu_utilization_pct: 9 } },
     };
     const view = gpuMetricsView(run);
-    expect(view.gpu_utilization_pct).toEqual({ mean: 5, peak: 9, p95: 9 });
+    expect(view.gpu_utilization_pct).toEqual({});
     expect(view.samples_count).toBe(5);
     expect(view.source).toBe("nvidia_smi");
   });
@@ -279,14 +294,14 @@ describe("aggregateMetricRows (:1212-1253) / keyMetricRows (:1254-1304)", () => 
     expect(typed[0][0]).toBe("媒体检索 Precision");
     const historical = aggregateMetricRows({}, {});
     expect(historical[0][0]).toBe("历史图片检索 Precision");
-    expect(historical[12][1]).toBe("未记录"); // 视频检索 P/R/F1
+    expect(historical.find((r) => r[0] === "视频检索 P / R / F1")?.[1]).toBe("未记录"); // 视频检索 P/R/F1
   });
 
   it("吞吐时延 note 区分「实测相位」与「时间线回退」", () => {
     const measured = aggregateMetricRows({ qa_concurrency: 4 }, { agent_throughput_latency_mode: "measured_agent_phase", agent_phase_completed_count: 10 });
-    expect(measured[5][2]).toContain("实际墙钟");
+    expect(measured.find((r) => r[0] === "Agent 并发吞吐折算时延")?.[2]).toContain("实际墙钟");
     const fallback = aggregateMetricRows({}, { agent_throughput_latency_sample_count: 3, agent_throughput_latency_total_count: 10 });
-    expect(fallback[5][2]).toContain("不能视为实测");
+    expect(fallback.find((r) => r[0] === "Agent 并发吞吐折算时延")?.[2]).toContain("不能视为实测");
   });
 
   it("keyMetricRows 未落盘候选顺序时不补零", () => {
@@ -367,7 +382,7 @@ describe("gpuMetricRows (:785-856)", () => {
 
   it("apple_unified / orin 分支行数与首标签不同", () => {
     const apple = gpuMetricRows({ source: "apple_unified", samples_count: 4, model_process_system_memory_used_mib: { peak: 1024, mean: 512 } });
-    expect(apple).toHaveLength(11);
+    expect(apple).toHaveLength(13);
     expect(apple[0][0]).toBe("主模型占用（footprint+权重）");
     const orin = gpuMetricRows({ source: "orin_ssh_pss", samples_count: 4 });
     expect(orin).toHaveLength(9);

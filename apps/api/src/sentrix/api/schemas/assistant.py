@@ -120,7 +120,14 @@ class CompleteEventPayload(BaseModel):
     #
     # 进度流（``public_progress``）同时是终端用户看到的进度条，``apps/web`` 的
     # ``AssistantPanel`` 把每一条都渲染成一行；往里加事件就是给用户每一步多加一行噪音。
-    trace: dict[str, Any] = {}
+    trace: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Execution facts. model_calls optionally includes status, attempt, duration_ms and "
+            "tool_argument_parse_facts (json_object_valid per native tool envelope); "
+            "plain-text completion is not a JSON parse attempt."
+        ),
+    )
     error: str = ""
 
 

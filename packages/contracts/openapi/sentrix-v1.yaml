@@ -2468,7 +2468,9 @@ components:
           additionalProperties: true
           type: object
           title: Trace
-          default: {}
+          description: Execution facts. model_calls optionally includes status, attempt,
+            duration_ms and tool_argument_parse_facts (json_object_valid per native
+            tool envelope); plain-text completion is not a JSON parse attempt.
         error:
           type: string
           title: Error

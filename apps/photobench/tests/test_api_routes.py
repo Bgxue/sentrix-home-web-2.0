@@ -83,6 +83,25 @@ def test_get_run_returns_the_state_without_items(client: TestClient):
     assert body["summary"]["answer_quality_mean"] == 2.0
 
 
+def test_optional_metrics_projection_preserves_unknown_and_explicit_zero(client: TestClient):
+    path = client.app.state.container.settings.results_root / "run-a" / "run.json"
+    state = json.loads(path.read_text())
+    state["telemetry_live"] = {
+        "latest": {
+            "memory_complete": False,
+            "model_process_gpu_memory_mib": None,
+            "model_process_host_memory_mib": 0,
+            "product_stack_memory_mib": None,
+        }
+    }
+    path.write_text(json.dumps(state))
+    latest = client.get("/api/v1/runs/run-a").json()["telemetry_live"]["latest"]
+    assert latest["model_process_gpu_memory_mib"] is None
+    assert latest["model_process_host_memory_mib"] == 0
+    assert latest["product_stack_memory_mib"] is None
+    assert latest["memory_complete"] is False
+
+
 def test_an_unknown_run_is_a_404_in_the_1_0_shape(client: TestClient):
     """1.0 ``:7757``：``{"error": str(KeyError)}`` —— ``str(KeyError("nope"))`` 带引号。"""
     response = client.get("/api/v1/runs/nope")

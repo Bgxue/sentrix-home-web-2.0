@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
+from typing import Any
 
 from sentrix.domain.assistant.evidence_ledger import EvidenceRequirement
 from sentrix.domain.assistant.intent import (
@@ -61,6 +63,7 @@ class PlannerResult:
     fallback_reason: str = ""
     raw: str = ""
     detail: str = ""
+    model_calls: tuple[dict[str, Any], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -85,22 +88,41 @@ class GoalPlanner:
         messages = list(base)
         last_raw = ""
         last_reason = "invalid_planner_action"
+        calls: list[dict[str, Any]] = []
         for attempt in range(self.max_attempts):
+            started = time.perf_counter()
+            call: dict[str, Any] = {
+                "step_id": f"planner_{attempt + 1}",
+                "call_type": "planner",
+                "status": "error",
+            }
             try:
                 # 规划不带工具：它要的是一段 JSON 声明，不是一次工具往返。
                 reply = self._model.complete(messages, ())
+                call.update(
+                    status="complete",
+                    prompt_tokens=reply.prompt_tokens,
+                    completion_tokens=reply.completion_tokens,
+                    finish_reason=reply.finish_reason,
+                )
             except Exception as error:
                 log.exception("planner call failed: scope=%s attempt=%s", scope_id, attempt + 1)
                 # 只有模型服务这一侧的失败才带说明：它的文案里已经写明了端点地址，直接
                 # 转述比在上层另拼一句更准。别的原因（2.0 自己拼错了请求）不往里塞，
                 # 免得把内部形状说给用户听。
+                call.update(error_type=type(error).__name__, error=str(error))
                 detail = str(error) if isinstance(error, ModelServiceError) else ""
-                return PlannerResult(fallback_reason=PLANNER_CALL_ERROR, detail=detail)
+                return PlannerResult(
+                    fallback_reason=PLANNER_CALL_ERROR, detail=detail, model_calls=tuple([*calls, call])
+                )
+            finally:
+                call["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+                calls.append(call)
 
             last_raw = reply.content
             requirements, reason = parse_declaration(last_raw or "", scope_id=scope_id, question=question)
             if requirements is not None:
-                return PlannerResult(requirements=requirements, raw=last_raw)
+                return PlannerResult(requirements=requirements, raw=last_raw, model_calls=tuple(calls))
             last_reason = reason
             if attempt + 1 >= self.max_attempts:
                 break
@@ -109,4 +131,4 @@ class GoalPlanner:
                 ChatMessage(ChatRole.ASSISTANT, str(last_raw or "")),
                 ChatMessage(ChatRole.USER, correction_hint(reason)),
             ]
-        return PlannerResult(fallback_reason=last_reason, raw=last_raw)
+        return PlannerResult(fallback_reason=last_reason, raw=last_raw, model_calls=tuple(calls))

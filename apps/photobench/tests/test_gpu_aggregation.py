@@ -54,6 +54,9 @@ def test_dynamic_runtime_keys_are_aggregated_without_being_in_the_fixed_list() -
         "mean": 20.0,
         "p50": 30.0,
         "p95": 30.0,
+        "valid_count": 2,
+        "mean_kind": "sample_mean",
+        "peak_kind": "sampled_peak",
     }
 
 

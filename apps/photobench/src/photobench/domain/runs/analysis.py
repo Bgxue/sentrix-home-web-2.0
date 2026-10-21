@@ -30,6 +30,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from photobench.domain.runtime.metrics import apple_power, apple_temperature
+
 # 1.0 ``:933`` / ``:1261``。
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 RANKING_KS = (1, 5, 10)
@@ -340,32 +342,61 @@ def agent_stability(item: dict[str, Any]) -> dict[str, Any]:
         and str(step.get("call_type") or "agent") in {"agent", "recovery"}
         and str(step.get("status") or "complete").lower() != "error"
     ]
-    parse_total = len(model_steps)
-
-    def parsed_success(step: dict[str, Any]) -> bool:
-        parse_status = step.get("parse_status")
-        if parse_status is not None:
-            return str(parse_status).lower() == "success" and trace_action(step) is not None
-        return trace_action(step) is not None
-
-    parse_success = sum(1 for step in model_steps if parsed_success(step))
+    native = item.get("metrics_contract_version") == 2 or "agent2_trace" in item
+    parse_total = 0 if native else len(model_steps)
+    parse_success = sum(1 for step in model_steps if trace_action(step) is not None) if not native else 0
+    facts = [
+        fact
+        for step in model_steps
+        for fact in step.get("tool_argument_parse_facts") or []
+        if isinstance(fact, dict) and isinstance(fact.get("json_object_valid"), bool)
+    ]
     failed_statuses = {"partial", "error", "timeout", "failed", "cancelled", "canceled"}
     status = str(item.get("agent_status") or "").lower()
     termination = str(item.get("termination_reason") or "").lower()
     turn_outcome = item.get("turn_outcome") or (
         (item.get("conversation") or [{}])[-1].get("turn_outcome") if item.get("conversation") else None
     )
-    complete = (
-        turn_outcome == "final_answer"
-        and bool(item.get("answer"))
-        and status not in failed_statuses
-        and not any(marker in termination for marker in ("step", "budget", "timeout", "error", "failure"))
-    )
+    complete: bool | None
+    if native:
+        budget = (item.get("agent2_trace") or {}).get("budget_outcome") or {}
+        steps, maximum = budget.get("model_steps"), budget.get("max_steps")
+        if termination in {"answered", "answered_with_gap"}:
+            complete = (
+                (
+                    bool(str(item.get("answer") or "").strip())
+                    and status not in failed_statuses
+                    and steps <= maximum
+                )
+                if isinstance(steps, int) and isinstance(maximum, int)
+                else None
+            )
+        else:
+            complete = False if termination else None
+    else:
+        complete = (
+            (
+                turn_outcome == "final_answer"
+                and bool(item.get("answer"))
+                and status not in failed_statuses
+                and not any(
+                    marker in termination for marker in ("step", "budget", "timeout", "error", "failure")
+                )
+            )
+            if turn_outcome
+            else None
+        )
     return {
+        "metrics_contract_version": 2,
         "json_parse_total": parse_total or None,
         "json_parse_success": parse_success if parse_total else None,
         "json_parse_rate": round(parse_success / parse_total, 3) if parse_total else None,
-        "completed_within_steps": complete if trace or item.get("agent_status") else None,
+        "tool_argument_json_total": len(facts) or None,
+        "tool_argument_json_success": sum(f["json_object_valid"] for f in facts) if facts else None,
+        "tool_argument_json_rate": round(sum(f["json_object_valid"] for f in facts) / len(facts), 3)
+        if facts
+        else None,
+        "completed_within_steps": complete,
         "final_turn_outcome": turn_outcome,
     }
 
@@ -980,6 +1011,12 @@ def capability_summary(
     action_valid = [value for value in action_judges if value.get("correct") in {True, False}]
     parse_totals = [item.get("agent_stability", {}).get("json_parse_total") for item in items]
     parse_successes = [item.get("agent_stability", {}).get("json_parse_success") for item in items]
+    tool_argument_total = sum(
+        int((item.get("agent_stability") or {}).get("tool_argument_json_total") or 0) for item in items
+    )
+    tool_argument_success = sum(
+        int((item.get("agent_stability") or {}).get("tool_argument_json_success") or 0) for item in items
+    )
     parse_total = sum(value for value in parse_totals if isinstance(value, int))
     parse_success = sum(value for value in parse_successes if isinstance(value, int))
     completion = [item.get("agent_stability", {}).get("completed_within_steps") for item in items]
@@ -1052,10 +1089,10 @@ def capability_summary(
     if agent_phase_wall_ms is not None and agent_phase_wall_ms > 0 and agent_phase_count > 0:
         agent_throughput_ms = round(agent_phase_wall_ms / agent_phase_count, 1)
         agent_throughput_mode = "measured_agent_phase"
-    elif wall_start is not None and wall_end is not None and judge_spans and items:
-        agent_throughput_ms = round(
-            max(0.0, (wall_end - wall_start) * 1000 - (judge_exclusive_ms or 0)) / len(items), 1
-        )
+    # Overlapping Judge intervals cannot be subtracted from Agent wall time.
+    # Legacy runs without a measured Agent stage have no defensible throughput.
+    else:
+        agent_throughput_mode = "unavailable"
     judge_phase = (phases or {}).get("qa_eval") or {}
     judge_phase_wall_ms = numeric_ms(judge_phase.get("judge_phase_wall_ms"))
     agent_wall_times: list[float] = []
@@ -1066,7 +1103,10 @@ def capability_summary(
             continue
         wall = _flat_ms(item, "wall_clock_ms")
         judge = _flat_ms(item, "judge_ms")
-        if wall is not None and judge is not None:
+        # PhotoBench 2.0 records the Agent before submitting its asynchronous Judge.
+        if wall is not None and ("agent2_trace" in item or item.get("metrics_contract_version") == 2):
+            agent_wall_times.append(wall)
+        elif wall is not None and judge is not None:
             agent_wall_times.append(max(0.0, wall - judge))
         elif wall is not None:
             agent_wall_times.append(wall)
@@ -1190,6 +1230,11 @@ def capability_summary(
         "json_parse_total": parse_total or None,
         "json_parse_success": parse_success if parse_total else None,
         "json_parse_success_rate": round(parse_success / parse_total, 3) if parse_total else None,
+        "tool_argument_json_total": tool_argument_total or None,
+        "tool_argument_json_success": tool_argument_success if tool_argument_total else None,
+        "tool_argument_json_rate": round(tool_argument_success / tool_argument_total, 3)
+        if tool_argument_total
+        else None,
         "qa_completion_valid_count": len(completion_valid),
         "qa_completion_within_steps_rate": round(sum(completion_valid) / len(completion_valid), 3)
         if completion_valid
@@ -1242,6 +1287,8 @@ def benchmark_e2e_latency_excluding_judge_ms(
         return None
     if qa_phase.get("agent_phase_finished_at"):
         return round(max(0.0, wall_ms), 1)
+    if any("agent2_trace" in item or item.get("metrics_contract_version") == 2 for item in items):
+        return None
     judge_values = [(item.get("timing_breakdown") or {}).get("judge_ms") for item in items]
     if items and not all(isinstance(value, (int, float)) for value in judge_values):
         return None
@@ -1432,11 +1479,21 @@ def effective_summary(state: dict[str, Any]) -> dict[str, Any]:
         if (
             key == "retrieval_recall_mean"
             or key.startswith(("retrieval_", "media_retrieval_", "image_retrieval_", "video_retrieval_"))
-            or key.startswith("json_parse_")
+            or key.startswith(
+                (
+                    "json_parse_",
+                    "tool_argument_json_",
+                    "agent_",
+                    "judge_phase_",
+                    "qa_completion_",
+                    "completed_within_steps",
+                )
+            )
             or saved.get(key) is None
         ):
             saved[key] = value
-    if saved.get("benchmark_e2e_latency_excluding_judge_ms") is None:
+    saved["metrics_contract_version"] = 2
+    if items or saved.get("benchmark_e2e_latency_excluding_judge_ms") is None:
         saved["benchmark_e2e_latency_excluding_judge_ms"] = benchmark_e2e_latency_excluding_judge_ms(
             state.get("phases") or {},
             items,
@@ -1654,12 +1711,76 @@ GPU_SAMPLE_FIELDS = (
     "sentrix_auxiliary_model_pss_mib",
     "sentrix_auxiliary_model_uma_mib",
     "product_stack_memory_mib",
+    "model_process_footprint_mib",
+    "model_process_mapped_weights_mib",
+    "product_stack_footprint_mib",
+    "product_stack_mapped_weights_mib",
 )
+
+
+def validated_telemetry_sample(sample: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Apply identical validity rules to fresh and historical observations; never mutate raw data."""
+    result = dict(sample)
+    rejected: list[str] = []
+    apple = (
+        sample.get("memory_accounting") == "apple_capacity_estimate"
+        or sample.get("source") == "apple_unified"
+    )
+    for key, value in sample.items():
+        invalid = isinstance(value, (int, float)) and not math.isfinite(value)
+        if apple and isinstance(value, (int, float)):
+            invalid |= key == "power_draw_w" and apple_power(value) is None
+            invalid |= key in {"temperature_c", "cpu_temperature_c"} and apple_temperature(value) is None
+        if key in GPU_AGGREGATE_KEYS and isinstance(value, (int, float)) and key != "system_memory_delta_mib":
+            invalid |= value < 0
+        if invalid:
+            result[key] = None
+            rejected.append(key)
+    return result, rejected
+
+
+def telemetry_sampling(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Coverage is described by actual sample intervals, without inventing missing observations."""
+    times = sorted(
+        {
+            float(s.get("t", s.get("_t", 0)))
+            for s in samples
+            if isinstance(s.get("t", s.get("_t")), (int, float))
+        }
+    )
+    intervals = [b - a for a, b in zip(times, times[1:], strict=False) if b > a]
+    phases: dict[str, Any] = {}
+    for sample in samples:
+        phase = str(sample.get("phase") or "unassigned")
+        row = phases.setdefault(phase, {"samples": 0, "core_memory_valid": 0})
+        row["samples"] += 1
+        row["core_memory_valid"] += int(
+            all(
+                isinstance(sample.get(key), (int, float))
+                for key in (
+                    "system_memory_used_mib",
+                    "model_process_system_memory_used_mib",
+                    "product_stack_memory_mib",
+                )
+            )
+        )
+    return {
+        "elapsed_seconds": times[-1] - times[0] if times else None,
+        "interval_seconds": series_stats([{"value": value} for value in intervals], "value"),
+        "gaps_over_3_seconds": sum(value > 3 for value in intervals),
+        "phases": phases,
+    }
 
 
 def series_stats(history: Sequence[dict[str, Any]], key: str) -> dict[str, Any]:
     """1.0 ``:5364`` 的 ``_series_stats``。"""
-    values = [float(point[key]) for point in history if isinstance(point.get(key), (int, float))]
+    values = [
+        float(point[key])
+        for point in history
+        if isinstance(point.get(key), (int, float))
+        and not isinstance(point[key], bool)
+        and math.isfinite(point[key])
+    ]
     if not values:
         return {}
     ordered = sorted(values)
@@ -1668,28 +1789,26 @@ def series_stats(history: Sequence[dict[str, Any]], key: str) -> dict[str, Any]:
         "peak": ordered[-1],
         "mean": round(sum(values) / count, 1),
         "p50": ordered[count // 2],
-        "p95": ordered[min(count - 1, int(count * 0.95))],
+        "p95": ordered[max(0, math.ceil(count * 0.95) - 1)],
+        "valid_count": count,
+        "mean_kind": "sample_mean",
+        "peak_kind": "sampled_peak",
     }
 
 
 def downsample_history(history: Sequence[dict[str, Any]], limit: int = 240) -> list[dict[str, Any]]:
     """1.0 ``:5378`` 的 ``_downsample_history``：阶段切换点必须保留。"""
     count = len(history)
-    if count <= limit:
+    if count <= max(limit, 2):
         return list(history)
     chosen = {0, count - 1}
-    previous = history[0].get("phase")
-    for index, point in enumerate(history):
-        phase = point.get("phase")
-        if phase != previous:
-            chosen.add(index)
-            previous = phase
-    step = (count - 1) / (limit - 1)
-    for index in range(limit):
-        chosen.add(min(count - 1, int(round(index * step))))
-    if len(chosen) > limit:
-        chosen = {min(count - 1, int(round(index * step))) for index in range(limit)}
-        chosen.add(count - 1)
+    for index in range(1, count):
+        if history[index].get("phase") != history[index - 1].get("phase"):
+            chosen.update((index - 1, index))
+    remaining = max(0, limit - len(chosen))
+    candidates = [index for index in range(count) if index not in chosen]
+    for index in range(remaining):
+        chosen.add(candidates[min(len(candidates) - 1, int((index + 0.5) * len(candidates) / remaining))])
     return [history[index] for index in sorted(chosen)]
 
 
@@ -1718,7 +1837,33 @@ def _is_telemetry_series_key(key: str) -> bool:
     ``kv_cache_usage_pct``，但少了这层兜底，以后 provider 补字段时会在读侧
     静默丢——那正是「字段算出来却没进曲线」的一类 bug。
     """
-    return key in GPU_SAMPLE_FIELDS or key.startswith(("runtime_", "kv_cache_"))
+    return (
+        key in GPU_SAMPLE_FIELDS
+        or key.startswith(("runtime_", "kv_cache_"))
+        or key
+        in {
+            "memory_accounting",
+            "memory_complete",
+            "memory_unit",
+            "source",
+            "source_status",
+            "source_diagnostics",
+            "observed_at_epoch",
+            "component_validity",
+            "process_observed_at_monotonic",
+            "device_observation_age_seconds",
+            "device_observed_at_monotonic",
+            "metrics_contract_version",
+            "power_scope",
+            "power_rail",
+            "power_rails_w",
+            "power_rails_average_w",
+            "model_process_footprint_mib",
+            "model_process_mapped_weights_mib",
+            "product_stack_footprint_mib",
+            "product_stack_mapped_weights_mib",
+        }
+    )
 
 
 def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> None:
@@ -1730,6 +1875,7 @@ def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> Non
     history: list[dict[str, Any]] = []
     latest: dict[str, Any] = {}
     peak: dict[str, Any] = {}
+    rejected: dict[str, int] = {}
     try:
         for line in lines:
             try:
@@ -1738,7 +1884,10 @@ def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> Non
                 continue
             if not isinstance(item, dict):
                 continue
-            point = {k: item[k] for k in item if _is_telemetry_series_key(k) and item.get(k) is not None}
+            item, invalid = validated_telemetry_sample(item)
+            for key in invalid:
+                rejected[key] = rejected.get(key, 0) + 1
+            point = {k: item[k] for k in item if _is_telemetry_series_key(k)}
             if point:
                 history.append(
                     {
@@ -1750,7 +1899,11 @@ def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> Non
                 )
                 latest = point
                 for key, value in point.items():
-                    if isinstance(value, (int, float)):
+                    if (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and key in GPU_AGGREGATE_KEYS
+                    ):
                         peak[key] = max(float(peak.get(key, value)), float(value))
         if history:
             raw_scopes = live.get("scopes")
@@ -1761,14 +1914,10 @@ def attach_gpu_sample_history(live: dict[str, Any], lines: Sequence[str]) -> Non
             if scopes.get("benchmark_process_ram"):
                 latest.setdefault("benchmark_process_memory_scope", scopes["benchmark_process_ram"])
                 peak.setdefault("benchmark_process_memory_scope", scopes["benchmark_process_ram"])
-            live["_full_sample_stats"] = {
-                "model_process_system_memory_used_mib": series_stats(
-                    history, "model_process_system_memory_used_mib"
-                ),
-                "system_memory_delta_mib": series_stats(history, "system_memory_delta_mib"),
-                "cpu_temperature_c": series_stats(history, "cpu_temperature_c"),
-                "temperature_c": series_stats(history, "temperature_c"),
-            }
+            live["_full_sample_stats"] = {key: series_stats(history, key) for key in GPU_AGGREGATE_KEYS}
+            live["field_stats"] = live["_full_sample_stats"]
+            live["rejected_samples"] = rejected
+            live["sampling"] = telemetry_sampling(history)
             live["history"] = downsample_history(history, limit=240)
             live["latest"] = latest
             live["peak"] = peak
@@ -1813,6 +1962,10 @@ GPU_AGGREGATE_KEYS = (
     "sentrix_auxiliary_model_pss_mib",
     "sentrix_auxiliary_model_uma_mib",
     "product_stack_memory_mib",
+    "model_process_footprint_mib",
+    "model_process_mapped_weights_mib",
+    "product_stack_footprint_mib",
+    "product_stack_mapped_weights_mib",
 )
 
 
@@ -1832,28 +1985,25 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """
     if not samples:
         return {"samples_count": 0}
-    metrics: dict[str, Any] = {}
-    metric_keys = list(GPU_AGGREGATE_KEYS)
-    metric_keys += sorted(
-        {
-            key
-            for sample in samples
-            for key in sample
-            if _is_telemetry_series_key(key) and key not in metric_keys
-        }
-    )
-    for key in metric_keys:
-        values = [s[key] for s in samples if isinstance(s.get(key), (int, float))]
-        if not values:
-            continue
-        values_sorted = sorted(values)
-        n = len(values_sorted)
-        metrics[key] = {
-            "peak": round(values_sorted[-1], 1),
-            "mean": round(sum(values) / n, 1),
-            "p50": round(values_sorted[n // 2], 1),
-            "p95": round(values_sorted[int(n * 0.95)], 1) if n >= 20 else round(values_sorted[-1], 1),
-        }
+    samples = [validated_telemetry_sample(sample)[0] for sample in samples]
+    keys = set(GPU_AGGREGATE_KEYS) | {
+        key for sample in samples for key in sample if key.startswith(("runtime_", "kv_cache_"))
+    }
+    metrics: dict[str, Any] = {key: stats for key in sorted(keys) if (stats := series_stats(samples, key))}
+    metrics["sampling"] = telemetry_sampling(samples)
+    latest = next((sample for sample in reversed(samples) if sample.get("memory_accounting")), samples[-1])
+    if samples[-1].get("source") is not None:
+        metrics["source"] = samples[-1]["source"]
+    for key in (
+        "metrics_contract_version",
+        "memory_accounting",
+        "component_validity",
+        "process_observed_at_monotonic",
+        "memory_complete",
+        "power_scope",
+        "power_rail",
+    ):
+        metrics[key] = (latest if key == "memory_accounting" else samples[-1]).get(key)
     limits = [
         sample.get("model_process_memory_limit_mib")
         for sample in samples
@@ -1864,17 +2014,20 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         for sample in samples
         if isinstance(sample.get("model_process_memory_over_limit"), bool)
     ]
-    latest = samples[-1]
     if (
         latest.get("memory_unit") == "host_smaps_rss_plus_gpu_mib"
-        or latest.get("model_process_host_memory_mib") is not None
+        or latest.get("memory_accounting") == "jetson_pss_plus_nvmap_estimate"
+        or (
+            latest.get("source") in {"jetson_local_pss", "orin_ssh_pss"}
+            and latest.get("model_process_host_memory_mib") is not None
+        )
     ):
         # 新口径：主机 smaps Rss + GPU/UMA 页。旧 run 的 memory_unit 可能还是
         # process_pss_uma_mib，但只要有拆分字段就按新口径解释，避免前端继续显示
         # VmRSS。历史 run 没有拆分字段时仍走下面的 PSS 分支。
         return {
             "samples_count": len(samples),
-            "source": ("jetson_local_pss" if latest.get("source") == "jetson_local_pss" else "orin_ssh_pss"),
+            "source": latest.get("source"),
             "memory_profile": {
                 "method": "orin_smaps_rss_plus_gpu_uma_v1",
                 "memory_unit": "host_smaps_rss_plus_gpu_mib",
@@ -1883,7 +2036,7 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "kv_cache_usage_peak_pct": (metrics.get("kv_cache_usage_pct") or {}).get("peak"),
                 "note": (
                     "Host smaps Rss + GPU/UMA pages (nvmap per PID in preference to "
-                    "VmRSS - smaps residual); the two halves do not overlap."
+                    "VmRSS - smaps residual); allocation/attribution estimate, not exact physical residency."
                 ),
             },
             **metrics,
@@ -1897,7 +2050,7 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "pss_samples_count": pss_sample_count,
             # 1.0 这里判的是 provider 的类；2.0 判样本自己的 source——GpuSampler 就是
             # 从 gpu_stats()["source"] 抄下来的，两者是同一个事实。
-            "source": ("jetson_local_pss" if latest.get("source") == "jetson_local_pss" else "orin_ssh_pss"),
+            "source": latest.get("source"),
             "memory_profile": {
                 "method": "orin_process_pss_uma_v1",
                 "memory_unit": "process_pss_uma_mib",
@@ -2001,6 +2154,10 @@ def apply_live_sample(
     **旧 run 的字段可能是 null/缺项**（1.0 的注释）：三处 ``isinstance`` 归一化是照搬的，
     一个历史字段不该让整条实时视图瘫痪。
     """
+    sample, rejected = validated_telemetry_sample(sample)
+    counts = live.setdefault("rejected_samples", {})
+    for key in rejected:
+        counts[key] = counts.get(key, 0) + 1
     if not isinstance(live.get("history"), list):
         live["history"] = []
     if not isinstance(live.get("peak"), dict):
@@ -2010,7 +2167,9 @@ def apply_live_sample(
     live["status"] = "running"
     live["source"] = sample.get("source") or live.get("source")
     live["samples_count"] = int(live.get("samples_count") or 0) + 1
-    live["latest"] = {key: sample.get(key) for key in GPU_SAMPLE_FIELDS if sample.get(key) is not None}
+    live["latest"] = {key: value for key, value in sample.items() if _is_telemetry_series_key(key)}
+    live["metrics_contract_version"] = 2
+    live["memory_accounting"] = sample.get("memory_accounting")
     live["model_processes"] = sample.get("model_processes") or []
     live["model_system_processes"] = sample.get("model_system_processes") or []
     live["benchmark_processes"] = sample.get("benchmark_processes") or []

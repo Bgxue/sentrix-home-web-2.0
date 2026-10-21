@@ -187,6 +187,17 @@ class WordObserver:
         return ObservationSemantics(caption=word, place=word, activity=word, objects=(word,), confidence=0.65)
 
 
+class CaptionEmbedder(ScriptedEmbedder):
+    def embed_query(self, text: str) -> list[float]:
+        # Ingested semantic text contains labels/newlines. Give the two captions
+        # distinct vectors so their text ranks cannot depend on random asset IDs.
+        if "海边" in text:
+            return list(GREEN)
+        if "雪山" in text:
+            return list(RED)
+        return super().embed_query(text)
+
+
 @pytest.fixture
 def album(tmp_path: Path) -> Path:
     directory = tmp_path / "album"
@@ -204,7 +215,7 @@ def channel_client(settings: Settings, album: Path) -> TestClient:
     # 这一槽。**此前这里只换了 ``visual_embedder``**，``text_embedder`` 一直是真
     # WeMM 侧车（8102）——侧车不在时 ``text_ann`` 通道就是空的，下面那条「三路融合」
     # 的用例会红，而它红的理由与代码无关，只是那台机器上没起侧车。
-    embedder = ScriptedEmbedder(images={red: RED, green: GREEN}, texts={"海边": GREEN, "雪山": GREEN})
+    embedder = CaptionEmbedder(images={red: RED, green: GREEN}, texts={})
     app = create_app(settings)
     app.state.container = dataclasses.replace(
         app.state.container,

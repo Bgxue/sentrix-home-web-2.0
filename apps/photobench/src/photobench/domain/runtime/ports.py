@@ -23,9 +23,23 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+
+@dataclass(frozen=True, slots=True)
+class RunRuntimeSnapshot:
+    """Immutable connection facts; JSON storage also prevents nested mutation."""
+
+    connection_json: str
+    build_revision: str = "development"
+
+    def connection(self) -> dict[str, Any]:
+        value: dict[str, Any] = json.loads(self.connection_json)
+        return value
+
 
 # ``runtime_checkable`` 是为了让「假件能替真件」这件事**可断言**而不是口头承诺：
 # 用例里 ``isinstance(Fake, TelemetryProvider)`` 一旦为假，就说明端口表面被改动过

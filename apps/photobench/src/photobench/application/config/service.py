@@ -355,6 +355,8 @@ class ConfigService:
             ),
             "endpoint_model": str(self._runtime.get("endpoint_model") or ""),
             "judge_provider_id": self.judge_provider_id,
+            "embedding": self._runtime.get("embedding") or {},
+            "product": self._runtime.get("product") or [],
         }
 
     def public_config(self) -> dict[str, Any]:

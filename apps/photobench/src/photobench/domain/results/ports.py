@@ -112,3 +112,15 @@ class RunResultWriter(Protocol):
         拦截在这里是**保护性**的：删错目录比读错文件严重得多。
         """
         ...
+
+
+class RunStartupRecovery(Protocol):
+    """Own the result-root instance lease before recovering interrupted runs.
+
+    acquire_and_recover refuses a second live owner. Original nonterminal states
+    are backed up before an interrupted transition; terminal history is untouched.
+    """
+
+    def acquire_and_recover(self) -> int: ...
+
+    def close(self) -> None: ...

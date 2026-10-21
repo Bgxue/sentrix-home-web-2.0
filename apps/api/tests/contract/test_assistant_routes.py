@@ -160,11 +160,13 @@ def test_a_conversation_can_be_deleted(client: TestClient):
 def test_the_detail_view_carries_messages_and_turns(client: TestClient):
     created = make_conversation(client)
     turn = start_turn(client, created["id"])
+    # The worker can finish before GET; assert a stable lifecycle boundary.
+    poll_until_terminal(client, turn["turn_id"])
 
     body = client.get(f"/api/v1/assistant/conversations/{created['id']}").json()
 
     assert body["conversation"]["id"] == created["id"]
-    assert [message["role"] for message in body["messages"]] == ["user"]
+    assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
     assert [item["id"] for item in body["turns"]] == [turn["turn_id"]]
 
 

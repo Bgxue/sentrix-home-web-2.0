@@ -22,6 +22,7 @@ def test_health_returns_ok(client: TestClient):
     assert response.json() == {
         "status": "ok",
         "version": "0.1.0",
+        "build_revision": "development",
         "database": "ok",
         "embeddings": "ok",
     }
@@ -79,6 +80,8 @@ def test_health_live_does_not_touch_dependencies(client: TestClient):
     """
 
     class _Exploding:
+        build_revision = "development"
+
         def database_healthy(self) -> bool:
             raise AssertionError("liveness must not query the database")
 
@@ -88,9 +91,37 @@ def test_health_live_does_not_touch_dependencies(client: TestClient):
 
     client.app.state.container = _Exploding()
 
-    assert client.get("/api/v1/health/live").json() == {"status": "ok", "version": "0.1.0"}
+    assert client.get("/api/v1/health/live").json() == {
+        "status": "ok",
+        "version": "0.1.0",
+        "build_revision": "development",
+    }
 
 
 def test_diagnostics_carries_the_full_payload(client: TestClient):
     """完整诊断与 ``/health`` 同源，保留既有消费方的字段。"""
     assert client.get("/api/v1/diagnostics").json() == client.get("/api/v1/health").json()
+
+
+def test_health_live_responds_with_the_entire_worker_pool_occupied(client: TestClient):
+    import asyncio
+
+    import anyio
+    import httpx
+
+    async def exercise():
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        previous = limiter.total_tokens
+        limiter.total_tokens = 1
+        await limiter.acquire()
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=client.app), base_url="http://test"
+            ) as http:
+                response = await asyncio.wait_for(http.get("/api/v1/health/live"), timeout=1)
+            assert response.status_code == 200
+        finally:
+            limiter.release()
+            limiter.total_tokens = previous
+
+    asyncio.run(exercise())

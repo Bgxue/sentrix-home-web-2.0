@@ -1,0 +1,48 @@
+# PhotoBench metrics contract v2
+
+本契约是 T006 指标正确性修复的兼容性基线；不补齐 vLLM 专项指标。
+
+## Additive interfaces
+
+- New runs persist `metrics_contract_version=2`, `build_revision` and an immutable,
+  secret-free `runtime_snapshot`. Model, Sentrix and telemetry clients use this
+  snapshot; changes to saved configuration affect subsequent runs only.
+- TelemetryProvider retains its four existing methods and status envelope.
+  Optional data describes `memory_accounting`, `memory_complete`, raw memory
+  components, power rail/scope, observation age and freshness. Unknown numeric
+  components remain null; incomplete totals remain null. Explicit absence is 0.
+- Samples preserve independent sources when another source fails. Stream values
+  expire after three source periods and are never re-stamped as new observations.
+- Product model-call traces add optional tool-argument parse counts and outcomes.
+  They contain execution facts, not benchmark judgments or raw prompts.
+- Native tool-argument JSON parsing has its own denominator; plain-text answers
+  are not JSON attempts. Legacy JSON-action metrics remain available for legacy
+  structured-action traces. Missing observations are not inferred successes.
+- v2 item `wall_clock_ms` is Agent elapsed time excluding Judge. Phase throughput
+  uses measured monotonic wall time, including overlap, never sums item latency.
+- Optional build identifiers are exposed through existing config/diagnostics
+  responses. Existing URLs, error envelopes and required fields remain unchanged.
+
+## Accounting and historical compatibility
+
+Jetson: system=MemTotal-MemAvailable; model=smaps RSS+nvmap; product=related PSS+
+main/auxiliary nvmap. These are attribution/allocation estimates, not a proof of
+physical-page deduplication. Positive VmRSS residual is a labeled fallback only.
+NVIDIA host RAM and device VRAM remain distinct. Apple footprint and mapped
+weights are separately retained and their sum is a capacity estimate; system
+active+wired+compressor is platform-specific.
+
+Historical files are not rewritten. Deterministic read projections may be
+recomputed from recorded facts, using the declared contract version. Missing
+attribution, parse observations, timing or samples cannot be reconstructed.
+P95 uses nearest-rank; mean is sample mean and peak is sampled peak. Statistics
+use valid full-resolution observations before display downsampling. Read and
+write projections apply the same value validation.
+
+## Acceptance
+
+The regression report distinguishes metric correctness from full-chain success;
+it does not redefine `run_valid`. Four devices run the same committed release,
+dataset and 10 QA in full mode. Every service is local except cloud Judge. Each
+required dependency is exercised before starting; all recorded failures and
+Judge denominators remain visible. General telemetry remains optional.

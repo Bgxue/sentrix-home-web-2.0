@@ -71,6 +71,15 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         ]
         if ports:
             profile["ports"] = ports
+    urls = (
+        [embedding_scope.get("wemm_url")]
+        if mode == "unified_multimodal"
+        else [embedding_scope.get("text_url"), embedding_scope.get("image_url")]
+    )
+    configured_hosts = [(urlparse(str(url or "")).hostname or "").lower() for url in urls if url]
+    if configured_hosts and not all(host in _local_hosts() for host in configured_hosts):
+        profile["local"] = False
+        profile["ports"] = []
     if mode:
         profiles[mode] = profile
         embedding_scope["profiles"] = profiles
@@ -86,15 +95,29 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         "embedding": embedding_scope,
         "sentrix": {
             "url": sentrix_url,
-            "ports": [sentrix_port] if sentrix_port else [],
+            "ports": [sentrix_port]
+            if sentrix_port and urlparse(sentrix_url).hostname in _local_hosts()
+            else [],
+            "local": urlparse(sentrix_url).hostname in _local_hosts(),
         },
         "product": list(raw.get("product") or []),
     }
 
 
+def services_from_connection(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve a frozen connection once when constructing a run's adapters."""
+    return _from_runtime_connection(raw) or {}
+
+
 def load_telemetry_services() -> dict[str, Any] | None:
     # 唯一来源：runtime_connection.json。没有第二份遥测配置文件。
-    path = Path(os.environ.get("PHOTOBENCH_RUNTIME_CONNECTION") or RUNTIME_CONNECTION_DEFAULT)
+    path = (
+        Path(os.environ.get("PHOTOBENCH_CONFIG_ROOT") or Path(RUNTIME_CONNECTION_DEFAULT).parent)
+        / "runtime_connection.json"
+    )
+    legacy = os.environ.get("PHOTOBENCH_RUNTIME_CONNECTION") or os.environ.get("PHOTOBENCH_RUNTIME_SERVICES")
+    if legacy and not os.environ.get("PHOTOBENCH_CONFIG_ROOT"):
+        path = Path(legacy)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -108,18 +131,25 @@ def matches_service(row: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
     if spec.get("local") is False:
         return False
     pids = {str(pid) for pid in spec.get("pids") or []}
-    if pids and str(row.get("pid")) in pids:
-        return True
+    if pids:
+        return str(row.get("pid")) in pids
     ports = {str(port) for port in spec.get("ports") or []}
     row_ports = {str(port) for port in row.get("listening_ports") or []}
-    if ports & row_ports:
-        return True
+    if ports:
+        return bool(ports & row_ports)
     identity = str(row.get("identity") or "").lower()
     return any(keyword and str(keyword).lower() in identity for keyword in spec.get("keywords") or [])
 
 
 def service_rows(rows: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [dict(row) for row in rows if matches_service(row, spec)]
+    selected = {int(row["pid"]) for row in rows if matches_service(row, spec)}
+    while True:
+        children = {int(row["pid"]) for row in rows if row.get("ppid") in selected}
+        expanded = selected | children
+        if expanded == selected:
+            break
+        selected = expanded
+    return [dict(row) for row in rows if int(row["pid"]) in selected]
 
 
 def dedupe_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -141,3 +171,16 @@ __all__ = [
     "matches_service",
     "service_rows",
 ]
+
+
+def service_resolved(rows: list[dict[str, Any]], spec: Mapping[str, Any]) -> bool:
+    """All configured listeners must be observed before a role total is complete."""
+    if spec.get("local") is False or spec.get("required") is False:
+        return True
+    expected = {str(port) for port in spec.get("ports") or []}
+    if expected:
+        observed = {str(port) for row in rows for port in row.get("listening_ports") or []}
+        return expected <= observed
+    if spec.get("pids") or spec.get("keywords"):
+        return bool(service_rows(rows, spec))
+    return True

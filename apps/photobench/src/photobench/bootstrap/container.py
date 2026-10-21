@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,21 +45,23 @@ from photobench.domain.config.ports import ConfigStore, SecretEnvStore
 from photobench.domain.datasets.ports import AlbumSource, QaMetadataSource
 from photobench.domain.deploy.ports import SentrixProcess
 from photobench.domain.http.ports import JsonHttpClient
-from photobench.domain.results.ports import RunResultWriter, RunStore
+from photobench.domain.results.ports import RunResultWriter, RunStartupRecovery, RunStore
 from photobench.domain.runtime.ports import (
     InferenceProvider,
     LifecycleProvider,
+    RunRuntimeSnapshot,
     RuntimeProviders,
 )
 from photobench.domain.sentrix.ports import SentrixClient
 from photobench.infrastructure.config.env import DotenvSecretStore
-from photobench.infrastructure.config.files import JsonConfigStore
+from photobench.infrastructure.config.files import JsonConfigStore, read_build_revision
 from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
 from photobench.infrastructure.deploy.sentrix_process import SubprocessSentrixProcess
 from photobench.infrastructure.deploy.systemd_process import SystemdSentrixProcess
 from photobench.infrastructure.http.client import HttpxJsonClient
 from photobench.infrastructure.http.judge_images import inline_judge_images
+from photobench.infrastructure.results.recovery import FileRunStartupRecovery
 from photobench.infrastructure.results.store import FileResultWriter, FileRunStore
 from photobench.infrastructure.runtime.providers import (
     create_runtime_providers,
@@ -66,6 +69,7 @@ from photobench.infrastructure.runtime.providers import (
     manager_telemetry,
 )
 from photobench.infrastructure.runtime.selection import detect_runtime_framework, select_runtime_providers
+from photobench.infrastructure.runtime.telemetry_scope import services_from_connection
 from photobench.infrastructure.sentrix.client import HttpxSentrixClient
 
 #: 1.0 建 provider 时用的超时：``query_current_model`` 里是 15 秒（``:5095``）。
@@ -79,6 +83,7 @@ class Container:
     config_store: ConfigStore
     secrets: SecretEnvStore
     run_store: RunStore
+    startup_recovery: RunStartupRecovery
     result_writer: RunResultWriter
     qa_metadata: QaMetadataSource
     albums: AlbumSource
@@ -91,6 +96,8 @@ class Container:
     #: ManagerTelemetry」，于是 153 上的 llama-server（没有 Manager）永远拿不到遥测。
     runtime_providers: Callable[[str, str, str], RuntimeProviders]
     config: ConfigService
+    build_revision: str
+    runtime_providers_for_run: Callable[[RunRuntimeSnapshot], RuntimeProviders]
     run_index: RunIndex
     runs: ReadRuns
     #: S10a：三份报告读侧（关键帧分析 / 记忆有效性 / trace 导出）。与 ``runs``
@@ -113,6 +120,7 @@ class Container:
         config_store: ConfigStore = JsonConfigStore(settings.config_root)
         secrets: SecretEnvStore = DotenvSecretStore(settings.config_root)
         config = ConfigService(config_store, secrets)
+        build_revision = read_build_revision(settings.sentrix_repo_root)
         run_store: RunStore = FileRunStore(settings.results_root)
         run_index = RunIndex()
         qa_metadata: QaMetadataSource = JsonQaMetadataSource(
@@ -166,6 +174,24 @@ class Container:
                 source=selection.source,
             )
 
+        def runtime_providers_for_run(snapshot: RunRuntimeSnapshot) -> RuntimeProviders:
+            connection = snapshot.connection()
+            endpoint = str(connection["model_base_url"])
+            manager = str(connection.get("vllm_manager_url") or "")
+            framework = str(connection.get("runtime_framework") or "generic")
+            selected = select_runtime_providers(
+                manager,
+                endpoint,
+                framework,
+                telemetry_services=services_from_connection(connection),
+            )
+            return RuntimeProviders(
+                inference=create_runtime_providers(endpoint, manager_url=manager).inference,
+                lifecycle=selected.lifecycle,
+                telemetry=selected.telemetry,
+                source=selected.source,
+            )
+
         def judge_images(sentrix_url: str, images: Any, assets_by_name: Any) -> list[dict[str, Any]]:
             """证据判分的图内联。**PIL 只能在 infrastructure**（``photobench-application-purity``
             的 forbidden 名单里有它，惰性 import 也照样判红）——所以这段代码住在这里，
@@ -212,8 +238,28 @@ class Container:
             （``runtime_providers``），judge 要按请求里的覆盖项装配。**取消回收模型**
             也走这条装配出来的生命周期提供者。
             """
-            providers = runtime_providers(
-                request.manager_url, request.model_base_url, request.runtime_framework
+            connection = config.public_runtime_connection_config()
+            connection = {
+                key: connection.get(key)
+                for key in (
+                    "sentrix_url",
+                    "model_base_url",
+                    "vllm_manager_url",
+                    "endpoint_model",
+                    "embedding",
+                    "product",
+                )
+            }
+            connection.update(
+                sentrix_url=request.sentrix_url,
+                model_base_url=request.model_base_url or config.model_base_url,
+                vllm_manager_url=request.manager_url,
+                runtime_framework=request.runtime_framework,
+            )
+            snapshot = request.runtime_snapshot or RunRuntimeSnapshot(json.dumps(connection), build_revision)
+            providers = runtime_providers_for_run(snapshot)
+            run_client: SentrixClient = HttpxSentrixClient(
+                http, lambda: str(snapshot.connection()["sentrix_url"])
             )
             judge = JudgeSettings(
                 judge_url=config.judge_url,
@@ -224,7 +270,8 @@ class Container:
                 evidence_judge_prompt=None,
             )
             return RunExecution(
-                client=sentrix,
+                client=run_client,
+                runtime_snapshot=snapshot,
                 albums=album_source,
                 writer=result_writer,
                 lifecycle=providers.lifecycle,
@@ -289,6 +336,7 @@ class Container:
             config_store=config_store,
             secrets=secrets,
             run_store=run_store,
+            startup_recovery=FileRunStartupRecovery(settings.results_root),
             result_writer=result_writer,
             qa_metadata=qa_metadata,
             albums=album_source,
@@ -298,6 +346,8 @@ class Container:
             inference_provider=inference_provider,
             runtime_providers=runtime_providers,
             config=config,
+            build_revision=build_revision,
+            runtime_providers_for_run=runtime_providers_for_run,
             run_index=run_index,
             runs=runs,
             reports=reports,

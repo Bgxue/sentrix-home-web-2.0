@@ -6,6 +6,7 @@ select the installed CUDA-only FLA norm even when the requested device is CPU.
 Select its built-in PyTorch fallback before loading the model. This is an
 operator entry point, not a product-managed model lifecycle.
 """
+
 from __future__ import annotations
 
 import argparse

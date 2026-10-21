@@ -1,124 +1,88 @@
-# 2.0 跨平台 PhotoBench 部署（xy 分支）
+# PhotoBench 四机固定版本部署与 10QA 验收
 
-> 2026-10-21 ｜ 适用：`xy` 分支的四机 10QA 回归  
-> 目标：同一份 commit 在 153（RTX 3090）、118（Orin AGX）、46（Orin NX）、158（Mac mini M4）跑通 benchmark；复用现有 8100 主模型，不启第二个模型服务。
+适用 T006；先本地完成 `make ci`、提交并固定 SHA，再发布该 SHA。四机使用相同源码和前端，保留各自配置、权重、数据、历史结果和 Python 环境。指标契约见 [photobench-metrics-contract.md](../architecture/photobench-metrics-contract.md)。本轮不补 vLLM 专项指标。
 
-## 1. 设备矩阵
+## 设备与依赖
 
-| 设备 | 2.0 目录 | Sentrix API | PhotoBench | 嵌入方案 | 备注 |
-|---|---|---|---|---|---|
-| 153 | `/home/asus/xy/sentrix-home-web-2.0` | 8291 | 8872 | wemm（复用 8102） | 现有 2.0 在 8191/8772，1.0 在 8091/8771 |
-| 118 | `/home/orin/xy/sentrix-home-web-2.0` | 8291 | 8872 | legacy（8101 + 8103） | 现有 1.0 在 8091/8771/11001；无 2.0 |
-| 46 | `/home/nx/xy/sentrix-home-web-2.0` | 8291 | 8872 | legacy（8101 + 8103） | 现有 2.0 在 8191/8772；内存 15.6 GB |
-| 158 | `/Users/saas/xy/sentrix-home-web-2.0` | 8291 | 8872 | legacy（8101 + 8103） | 现有 2.0 在 8191/8772；目录非 git |
+以下端点全部指设备自己的 `127.0.0.1`；产品8291、PhotoBench8872。仅云端 Judge 可访问外部模型。
 
-主模型一律复用 `http://127.0.0.1:8100/v1`；PhotoBench 的 `runtime_connection.json` 必须把 `sentrix_url` 指到本机 8291，不能指回 153。
+| SSH | 主模型 | 文本嵌入 | 图片嵌入 | 旧新栈根目录 |
+|---|---|---|---|---|
+| 153 | 8100/v1 | WeMM8102 | WeMM8102 | /home/asus/xy/sentrix-home-web-2.0 |
+| nx46 | 8100/v1 | 8101 | 8103 | /home/nx/xy/sentrix-home-web-2.0 |
+| orin118 | **8103/v1** | **18101** | **18103** | /home/orin/xy/sentrix-home-web-2.0 |
+| mac158 | 8100/v1 | 8101 | 8103 | /Users/saas/xy/sentrix-home-web-2.0 |
 
-## 2. 安装
+模型不同，不能解释为同模型性能横评。四机没有 Git 元数据，运行版本由源码及前端 SHA256 清单、实际 Python 导入路径、服务回显和 run 快照共同证明。
 
-```bash
-git clone git@github.com:Sheepspeare/sentrix-home-web-2.0.git ~/xy/sentrix-home-web-2.0
-cd ~/xy/sentrix-home-web-2.0
-git checkout xy
-bash scripts/deploy/install_env.sh auto
-```
-
-- `auto` 按 `uname`/`nvidia-smi` 判平台：Darwin arm64 → mac，Linux aarch64 → jetson，Linux x86_64 + NVIDIA → 153。
-- 没有 npm 的机器（46）会跳过前端依赖；把别处构建好的 `apps/*/web/dist` 同步过来即可。
-- macOS 与 Linux aarch64 装 CPU 版 `onnxruntime`；153 装 `onnxruntime-gpu`。人脸 provider 必须显式声明 CPU（legacy 方案脚本已设）。
-
-## 3. 启动
+## 本地开发与打包
 
 ```bash
-# 只加载平台参数（不启动）
-source scripts/deploy/platform-profiles.sh auto
-
-# 153：wemm 方案（8102 侧车须在跑）
-bash scripts/deploy/start_api.sh 153
-bash scripts/deploy/start_photobench.sh
-
-# 118/46/158：legacy 方案（8101 + 8103 侧车须在跑）
-bash scripts/deploy/start_api.sh jetson   # 158 用 mac
-bash scripts/deploy/start_photobench.sh
+# 仓库根；包括全量测试、≥85%覆盖率、两个前端构建、两份OpenAPI
+make ci
+git add <已检查的代码、测试、文档>
+git commit -m 'fix(photobench): correct cross-platform metric accounting'
+# 在最终提交上再次通过门禁；不得用跳过失败测试代替
+make ci
+.venv/bin/python scripts/deploy/photobench_release.py package --destination /absolute/release-output
 ```
 
-Mac 的 legacy 一键启动仍是 `bash scripts/deploy/start_legacy_mac.sh`（会顺带拉起 8103 chinese-clip）。
+输出 `<SHA>.tar.gz`、包校验文件和解包目录。包内包含 `build-info.json`、逐文件 `release-manifest.json` 和统一构建的两个 dist。打包要求工作树干净且 dist 存在。不将配置、密钥、venv、权重或历史结果打包。
 
-线程上限：`deploy/thread-limits.env` 的 `SENTRIX_LIB_THREADS` 留空表示自动推导；`start_api.sh` / `start_legacy_mac.sh` 会在 Python 启动前导出 OMP/MKL/OpenBLAS/NumExpr。
+本地磁盘不足时，真实嵌入CI fixture可通过临时测试桥访问已登记的真实模型，须在验证报告明确说明。正式四机回归禁止沿用此桥。
 
-## 4. 10QA 验收
+## 发布与回滚
+
+在远端使用独立目录 `~/xy/releases/<SHA>`，运行绑定保存在 `~/xy/runtime/<SHA>`，不要覆盖旧新栈目录。先校验包SHA256，再解包。首次激活要求旧8291/8872仍在运行以捕获有效环境。
 
 ```bash
-POST http://127.0.0.1:8872/api/v1/runs
-{
-  "album_id": "album3-14",
-  "qa_set": "compact-10q",
-  "mode": "full",
-  "models": ["__current__"],
-  "model_base_url": "http://127.0.0.1:8100/v1",
-  "sentrix_url": "http://127.0.0.1:8291"
-}
+# 远端现有venv内的Python；以下路径需替换为实际绝对路径
+<old>/.venv/bin/python <release>/scripts/deploy/photobench_release.py verify --root <release>
+<old>/.venv/bin/python <release>/scripts/deploy/photobench_release.py activate \
+  --root <release> --previous <old> --runtime <runtime>
 ```
 
-每台必须满足：
+激活器复制配置到受保护的运行目录；原配置不改。仅已确认属本机的LAN地址可规范为loopback；真实远程依赖拒绝。旧data、datasets、results、venv显式绑定，两个dist和PYTHONPATH指新release。所有相对数据路径均相对旧根解析。
 
-- `status=completed`、`run_valid=true`、10/10 item completed；
-- `tool_execution_error=0`，无 planner/model call error；
-- Judge 10/10 completed，有效分数 10/10（异常项必须记录原因，不补造）；
-- 遥测：153 `host_nvidia_smi` 有样本；118/46 `model_process_host_memory_mib`、`_gpu_memory_mib`、`_gpu_memory_source` 非空；158 `memory_profile.method=apple_phys_footprint_plus_mapped_weights_v1`；
-- 无 OOM、无 watchdog 重启；1.0 端点不受影响。
+发布前检查 `product` 清单：独立Qdrant必须有本机监听；进程内嵌入式Qdrant无需6333服务，确认实现后从新配置副本移除该独立服务声明，不能把探测失败当不存在。主模型和文本/图片嵌入端口均从URL推导，不能再维护一份遥测端口文件。
 
-## 5. 资源与回退
+激活器只核验并停止8291/8872的uvicorn，活跃run拒绝发布；不管理模型服务，不动8091/8191/8771/8772。人脸固定CPU，自动线程上限在数值库导入前生效；0表示不限制。权重必须预先本地存在，正式运行设离线模式。启动后等待两个服务回显同一SHA，保存日志、PID及activation记录。
 
-- 不启动第二个 8100；2.0 的 CLIP/人脸一律 CPU，显存留给主模型。
-- 46 的 `MemAvailable < 4 GiB` 时不启动 2.0 API；必要时只暂停现有 2.0（8191/8772），不动 1.0 与 8100。
-- 158 若有在跑的 run，不要重启它的 8191/8772；新栈用 8291/8872。
-- 任一新栈失败：只停新栈，原服务不动；记录 PID、命令行、日志路径。
-- 46 的 2.0 若 health 报 `embeddings=unavailable`，先起 8101/8103（legacy）或 8102（wemm）再评测。
-
-## 6. 遥测口径（2.0 现行）
-
-- **Orin 本机（46）**：`memory_unit=host_smaps_rss_plus_gpu_mib`、
-  `memory_profile.method=orin_smaps_rss_plus_gpu_uma_v1`、
-  `scope=host_smaps_rss_plus_gpu_uma`。主模型 = 主机 `smaps Rss` + 设备侧 GPU/UMA 页；
-  GPU 侧优先 `nvmap` 按 PID 求和，账本不可读时才用 `VmRSS − smaps Rss` 兜底。
-  历史 run 没有拆分字段时仍按 `orin_process_pss_uma_v1`（PSS/VmRSS）解释。
-- **Mac（158）**：`memory_unit=apple_phys_footprint_plus_mapped_weights_mib`、
-  `method=apple_phys_footprint_plus_mapped_weights_v1`。主模型 =
-  `phys_footprint + 已映射的模型权重文件`；不是 GPU 专属显存。
-- **整套产品**：周边 PSS + 主模型 PSS + 主模型 GPU/UMA 页；不是
-  `VmRSS − smaps` 的“补偿”。只有 `scope=all_related_pss_plus_model_uma_extra`
-  的 run 才按此公式解释。
-
-## 7. 遥测服务范围（run 级归因）
-
-整机 RAM / 整卡 GPU 仍全量采样；细分归因只算当前 run 实际使用的本机服务。
-每台设备只维护 `apps/photobench/config/runtime_connection.json`（不进 git），
-主模型、嵌入、Sentrix、product 都在这一份里；PhotoBench 启动时读取，改配置后重启 8872。
-
-```json
-{
-  "model_base_url": "http://127.0.0.1:8100/v1",
-  "embedding": {
-    "mode": "unified_multimodal",
-    "profiles": {
-      "unified_multimodal": {"local": true},
-      "split_text_image": {"local": true},
-      "no_local_embedding": {"local": false}
-    }
-  },
-  "product": [
-    {"id": "sentrix_api", "ports": [8291]},
-    {"id": "photobench", "ports": [8872]},
-    {"id": "qdrant", "ports": [6333]}
-  ]
-}
+```bash
+<old>/.venv/bin/python <release>/scripts/deploy/photobench_release.py rollback \
+  --root <release> --runtime <runtime>
 ```
 
-- `unified_multimodal`：一个多模态嵌入侧车（WeMM 8102）。
-- `split_text_image`：文本 + 图像两个侧车（8101/8103 或 18101/18103）。
-- 嵌入端口只从 `wemm_url` / `text_url` / `image_url` 推导，`profiles` 不再写 `ports`；避免两份端口漂移。
-- `no_local_embedding`：嵌入在远程，本机不记。
-- `main_model.local=false`：模型在远程，本机不记主模型。
-- 未列出的旧栈、另一套嵌入方案、旧 2.0/1.0 进程不进入 product/auxiliary。
-- 主模型 / product / auxiliary 按 PID 互斥；产品总量只加一次，再加主模型 GPU 页。
+回滚切回bindings中记录的previous源码并重启8291/8872，保留当前release、激活记录和全部结果。启动失败先读运行目录的api.log/photobench.log；不修改远端源码修问题，回本地修复、提交新SHA、重新通过CI和四机完整回归。
+
+## 启动前门禁与正式执行
+
+```bash
+<release>/.venv/bin/python <release>/scripts/deploy/photobench_acceptance.py preflight \
+  --root <release> --runtime <runtime>
+# 汇总四机preflight，确认dataset/QA/GT哈希完全一致后再执行
+<release>/.venv/bin/python <release>/scripts/deploy/photobench_acceptance.py run \
+  --root <release> --runtime <runtime>
+```
+
+preflight要求版本一致、完整diagnostics正常、没有活跃孤儿；核对有效产品环境与PhotoBench配置；检查实际本机监听进程，拒绝代理/重定向/远程卸载；分别执行主文本、主视觉、文本嵌入、图像嵌入真实请求并校验向量维度及有效值。核对CPU人脸环境，并在独立进程实际加载本地RetinaFace、SCRFD、ArcFace权重，记录哈希与实际CPU provider。存储使用本机数据路径，不下载权重。Judge采用独立配置，不把密钥写入报告。
+
+run保存唯一请求和响应，`album3-14 / compact-10q / mode=full / models=["__current__"]`，创建新scope，QA并发1、turn_timeout900秒、import_timeout14400秒。每次尝试使用独立runtime记录，旧请求与结果不得覆盖。需要重试时明确记录原因和前一run，不能挑选或删除失败题。
+
+完成后：
+
+```bash
+<release>/.venv/bin/python <release>/scripts/deploy/photobench_acceptance.py audit \
+  --root <release> --runtime <runtime>
+```
+
+独立报告分别给出 `chain_pass` 和 `metrics_pass`，不以 `run_valid` 代替验收。全链路须所有必需阶段完成、10/10 QA、10/10有效Judge，且无工具/模型/规划错误、超时、OOM、意外重启；质量低分单独报告。指标须验证原始样本→保存统计→API/前端统计一致，内存分量可复算、未知值保持null、NX功耗轨有范围，导入/处理/QA均有新鲜核心内存；报告样本数、间隔、阶段覆盖、首尾缺口；本轮核心内存单次/首尾缺口超过3秒即记验收失败，不能用有效样本平均掩盖缺失。
+
+## 口径与历史
+
+- NX/AGX一致：整机MemTotal−MemAvailable，主模型smaps RSS+nvmap，产品相关PID去重PSS+主/辅助nvmap。分配/归属估计；nvmap不可读时正残差可作标明来源的估计，非正残差不可用。
+- NVIDIA：主模型RAM按选定端口的监听PID及后代PSS；VRAM按同一PID归属。其他实例只进整卡/其他进程统计。
+- Mac：整机active+wired+compressor为平台特定统计；footprint、映射权重和容量估计合计分别展示，不宣称精确物理驻留。
+- source退出或超过三个刷新周期后读数失效；单来源失败保留其他有效来源。null不是0，必要分量未知时总量为空。
+- P95用nearest-rank，完整有效样本先统计后降采样；均值为样本均值、峰值为采样峰值，保留首尾及阶段边界。
+- 历史原始结果不改写；仅从已记录完整事实做带版本派生。历史归属错误、缺失解析事实或采样不能补造。

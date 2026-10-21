@@ -23,7 +23,7 @@ import type { EChartsOption, EChartsType } from "echarts";
 import type { Run } from "../../../api/types.ts";
 import { EXECUTION_PHASES } from "../../../lib/constants.ts";
 import { fmtMemory } from "../../../lib/format.ts";
-import { jetsonUnifiedFromRun } from "../../../lib/telemetry.ts";
+import { jetsonUnifiedFromRun, telemetryNumber, telemetryPlatform } from "../../../lib/telemetry.ts";
 import {
   liveTelemetryPhaseRows,
   liveTelemetryRows,
@@ -49,7 +49,7 @@ interface TelemetrySeriesDefinition {
   key: string;
   name: string;
   color: string;
-  /** 需要把多个已存字段相加时使用；缺项按 0 处理（旧 run 兼容）。 */
+  /** 需要把多个已存字段相加时使用；必要分量缺失时合计不可用。 */
   keys?: string[];
 }
 
@@ -62,7 +62,7 @@ function telemetrySeriesDefinitions(
   const isOrin = ["orin_ssh_pss", "jetson_local_pss"].includes(source);
   if (isApple) {
     return [
-      { key: "system_memory_used_mib", name: "整机内存（App+Wired+Compressed）", color: "#20a36a" },
+      { key: "system_memory_used_mib", name: "整机内存（active+wired+compressor，平台特定）", color: "#20a36a" },
       { key: "product_stack_memory_mib", name: "整套产品内存（相关进程 footprint+权重）", color: "#d9488b" },
       { key: "sentrix_stack_pss_mib", name: "Sentrix 周边（不含主模型，footprint+权重）", color: "#8b6de8" },
       { key: "model_process_system_memory_used_mib", name: "主模型进程占用（footprint+权重映射）", color: "#f2b84b" },
@@ -93,36 +93,33 @@ function telemetrySeriesDefinitions(
     { key: "memory_used_mib", name: "整卡 GPU 显存", color: "#4f7cff" },
     { key: "system_memory_used_mib", name: "整机 RAM", color: "#20a36a" },
     { key: "benchmark_process_gpu_memory_mib", name: "测评系统 GPU 显存", color: "#d9488b" },
-    { key: "product_stack_memory_mib", name: "整套产品 RAM（相关进程 PSS + GPU/UMA 页）", color: "#8b6de8" },
+    { key: "product_stack_memory_mib", name: "整套产品 RAM（PSS）", color: "#8b6de8" },
     {
       key: "sentrix_stack_memory_mib",
-      keys: ["sentrix_stack_pss_mib", "sentrix_auxiliary_model_uma_mib"],
-      name: "Sentrix 周边（PSS + 辅助 UMA，不含主模型）",
+      keys: ["sentrix_stack_pss_mib"],
+      name: "Sentrix 周边 RAM（PSS，不含主模型）",
       color: "#a78bfa",
     },
     { key: "model_process_memory_used_mib", name: "主模型 GPU 显存（nvidia-smi 按 PID）", color: "#ef8a4b" },
-    { key: "model_process_system_memory_used_mib", name: "主模型 RAM（进程 smaps Rss）", color: "#f2b84b" },
+    { key: "model_process_system_memory_used_mib", name: "主模型 RAM（PSS）", color: "#f2b84b" },
   ];
 }
 
 /** 1.0 `:1061-1065`。注意 `Number(null) === 0` 是有限数——1.0 的 null 会被当成 0 画出来。 */
 function seriesValue(item: Dict, definition: TelemetrySeriesDefinition): number | null {
   if (definition.keys?.length) {
-    const values = definition.keys
-      .map((key) => Number(item[key]))
-      .filter((value) => Number.isFinite(value));
-    return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+    const values = definition.keys.map((key) => telemetryNumber(item[key]));
+    return values.every((value): value is number => value !== null)
+      ? values.reduce((sum, value) => sum + value, 0) : null;
   }
-  const primary = Number(item[definition.key]);
-  if (Number.isFinite(primary)) return primary;
-  return null;
+  return telemetryNumber(item[definition.key]);
 }
 
 /** 1.0 `:1070-1096` 的 option 组装（`setOption` 之外的部分逐行照搬）。 */
 function buildTelemetryOption(run: Run | null | undefined, history: Dict[]): EChartsOption {
   const r = dict(run);
   const source =
-    telemetryLiveState(run).source || r.telemetry_source || dict(dict(r.phases).gpu_metrics).source || "";
+    telemetryPlatform(telemetryLiveState(run)) || r.telemetry_source || telemetryPlatform(dict(dict(r.phases).gpu_metrics));
   const definitions = telemetrySeriesDefinitions(source, jetsonUnifiedFromRun(run));
   const available = definitions.filter((definition) =>
     history.some((item) => seriesValue(item, definition) != null),
@@ -250,15 +247,12 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
   const phaseRows = liveTelemetryPhaseRows(run);
   const processes = telemetryProcessList(run);
   const chartData = useMemo(() => telemetryChart(run), [run]);
-  // 轮询会每 2 秒换一个 run 对象，但历史点可能没变。用「点数 + 首末时间 + 相位」
-  // 做数据指纹：没变就不 setOption。否则 notMerge 会重建图表，鼠标悬浮的 tooltip
+  // 轮询会每 2 秒换一个 run 对象，但历史点可能没变。比较实际历史内容，
+  // 让相同时间点的null/数值修正同样触发重画。否则 notMerge 会重建图表，鼠标悬浮的 tooltip
   // 会在下一次轮询时被清掉（158 上 active_count 被孤儿 run 占住时尤其明显）。
   const chartKey = useMemo(() => {
     if (!chartData) return "";
-    const history = chartData.history;
-    const first = history[0] || {};
-    const last = history[history.length - 1] || {};
-    return `${history.length}:${first.t ?? ""}:${last.t ?? ""}:${last.phase ?? ""}`;
+    return JSON.stringify(chartData.history);
   }, [chartData]);
   const lastChartKeyRef = useRef<string>("");
 
@@ -289,7 +283,7 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
     lastChartKeyRef.current = chartKey;
     chart.resize();
     return () => observer?.disconnect();
-  }, [chartData, run]);
+  }, [chartData, chartKey, run]);
 
   // 1.0 `onUnmounted`（`:2837`）的 `telemetryChartInstance.dispose()`。
   useEffect(

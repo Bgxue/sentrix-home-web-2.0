@@ -91,8 +91,11 @@ class DiesAfterPlanning:
     「上层只认那个类型」这类问题）。文案里就是 8100 缺 tool-call flag 时那句真实的 400。
     """
 
+    planned = False
+
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
-        if not tools:
+        if not self.planned:
+            self.planned = True
             return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
         raise ModelServiceError(
             "模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400："

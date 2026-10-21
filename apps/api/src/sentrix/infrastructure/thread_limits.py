@@ -55,6 +55,15 @@ def ort_intra_op_threads() -> int:
     return lib_threads()
 
 
+def configure_thread_environment() -> int:
+    """Process entry calls this before importing adapters or numerical libraries."""
+    value = lib_threads()
+    if value > 0:
+        for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            os.environ[key] = str(value)
+    return value
+
+
 def ort_session_options() -> Any | None:
     """带线程上限的 ``SessionOptions``；onnxruntime 不可用时返回 None。"""
     value = lib_threads()
@@ -78,6 +87,12 @@ def apply_process_thread_limits() -> int:
             import cv2
 
             cv2.setNumThreads(value)
+        except Exception:
+            pass
+        try:
+            import torch
+
+            torch.set_num_threads(value)
         except Exception:
             pass
     return value

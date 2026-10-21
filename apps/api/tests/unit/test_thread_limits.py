@@ -64,3 +64,15 @@ def test_zero_skips_ort_options(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_apply_returns_the_effective_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SENTRIX_LIB_THREADS", "4")
     assert thread_limits.apply_process_thread_limits() == 4
+
+
+def test_environment_is_set_before_numerical_import_and_zero_preserves_it(monkeypatch):
+    monkeypatch.setenv("SENTRIX_LIB_THREADS", "2")
+    for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        monkeypatch.delenv(key, raising=False)
+    assert thread_limits.configure_thread_environment() == 2
+    assert thread_limits.os.environ["OPENBLAS_NUM_THREADS"] == "2"
+    monkeypatch.setenv("SENTRIX_LIB_THREADS", "0")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "7")
+    assert thread_limits.configure_thread_environment() == 0
+    assert thread_limits.os.environ["OPENBLAS_NUM_THREADS"] == "7"

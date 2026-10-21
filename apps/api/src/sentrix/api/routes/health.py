@@ -20,9 +20,13 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health/live")
-def health_live() -> dict[str, str]:
+async def health_live(request: Request) -> dict[str, str]:
     """轻量存活探针：不访问任何依赖，也不进线程池。"""
-    return {"status": "ok", "version": __version__}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "build_revision": request.app.state.container.build_revision,
+    }
 
 
 @router.get("/health")
@@ -60,6 +64,7 @@ def _diagnostics(request: Request) -> dict[str, str]:
     payload = {
         "status": "ok" if (database_ok and embeddings_ok) else "degraded",
         "version": __version__,
+        "build_revision": container.build_revision,
         "database": "ok" if database_ok else "error",
         "embeddings": "ok" if embeddings_ok else "unavailable",
     }
