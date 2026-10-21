@@ -102,8 +102,8 @@ POST http://127.0.0.1:8872/api/v1/runs
   "embedding": {
     "mode": "unified_multimodal",
     "profiles": {
-      "unified_multimodal": {"local": true, "ports": [8102]},
-      "split_text_image": {"local": true, "ports": [8101, 8103]},
+      "unified_multimodal": {"local": true},
+      "split_text_image": {"local": true},
       "no_local_embedding": {"local": false}
     }
   },
@@ -117,6 +117,7 @@ POST http://127.0.0.1:8872/api/v1/runs
 
 - `unified_multimodal`：一个多模态嵌入侧车（WeMM 8102）。
 - `split_text_image`：文本 + 图像两个侧车（8101/8103 或 18101/18103）。
+- 嵌入端口只从 `wemm_url` / `text_url` / `image_url` 推导，`profiles` 不再写 `ports`；避免两份端口漂移。
 - `no_local_embedding`：嵌入在远程，本机不记。
 - `main_model.local=false`：模型在远程，本机不记主模型。
 - 未列出的旧栈、另一套嵌入方案、旧 2.0/1.0 进程不进入 product/auxiliary。
