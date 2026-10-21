@@ -43,7 +43,10 @@ def test_save_preserves_service_topology_in_runtime_connection(tmp_path: Path) -
                 "model_base_url": "http://127.0.0.1:8100/v1",
                 "endpoint_model": "old",
                 "embedding": {"mode": "split_text_image", "text_url": "http://127.0.0.1:8101"},
-                "product": [{"id": "photobench", "ports": [8872]}],
+                "product": [
+                    {"id": "sentrix_api", "ports": [8191]},
+                    {"id": "photobench", "ports": [8872]},
+                ],
             }
         ),
         encoding="utf-8",
@@ -63,4 +66,26 @@ def test_save_preserves_service_topology_in_runtime_connection(tmp_path: Path) -
     assert saved["model_base_url"] == "http://127.0.0.1:8103/v1"
     assert saved["endpoint_model"] == "qwen35-mixed-3p1"
     assert saved["embedding"]["text_url"] == "http://127.0.0.1:8101"
-    assert saved["product"] == [{"id": "photobench", "ports": [8872]}]
+    assert {"id": "sentrix_api", "ports": [8291]} in saved["product"]
+    assert {"id": "photobench", "ports": [8872]} in saved["product"]
+
+
+def test_embedding_ports_come_from_urls_not_stale_profiles() -> None:
+    from photobench.infrastructure.runtime.telemetry_scope import _from_runtime_connection
+
+    scope = _from_runtime_connection(
+        {
+            "model_base_url": "http://127.0.0.1:8100/v1",
+            "endpoint_model": "qwen35-q4km",
+            "embedding": {
+                "mode": "split_text_image",
+                "local": True,
+                "text_url": "http://127.0.0.1:8101",
+                "image_url": "http://127.0.0.1:8103",
+                "profiles": {"split_text_image": {"local": True, "ports": [18101, 18103]}},
+            },
+            "product": [{"id": "photobench", "ports": [8872]}],
+        }
+    )
+    assert scope is not None
+    assert scope["embedding"]["profiles"]["split_text_image"]["ports"] == [8101, 8103]

@@ -75,6 +75,14 @@ def normalize_service_url(value: str | None) -> str:
     return raw.rstrip("/")
 
 
+def _port_of(value: str) -> int | None:
+    try:
+        parsed = urlparse(str(value or ""))
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+
+
 def secret_hint(value: str | None) -> str:
     """1.0 ``:308``。给界面看的密钥指纹：首尾各两位、中间打星。"""
     secret = str(value or "")
@@ -394,7 +402,7 @@ class ConfigService:
         provider_id = str(payload.get("judge_provider_id") or self.judge_provider_id).strip()
         if provider_id not in self.judge_providers:
             raise InvalidRequestError(f"unknown judge provider: {provider_id}")
-        values = {
+        values: dict[str, Any] = {
             "sentrix_url": _validated_service_url(payload.get("sentrix_url"), "Sentrix URL"),
             "judge_url": _validated_service_url(payload.get("judge_url"), "Judge URL"),
             "judge_model": str(payload.get("judge_model") or "").strip(),
@@ -411,6 +419,17 @@ class ConfigService:
         for key in ("embedding", "product"):
             if key in self._runtime:
                 values[key] = self._runtime[key]
+        # product 里的 Sentrix API 端口必须跟着 sentrix_url 走，否则页面换地址后
+        # 遥测仍按旧端口找进程。
+        sentrix_port = _port_of(values["sentrix_url"])
+        product: list[dict[str, Any]] = [
+            dict(item) for item in values.get("product") or [] if isinstance(item, dict)
+        ]
+        for item in product:
+            if item.get("id") == "sentrix_api" and sentrix_port:
+                item["ports"] = [sentrix_port]
+        if "product" in values or product:
+            values["product"] = product
         self._store.write_json(RUNTIME_CONNECTION_NAME, values)
         self._runtime = dict(values)
         self.sentrix_url = values["sentrix_url"]

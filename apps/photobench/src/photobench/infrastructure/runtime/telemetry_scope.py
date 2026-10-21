@@ -51,6 +51,29 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     local = bool(host) and host in _local_hosts()
     sentrix_url = str(raw.get("sentrix_url") or "").strip()
     sentrix_port = _url_port(sentrix_url)
+    embedding_scope = dict(embedding or {})
+    mode = str(embedding_scope.get("mode") or "")
+    profiles = dict(embedding_scope.get("profiles") or {})
+    profile = dict(profiles.get(mode) or {})
+    # 端口从实际 URL 推导，避免 profiles.ports 与 text_url/image_url 各写一份后漂移。
+    if profile.get("local") is not False and mode == "unified_multimodal":
+        wemm_port = _url_port(embedding_scope.get("wemm_url"))
+        if wemm_port:
+            profile["ports"] = [wemm_port]
+    elif profile.get("local") is not False and mode == "split_text_image":
+        ports = [
+            port
+            for port in (
+                _url_port(embedding_scope.get("text_url")),
+                _url_port(embedding_scope.get("image_url")),
+            )
+            if port
+        ]
+        if ports:
+            profile["ports"] = ports
+    if mode:
+        profiles[mode] = profile
+        embedding_scope["profiles"] = profiles
     return {
         "main_model": {
             "base_url": model_url,
@@ -59,7 +82,7 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             "ports": [port] if local and port else [],
             "keywords": ["llama-server"],
         },
-        "embedding": dict(embedding or {}),
+        "embedding": embedding_scope,
         "sentrix": {
             "url": sentrix_url,
             "ports": [sentrix_port] if sentrix_port else [],

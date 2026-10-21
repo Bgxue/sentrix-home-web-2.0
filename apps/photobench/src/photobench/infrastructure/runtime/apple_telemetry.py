@@ -40,10 +40,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from photobench.infrastructure.runtime.providers import (
-    _dedupe_rows,
-    _load_telemetry_services,
-    _service_rows,
+from photobench.infrastructure.runtime.telemetry_scope import (
+    dedupe_rows as _dedupe_rows,
+)
+from photobench.infrastructure.runtime.telemetry_scope import (
+    load_telemetry_services as _load_telemetry_services,
+)
+from photobench.infrastructure.runtime.telemetry_scope import (
+    service_rows as _service_rows,
 )
 
 # 与 providers.py 的同名常量**刻意不同源**：1.0 这里是一份写死的 set/tuple，

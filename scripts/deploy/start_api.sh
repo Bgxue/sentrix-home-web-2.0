@@ -14,7 +14,7 @@ if [ -f deploy/thread-limits.env ]; then
 fi
 # 服务拓扑的唯一来源；没有这份文件时保持旧的环境变量启动方式。
 if [ -f apps/photobench/config/runtime_connection.json ]; then
-  eval "$(.venv/bin/python scripts/deploy/runtime_services_env.py)"
+  eval "$(.venv/bin/python scripts/deploy/runtime_connection_env.py)"
 fi
 
 export SENTRIX_LIB_THREADS="${SENTRIX_LIB_THREADS:-}"
