@@ -37,7 +37,7 @@ from photobench.domain.runtime.metrics import apple_power, apple_temperature, de
 # 1.0 ``:933`` / ``:1261``。
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 RANKING_KS = (1, 5, 10)
-JUDGE_CONSISTENCY_VERSION = 2
+JUDGE_CONSISTENCY_VERSION = 3
 
 
 def now_iso() -> str:
@@ -66,6 +66,21 @@ def judge_score_consistency(
         "\n" if version >= 2 else "",
         text,
     )
+    if version >= 3:
+        # Praise must name the tested answer, or be an answer-level assertion at
+        # the start of a clause. Reference narration is not praise of the model.
+        subject = r"(?:模型|助手)(?:的)?(?:回答|答案|结论)"
+        clause_subject = r"^\s*(?:(?:该|此|最终)(?:次)?)?(?:回答|答案|结论)"
+        assertions = (
+            rf"{subject}.{{0,12}}(?:正确|准确)",
+            rf"{clause_subject}.{{0,12}}(?:正确|准确)",
+            rf"(?:{subject}|{clause_subject}).{{0,12}}与.{{0,12}}(?:参考答案|标准答案).{{0,8}}一致",
+            rf"(?:{subject}|{clause_subject}).{{0,8}}符合.{{0,8}}预期",
+            r"^\s*与.{0,12}(?:参考答案|标准答案).{0,8}一致",
+            r"^\s*符合.{0,8}预期",
+            r"^\s*核心信息.{0,12}(?:一致|完整|正确)",
+        )
+        return not any(re.search(pattern, cleaned, flags=re.MULTILINE) for pattern in assertions)
     positive_patterns = (
         (r"(?<!可)(?<!可以)" if version >= 2 else "") + r"(?:回答|模型回答).{0,12}(?:正确|准确)",
         r"与.{0,24}(?:参考答案|标准答案).{0,12}一致",
@@ -124,11 +139,10 @@ def judge_projection(judge: dict[str, Any] | None) -> dict[str, Any]:
 def judge_consistency_status(judge: dict[str, Any] | None) -> str | None:
     """1.0 ``:718``。"""
     judge = judge_projection(judge)
-    version = (
-        JUDGE_CONSISTENCY_VERSION
-        if judge.get("consistency_version") == 2 or judge.get("score_derivation")
-        else 1
-    )
+    recorded_version = judge.get("consistency_version")
+    version = JUDGE_CONSISTENCY_VERSION if judge.get("score_derivation") else 1
+    if not judge.get("score_derivation") and isinstance(recorded_version, int) and recorded_version in (2, 3):
+        version = recorded_version
     if not judge_score_consistency(judge.get("score"), str(judge.get("reason") or ""), version=version):
         return "inconsistent"
     value = judge.get("consistency_status")

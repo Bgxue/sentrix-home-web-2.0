@@ -164,7 +164,7 @@ def test_an_answerable_question_does_not_turn_a_valid_judge_zero_into_a_missing_
     )
     result = _runner(http).judge("q", "ref", "answer")
     assert result["score"] == 0
-    assert result["consistency_version"] == 2
+    assert result["consistency_version"] == 3
     assert len(http.calls) == 1
 
 
@@ -437,3 +437,11 @@ def test_consistency_retry_transport_failure_retains_first_raw_without_fabricati
     assert result["attempts"][0]["raw_response"] == first
     assert "error" in result["attempts"][1]
     assert "raw_response" not in result["attempts"][1]
+
+
+def test_reference_answer_praise_does_not_describe_the_tested_models_answer():
+    text = '{"score":"0","reason":"参考答案已经回答了正确地点但模型未能作答，所以得0分。"}'
+    http = FakeHttpClient([judge_reply(text)])
+    result = _runner(http).judge("q", "r", "a")
+    assert result["score"] == 0
+    assert len(http.calls) == 1

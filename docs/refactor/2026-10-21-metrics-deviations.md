@@ -60,3 +60,5 @@ API列表与详情、前端类型及OpenAPI同步添加可选版本字段。新S
 2026-10-22用户明确替代旧零error验收：中间受控异常不直接否定服务；要求有界恢复和真实终态证据。新增score_normalization_version=1、score_normalization、attempts及只读score_derivation。原始历史不改；显式原score/无歧义raw_text允许确定性派生；缺失重问、失败原执行不补造。共用Judge解析变更须四机固定新SHA回归，纯展示按影响验证。
 
 AGX实测单次进程采集1.431秒，其中1.228秒是同6个PID分别读PSS和RSS导致12次内核smaps_rollup遍历。改为每PID单次读取两字段，保留缺失null并避免跨观测拼接；不缓存旧值、不修改公式/TTL/3秒覆盖门槛，负载效果待真机回归。
+
+Judge一致性v3进一步限定为明确“模型/助手的回答/答案/结论”或分句开头针对回答的肯定断言；参考答案已回答正确地点而模型未能作答的合法0分不重问。真正模型回答正确却给0仍重问一次；v1/v2历史语义保留，新执行consistency_version=3，标准化v1不变。
