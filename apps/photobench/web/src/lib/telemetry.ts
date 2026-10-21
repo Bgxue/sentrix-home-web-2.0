@@ -236,7 +236,7 @@ export function liveTelemetryRows(run: unknown): MetricRow[] {
     : scope === "apple_phys_footprint_related"
     ? "旧口径（仅 phys_footprint，未计映射权重），系统性偏低；重跑后按新口径显示"
     : scope === "all_related_pss_plus_model_uma_extra"
-    ? "所有相关进程 PSS 加总 + max(0, 主模型 VmRSS - 主模型 smaps Rss)"
+    ? "所有相关进程 PSS 加总 + 主模型/辅助模型 GPU/UMA 页"
     : "历史记录未标记新公式 scope；该值不能按当前公式解释，需重跑";
   if (live.source === "apple_unified") {
     const stage = ["completed", "completed_with_errors", "failed", "cancelled", "interrupted"].includes(r.status)

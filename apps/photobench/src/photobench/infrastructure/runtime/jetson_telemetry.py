@@ -394,6 +394,13 @@ def _augment_local_process_memory(
     model_pss = _sum_mib(model_rows, "pss_mib")
     model_smaps_rss = _sum_mib(model_rows, "smaps_rss_mib")
     sentrix_pss = _sum_mib(sentrix_rows, "pss_mib")
+    auxiliary_pids = {row["pid"] for row in auxiliary_rows}
+    auxiliary_memory = unified_model_memory(
+        auxiliary_pids,
+        rss_mib=_sum_mib(auxiliary_rows, "rss_mib"),
+        host_rss_mib=_sum_mib(auxiliary_rows, "smaps_rss_mib"),
+    )
+    auxiliary_uma = auxiliary_memory.get("model_process_gpu_memory_mib")
     model_memory = unified_model_memory(model_pids, rss_mib=model_rss, host_rss_mib=model_smaps_rss)
     if model_memory:
         data.update(model_memory)
@@ -413,6 +420,8 @@ def _augment_local_process_memory(
         data["sentrix_auxiliary_model_pss_mib"] = (
             auxiliary_pss if auxiliary_pss is not None else (0.0 if not auxiliary_rows else None)
         )
+        if auxiliary_uma is not None:
+            data["sentrix_auxiliary_model_uma_mib"] = round(float(auxiliary_uma), 2)
         data["sentrix_stack_pss_scope"] = "sentrix_related_pss_excluding_llama"
         data["sentrix_processes"] = [
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
@@ -427,10 +436,11 @@ def _augment_local_process_memory(
         and model_rss is not None
         and model_smaps_rss is not None
         and model_memory.get("model_process_gpu_memory_mib") is not None
+        and auxiliary_uma is not None
     ):
         cpu_pages = sentrix_pss + model_pss
         uma_extra = float(model_memory["model_process_gpu_memory_mib"])
-        product = round(cpu_pages + uma_extra, 2)
+        product = round(cpu_pages + uma_extra + float(auxiliary_uma or 0.0), 2)
         data["product_stack_memory_mib"] = product
         data["benchmark_process_memory_used_mib"] = product
         data["benchmark_process_memory_scope"] = "all_related_pss_plus_model_uma_extra"

@@ -80,7 +80,8 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             "model": str(raw.get("endpoint_model") or ""),
             "local": local,
             "ports": [port] if local and port else [],
-            "keywords": ["llama-server"],
+            # 端口已足够；"llama-server" 同时是 8101 bge 的命令，不能再当主模型。
+            "keywords": [],
         },
         "embedding": embedding_scope,
         "sentrix": {

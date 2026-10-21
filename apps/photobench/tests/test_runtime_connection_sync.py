@@ -89,3 +89,20 @@ def test_embedding_ports_come_from_urls_not_stale_profiles() -> None:
     )
     assert scope is not None
     assert scope["embedding"]["profiles"]["split_text_image"]["ports"] == [8101, 8103]
+
+
+def test_main_model_ports_do_not_match_embedding_llama_server() -> None:
+    from photobench.infrastructure.runtime.telemetry_scope import _from_runtime_connection, matches_service
+
+    scope = _from_runtime_connection(
+        {
+            "model_base_url": "http://127.0.0.1:8100/v1",
+            "endpoint_model": "qwen35-q4km",
+            "embedding": {"mode": "split_text_image", "local": True},
+        }
+    )
+    assert scope is not None
+    bge_row = {"pid": 1, "identity": "llama-server --embedding", "listening_ports": ["8101"]}
+    main_row = {"pid": 2, "identity": "llama-server", "listening_ports": ["8100"]}
+    assert matches_service(main_row, scope["main_model"])
+    assert not matches_service(bge_row, scope["main_model"])
