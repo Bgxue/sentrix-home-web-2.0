@@ -293,6 +293,33 @@ def check_nvidia_attribution(sample: dict[str, Any], listener_pid: int) -> bool:
     return bool(ram_pids) and ram_pids <= allowed and gpu_pids <= allowed
 
 
+def check_device_freshness(sample: dict[str, Any]) -> list[str]:
+    observed, captured = sample.get("device_observed_at_monotonic"), sample.get("_t")
+    if not finite(observed) or not finite(captured):
+        return []
+    age = captured - observed
+    declared = sample.get("device_observation_age_seconds")
+    errors = []
+    if not finite(declared) or abs(age - declared) > 0.01:
+        errors.append("device_age_not_rebased_at_sample")
+    ttl = sample.get("device_observation_ttl_seconds", 3.0)
+    if not finite(ttl) or ttl <= 0 or not 0 <= age <= ttl:
+        fields = (
+            "power_draw_w",
+            "temperature_c",
+            "cpu_temperature_c",
+            "gpu_utilization_pct",
+            "memory_used_mib",
+            "cpu_power_w",
+            "gpu_power_w",
+        )
+        if any(finite(sample.get(key)) for key in fields):
+            errors.append("stale_device_values")
+        if any(finite(v) for v in (sample.get("power_rails_w") or {}).values()):
+            errors.append("stale_device_rails")
+    return errors
+
+
 def face_weights(effective: dict[str, str]) -> list[dict[str, Any]]:
     for key in ("FACE_PROVIDERS", "RETINAFACE_PROVIDERS"):
         require(effective.get(key) == "CPUExecutionProvider", f"CPU face policy not effective: {key}")
@@ -596,6 +623,7 @@ def audit(runtime: Path) -> dict[str, Any]:
     formulas_checked = 0
     rails: set[str] = set()
     for index, sample in enumerate(samples):
+        metric_errors.extend(f"{index}:{reason}" for reason in check_device_freshness(sample))
         accounting = sample.get("memory_accounting")
         if accounting == "jetson_pss_plus_nvmap_estimate":
             components = [

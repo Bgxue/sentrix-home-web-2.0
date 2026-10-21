@@ -841,6 +841,7 @@ class LocalJetsonLlamaCppTelemetryProvider:
             sample.update(parsed)
             sample["device_observed_at_monotonic"] = _TEGRASTATS._observed_at
             sample["device_observation_age_seconds"] = time.monotonic() - _TEGRASTATS._observed_at
+            sample["device_observation_ttl_seconds"] = 3 * _TEGRASTATS.interval_ms / 1000
         self._device_sample = sample
         return self._device_sample
 

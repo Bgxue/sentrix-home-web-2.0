@@ -348,6 +348,7 @@ class _MacmonStream:
                 **self._latest,
                 "device_observed_at_monotonic": self._observed_at,
                 "device_observation_age_seconds": age,
+                "device_observation_ttl_seconds": 3.0,
             }
 
     def _read(self) -> None:
@@ -903,6 +904,7 @@ class LocalAppleUnifiedTelemetryProvider:
             "gpu_power_w",
             "device_observed_at_monotonic",
             "device_observation_age_seconds",
+            "device_observation_ttl_seconds",
         ):
             if key in device:
                 gpu[key] = device[key]

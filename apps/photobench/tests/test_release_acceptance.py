@@ -88,6 +88,25 @@ def test_unknown_total_cannot_pass_as_zero():
     assert acceptance.expected_total([0, 10], 10)
 
 
+def test_acceptance_derives_age_independently_instead_of_trusting_reported_age():
+    acceptance = script("photobench_acceptance")
+    sample = {
+        "_t": 165.0,
+        "device_observed_at_monotonic": 99.5,
+        "device_observation_age_seconds": 0.5,
+        "device_observation_ttl_seconds": 1.5,
+        "power_draw_w": 30,
+        "power_rails_w": {"VDD_IN": 30},
+    }
+    assert set(acceptance.check_device_freshness(sample)) == {
+        "device_age_not_rebased_at_sample",
+        "stale_device_values",
+        "stale_device_rails",
+    }
+    sample.update(device_observation_age_seconds=65.5, power_draw_w=None, power_rails_w=None)
+    assert acceptance.check_device_freshness(sample) == []
+
+
 def test_jetson_acceptance_requires_process_pss_before_summing_allocations():
     acceptance = script("photobench_acceptance")
     sample = {

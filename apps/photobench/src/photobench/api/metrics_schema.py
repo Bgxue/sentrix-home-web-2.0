@@ -14,6 +14,9 @@ class MemoryObservation(BaseModel):
     component_validity: dict[str, str] | None = None
     observed_at_epoch: float | None = None
     device_observation_age_seconds: float | None = None
+    device_observed_at_monotonic: float | None = None
+    device_observation_ttl_seconds: float | None = None
+    device_freshness_version: int | None = None
     model_process_system_memory_used_mib: float | None = None
     model_process_host_memory_mib: float | None = None
     model_process_gpu_memory_mib: float | None = None

@@ -92,6 +92,8 @@ export type RunPhases = Record<string, Phase | undefined>;
  * 下存在的可空字段。
  */
 export interface TelemetryLive {
+  device_freshness_version?: number;
+  device_observation_ttl_seconds?: number | null;
   metrics_contract_version?: number;
   memory_accounting?: "nvidia_pss_and_vram" | "jetson_pss_plus_nvmap_estimate" | "apple_capacity_estimate";
   memory_complete?: boolean;

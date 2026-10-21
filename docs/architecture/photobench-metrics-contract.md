@@ -63,3 +63,11 @@ Judge denominators remain visible. General telemetry remains optional.
 降采样历史不得冒充缺失的完整阶段峰值。实时行与阶段行优先使用memory_accounting，
 Jetson显示RSS/nvmap/PSS各分量及板级/轨级功耗，Mac显示容量估计与active+wired+compressor；
 旧无指标定义的历史source仅用于兼容。生产schema与失败语义不变。
+
+2026-10-22设备源新鲜度补充（device_freshness_version=1，可选投影）：
+设备读数在采样持久化时按同一单调时钟重新计算age，不能沿用gpu_stats返回时的age。
+新增可选device_observation_ttl_seconds（流源为三个真实刷新周期），并保留device_observed_at_monotonic。
+TTL失效仅清空设备数值及轨道读数并标source_status.device=unavailable，保留有效进程/系统内存。
+历史已有完整单调时间戳时允许按记录TTL派生；旧缺TTL用明确标注的3秒兼容门槛，
+派生结果标device_freshness_version=1，原始文件不改写。没有时间事实时不补造新鲜度。
+独立验收从采样时间减源观测时间复核age和TTL，禁止仅信任已保存的age。

@@ -37,7 +37,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from photobench.domain.runs.analysis import aggregate_gpu_samples
+from photobench.domain.runs.analysis import aggregate_gpu_samples, validated_telemetry_sample
 from photobench.domain.runtime.metrics import finite_number
 from photobench.domain.runtime.ports import TelemetryProvider
 
@@ -110,6 +110,7 @@ class GpuSampler:
                 return {"status": "unavailable", "error": str(error)}
 
         gpu_result = probe(self.provider.gpu_stats)
+        gpu_observed_at = time.monotonic()
         memory_result = probe(self.provider.process_memory)
         system_result = probe(self.provider.system_memory)
         if self._stop.is_set():
@@ -123,12 +124,15 @@ class GpuSampler:
         system_memory = (
             (system_result.get("data") or {}) if system_result.get("status") == "available" else {}
         )
-        timestamp = time.perf_counter()
+        timestamp = time.monotonic()
         for gpu in data.get("gpus") or [{"index": 0}]:
             sample = dict(gpu)
             if sample.get("cpu_temperature_c") is None and data.get("cpu_temperature_c") is not None:
                 sample["cpu_temperature_c"] = data["cpu_temperature_c"]
             sample["_t"] = timestamp
+            if gpu_result.get("status") == "available":
+                sample.setdefault("device_observed_at_monotonic", gpu_observed_at)
+                sample.setdefault("device_observation_ttl_seconds", 3 * self.interval)
             sample["observed_at_epoch"] = time.time()
             sample["metrics_contract_version"] = 2
             sample["source_status"] = {
@@ -233,6 +237,7 @@ class GpuSampler:
             sample["peak_activation_gib"] = memory_profile.get("peak_activation_gib")
             sample["non_torch_gib"] = memory_profile.get("non_torch_gib")
             sample["cuda_graph_gib"] = memory_profile.get("cuda_graph_gib")
+            sample, _rejected = validated_telemetry_sample(sample)
             self.samples.append(sample)
             if self.on_sample:
                 # 回调失败吞掉：采样是增强，见类注释（1.0 ``:1767``）。

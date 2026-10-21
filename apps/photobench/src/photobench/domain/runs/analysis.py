@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from photobench.domain.runtime.metrics import apple_power, apple_temperature
+from photobench.domain.runtime.metrics import apple_power, apple_temperature, device_freshness
 
 # 1.0 ``:933`` / ``:1261``。
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -1732,8 +1732,7 @@ GPU_SAMPLE_FIELDS = (
 
 def validated_telemetry_sample(sample: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Apply identical validity rules to fresh and historical observations; never mutate raw data."""
-    result = dict(sample)
-    rejected: list[str] = []
+    result, rejected = device_freshness(sample)
     apple = (
         sample.get("memory_accounting") == "apple_capacity_estimate"
         or sample.get("source") == "apple_unified"
@@ -1865,6 +1864,8 @@ def _is_telemetry_series_key(key: str) -> bool:
             "process_observed_at_monotonic",
             "device_observation_age_seconds",
             "device_observed_at_monotonic",
+            "device_observation_ttl_seconds",
+            "device_freshness_version",
             "metrics_contract_version",
             "power_scope",
             "power_rail",
@@ -2011,6 +2012,7 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "memory_accounting",
         "component_validity",
         "process_observed_at_monotonic",
+        "device_freshness_version",
         "memory_complete",
         "power_scope",
         "power_rail",

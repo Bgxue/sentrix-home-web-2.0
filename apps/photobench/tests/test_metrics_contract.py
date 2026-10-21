@@ -34,6 +34,85 @@ def test_nearest_rank_p95_has_no_off_by_one() -> None:
     assert analysis.series_stats([{"x": n} for n in range(1, 21)], "x")["p95"] == 19
 
 
+def test_slow_process_probe_cannot_publish_old_device_values_as_fresh(monkeypatch):
+    from photobench.application.run_execution import gpu_sampler
+
+    clock = [100.0]
+
+    class SlowProcess:
+        def gpu_stats(self):
+            return {
+                "status": "available",
+                "data": {
+                    "gpus": [
+                        {
+                            "power_draw_w": 30,
+                            "temperature_c": 50,
+                            "device_observed_at_monotonic": 99.5,
+                            "device_observation_age_seconds": 0.5,
+                            "device_observation_ttl_seconds": 1.5,
+                        }
+                    ]
+                },
+            }
+
+        def process_memory(self):
+            clock[0] = 165.0
+            return {"status": "available", "data": {"product_stack_memory_mib": 500}}
+
+        def system_memory(self):
+            return {"status": "available", "data": {"system_memory_used_mib": 1000}}
+
+        def kv_cache(self):
+            return {"status": "not_applicable"}
+
+    monkeypatch.setattr(gpu_sampler.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(gpu_sampler.time, "perf_counter", lambda: clock[0])
+    sampler = gpu_sampler.GpuSampler(SlowProcess())
+    sampler.sample_once()
+    sample = sampler.samples[0]
+    assert sample["device_observation_age_seconds"] == 65.5
+    assert sample["power_draw_w"] is None
+    assert sample["temperature_c"] is None
+    assert sample["source_status"]["device"] == "unavailable"
+    assert sample["product_stack_memory_mib"] == 500
+    assert sample["system_memory_used_mib"] == 1000
+
+
+def test_historical_freshness_is_derived_from_timestamps_without_mutating_raw():
+    raw = {
+        "_t": 165.0,
+        "device_observed_at_monotonic": 99.5,
+        "device_observation_age_seconds": 0.5,
+        "power_draw_w": 30,
+        "source_status": {"device": "available", "process": "available"},
+        "product_stack_memory_mib": 500,
+    }
+    derived, rejected = analysis.validated_telemetry_sample(raw)
+    assert derived["device_observation_age_seconds"] == 65.5
+    assert derived["device_freshness_version"] == 1
+    assert derived["power_draw_w"] is None
+    assert "power_draw_w" in rejected
+    assert raw["power_draw_w"] == 30
+    assert raw["source_status"]["device"] == "available"
+
+
+@pytest.mark.parametrize(("captured", "expected_power"), [(101.5, 30), (101.501, None), (99, None)])
+def test_device_ttl_uses_source_period_and_preserves_memory(captured, expected_power):
+    raw = {
+        "_t": captured,
+        "device_observed_at_monotonic": 100,
+        "device_observation_ttl_seconds": 1.5,
+        "power_draw_w": 30,
+        "power_rails_w": {"VDD_IN": 30},
+        "system_memory_used_mib": 1000,
+    }
+    derived, _ = analysis.validated_telemetry_sample(raw)
+    assert derived["power_draw_w"] == expected_power
+    assert derived["system_memory_used_mib"] == 1000
+    assert raw["power_rails_w"] == {"VDD_IN": 30}
+
+
 def test_downsampling_preserves_all_phase_boundaries() -> None:
     history = [{"phase": str(n // 2), "t": n} for n in range(40)]
     selected = analysis.downsample_history(history, limit=8)
@@ -335,6 +414,7 @@ def test_single_instance_orphan_recovery_preserves_original(tmp_path) -> None:
 
 def test_jetson_device_cache_cannot_extend_stream_lifetime(monkeypatch):
     class Stream:
+        interval_ms = 500
         _observed_at = 10
         line = "VDD_IN 12000mW/11000mW GR3D_FREQ 80%"
 

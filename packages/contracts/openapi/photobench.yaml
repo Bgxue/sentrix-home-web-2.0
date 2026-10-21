@@ -1020,6 +1020,21 @@ components:
           - type: number
           - type: 'null'
           title: Device Observation Age Seconds
+        device_observed_at_monotonic:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Device Observed At Monotonic
+        device_observation_ttl_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Device Observation Ttl Seconds
+        device_freshness_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Device Freshness Version
         model_process_system_memory_used_mib:
           anyOf:
           - type: number
