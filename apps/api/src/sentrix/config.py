@@ -8,7 +8,7 @@ values disagreed with each other and with the code.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SENTRIX_", extra="forbid")
 
     data_dir: Path = Field(default=Path("data"))
+    # 部署形态的**唯一开关**。只提供一组默认值，显式 env 永远优先：
+    # - server：wemm / 180s / 120s
+    # - mac：legacy / 600s / 180s（CPU 人脸另见 onnx_runtime 的 provider 默认）
+    # 数据根、模型/侧车地址、judge 配置不归它管。
+    deployment_profile: Literal["server", "mac"] = "server"
 
     # Web 的构建产物（``apps/web/dist``，``vite build`` 的产物，``.gitignore`` 里）。
     # **它是本模块里第二个可配的根，和开头那句「data_dir 是唯一可配的根」是有出入
@@ -93,6 +98,15 @@ class Settings(BaseSettings):
     def model_post_init(self, _context: Any, /) -> None:  # noqa: D105
         self.data_dir = self.data_dir.expanduser().resolve()
         self.web_dist_dir = self.web_dist_dir.expanduser().resolve()
+        # **profile 只填默认值，显式环境变量永远优先。** ``model_fields_set`` 含 env
+        # 解析出来的字段；显式设了就不再覆盖。
+        mac = self.deployment_profile == "mac"
+        if "embedding_scheme" not in self.model_fields_set:
+            self.embedding_scheme = "legacy" if mac else "wemm"
+        if "agent_wall_time_s" not in self.model_fields_set:
+            self.agent_wall_time_s = 600.0 if mac else 180.0
+        if "chat_timeout_s" not in self.model_fields_set:
+            self.chat_timeout_s = 180.0 if mac else 120.0
         # **未知方案直接启动失败。** 静默回退到默认会让「配错了」变成「跑的是另一套
         # 模型」——两套模型的向量互不兼容，而检索侧不会报错，只会算不出相似度。
         if self.embedding_scheme not in EMBEDDING_SCHEMES:

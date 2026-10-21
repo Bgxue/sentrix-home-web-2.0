@@ -51,6 +51,7 @@ from photobench.application.run_execution.service import (
     RunRequest,
 )
 from photobench.application.runs.index import RunIndex
+from photobench.config import default_import_timeout
 from photobench.domain.datasets.ports import AlbumSource
 from photobench.domain.errors import InvalidRequestError
 from photobench.domain.http.ports import JsonHttpClient
@@ -223,7 +224,7 @@ class RunSuites:
                     run_id=run_id,
                     mode=mode,
                     # 整册导入在 Mac/CPU 上可能远超默认 2h；允许按 run 放宽客户端超时。
-                    import_timeout=int(payload.get("import_timeout") or 0) or 7200,
+                    import_timeout=int(payload.get("import_timeout") or 0) or default_import_timeout(),
                     # reuse 才传；full 留空让 ``execute`` 走 ``_default_scope_id``。
                     scope_id=existing_scope_id,
                     runtime_framework=deps.runtime_framework,

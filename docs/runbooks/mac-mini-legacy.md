@@ -30,14 +30,28 @@ cd ~/GitHub/sentrix-home-web2.0
 
 脚本会：
 
-1. 设置 `SENTRIX_EMBEDDING_SCHEME=legacy`；
-2. 显式设置 `FACE_PROVIDERS=CPUExecutionProvider`、`RETINAFACE_PROVIDERS=CPUExecutionProvider`
-   （Mac 没有 CUDA；不设会被人脸模块的 CUDA 防线按设计拒启）；
-3. 拉起 8103 chinese-clip 侧车；
-4. 拉起 8191 API；
-5. 等 `/api/v1/health` 返回。
+1. 设置 `SENTRIX_DEPLOYMENT_PROFILE=mac`（profile 默认：legacy / 墙钟 600s /
+   chat 180s / 人脸 CPU）；
+2. 拉起 8103 chinese-clip 侧车；
+3. 拉起 8191 API；
+4. 等 `/api/v1/health` 返回。
 
-### 2.1 PhotoBench 迁移（必做）
+profile 不负责数据根、模型/侧车地址、llama-server 上下文和 judge 配置，仍需显式设置。
+
+### 2.1 PhotoBench 启动
+
+同样设 `SENTRIX_DEPLOYMENT_PROFILE=mac`，profile 会把 QA 并发设为 2、整册导入超时设为
+86400s；`PHOTOBENCH_QA_CONCURRENCY` / run payload 的 `import_timeout` 仍可覆盖。
+数据集根用 158 本机的 1.0 data：
+
+```bash
+SENTRIX_DEPLOYMENT_PROFILE=mac \
+PHOTOBENCH_DATA_ROOT=$HOME/GitHub/Sentrix-Home-Web/services/photobench/data \
+.venv/bin/python -m uvicorn --factory photobench.main:create_app \
+  --host 0.0.0.0 --port 8772 --app-dir apps/photobench/src
+```
+
+### 2.2 PhotoBench 迁移（必做）
 
 从 153 复制 PhotoBench 配置后，**必须**改 `apps/photobench/config/runtime_connection.json`：
 
@@ -69,7 +83,7 @@ episodic BAAI/bge-m3             1024d
 
 ## 4. 与 153 的差异
 
-| 项 | 153 | 130 |
+| 项 | 153 | 158 |
 |---|---|---|
 | 方案 | wemm（默认） | legacy |
 | 视觉 | WeMM 2048d / 8102 | chinese-clip 768d / 8103 |

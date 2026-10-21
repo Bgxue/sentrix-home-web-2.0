@@ -38,6 +38,16 @@ CPU_EXECUTION_PROVIDER = "CPUExecutionProvider"
 
 DEFAULT_PROVIDERS = f"{CUDA_EXECUTION_PROVIDER},{CPU_EXECUTION_PROVIDER}"
 
+
+def _default_providers() -> str:
+    """没显式设 ``FACE_PROVIDERS`` / ``RETINAFACE_PROVIDERS`` 时的默认链。
+
+    Mac 没有 CUDA；默认链里带 CUDA 会让人脸防线按设计拒启整套导入。profile=mac
+    时默认 CPU；显式 env 仍然优先（例如一台有 eGPU 的 Mac 想用 CUDA）。
+    """
+    profile = os.environ.get("SENTRIX_DEPLOYMENT_PROFILE", "server").strip().lower()
+    return CPU_EXECUTION_PROVIDER if profile == "mac" else DEFAULT_PROVIDERS
+
 # 每个 ONNX session 的显存上限。1.0 取 256 MiB 是有理由的：一个人脸适配器可能同时持有
 # 好几个 session（RetinaFace 检测 + buffalo_l 检测 + buffalo_l 识别），预算是**逐个**
 # session 算的，所以单个不能定大。
@@ -75,7 +85,7 @@ def preload_cuda_runtime() -> bool:
 
 def provider_chain(provider_env: str) -> list[str]:
     """环境变量给出的 provider 链；没设就用默认链。空项与空白项被清掉。"""
-    raw = (os.getenv(provider_env) or "").strip() or DEFAULT_PROVIDERS
+    raw = (os.getenv(provider_env) or "").strip() or _default_providers()
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
