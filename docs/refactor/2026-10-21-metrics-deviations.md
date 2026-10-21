@@ -56,3 +56,7 @@ Jetson显示RSS/nvmap/PSS各分量及板级/轨级功耗，Mac显示容量估计
 否定短语不能删除后拼接出新的褒义。真正矛盾仍只重问一次、失败保留None；评分rubric不变。
 未带版本的旧Judge保留v1语义，不根据早先raw_text猜测未保存的重问结果，不改历史原文。
 API列表与详情、前端类型及OpenAPI同步添加可选版本字段。新SHA必须四机重新完整回归。
+
+2026-10-22用户明确替代旧零error验收：中间受控异常不直接否定服务；要求有界恢复和真实终态证据。新增score_normalization_version=1、score_normalization、attempts及只读score_derivation。原始历史不改；显式原score/无歧义raw_text允许确定性派生；缺失重问、失败原执行不补造。共用Judge解析变更须四机固定新SHA回归，纯展示按影响验证。
+
+AGX实测单次进程采集1.431秒，其中1.228秒是同6个PID分别读PSS和RSS导致12次内核smaps_rollup遍历。改为每PID单次读取两字段，保留缺失null并避免跨观测拼接；不缓存旧值、不修改公式/TTL/3秒覆盖门槛，负载效果待真机回归。

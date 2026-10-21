@@ -267,3 +267,22 @@ def test_the_sentrix_client_has_no_arbiter_or_batch_cancel_capability():
 
     names = [name for name in dir(SentrixClient) if not name.startswith("_")]
     assert [name for name in names if "arbiter" in name or "cancel" in name] == []
+
+
+def test_explicit_historical_score_derivation_is_consistent_and_does_not_rewrite_raw(client: TestClient):
+    path = client.app.state.container.settings.results_root / "run-a" / "run.json"
+    state = json.loads(path.read_text())
+    state["items"][0]["judge"] = {"score": "1.0", "reason": "部分满足", "judge_status": "completed"}
+    path.write_text(json.dumps(state))
+    raw = path.read_bytes()
+    listing = client.get("/api/v1/runs/run-a/items?score=1").json()["items"]
+    detail = client.get("/api/v1/runs/run-a/items/0").json()["item"]
+    summary = client.get("/api/v1/runs/run-a").json()["summary"]
+    assert len(listing) == 1
+    for item in (listing[0], detail):
+        assert item["judge"]["score"] == 1
+        assert item["judge"]["score_derivation"]["original_score"] == "1.0"
+        assert item["judge"]["score_derivation"]["rule_version"] == 1
+    assert summary["answer_quality_mean"] == 1
+    assert summary["judge_valid_count"] == 1
+    assert path.read_bytes() == raw

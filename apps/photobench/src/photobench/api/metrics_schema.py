@@ -48,6 +48,10 @@ class JudgeObservation(BaseModel):
     model_config = ConfigDict(extra="allow")
     # Preserve legacy raw values; validation belongs to the versioned domain rule.
     score: Any = None
+    score_normalization_version: int | None = None
+    score_normalization: dict[str, Any] | None = None
+    score_derivation: dict[str, Any] | None = None
+    attempts: list[dict[str, Any]] | None = None
     consistency_version: int | None = None
     consistency_status: str | None = None
 

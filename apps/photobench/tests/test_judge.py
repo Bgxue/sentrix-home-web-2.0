@@ -346,3 +346,94 @@ def test_the_prompt_constant_is_the_1_0_text():
     """提示词是判分口径本身；这条钉住它没有被「整理」过。"""
     assert JUDGE_PROMPT.startswith("你是通用对话任务的回答质量评测员")
     assert '{"score":0|1|2,"reason":"简短中文理由"}' in JUDGE_PROMPT
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(0, 0), (1, 1), (2, 2), (1.0, 1), ("1", 1), ("2", 2), (" 0 ", 0), ("1.0", 1), ("1e0", 1)],
+)
+def test_score_normalization_accepts_only_explicit_integral_scores(value, expected):
+    from photobench.domain.runs.judge import normalize_judge_score
+
+    fact = normalize_judge_score(value)
+    assert fact["score"] == expected
+    assert type(fact["score"]) is int
+    assert fact["converted"] is isinstance(value, str)
+    assert fact["rule_version"] == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        True,
+        False,
+        None,
+        "",
+        " ",
+        float("nan"),
+        float("inf"),
+        "NaN",
+        "Infinity",
+        "1.2",
+        1.2,
+        3,
+        -1,
+        "得2分",
+        [],
+        {},
+        "1_0",
+    ],
+)
+def test_score_normalization_rejects_invalid_types_and_values(value):
+    from photobench.domain.runs.judge import normalize_judge_score
+
+    assert normalize_judge_score(value)["score"] is None
+
+
+def test_quality_retains_raw_response_and_normalization_facts():
+    raw = judge_reply('{"score":"1.0","reason":"部分满足"}')
+    result = _runner(FakeHttpClient([raw])).judge("q", "r", "a")
+    assert result["score"] == 1
+    assert result["score_normalization_version"] == 1
+    assert result["score_normalization"]["converted"] is True
+    assert result["attempts"][0]["raw_response"] == raw
+
+
+def test_inconsistent_retry_failure_preserves_both_responses_without_fallback_score():
+    first = judge_reply('{"score":"0","reason":"模型回答正确"}')
+    second = judge_reply('{"score":true,"reason":"得2分"}')
+    result = _runner(FakeHttpClient([first, second])).judge("q", "r", "a")
+    assert result["score"] is None
+    assert len(result["attempts"]) == 2
+    assert result["attempts"][1]["raw_response"] == second
+    assert result["raw_text"] == second["choices"][0]["message"]["content"]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "正确地点为甲地，模型未回答正确。",
+        "参考答案给出正确地点，但模型回答不正确。",
+        "模型没有回答正确，因此得0分。",
+    ],
+)
+def test_reference_and_negative_reason_keep_zero_score(reason):
+    import json
+
+    result = _runner(FakeHttpClient([judge_reply(json.dumps({"score": " 0 ", "reason": reason}))])).judge(
+        "q", "r", "a"
+    )
+    assert result["score"] == 0
+    assert len(result["attempts"]) == 1
+
+
+def test_consistency_retry_transport_failure_retains_first_raw_without_fabricating_second():
+    first = judge_reply('{"score":0,"reason":"模型回答正确"}')
+    result = _runner(FakeHttpClient([first, RuntimeError("offline"), RuntimeError("offline")])).judge(
+        "q", "r", "a"
+    )
+    assert result["score"] is None
+    assert result["judge_status"] == "failed"
+    assert result["attempts"][0]["raw_response"] == first
+    assert "error" in result["attempts"][1]
+    assert "raw_response" not in result["attempts"][1]

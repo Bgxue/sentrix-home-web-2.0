@@ -58,6 +58,15 @@ describe("effectiveRunSummary：已存 summary 优先于现算（1.0 的 `saved.
     expect(result.answer_quality_mean).toBe(1);
   });
 
+  it("评分只消费后端标准分，不将布尔值或混合文字转成有效分数", () => {
+    const result = effectiveRunSummary({ items: [
+      { judge: { score: true } }, { judge: { score: "得2分" } },
+      { judge: { score: 1, score_derivation: { rule_version: 1, source: "raw_text", score: 1 } } },
+    ] } as unknown as Run);
+    expect(result.judge_valid_count).toBe(1);
+    expect(result.answer_quality_mean).toBe(1);
+  });
+
   // 后端存的值与 items 现算**故意不同**：把 `??` 改成「一律现算」这条必须挂。
   const run = {
     run_id: "saved-wins",

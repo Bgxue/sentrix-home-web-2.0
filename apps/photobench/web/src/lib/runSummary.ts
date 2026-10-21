@@ -75,9 +75,9 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const saved = (run?.summary || {}) as Loose;
   const items = (run?.items || []) as unknown as Loose[];
   const metricItems = items.filter((item) => String(item?.answerability || "").toLowerCase() !== "unanswerable");
-  const judged = items.filter((item) => item.judge?.score != null && item.judge?.consistency_status !== "inconsistent");
+  const judged = items.filter((item) => typeof item.judge?.score === "number" && [0, 1, 2].includes(item.judge.score) && item.judge?.consistency_status !== "inconsistent");
   const recalls = metricItems.map((item) => item.retrieval_recall).filter((value) => Number.isFinite(Number(value)));
-  const scores = judged.map((item) => Number(item.judge.score)).filter(Number.isFinite);
+  const scores = judged.map((item) => item.judge.score as number);
   const evidenceScores = items.map((item) => item.evidence_judge?.score).filter((score) => [0, 1, 2].includes(score));
   const typedRetrieval = items.some((item) => Object.prototype.hasOwnProperty.call(item, "retrieval_media_refs"));
   const retrievalItems = metricItems.filter((item) => mediaRefs(item).length);

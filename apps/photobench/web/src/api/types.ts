@@ -208,6 +208,10 @@ export interface Judge {
   rejudge_id?: string | null;
   consistency_status?: string | null;
   consistency_version?: number | null;
+  score_normalization_version?: number | null;
+  score_normalization?: { rule_version: number; input_type: string; status: string; converted: boolean; score: number | null } | null;
+  score_derivation?: { rule_version: number; source: string; score: number | null; source_sha256?: string } | null;
+  attempts?: Array<Record<string, unknown>> | null;
   reason?: string | null;
   [key: string]: unknown;
 }

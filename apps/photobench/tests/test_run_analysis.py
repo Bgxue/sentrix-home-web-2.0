@@ -464,3 +464,25 @@ def test_run_valid_is_false_when_a_phase_did_not_finish_cleanly():
     }
 
     assert analysis.effective_summary(state)["run_valid"] is False
+
+
+def test_judge_summary_rejects_boolean_and_derives_explicit_string_without_changing_history():
+    from copy import deepcopy
+
+    from photobench.domain.runs.analysis import judge_projection, judge_score_for_summary
+
+    for score in (True, False, "", [], {}, "得2分"):
+        assert judge_score_for_summary({"score": score}) is None
+    old = {"score": None, "raw_text": '{"score":"1.0","reason":"部分满足"}', "judge_status": "completed"}
+    snapshot = deepcopy(old)
+    projected = judge_projection(old)
+    assert old == snapshot
+    assert projected["score"] == 1
+    assert projected["score_derivation"]["source"] == "raw_text"
+    assert projected["score_derivation"]["original_score"] is None
+    assert judge_score_for_summary(old) == 1
+    old["reason"] = "judge_inconsistent_score_reason"
+    assert judge_score_for_summary(old) is None
+    old["reason"] = "judge_error: failed"
+    old["judge_status"] = "failed"
+    assert judge_score_for_summary(old) is None

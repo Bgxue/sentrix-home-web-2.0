@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -30,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from photobench.domain.runs.judge import normalize_judge_score, parse_judge_json
 from photobench.domain.runtime.metrics import apple_power, apple_temperature, device_freshness
 
 # 1.0 ``:933`` / ``:1261``。
@@ -74,10 +76,59 @@ def judge_score_consistency(
     return not any(re.search(pattern, cleaned) for pattern in positive_patterns)
 
 
+def judge_projection(judge: dict[str, Any] | None) -> dict[str, Any]:
+    """Versioned read-only derivation; saved observations and execution status stay intact."""
+    result = dict(judge or {})
+    if result.get("score_normalization_version") == 1 or result.get("score_derivation"):
+        return result
+    original = result.get("score")
+    fact = normalize_judge_score(original)
+    source = "score"
+    raw = str(result.get("raw_text") or "")
+    if (
+        original is None
+        and raw
+        and result.get("judge_status") == "completed"
+        and not str(result.get("reason") or "").startswith(("judge_inconsistent", "judge_error"))
+    ):
+        parsed = parse_judge_json(raw)
+        candidate = normalize_judge_score(parsed.get("score"))
+        if candidate["score"] is not None and judge_score_consistency(
+            candidate["score"], str(parsed.get("reason") or "")
+        ):
+            fact, source = candidate, "raw_text"
+    # Existing numerical observations keep their historical consistency version.
+    if (
+        fact["converted"]
+        or (source == "raw_text" and fact["score"] is not None)
+        or (original is not None and fact["score"] is None)
+    ):
+        result["score"] = fact["score"]
+        result["score_derivation"] = {
+            "rule_version": 1,
+            "source": source,
+            "source_sha256": hashlib.sha256(
+                (
+                    raw if source == "raw_text" else json.dumps(original, ensure_ascii=False, sort_keys=True)
+                ).encode()
+            ).hexdigest(),
+            "original_score": original,
+            "original_judge_status": result.get("judge_status"),
+            "score": fact["score"],
+            "consistency_version": JUDGE_CONSISTENCY_VERSION,
+            "normalization": fact,
+        }
+    return result
+
+
 def judge_consistency_status(judge: dict[str, Any] | None) -> str | None:
     """1.0 ``:718``。"""
-    judge = judge or {}
-    version = JUDGE_CONSISTENCY_VERSION if judge.get("consistency_version") == 2 else 1
+    judge = judge_projection(judge)
+    version = (
+        JUDGE_CONSISTENCY_VERSION
+        if judge.get("consistency_version") == 2 or judge.get("score_derivation")
+        else 1
+    )
     if not judge_score_consistency(judge.get("score"), str(judge.get("reason") or ""), version=version):
         return "inconsistent"
     value = judge.get("consistency_status")
@@ -86,9 +137,13 @@ def judge_consistency_status(judge: dict[str, Any] | None) -> str | None:
 
 def judge_score_for_summary(judge: dict[str, Any] | None) -> int | None:
     """1.0 ``:725``：只有 0/1/2 且不自相矛盾的分数才进汇总。"""
-    judge = judge or {}
-    score = judge.get("score")
-    return score if score in {0, 1, 2} and judge_consistency_status(judge) != "inconsistent" else None
+    judge = judge_projection(judge)
+    score = normalize_judge_score(judge.get("score"))["score"]
+    return (
+        score
+        if judge.get("judge_status") != "failed" and judge_consistency_status(judge) != "inconsistent"
+        else None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +489,7 @@ def _round_or_none(metrics: dict[str, Any] | None, key: str) -> float | None:
 
 def derive_attribution(item: dict[str, Any]) -> dict[str, Any]:
     """1.0 ``:4202``。从已存的 turn 字段里判定失败层。"""
-    judge_score = (item.get("judge") or {}).get("score")
+    judge_score = judge_score_for_summary(item.get("judge"))
     recall = item.get("retrieval_recall")
     # **R 层问的是「检索找到了吗」，不是「交付了吗」。**
     #
@@ -1022,7 +1077,7 @@ def capability_summary(
     evidence_scores = [
         score
         for judge in evidence_judges
-        if isinstance((score := judge.get("score")), (int, float)) and score in {0, 1, 2}
+        if (score := normalize_judge_score(judge_projection(judge).get("score"))["score"]) is not None
     ]
     evidence_dist = {str(score): evidence_scores.count(score) for score in (0, 1, 2)}
     action_judges = [
@@ -1595,7 +1650,7 @@ def run_list_entry(state: dict[str, Any]) -> dict[str, Any]:
 
 def item_summary(item: dict[str, Any], index: int, review: dict[str, Any] | None = None) -> dict[str, Any]:
     """1.0 ``:6559`` 的 ``_item_summary``。"""
-    judge = item.get("judge") or {}
+    judge = judge_projection(item.get("judge"))
     return {
         "index": index,
         "qa_id": item.get("qa_id"),
@@ -1628,6 +1683,11 @@ def item_summary(item: dict[str, Any], index: int, review: dict[str, Any] | None
             "rejudge_id": judge.get("rejudge_id"),
             "consistency_status": judge_consistency_status(judge),
             "consistency_version": judge.get("consistency_version"),
+            **{
+                key: judge[key]
+                for key in ("score_normalization_version", "score_normalization", "score_derivation")
+                if key in judge
+            },
         },
         "task_judge": item.get("task_judge") or {},
         "task_judges": item.get("task_judges") or [],
@@ -1663,7 +1723,12 @@ def hydrate_qa_metadata(item: dict[str, Any], qa_metadata: dict[str, dict[str, A
         if value:
             tags.append(f"{prefix}:{value}")
     hydrated["tags"] = list(dict.fromkeys(tags))
-    judge = hydrated.get("judge") or {}
+    judge = judge_projection(hydrated.get("judge"))
+    if judge:
+        hydrated["judge"] = judge
+    for key in ("evidence_judge",):
+        if hydrated.get(key):
+            hydrated[key] = judge_projection(hydrated[key])
     consistency_status = judge_consistency_status(judge)
     if consistency_status:
         hydrated["judge"] = {**judge, "consistency_status": consistency_status}

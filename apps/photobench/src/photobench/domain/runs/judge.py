@@ -23,6 +23,9 @@
 from __future__ import annotations
 
 import json
+import math
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 JUDGE_PROMPT = """你是通用对话任务的回答质量评测员。根据截至当前轮的完整对话、当前问题、预期行为、可回答性、模型回答和参考答案，对“模型是否有效完成用户本轮任务”打 0/1/2 分。
@@ -166,6 +169,34 @@ def parse_judge_json(text: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+JUDGE_SCORE_NORMALIZATION_VERSION = 1
+_SCORE_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def normalize_judge_score(value: Any) -> dict[str, Any]:
+    """Normalize only an explicit score; never infer a grade from prose or bool."""
+    score: int | None = None
+    if type(value) is int and value in (0, 1, 2):
+        score = value
+    elif type(value) is float and math.isfinite(value) and value in (0, 1, 2):
+        score = int(value)
+    elif isinstance(value, str) and _SCORE_NUMBER.fullmatch(value.strip()):
+        try:
+            number = Decimal(value.strip())
+            if number.is_finite() and number in (Decimal(0), Decimal(1), Decimal(2)):
+                score = int(number)
+        except InvalidOperation:
+            pass
+    converted = isinstance(value, str) and score is not None
+    return {
+        "rule_version": JUDGE_SCORE_NORMALIZATION_VERSION,
+        "input_type": type(value).__name__,
+        "status": "invalid" if score is None else "normalized" if converted else "accepted",
+        "converted": converted,
+        "score": score,
+    }
+
+
 def execution_failure(agent_status: str | None, termination_reason: str | None) -> bool:
     """1.0 ``_execution_failure``（``:1488``）：这一轮 Agent 执行本身是不是失败的。
 
@@ -209,5 +240,7 @@ __all__ = [
     "execution_failure",
     "judge_chat_url",
     "parse_judge_json",
+    "normalize_judge_score",
+    "JUDGE_SCORE_NORMALIZATION_VERSION",
     "thinking_kwargs",
 ]

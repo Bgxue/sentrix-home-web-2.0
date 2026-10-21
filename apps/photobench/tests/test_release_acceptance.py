@@ -261,3 +261,68 @@ def test_preflight_native_bge_probe_uses_cls_not_token_mean(monkeypatch):
     assert result["vector"] == [0.6, 0.8] + [0.0] * 1022
     assert protocol == "llama_cpp_bge_m3_cls_l2"
     assert len(calls) == 3
+
+
+def task_item(reason="answered", errors=None):
+    trace = {
+        "terminal_reason": reason,
+        "task_state": {"phase": "terminal"},
+        "budget_outcome": {"model_steps": 2, "max_steps": 8},
+        "guard": [{"code": "prompt_too_long"}] if errors else [],
+    }
+    return {
+        "qa_id": "q1",
+        "execution_status": "completed",
+        "termination_reason": reason,
+        "answer": "a",
+        "runtime_turns": [
+            {
+                "agent_status": "complete" if reason == "answered" else "partial",
+                "termination_reason": reason,
+                "agent2_trace": trace,
+            }
+        ],
+        "execution_trace": errors or [],
+    }
+
+
+def test_acceptance_distinguishes_controlled_recovery_and_task_failure_from_program_defects():
+    a = script("photobench_acceptance")
+    calls = [
+        {
+            "stage": "model",
+            "step_id": "s",
+            "status": "error",
+            "error_type": "PromptTooLongError",
+            "duration_ms": 2,
+        },
+        {"stage": "model", "step_id": "s", "status": "complete", "duration_ms": 3},
+    ]
+    good = task_item(errors=calls)
+    failed = task_item("parse_failure")
+    failed["qa_id"] = "q2"
+    report = a.assess_tasks([good, failed], expected_count=2)
+    assert report["service_errors"] == []
+    assert report["success"] == 1 and report["recovered_success"] == 1
+    assert report["controlled_failure"] == 1 and report["unhandled_failure"] == 0
+    assert report["call_error_rate"] == {"numerator": 1, "denominator": 2}
+    failed["runtime_turns"][0]["agent2_trace"]["task_state"]["phase"] = "acting"
+    assert a.assess_tasks([failed], expected_count=1)["service_errors"]
+
+
+def test_acceptance_does_not_invent_recovery_from_a_caught_error_or_hide_missing_questions():
+    a = script("photobench_acceptance")
+    caught = task_item(
+        errors=[{"stage": "model", "status": "error", "error_type": "PromptTooLongError", "duration_ms": 1}]
+    )
+    report = a.assess_tasks([caught], expected_count=2)
+    assert report["recovered_success"] == 0
+    assert report["unverified_recovery_events"] == 1
+    assert "scheduled_item_count_mismatch" in report["service_errors"]
+
+
+def test_acceptance_score_parser_rejects_bool_and_accepts_finite_integral_strings():
+    a = script("photobench_acceptance")
+    assert a.explicit_score("1.0") == 1
+    assert a.explicit_score(True) is None
+    assert a.explicit_score("得2分") is None

@@ -991,6 +991,31 @@ components:
       properties:
         score:
           title: Score
+        score_normalization_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Score Normalization Version
+        score_normalization:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Score Normalization
+        score_derivation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Score Derivation
+        attempts:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Attempts
         consistency_version:
           anyOf:
           - type: integer

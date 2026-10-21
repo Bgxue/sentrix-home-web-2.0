@@ -270,7 +270,10 @@ class ReadRuns:
                     and search not in str(item.get("qa_id") or "").lower()
                 ):
                     continue
-                if score_filter is not None and (item.get("judge") or {}).get("score") != score_filter:
+                if (
+                    score_filter is not None
+                    and analysis.judge_score_for_summary(item.get("judge")) != score_filter
+                ):
                     continue
                 if task_type and item.get("task_type") != task_type:
                     continue

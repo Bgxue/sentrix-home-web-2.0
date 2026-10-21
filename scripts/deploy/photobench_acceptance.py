@@ -9,10 +9,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, TypeGuard
 from urllib.error import HTTPError
@@ -503,6 +505,144 @@ def run(runtime: Path) -> dict[str, Any]:
     return response
 
 
+def explicit_score(value: Any) -> int | None:
+    """Independent acceptance oracle, not a production score inference path."""
+    if finite(value) and value in (0, 1, 2):
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(
+        r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value.strip()
+    ):
+        try:
+            number = Decimal(value.strip())
+            if number.is_finite() and number in (Decimal(0), Decimal(1), Decimal(2)):
+                return int(number)
+        except InvalidOperation:
+            pass
+    return None
+
+
+def assess_tasks(items: list[dict[str, Any]], *, expected_count: int = 10) -> dict[str, Any]:
+    """Contract v1: truthful terminal evidence, independently of answer quality."""
+    success_reasons = {"answered", "answered_with_gap", "policy_refusal"}
+    failure_reasons = {
+        "no_tool_call_stopped",
+        "tool_budget_exhausted",
+        "step_budget_exhausted",
+        "timeout",
+        "model_error",
+        "guard_blocked",
+        "parse_failure",
+        "planner_blocked",
+    }
+    report: dict[str, Any] = {
+        key: 0
+        for key in (
+            "success",
+            "recovered_success",
+            "controlled_failure",
+            "unhandled_failure",
+            "cancelled",
+            "unverified_recovery_events",
+        )
+    }
+    defects = []
+    rows = []
+    call_count = error_count = 0
+    if len(items) != expected_count:
+        defects.append("scheduled_item_count_mismatch")
+    ids = [item.get("qa_id") for item in items]
+    if any(not value for value in ids) or len(set(ids)) != len(ids):
+        defects.append("missing_or_duplicate_qa_id")
+    for index, item in enumerate(items):
+        reason = item.get("termination_reason")
+        turns = item.get("runtime_turns") or []
+        terminal = bool(turns) and item.get("execution_status") == "completed"
+        for turn in turns:
+            trace = turn.get("agent2_trace") or {}
+            budget = trace.get("budget_outcome") or {}
+            n, maximum = budget.get("model_steps"), budget.get("max_steps")
+            terminal = terminal and all(type(v) is int and v >= 0 for v in (n, maximum))
+            if type(n) is int and type(maximum) is int:
+                terminal = terminal and n <= maximum
+                if turn.get("termination_reason") == "step_budget_exhausted":
+                    terminal = terminal and n == maximum
+            terminal = terminal and turn.get("agent_status") in {
+                "complete",
+                "partial",
+                "failed",
+                "blocked",
+                "cancelled",
+            }
+            terminal = (
+                terminal
+                and trace.get("terminal_reason") == turn.get("termination_reason")
+                and (trace.get("task_state") or {}).get("phase") == "terminal"
+            )
+        calls = [step for step in item.get("execution_trace") or [] if step.get("stage") == "model"]
+        errors = [step for step in calls if step.get("status") in {"error", "failed"}]
+        call_count += len(calls)
+        error_count += len(errors)
+        guards = [guard for turn in turns for guard in (turn.get("agent2_trace") or {}).get("guard") or []]
+        recovery_evidence = sum(guard.get("code") == "prompt_too_long" for guard in guards)
+        recovered = 0
+        for position, call in enumerate(calls):
+            if call.get("status") not in {"error", "failed"}:
+                continue
+            # Product contract: each compression removes a complete prior tool round;
+            # the observed recovery must have a later successful call at the same step.
+            if (
+                call.get("error_type") == "PromptTooLongError"
+                and call.get("step_id")
+                and finite(call.get("duration_ms"))
+                and recovery_evidence > 0
+                and any(
+                    later.get("step_id") == call["step_id"]
+                    and later.get("status") in {"complete", "completed", "ok"}
+                    for later in calls[position + 1 :]
+                )
+            ):
+                recovered += 1
+                recovery_evidence -= 1
+            elif reason in success_reasons:
+                report["unverified_recovery_events"] += 1
+        if terminal and reason in success_reasons and str(item.get("answer") or "").strip():
+            category = "success"
+            if errors and recovered == len(errors):
+                report["recovered_success"] += 1
+        elif terminal and reason in failure_reasons:
+            category = "controlled_failure"
+        elif reason == "cancelled" or "cancelled" in str(item.get("error") or "").lower():
+            category = "cancelled"
+        else:
+            category = "unhandled_failure"
+            defects.append(f"{index}:missing_or_inconsistent_terminal_evidence")
+        report[category] += 1
+        rows.append(
+            {
+                "qa_id": item.get("qa_id"),
+                "category": category,
+                "termination_reason": reason,
+                "terminal_verified": bool(terminal),
+                "call_errors": len(errors),
+                "verified_recovered_calls": recovered,
+            }
+        )
+    report.update(
+        rule_version=1,
+        expected_count=expected_count,
+        observed_count=len(items),
+        service_errors=defects,
+        items=rows,
+        call_error_rate={"numerator": error_count, "denominator": call_count},
+        baseline="same fixed 10QA; historical runs retained by revision; no statistical reliability claim",
+        tolerance=(
+            "no task-quality error-rate threshold; all tasks must have truthful terminals; "
+            "telemetry thresholds unchanged"
+        ),
+    )
+    return report
+
+
 def audit(runtime: Path) -> dict[str, Any]:
     bindings = read_json(runtime / "bindings.json")
     pre = read_json(runtime / "preflight.json")
@@ -528,49 +668,41 @@ def audit(runtime: Path) -> dict[str, Any]:
         "gpu_metrics",
         "aggregate",
     ):
-        if ((saved.get("phases") or {}).get(phase) or {}).get("status") != "done":
+        status = ((saved.get("phases") or {}).get(phase) or {}).get("status")
+        if status != "done" and not (phase == "qa_eval" and status == "partial"):
             chain_errors.append(f"required_phase_not_done:{phase}")
     if saved.get("status") != "completed" or len(items) != 10:
         chain_errors.append("run_not_completed_with_10_items")
     if saved.get("build_revision") != pre["revision"] or api.get("build_revision") != pre["revision"]:
         metric_errors.append("revision_mismatch")
+    tasks = assess_tasks(items)
+    chain_errors.extend(tasks["service_errors"])
     scores: list[float] = []
+    missing_scores = []
+    normalizations = []
     for index, item in enumerate(items):
-        reasons = []
-        if item.get("execution_status") != "completed":
-            reasons.append("execution_not_completed")
-        score = (item.get("judge") or {}).get("score")
+        judge = item.get("judge") or {}
+        score = explicit_score(judge.get("score"))
         if (
             item.get("judge_status") != "completed"
-            or not finite(score)
-            or score not in {0, 1, 2}
-            or (item.get("judge") or {}).get("consistency_status") == "inconsistent"
+            or score is None
+            or judge.get("consistency_status") == "inconsistent"
         ):
-            reasons.append("judge_missing")
+            missing_scores.append(
+                {
+                    "index": index,
+                    "qa_id": item.get("qa_id"),
+                    "reason": judge.get("reason"),
+                    "judge_status": item.get("judge_status"),
+                }
+            )
         else:
             scores.append(float(score))
-        if item.get("termination_reason") in {
-            "model_error",
-            "planner_call_error",
-            "timeout",
-            "step_budget",
-            "step_budget_exhausted",
-            "tool_budget_exhausted",
-            "parse_failure",
-            "cancelled",
-        }:
-            reasons.append(str(item.get("termination_reason")))
-        calls = item.get("model_call_metrics") or []
-        trace = item.get("execution_trace") or []
-        if any(call.get("status") in {"error", "failed"} for call in calls + trace):
-            reasons.append("recorded_call_error")
-        if any(
-            tool.get("error") or tool.get("status") in {"error", "failed"}
-            for tool in item.get("tool_trace") or []
-        ):
-            reasons.append("tool_error")
-        if reasons:
-            chain_errors.append(f"{index}:{','.join(reasons)}")
+        for attempt in judge.get("attempts") or []:
+            fact = attempt.get("score_normalization") or {}
+            if fact.get("converted"):
+                normalizations.append({"index": index, "fact": fact})
+    infrastructure_errors: list[str] = []
     phase_report: dict[str, Any] = {}
     for phase in ("photo_import", "pipeline_processing", "qa_eval"):
         points = [s for s in samples if s.get("phase") == phase]
@@ -695,12 +827,23 @@ def audit(runtime: Path) -> dict[str, Any]:
         if log.exists():
             tail = log.read_text(errors="replace")[-2_000_000:].lower()
             if any(x in tail for x in ("out of memory", "outofmemoryerror", "oom-kill", "killed process")):
-                chain_errors.append(f"{role}:oom_in_service_log")
+                infrastructure_errors.append(f"{role}:oom_in_service_log")
     if listener(8291) != pre["api_pid"] or listener(8872) != pre["pb_pid"]:
-        chain_errors.append("unexpected_service_restart")
+        infrastructure_errors.append("unexpected_service_restart")
     report = {
         "run_id": run_id,
         "revision": pre["revision"],
+        "acceptance_rule_version": 2,
+        "service_pass": not chain_errors,
+        "scoring_complete": len(scores) == 10,
+        "scoring": {
+            "valid": len(scores),
+            "expected": 10,
+            "missing": missing_scores,
+            "standardized_responses": normalizations,
+        },
+        "tasks": tasks,
+        "infrastructure_errors": infrastructure_errors,
         "chain_pass": not chain_errors,
         "metrics_pass": not metric_errors,
         "chain_errors": chain_errors,

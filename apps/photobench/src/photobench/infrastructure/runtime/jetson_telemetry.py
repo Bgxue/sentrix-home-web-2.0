@@ -331,19 +331,18 @@ def _sum_mib(rows: list[dict[str, Any]], key: str) -> float | None:
     return round(sum(float(row[key]) for row in rows), 2)
 
 
-def _process_smaps_field_mib(pid: int, field: str) -> float | None:
+def _process_smaps_memory_mib(pid: int) -> tuple[float | None, float | None]:
+    """Read PSS and RSS in one kernel walk, so both describe the same observation."""
+    values: dict[str, float] = {}
     try:
         with open(f"/proc/{pid}/smaps_rollup", encoding="ascii") as file:
             for line in file:
-                if line.startswith(field):
-                    return round(int(line.split()[1]) / 1024, 2)
+                key = line.split(":", 1)[0]
+                if key in {"Pss", "Rss"}:
+                    values[key] = round(int(line.split()[1]) / 1024, 2)
     except (OSError, ValueError, IndexError):
-        return None
-    return None
-
-
-def _process_pss_mib(pid: int) -> float | None:
-    return _process_smaps_field_mib(pid, "Pss:")
+        return None, None
+    return values.get("Pss"), values.get("Rss")
 
 
 def _is_model_process(row: dict[str, Any], *, model_pid: int | None, endpoint_port: str) -> bool:
@@ -418,10 +417,7 @@ def _augment_local_process_memory(
         ]
         auxiliary_rows = []
     observations = {
-        int(row["pid"]): (
-            _process_pss_mib(int(row["pid"])),
-            _process_smaps_field_mib(int(row["pid"]), "Rss:"),
-        )
+        int(row["pid"]): _process_smaps_memory_mib(int(row["pid"]))
         for row in dedupe_rows(sentrix_rows + model_rows)
     }
     for row in sentrix_rows + model_rows + product_rows + auxiliary_rows:

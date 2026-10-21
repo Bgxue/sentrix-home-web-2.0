@@ -484,8 +484,7 @@ def test_orphan_rejudge_on_terminal_run_is_also_recovered(tmp_path):
 def test_jetson_no_auxiliary_is_zero_and_disappeared_model_cannot_reuse_total(monkeypatch):
     rows = [{"pid": 1, "ppid": 0, "rss_mib": 10, "listening_ports": [8100], "process_name": "llama-server"}]
     monkeypatch.setattr(jetson, "_host_process_rows", lambda: rows)
-    monkeypatch.setattr(jetson, "_process_pss_mib", lambda pid: 8)
-    monkeypatch.setattr(jetson, "_process_smaps_field_mib", lambda pid, field: 10)
+    monkeypatch.setattr(jetson, "_process_smaps_memory_mib", lambda pid: (8, 10))
     monkeypatch.setattr(jetson, "_nvmap_clients_mib", lambda: {1: 20})
     scope = {"main_model": {"ports": [8100]}, "embedding": {}, "sentrix": {}, "product": []}
     good = jetson._augment_local_process_memory(
@@ -538,3 +537,28 @@ def test_linux_memory_never_substitutes_memfree_for_memavailable(monkeypatch):
     assert system_used(100, 200) is None
     monkeypatch.setattr(jetson.Path, "read_text", lambda *a, **k: "MemTotal: 102400 kB\nMemFree: 1024 kB\n")
     assert jetson._meminfo_mib() == {}
+
+
+def test_jetson_pss_and_rss_share_one_kernel_observation(monkeypatch):
+    import builtins
+    import io
+
+    reads = []
+
+    def changing_rollup(path, **kwargs):
+        reads.append(path)
+        return io.StringIO(
+            "Rss: 10240 kB\nPss: 8192 kB\n" if len(reads) == 1 else "Rss: 20480 kB\nPss: 16384 kB\n"
+        )
+
+    monkeypatch.setattr(builtins, "open", changing_rollup)
+    assert jetson._process_smaps_memory_mib(42) == (8, 10)
+    assert len(reads) == 1
+
+
+def test_jetson_partial_rollup_keeps_missing_component_unavailable(monkeypatch):
+    import builtins
+    import io
+
+    monkeypatch.setattr(builtins, "open", lambda *a, **k: io.StringIO("Rss: 10240 kB\n"))
+    assert jetson._process_smaps_memory_mib(42) == (None, 10)
