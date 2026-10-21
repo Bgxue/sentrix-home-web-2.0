@@ -232,6 +232,17 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
   const phaseRows = liveTelemetryPhaseRows(run);
   const processes = telemetryProcessList(run);
   const chartData = useMemo(() => telemetryChart(run), [run]);
+  // 轮询会每 2 秒换一个 run 对象，但历史点可能没变。用「点数 + 首末时间 + 相位」
+  // 做数据指纹：没变就不 setOption。否则 notMerge 会重建图表，鼠标悬浮的 tooltip
+  // 会在下一次轮询时被清掉（158 上 active_count 被孤儿 run 占住时尤其明显）。
+  const chartKey = useMemo(() => {
+    if (!chartData) return "";
+    const history = chartData.history;
+    const first = history[0] || {};
+    const last = history[history.length - 1] || {};
+    return `${history.length}:${first.t ?? ""}:${last.t ?? ""}:${last.phase ?? ""}`;
+  }, [chartData]);
+  const lastChartKeyRef = useRef<string>("");
 
   useEffect(() => {
     const element = canvasRef.current;
@@ -239,13 +250,11 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
       // 1.0 `:1029-1033`：没有容器或数据不足 2 点时销毁实例。
       chartRef.current?.dispose();
       chartRef.current = null;
+      lastChartKeyRef.current = "";
       return;
     }
     const chart = chartRef.current ?? echarts.init(element);
     chartRef.current = chart;
-    chart.setOption(buildTelemetryOption(run, chartData.history), true);
-    chart.resize();
-
     const observer =
       typeof ResizeObserver === "undefined"
         ? null
@@ -253,6 +262,14 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
             chartRef.current?.resize();
           });
     observer?.observe(element);
+    if (lastChartKeyRef.current === chartKey) {
+      // 数据没变，只保证尺寸正确；不要 setOption，否则 tooltip 会被重置。
+      chart.resize();
+      return () => observer?.disconnect();
+    }
+    chart.setOption(buildTelemetryOption(run, chartData.history), true);
+    lastChartKeyRef.current = chartKey;
+    chart.resize();
     return () => observer?.disconnect();
   }, [chartData, run]);
 
