@@ -120,3 +120,15 @@ Judge一致性规则核验：新正式run的回答质量judge必须记录consist
 任何该规则代码修复也必须新SHA、完整make ci及四机新scope full10QA，不能重判旧run代替。
 
 Judge一致性v3进一步限定为明确“模型/助手的回答/答案/结论”或分句开头针对回答的肯定断言；参考答案已回答正确地点而模型未能作答的合法0分不重问。真正模型回答正确却给0仍重问一次；v1/v2历史语义保留，新执行consistency_version=3，标准化v1不变。
+
+
+### Jetson 核心采样关键路径（2026-10-22）
+
+9dad22b 实际 AGX 导入仍出现3.493秒缺口。继续定位发现gpu_stats先读主模型PSS，
+process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps，唯一的新鲜进程
+观测归process_memory。可选llama.cpp /metrics各IO超时从2秒收紧至0.2秒，繁忙时KV为
+不可用，不保留前次值；不改变主模型HTTP请求超时、内存公式、源TTL或严格3秒覆盖门槛。
+这是Jetson适配器内部修复，无公开schema、端口、装配点或部署配置变化。真实HTTP繁忙
+测试确认在服务端任务结束前返回不可用；完整采样测试确认每PID仅一次smaps遍历。
+影响范围仅NX/AGX；固定新提交、完整CI后这两机新scope full10QA。3090/Mac继续使用
+9dad22b正式证据及该版本前端产物，不将旧run改标新SHA，版本分别追踪。

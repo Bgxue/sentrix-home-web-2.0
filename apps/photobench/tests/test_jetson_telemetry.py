@@ -91,3 +91,92 @@ def test_no_split_fields_keeps_the_legacy_unit() -> None:
     jetson.apply_jetson_memory_metadata(data)
     assert data["memory_unit"] == "process_pss_uma_mib"
     assert "memory_profile" not in data
+
+
+def test_sampler_walks_each_process_once_even_when_device_stats_are_collected(monkeypatch):
+    import builtins
+    import io
+
+    from photobench.application.run_execution.gpu_sampler import GpuSampler
+
+    provider = jetson.LocalJetsonLlamaCppTelemetryProvider("http://127.0.0.1:8100")
+    monkeypatch.setattr(provider, "_pid", lambda: 42)
+    monkeypatch.setattr(provider, "_metrics", lambda: {})
+    monkeypatch.setattr(provider, "_llama_args", lambda pid: {})
+    monkeypatch.setattr(provider, "_device", lambda: {})
+    monkeypatch.setattr(jetson, "_meminfo_mib", lambda: {"system_memory_used_mib": 100})
+    monkeypatch.setattr(jetson, "_nvmap_clients_mib", lambda: {42: 3})
+    monkeypatch.setattr(
+        jetson,
+        "_host_process_rows",
+        lambda: [{"pid": 42, "identity": "llama-server --port 8100", "rss_mib": 1}],
+    )
+    walks = []
+
+    def smaps(path, *args, **kwargs):
+        walks.append(str(path))
+        return io.StringIO("Rss: 1024 kB\nPss: 512 kB\n")
+
+    monkeypatch.setattr(builtins, "open", smaps)
+    sampler = GpuSampler(provider)
+    sampler.sample_once()
+    assert walks == ["/proc/42/smaps_rollup"]
+    assert sampler.samples[0]["model_process_host_memory_mib"] == 1
+    assert sampler.samples[0]["model_process_system_memory_used_mib"] == 4
+
+
+def test_failed_optional_metrics_probe_never_reuses_previous_kv(monkeypatch):
+    provider = jetson.LocalJetsonLlamaCppTelemetryProvider("http://127.0.0.1:8100")
+    values = iter([{"kv_cache_used_tokens": 12}, {}])
+    monkeypatch.setattr(provider, "_metrics", lambda: next(values))
+    monkeypatch.setattr(provider, "_pid", lambda: 42)
+    monkeypatch.setattr(provider, "_llama_args", lambda pid: {})
+    monkeypatch.setattr(provider, "_device", lambda: {})
+    provider.gpu_stats()
+    assert provider.kv_cache()["data"]["used_tokens"] == 12
+    provider.gpu_stats()
+    assert provider.kv_cache()["status"] == "unavailable"
+
+
+def test_busy_optional_metrics_endpoint_has_a_short_budget(monkeypatch):
+    import httpx
+
+    provider = jetson.LocalJetsonLlamaCppTelemetryProvider("http://127.0.0.1:8100")
+
+    def busy(url, *, timeout):
+        assert timeout <= 0.2
+        raise httpx.ReadTimeout("busy model metrics")
+
+    monkeypatch.setattr(jetson.httpx, "get", busy)
+    assert provider._metrics() == {}
+
+
+def test_real_busy_metrics_http_does_not_wait_for_model_work():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BusyHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            entered.set()
+            release.wait(3)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BusyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        provider = jetson.LocalJetsonLlamaCppTelemetryProvider(f"http://127.0.0.1:{server.server_port}")
+        assert provider._metrics() == {}
+        assert entered.is_set() and not release.is_set()
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)

@@ -717,7 +717,6 @@ class LocalJetsonLlamaCppTelemetryProvider:
             JETSON_SAMPLE_INTERVAL_SECONDS if pss_interval is None else max(0.0, float(pss_interval))
         )
         self.device_interval = self.pss_interval
-        self._last_probe = 0.0
         self._last_device_probe = 0.0
         self._device_sample: dict[str, Any] = {}
         self._last_pid: int | None = None
@@ -762,21 +761,6 @@ class LocalJetsonLlamaCppTelemetryProvider:
             pass
         return pid
 
-    @staticmethod
-    def _pss_mib(pid: int) -> float:
-        with open(f"/proc/{pid}/smaps_rollup", encoding="ascii") as file:
-            for line in file:
-                if line.startswith("Pss:"):
-                    return round(int(line.split()[1]) / 1024, 2)
-        raise ValueError("Pss not found in smaps_rollup")
-
-    @staticmethod
-    def _rss_mib(pid: int) -> float:
-        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
-            if line.startswith("VmRSS:"):
-                return round(int(line.split()[1]) / 1024, 2)
-        raise ValueError("VmRSS not found")
-
     def _llama_args(self, pid: int) -> dict[str, Any]:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         args = [os.fsdecode(item) for item in raw if item]
@@ -802,7 +786,9 @@ class LocalJetsonLlamaCppTelemetryProvider:
         """llama.cpp 的 ``/metrics`` 里那几个 ``llamacpp:kv_cache_*``。探不到就什么都不加。"""
         data: dict[str, Any] = {}
         try:
-            response = httpx.get(f"{self.endpoint}/metrics", timeout=2)
+            # Optional KV counters must not consume the core-memory sampling
+            # budget when the inference server is busy with a visual request.
+            response = httpx.get(f"{self.endpoint}/metrics", timeout=0.2)
             response.raise_for_status()
             values: dict[str, float] = {}
             for line in response.text.splitlines():
@@ -842,8 +828,8 @@ class LocalJetsonLlamaCppTelemetryProvider:
         return self._device_sample
 
     def gpu_stats(self) -> dict[str, Any]:
-        data: dict[str, Any] = dict(self._last_memory.get("data") or {})
-        data.update(self._metrics())
+        # A failed optional probe is unknown, never the preceding observation.
+        data: dict[str, Any] = self._metrics()
         data["memory_unit"] = "process_pss_uma_mib"
         data["memory_scope"] = "model_process_pss"
         data["memory_profile"] = {"method": "orin_process_pss_uma_v1"}
@@ -852,23 +838,15 @@ class LocalJetsonLlamaCppTelemetryProvider:
             if pid != self._last_pid:
                 # PID 变了意味着换过一次模型进程：上一次的进程内存读数不再属于它。
                 self._last_pid = pid
-                self._last_probe = 0.0
                 data.pop("process_memory_used_mib", None)
             data["root_pid"] = pid
             if pid != getattr(self, "_baseline_pid", None):
                 self._baseline_pid = pid
                 self._system_baseline_mib = None
-            if time.monotonic() - self._last_probe >= self.pss_interval:
-                self._last_probe = time.monotonic()
-                data["process_memory_used_mib"] = self._pss_mib(pid)
-                data["process_memory_scope"] = "llama_server_pss"
-                try:
-                    data["process_rss_mib"] = self._rss_mib(pid)
-                    data["llama_server_args"] = self._llama_args(pid)
-                except (OSError, ValueError, IndexError):
-                    pass
-                data["pss_sampled_at_monotonic"] = time.monotonic()
-                data.pop("pss_error", None)
+            # process_memory() owns the single fresh PSS/RSS observation for
+            # every related PID. Walking the large main model here as well
+            # delays all core memory samples without contributing a value.
+            data["llama_server_args"] = self._llama_args(pid)
             device = self._device()
             used = device.get("system_memory_used_mib")
             if self._system_baseline_mib is None and isinstance(used, (int, float)):
