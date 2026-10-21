@@ -422,6 +422,15 @@ COMPUTE = [
 ]
 
 
+def test_embedding_ports_are_candidates_for_auxiliary_attribution() -> None:
+    assert providers._is_system_related_process(
+        {"identity": "python legacy_clip_sidecar.py", "listening_ports": ["8103"]}
+    )
+    assert providers._is_system_related_process(
+        {"identity": "python wemm_embedder_sidecar.py", "listening_ports": ["8102"]}
+    )
+
+
 def test_model_services_are_classified_for_auxiliary_split() -> None:
     """llama-server/vLLM/嵌入侧车不是 Sentrix 周边，不能把模型内存算进紫线。"""
     assert providers._is_model_service_process(
@@ -467,13 +476,33 @@ def test_auxiliary_model_services_stay_in_sentrix_without_double_count(
 ) -> None:
     """主模型只排除一次；嵌入/辅助服务计入 Sentrix，但单独记一份。"""
     rows = [
-        {"pid": 100, "process_name": "python", "rss_mib": 100.0, "listening_ports": ["8771"], "identity": "python benchmark_orchestrator.py"},
-        {"pid": 200, "process_name": "llama-server", "rss_mib": 200.0, "listening_ports": ["8100"], "identity": "llama-server --port 8100"},
-        {"pid": 300, "process_name": "python", "rss_mib": 75.0, "listening_ports": ["8104"], "identity": "/home/asus/github/sentrix-home-web/freeret_sidecar.py --port 8104"},
+        {
+            "pid": 100,
+            "process_name": "python",
+            "rss_mib": 100.0,
+            "listening_ports": ["8771"],
+            "identity": "python benchmark_orchestrator.py",
+        },
+        {
+            "pid": 200,
+            "process_name": "llama-server",
+            "rss_mib": 200.0,
+            "listening_ports": ["8100"],
+            "identity": "llama-server --port 8100",
+        },
+        {
+            "pid": 300,
+            "process_name": "python",
+            "rss_mib": 75.0,
+            "listening_ports": ["8104"],
+            "identity": "/home/asus/github/sentrix-home-web/freeret_sidecar.py --port 8104",
+        },
     ]
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in rows])
     monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: 50.0, 200: 150.0, 300: 75.0}[pid])
-    monkeypatch.setattr(providers, "_process_smaps_field_mib", lambda pid, field: {100: 100.0, 200: 200.0, 300: 100.0}[pid])
+    monkeypatch.setattr(
+        providers, "_process_smaps_field_mib", lambda pid, field: {100: 100.0, 200: 200.0, 300: 100.0}[pid]
+    )
     data = providers._augment_host_process_memory({"root_pid": 200}, model_pids={200}, compute_apps=[])
     assert data["sentrix_stack_pss_mib"] == 125.0
     assert data["sentrix_product_pss_mib"] == 50.0

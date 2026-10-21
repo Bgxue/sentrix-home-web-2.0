@@ -224,7 +224,10 @@ def _host_process_rows() -> list[dict[str, Any]]:
 def _is_system_related_process(row: Mapping[str, Any]) -> bool:
     identity = str(row.get("identity") or "").lower()
     ports = {str(port) for port in row.get("listening_ports") or []}
-    if ports & SYSTEM_PROCESS_PORTS:
+    # 端口表只列了部分历史服务；WeMM 8102、CLIP 8103、freeret 8104、
+    # 18101/18103 这些嵌入端口若不在表里，就只能碰运气靠命令关键词命中。
+    # 统一并进“系统相关”候选，再由 _is_model_service_process 归到辅助模型。
+    if ports & (SYSTEM_PROCESS_PORTS | MODEL_SERVICE_PORTS):
         return True
     return any(keyword and keyword in identity for keyword in SYSTEM_PROCESS_KEYWORDS)
 
