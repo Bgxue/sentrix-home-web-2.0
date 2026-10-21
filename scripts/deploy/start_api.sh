@@ -12,6 +12,11 @@ if [ -f deploy/thread-limits.env ]; then
   # shellcheck disable=SC1091
   . deploy/thread-limits.env
 fi
+# 服务拓扑的唯一来源；没有这份文件时保持旧的环境变量启动方式。
+if [ -f apps/photobench/config/runtime_services.json ]; then
+  eval "$(.venv/bin/python scripts/deploy/runtime_services_env.py)"
+fi
+
 export SENTRIX_LIB_THREADS="${SENTRIX_LIB_THREADS:-}"
 if [ -n "$SENTRIX_LIB_THREADS" ] && [ "$SENTRIX_LIB_THREADS" != "0" ]; then
   export OMP_NUM_THREADS="$SENTRIX_LIB_THREADS"

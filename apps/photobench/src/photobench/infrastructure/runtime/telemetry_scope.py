@@ -13,16 +13,24 @@ from pathlib import Path
 from typing import Any
 
 TELEMETRY_SERVICES_ENV = "PHOTOBENCH_TELEMETRY_SERVICES"
+RUNTIME_SERVICES_DEFAULT = "apps/photobench/config/runtime_services.json"
 TELEMETRY_SERVICES_DEFAULT = "apps/photobench/config/telemetry_services.json"
 
 
 def load_telemetry_services() -> dict[str, Any] | None:
-    path = Path(os.environ.get(TELEMETRY_SERVICES_ENV) or TELEMETRY_SERVICES_DEFAULT)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    return raw if isinstance(raw, dict) else None
+    # 唯一来源优先；旧 telemetry_services.json 只作为未迁移设备的兼容回退。
+    candidates = [
+        Path(os.environ.get(TELEMETRY_SERVICES_ENV) or RUNTIME_SERVICES_DEFAULT),
+        Path(TELEMETRY_SERVICES_DEFAULT),
+    ]
+    for path in candidates:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(raw, dict):
+            return raw
+    return None
 
 
 def matches_service(row: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
@@ -56,6 +64,7 @@ def dedupe_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "RUNTIME_SERVICES_DEFAULT",
     "TELEMETRY_SERVICES_DEFAULT",
     "TELEMETRY_SERVICES_ENV",
     "dedupe_rows",

@@ -1,0 +1,26 @@
+{
+  "main_model": {
+    "base_url": "http://127.0.0.1:8100/v1",
+    "model": "qwen35-q4km",
+    "local": true,
+    "ports": [8100],
+    "keywords": []
+  },
+  "embedding": {
+    "mode": "split_text_image",
+    "local": true,
+    "text_url": "http://127.0.0.1:8101",
+    "image_url": "http://127.0.0.1:8103",
+    "wemm_url": "http://127.0.0.1:8102",
+    "profiles": {
+      "unified_multimodal": {"local": true, "ports": [8102]},
+      "split_text_image": {"local": true, "ports": [8101, 8103]},
+      "no_local_embedding": {"local": false}
+    }
+  },
+  "sentrix": {"url": "http://127.0.0.1:8291", "ports": [8291]},
+  "product": [
+    {"id": "photobench", "ports": [8872]},
+    {"id": "qdrant", "ports": [6333]}
+  ]
+}
