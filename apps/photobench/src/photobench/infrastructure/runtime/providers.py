@@ -29,7 +29,6 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
-import json
 import os
 import re
 import subprocess
@@ -44,6 +43,15 @@ import httpx
 from photobench.domain.runtime.ports import LifecycleProvider, RuntimeProviders, TelemetryProvider
 from photobench.infrastructure.runtime.hardware import read_cpu_temperature_c
 from photobench.infrastructure.runtime.jetson_telemetry import unified_model_memory
+from photobench.infrastructure.runtime.telemetry_scope import (
+    dedupe_rows as _dedupe_rows,
+)
+from photobench.infrastructure.runtime.telemetry_scope import (
+    load_telemetry_services as _load_telemetry_services,
+)
+from photobench.infrastructure.runtime.telemetry_scope import (
+    service_rows as _service_rows,
+)
 
 
 def normalize_service_url(value: str | None) -> str:
@@ -248,51 +256,6 @@ MODEL_SERVICE_KEYWORDS = (
     "text_embedder_sidecar",
     "legacy_clip_sidecar",
 )
-
-# 细分归因的“当前 run 实际用了哪些本机服务”清单。整机/整卡仍然全量采样；
-# 这份文件只决定 product/auxiliary 的归属，避免把未启用的旧栈、另一套嵌入方案
-# 也算进当前 run。文件不进 git，模板见 telemetry_services.example.json。
-TELEMETRY_SERVICES_ENV = "PHOTOBENCH_TELEMETRY_SERVICES"
-TELEMETRY_SERVICES_DEFAULT = "apps/photobench/config/telemetry_services.json"
-
-
-def _load_telemetry_services() -> dict[str, Any] | None:
-    path = Path(os.environ.get(TELEMETRY_SERVICES_ENV) or TELEMETRY_SERVICES_DEFAULT)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    return raw if isinstance(raw, dict) else None
-
-
-def _matches_service(row: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
-    if spec.get("local") is False:
-        return False
-    pids = {str(pid) for pid in spec.get("pids") or []}
-    if pids and str(row.get("pid")) in pids:
-        return True
-    ports = {str(port) for port in spec.get("ports") or []}
-    row_ports = {str(port) for port in row.get("listening_ports") or []}
-    if ports & row_ports:
-        return True
-    identity = str(row.get("identity") or "").lower()
-    return any(keyword and str(keyword).lower() in identity for keyword in spec.get("keywords") or [])
-
-
-def _service_rows(rows: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [dict(row) for row in rows if _matches_service(row, spec)]
-
-
-def _dedupe_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[int] = set()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        pid = int(row["pid"])
-        if pid in seen:
-            continue
-        seen.add(pid)
-        out.append(dict(row))
-    return out
 
 
 def _is_model_service_process(row: Mapping[str, Any]) -> bool:

@@ -32,6 +32,12 @@ from urllib.parse import urlparse
 
 import httpx
 
+from photobench.infrastructure.runtime.telemetry_scope import (
+    dedupe_rows,
+    load_telemetry_services,
+    service_rows,
+)
+
 
 def _configured_set(env_name: str, defaults: tuple[str, ...]) -> set[str]:
     """1.0 同名函数照搬：环境变量给了就整份替换（不是并入），空项剔除。"""
@@ -272,7 +278,7 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
 
 
 def _host_process_rows() -> list[dict[str, Any]]:
-    ports_by_pid = _listening_ports_by_pid(SYSTEM_PROCESS_PORTS)
+    ports_by_pid = _listening_ports_by_pid(set())
     rows = []
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
@@ -346,14 +352,40 @@ def _augment_local_process_memory(
         rows = _host_process_rows()
     except Exception:
         rows = []
-    model_rows = [
-        row for row in rows if _is_model_process(row, model_pid=model_pid, endpoint_port=str(endpoint_port))
-    ]
-    product_rows = [row for row in rows if _is_system_related_process(row)]
-    sentrix_rows = [
-        row for row in product_rows if row.get("pid") not in {item.get("pid") for item in model_rows}
-    ]
-    for row in sentrix_rows + model_rows:
+    scope = load_telemetry_services()
+    if scope:
+        main_spec = dict(scope.get("main_model") or {})
+        model_rows = service_rows(rows, main_spec) if main_spec.get("local") is not False else []
+        model_pids = {row["pid"] for row in model_rows}
+        embedding = dict(scope.get("embedding") or {})
+        mode = str(embedding.get("mode") or "")
+        profile = dict((embedding.get("profiles") or {}).get(mode) or {})
+        if embedding.get("local") is False or profile.get("local") is False:
+            profile = {}
+        auxiliary_rows = [row for row in service_rows(rows, profile) if row["pid"] not in model_pids]
+        auxiliary_pids = {row["pid"] for row in auxiliary_rows}
+        product_rows: list[dict[str, Any]] = []
+        for product_spec in scope.get("product") or []:
+            if isinstance(product_spec, dict):
+                product_rows.extend(service_rows(rows, product_spec))
+        product_rows = [
+            row
+            for row in dedupe_rows(product_rows)
+            if row["pid"] not in model_pids and row["pid"] not in auxiliary_pids
+        ]
+        sentrix_rows = dedupe_rows(product_rows + auxiliary_rows)
+    else:
+        model_rows = [
+            row
+            for row in rows
+            if _is_model_process(row, model_pid=model_pid, endpoint_port=str(endpoint_port))
+        ]
+        product_rows = [row for row in rows if _is_system_related_process(row)]
+        sentrix_rows = [
+            row for row in product_rows if row.get("pid") not in {item.get("pid") for item in model_rows}
+        ]
+        auxiliary_rows = []
+    for row in sentrix_rows + model_rows + product_rows + auxiliary_rows:
         pid = int(row["pid"])
         row["pss_mib"] = _process_pss_mib(pid)
         row["smaps_rss_mib"] = _process_smaps_field_mib(pid, "Rss:")
@@ -373,6 +405,14 @@ def _augment_local_process_memory(
     model_pss_complete = bool(model_rows) and all(row.get("pss_mib") is not None for row in model_rows)
     if sentrix_pss is not None and sentrix_pss_complete:
         data["sentrix_stack_pss_mib"] = sentrix_pss
+        product_pss = _sum_mib(product_rows, "pss_mib")
+        auxiliary_pss = _sum_mib(auxiliary_rows, "pss_mib")
+        data["sentrix_product_pss_mib"] = (
+            product_pss if product_pss is not None else (0.0 if not product_rows else None)
+        )
+        data["sentrix_auxiliary_model_pss_mib"] = (
+            auxiliary_pss if auxiliary_pss is not None else (0.0 if not auxiliary_rows else None)
+        )
         data["sentrix_stack_pss_scope"] = "sentrix_related_pss_excluding_llama"
         data["sentrix_processes"] = [
             {key: row.get(key) for key in ("pid", "process_name", "rss_mib", "pss_mib", "listening_ports")}
