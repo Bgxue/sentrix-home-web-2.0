@@ -75,6 +75,7 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
       "/runs/r1",
       "/runs/r1/keyframe-analysis",
       "/runs/r1/memory-effectiveness",
+      "/runs/r1/graph-quality",
     ]);
   });
 
