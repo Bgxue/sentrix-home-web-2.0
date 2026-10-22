@@ -237,3 +237,10 @@
 | 路径 | 职责 | 层 | 依赖谁 | 被谁依赖 |
 |---|---|---|---|---|
 | `sentrix/infrastructure/build.py` | 读取固定 release 的构建版本清单 | infrastructure | — | `sentrix/bootstrap/container.py` |
+
+
+## 仓库测试工具（不进入生产包依赖图）
+
+`scripts/run_real_tests.py` 由 Makefile 的 `test-real` 调用，依赖标准库及 pytest 子进程，
+不导入业务模块、不参与 bootstrap 装配、不新增 domain 端口。对应门禁测试为
+`apps/api/tests/unit/test_real_test_gate.py`；失败、缺依赖跳过、零用例及报告防覆盖均由实际子进程验证。

@@ -37,6 +37,9 @@ from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.persistence.repositories.facts import SqliteFactRepository
 from sentrix.main import create_app
 
+# Requires real album data, local weights or a running model; run via make test-real.
+pytestmark = pytest.mark.real_environment
+
 ALBUM = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 EXPECTED_DAYS = {

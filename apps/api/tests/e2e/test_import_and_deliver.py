@@ -5,6 +5,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+# Requires real album data, local weights or a running model; run via make test-real.
+pytestmark = pytest.mark.real_environment
+
 FIXTURE_DIR = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 

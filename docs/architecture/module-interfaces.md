@@ -780,11 +780,21 @@ class AlbumSource(Protocol):
 |---|---|---|
 | unit | 纯逻辑、错误映射、边界 | `pytest apps/api/tests/unit` |
 | contract | 每个 v1 端点 | `pytest apps/api/tests/contract` |
-| integration | 真后端契约（临时目录/本地 HTTP/合成数据） | `pytest apps/api/tests/integration` |
-| e2e | 真服务 + 黄金数据 | `pytest apps/api/tests/e2e` |
+| integration | 真后端契约（临时目录/本地 HTTP/合成数据） | `make test-integration` |
+| 真实环境专项 | 真相册、GeoNames、人脸权重、真实模型 | `make test-real`，按影响指定 `REAL_TEST_PATHS` |
 | PhotoBench | 适配器替换、相位、指标 | `pytest apps/photobench/tests` |
 
 **A 类 Provider 至少补 integration；C 类仓储至少补 integration + 并发用例。**
+
+2026-10-23 用户确认三层验证：日常 `make ci` 执行全部未标记 `real_environment` 的自动测试，
+继续检查严格类型、分层/可达性、文档、两份 OpenAPI、≥85% 覆盖率及两个前端的测试与构建。
+真实资源用例保留全部原断言，明确标记后独立运行；同文件内的纯算术/阈值用例不得随真实权重测试一起移出。
+专项入口 `scripts/run_real_tests.py` 保留 JUnit，零用例、缺依赖 skip、失败或错误均不能通过；
+`make ci-real` 为日常门禁加全套真实专项。直接 pytest 的 skip 仅是未执行记录，不能作专项通过证据。
+真机10QA另验固定版本部署、本机依赖、执行终态、遥测与评分，不替代专项中的地点/人脸/重复导入断言。
+涉及公共执行或指标的发布验证受影响四机，平台专用变更按影响验证对应设备；纯测试编排不触发额外模型回归。
+详见 [测试分层与证据](../runbooks/testing.md)。
+
 
 失败语义的契约测试模板：
 
