@@ -149,3 +149,5 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 CUDA/cuDNN大版本必须匹配。LD_LIBRARY_PATH只允许候选进程指向已核验匹配的真实库；不能把lib*.so.12软链成.so.13。不要将两个ORT发行包共用命名空间或用户site污染视为正常加速证据；独立环境选择一个实际运行版本，并核验import与kernel。隔离候选未通过前现用服务和模型不切换。
 
 官方依据：https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html 、 https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html 。PyPI ORT≥1.27默认CUDA13，不适合直接套用CUDA12.6 Jetson。已核验的设备事实与候选测试记录另见本轮独立报告。
+
+前端内存说明补核版只改变标签/说明及accounting元数据投影，后端生产文件与3cb480a逐字节相同。完整CI、固定提交与统一制品后，等待各机当前验证序列终态再切release；四机重新预检，并用保留的真实API结果验证新前端的内存标签、公式和null显示。保留3cb实际运行版本与原始证据，不将其改标为新SHA，也不因此再调用60题模型。切换前先保存PID/资源连续性和日志，切换本身作为授权部署记录，不报意外重启。

@@ -873,3 +873,7 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 - Sentrix安全HTTP重试有总预算且不重放不确定POST；Judge策略独立。排队取消在execute前保留，后续run不可逃过取消。
 - Mac集中profile缺省600/180秒、QA2、导入86400秒，显式覆盖及QA0语义保留；provider从Settings注入，不静默CPU回退。
 - 模型名记录原始端点ID，Qwen3.5不截断，未记录不以__current__伪装名称；导入等待展示不假造媒体进度。
+
+### 2026-10-22 内存展示口径补核
+
+主指标卡按显式memory_accounting识别平台，Mac/Jetson使用“主模型内存占用”标签；Mac的footprint+映射权重明确为容量估计，映射不保证驻留。Jetson现行说明为nvmap优先、不可读时仅正残差作注明来源的估计，未知分量使合计不可用；不承诺跨驱动和共享页物理去重。无现行accounting元数据的历史记录不套新公式。只修前端标签/说明及元数据传递，不改变采集、公式数值、执行、接口或原始记录；必须以真实run核验新显示，实际10QA证据保留原应用SHA。

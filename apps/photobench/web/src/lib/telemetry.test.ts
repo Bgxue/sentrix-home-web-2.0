@@ -306,6 +306,40 @@ describe("comparableMemoryProfile (:1151-1165) —— 可比判据", () => {
 });
 
 describe("memoryProfileRows (:1176-1211) —— 三种 method 分道", () => {
+  it("新 Jetson 公式说明与归属估计一致，历史记录不套现行公式", () => {
+    const run = { phases: { gpu_metrics: {
+      source: "jetson_local_pss", memory_accounting: "jetson_pss_plus_nvmap_estimate",
+      model_process_system_memory_used_mib: { peak: 1024 },
+      memory_profile: { method: "orin_smaps_rss_plus_gpu_uma_v1", scope: "host_smaps_rss_plus_gpu_uma" },
+    } } };
+    const profile = comparableMemoryProfile(run);
+    expect(profile?.memory_accounting).toBe("jetson_pss_plus_nvmap_estimate");
+    const rows = memoryProfileRows(profile);
+    const notes = rows.map((row) => row[2]).join(" ");
+    expect(notes).toContain("优先按 PID 汇总 nvmap");
+    expect(notes).toContain("未知分量使合计不可用");
+    expect(notes).toContain("不保证物理去重");
+    expect(notes).not.toContain("max(");
+    const metricNote = keyMetricRows(run, {}).find((row) => row.label === "主模型内存占用")?.note;
+    expect(metricNote).toContain("优先 nvmap");
+    expect(metricNote).toContain("不保证物理去重");
+    expect(metricNote).not.toContain("两半不重叠");
+    const historical = memoryProfileRows({ ...profile, memory_accounting: undefined });
+    expect(historical.find((row) => row[0] === "数据来源")?.[2]).toContain("历史 GPU 归属公式");
+    expect(historical.find((row) => row[0] === "数据来源")?.[2]).not.toContain("优先");
+  });
+
+  it("Mac 主指标将 footprint 加映射权重标为容量估计", () => {
+    const rows = keyMetricRows({ phases: { gpu_metrics: {
+      source: "apple_unified", memory_accounting: "apple_capacity_estimate",
+      model_process_system_memory_used_mib: { peak: 1024 },
+    } } }, {});
+    const note = rows.find((row) => row.label === "主模型内存占用")?.note;
+    expect(note).toContain("容量估计");
+    expect(note).toContain("映射不保证驻留");
+    expect(note).not.toContain("进程提交占用");
+  });
+
   it("macos / orin / 默认(vLLM) 首行各不相同", () => {
     expect(memoryProfileRows({ memory_profile: { method: "macos_unified_memory_v1" } })[0][0]).toBe("内存占用峰值");
     expect(memoryProfileRows({ memory_profile: { method: "orin_process_pss_uma_v1" } })[0][0]).toBe("进程物理内存峰值（PSS）");

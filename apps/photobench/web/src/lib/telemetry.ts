@@ -486,6 +486,7 @@ export function comparableMemoryProfile(run: unknown): Dict | null {
   return {
     status: gpu.status,
     source: "gpu_metrics",
+    memory_accounting: gpu.memory_accounting,
     memory_profile: profile,
     model_process_memory_used_mib: gpu.model_process_memory_used_mib,
     model_process_system_memory_used_mib: gpu.model_process_system_memory_used_mib,
@@ -513,11 +514,13 @@ export function memoryProfileRows(rawProfile: unknown = {}): MetricRow[] {
   }
   const processMemory = dict(profile.model_process_memory_used_mib);
   if (memory.method === "orin_smaps_rss_plus_gpu_uma_v1") return [
-    ["主模型占用峰值（smaps Rss + GPU/UMA）", fmtMemory(dict(profile.model_process_system_memory_used_mib).peak), "主机页 + 设备页，两半不重叠；不是 VmRSS，也不是独立显存", true],
+    ["主模型占用峰值（smaps Rss + GPU/UMA）", fmtMemory(dict(profile.model_process_system_memory_used_mib).peak), "主机 smaps RSS + GPU/UMA 分配的归属估计；跨驱动和共享页不保证物理去重", true],
     ["工作负载内存估算", "不可计算", "当前 llama.cpp 未提供可靠的 KV Cache 实际使用量"],
     ["KV Cache 已用峰值", memory.kv_cache_used_peak_tokens == null ? "-" : `${Number(memory.kv_cache_used_peak_tokens).toLocaleString("en-US")} token`, `使用率峰值 ${fmtNumber(memory.kv_cache_usage_peak_pct, "%")}`],
     ["KV 实际字节数", "不可用", "未验证模型每 token KV 字节数；不以 token 数伪造 GiB"],
-    ["数据来源", "本机 smaps Rss + nvmap/GPU 页 + tegrastats", "GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)"],
+    ["数据来源", "本机 smaps Rss + nvmap/GPU 页 + tegrastats", profile.memory_accounting === "jetson_pss_plus_nvmap_estimate"
+      ? "GPU 优先按 PID 汇总 nvmap；不可读时仅正的 VmRSS − smaps RSS 残差作为注明来源的估计；未知分量使合计不可用"
+      : "历史 GPU 归属公式以原始口径说明为准；不按现行公式重算"],
   ];
   if (memory.method === "orin_process_pss_uma_v1") return [
     ["进程物理内存峰值（PSS）", fmtMemory(processMemory.peak), "Orin 统一物理内存平台的进程峰值；不是独立显存，也不是工作负载估算", true],
@@ -607,16 +610,19 @@ export function keyMetricRows(run: unknown, summary: unknown): KeyMetric[] {
   const gpu = dict(gpuMetricsView(run));
   const ranking = dict(s.image_ranking);
   const pct = (value: unknown) => value == null ? "未计算" : fmtPct(value);
-  const isUnified = gpu.source === "apple_unified";
-  const isOrin = ["orin_ssh_pss", "jetson_local_pss"].includes(gpu.source);
+  const platform = telemetryPlatform(gpu);
+  const isUnified = platform === "apple_unified";
+  const isOrin = ["orin_ssh_pss", "jetson_local_pss"].includes(platform);
   const processMemory = isUnified || isOrin
     ? dict(gpu.model_process_system_memory_used_mib).peak
     : dict(gpu.model_process_memory_used_mib).peak;
   const processMemoryNote = isUnified
-    ? "主模型占用峰值（footprint+权重映射）· 进程提交占用，不是 GPU 专属显存"
+    ? "主模型占用采样峰值（footprint+权重映射）· 容量估计，映射不保证驻留，非 GPU 专属显存"
     : isOrin
       ? jetsonUnifiedFromRun(run)
-        ? "主模型占用峰值 · 主机 smaps Rss + GPU/UMA 页（GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)，两半不重叠）"
+        ? gpu.memory_accounting === "jetson_pss_plus_nvmap_estimate"
+          ? "主模型占用采样峰值 · smaps RSS + GPU/UMA 分配估计；优先 nvmap，不可读时仅正残差作为注明来源的估计；未知分量使合计不可用，跨驱动和共享页不保证物理去重"
+          : "主模型占用采样峰值 · smaps RSS + GPU/UMA；历史公式见原始记录，不推断物理去重"
         : "主模型 VmRSS 峰值 · Orin 无独立显存，这是进程驻留"
       : "主模型显存峰值 · NVML 按模型 PID 汇总";
   const throughputNote = s.agent_throughput_latency_mode === "measured_agent_phase"
@@ -646,7 +652,7 @@ export function keyMetricRows(run: unknown, summary: unknown): KeyMetric[] {
       note: `模型显式交付的图片里属于 GT 的比例 · ${s.image_retrieval_metric_count ?? 0} 题含图片 GT · 这是交付口径，与检索口径的 R@K 不可换算`,
     },
     {
-      label: "模型进程显存",
+      label: isUnified || isOrin ? "主模型内存占用" : "模型进程显存",
       value: fmtMemory(processMemory),
       note: processMemoryNote,
     },
