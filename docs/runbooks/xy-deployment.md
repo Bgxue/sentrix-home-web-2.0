@@ -140,6 +140,8 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 
 配置源为runtime_connection.json；白名单product_settings可指定deployment_profile、agent_wall_time_s、chat_timeout_s、face_providers、retinaface_providers。配置API更新仅影响新run，队列和resume保持快照。不同产品URL不授予按同端口杀本机服务的权限，只有登记本机API允许自动重启。
 
+发布器回滚到没有`Settings.runtime_configuration()`的旧release时，预检读取旧版实际Settings的Agent/Chat预算与已有provider环境变量，不要求旧版实现新增诊断方法，也不伪报其支持部署预设。仍在停止任一监听之前核验Python≥3.11、源码导入路径及配置可构造性；旧环境损坏时先绑定独立验证过的兼容环境。此兼容修复仅影响发布/回滚工具，不改变应用执行、指标、接口或前端；真实测评证据沿用其实际应用SHA，工具提交单独追踪。
+
 硬件环境先运行当前解释器下的runtime_acceleration_probe.py，保存实际包路径/版本/RECORD哈希、用户site、动态库和真实算子结果。可用`--torch-device cuda|mps|cpu`和`--onnx <本地权重> --provider CUDAExecutionProvider|CPUExecutionProvider`；每个探针有总超时。生产预检逐个人脸权重做实际推理并检查profile kernel provider。
 
 新安装指定全新SENTRIX_INSTALL_VENV；Jetson还必须提供SENTRIX_DEPENDENCY_LOCK完整带哈希锁（含匹配JetPack/Python的原始wheel及SHA256）。安装不覆盖现存环境，pip check后保存runtime-inventory.json与requirements.observed.txt，后者只表示已安装事实，不能单独充当带来源哈希的重建锁。CUDA候选侧车可用自己的Python版本；不能用Python3.10运行要求≥3.11的产品包。

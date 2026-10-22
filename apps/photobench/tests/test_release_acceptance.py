@@ -414,3 +414,57 @@ def test_build_acceptance_does_not_require_qa_terminals(tmp_path, monkeypatch):
     }
     # Empty telemetry must still fail: build is not exempt from memory coverage.
     assert "no_core_memory_in_photo_import" in report["metric_errors"]
+
+
+def test_rollback_precheck_accepts_previous_settings_without_runtime_diagnostics(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    release = script("photobench_release")
+    root = tmp_path / "old-release"
+    for package, relative in (("sentrix", "apps/api/src"), ("photobench", "apps/photobench/src")):
+        target = root / relative / package
+        target.mkdir(parents=True)
+        (target / "__init__.py").write_text("")
+    (root / "apps/api/src/sentrix/config.py").write_text(
+        "class Settings:\n    agent_wall_time_s = 180.0\n    chat_timeout_s = 120.0\n"
+    )
+    config = tmp_path / "config"
+    config.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    release.write_json(
+        config / "runtime_connection.json",
+        {
+            "sentrix_url": "http://127.0.0.1:8291",
+            "model_base_url": "http://127.0.0.1:8100/v1",
+        },
+    )
+    actual_check_output = subprocess.check_output
+    actual_popen = subprocess.Popen
+
+    def run_check(command, **kwargs):
+        return actual_check_output([sys.executable, *command[1:]], **kwargs)
+
+    class Child:
+        pid = 999
+
+    def popen(command, **kwargs):
+        return actual_popen(command, **kwargs) if "-c" in command else Child()
+
+    monkeypatch.setattr(release, "listener", lambda port: None)
+    monkeypatch.setattr(release, "wait_ready", lambda revision: None)
+    monkeypatch.setattr(release.subprocess, "Popen", popen)
+    monkeypatch.setattr(release.subprocess, "check_output", run_check)
+    env = {
+        **os.environ,
+        "FACE_PROVIDERS": "CPUExecutionProvider",
+        "RETINAFACE_PROVIDERS": "CPUExecutionProvider",
+    }
+    bindings = {key: str(tmp_path / key) for key in ("venv", "data", "datasets", "results")}
+    bindings.update(config=str(config), environments={"api": env, "photobench": env})
+    release.launch(root, runtime, bindings, "old-fixed")
+    product = release.read_json(config / "runtime_connection.json")["product_settings"]
+    assert product["agent_wall_time_s"] == 180
+    assert product["face_providers"] == "CPUExecutionProvider"

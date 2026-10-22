@@ -302,13 +302,20 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
                 [
                     str(root / ".venv/bin/python"),
                     "-c",
-                    "import json,sys,sentrix,photobench; from sentrix.config import Settings; "
+                    "import json,os,sys,sentrix,photobench; from sentrix.config import Settings; "
+                    "settings=Settings(); "
+                    "runtime=settings.runtime_configuration() if hasattr(settings,'runtime_configuration') "
+                    "else {'agent_wall_time_s':settings.agent_wall_time_s,"
+                    "'chat_timeout_s':settings.chat_timeout_s,"
+                    "'face_providers':os.environ['FACE_PROVIDERS'],"
+                    "'retinaface_providers':os.environ['RETINAFACE_PROVIDERS']}; "
                     "print(json.dumps({'paths':[sentrix.__file__,photobench.__file__],"
-                    "'python':list(sys.version_info[:2]),'runtime':Settings().runtime_configuration()}))",
+                    "'python':list(sys.version_info[:2]),'runtime':runtime}))",
                 ],
                 env=env,
                 cwd=root,
                 text=True,
+                timeout=60,
             )
         )
         paths = check["paths"]
@@ -329,6 +336,7 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
                     "face_providers",
                     "retinaface_providers",
                 )
+                if key in effective
             }
             write_json(Path(bindings["config"]) / "runtime_connection.json", connection)
         environments[role] = env
