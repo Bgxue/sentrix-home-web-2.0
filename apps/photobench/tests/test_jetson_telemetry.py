@@ -255,6 +255,15 @@ def test_listener_cache_revalidates_socket_and_process_identity(monkeypatch, tmp
     calls.clear()
     assert jetson._listening_ports_by_pid({"8100"}) == {1: {"8100"}}
     assert calls == [1], "cached topology should inspect only validated holders"
+    # gpu_stats checks only the model port; process_memory checks the whole
+    # frozen topology. Alternating those queries must not evict each other.
+    assert jetson._listening_ports_by_pid({"8100", "8106"}) == {1: {"8100"}, 2: {"8106"}}
+    calls.clear()
+    assert jetson._listening_ports_by_pid({"8100"}) == {1: {"8100"}}
+    assert calls == [1], "a different port selection must not force another full /proc scan"
+    calls.clear()
+    assert jetson._listening_ports_by_pid({"8100", "8106"}) == {1: {"8100"}, 2: {"8106"}}
+    assert calls == [1, 2]
     # A reused PID with the same socket inode must not inherit old ownership.
     identities[1] = "reused"
     sockets[1], sockets[3] = set(), {"100"}

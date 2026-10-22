@@ -280,7 +280,7 @@ def unified_model_memory(
     return result
 
 
-_listener_cache: dict[str, Any] = {}
+_listener_cache: dict[tuple[str, ...], dict[str, Any]] = {}
 _listener_lock = threading.Lock()
 
 
@@ -337,13 +337,15 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
     if not socket_ports:
         return {}
     signature = tuple(sorted(socket_ports.items()))
+    selection = tuple(sorted(target_ports))
     with _listener_lock:
-        cached = _listener_cache.get("owners", {})
-        identities = _listener_cache.get("identities", {})
+        entry = _listener_cache.get(selection, {})
+        cached = entry.get("owners", {})
+        identities = entry.get("identities", {})
         if (
             target_ports
-            and _listener_cache.get("signature") == signature
-            and time.monotonic() < _listener_cache.get("expires", 0)
+            and entry.get("signature") == signature
+            and time.monotonic() < entry.get("expires", 0)
             and cached
             and all(
                 identities.get(pid) is not None
@@ -364,12 +366,20 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
             owners[int(proc.name)] = held
             result[int(proc.name)] = {socket_ports[inode] for inode in held}
     with _listener_lock:
-        _listener_cache.update(
-            signature=signature,
-            owners=owners,
-            identities={pid: _process_start_ticks(pid) for pid in owners},
-            expires=time.monotonic() + 2.0,
-        )
+        now = time.monotonic()
+        # The device/model and full product probes use different port sets.
+        # Keep their independently validated entries, with bounded retention.
+        for key in list(_listener_cache):
+            if _listener_cache[key].get("expires", 0) <= now:
+                del _listener_cache[key]
+        if selection not in _listener_cache and len(_listener_cache) >= 32:
+            del _listener_cache[next(iter(_listener_cache))]
+        _listener_cache[selection] = {
+            "signature": signature,
+            "owners": owners,
+            "identities": {pid: _process_start_ticks(pid) for pid in owners},
+            "expires": now + 2.0,
+        }
     return result
 
 

@@ -1215,6 +1215,6 @@ Judge一致性v3进一步限定为明确“模型/助手的回答/答案/结论�
 
 - 仍经 `TelemetryProvider` 四方法采集，不改签名或装配；application内部的采样/发布协作者按单调时钟安排周期，跳过已错过周期，不无界追赶。全样本滚动聚合由单个独立发布线程执行，不持采样锁，不建立无界发布队列。
 - 新可选契约 `memory_observation_version=1`、`memory_observations`、`memory_dependencies`、`sampling_diagnostics`；`gpu_metrics.sampling_integrity`记录采集、写入、发布异常和有界停止后尚存线程。公式和有效性仍归domain，系统文件/进程身份/缓存IO归infrastructure。API只投影、前端展示来源和值龄；缓存保持原观测起止，PID与start_ticks共同核验，不写死PID。
-- Jetson每轮共享一次nvmap账本；监听socket缓存最长2秒且每次核验原持有者身份/socket，变化即重查；相关PID单次smaps同时取RSS/PSS，总探测时间达到1秒后不再读后续PID，未读分量保持null。单次内核文件读取无法由线程硬抢占，该预算不是硬实时承诺。
+- Jetson每轮共享一次nvmap账本；监听socket缓存按端口集合隔离、最多32份且最长2秒，每次核验原持有者身份/socket，变化即重查；相关PID单次smaps同时取RSS/PSS，总探测时间达到1秒后不再读后续PID，未读分量保持null。单次内核文件读取无法由线程硬抢占，该预算不是硬实时承诺。
 - 正常生产保持fail-open；严格验收独立重算分量值龄及最老必要来源，仍以3秒门槛判断。确认无辅助服务的0也依赖新鲜拓扑；不完整不得伪装完整。停止最长共同等待10秒，未退出线程明确记异常，不能据此宣称资源已释放。
 - 本轮用户要求仅本地修代码、暂不启动测评；不改驱动、CUDA/ORT环境或远端服务。新代码的真机时序与覆盖效果待后续授权验证，历史无逐分量时间不补造。
