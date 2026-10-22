@@ -251,8 +251,8 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
     expect(phaseSummary("photo_import", { accepted_count: 8, total_media: 10, failed_count: 2, upload_seconds: 1.5 })).toBe(
       "导入 8/10 个媒体 · 失败 2 · 总计 1.5s",
     );
-    // total_media 缺 → 回退 total_photos → 再缺才 "?"
-    expect(phaseSummary("photo_import", {})).toBe("导入 0/? 个媒体 · 失败 0 · 总计 -");
+    // Counts are unknown until the synchronous import response returns; never display fake zeroes.
+    expect(phaseSummary("photo_import", {})).toBe("导入 ?/? 个媒体 · 失败 ? · 总计 -");
   });
 
   it("pipeline_processing：有 progress 才展开，否则落到通用「耗时」", () => {

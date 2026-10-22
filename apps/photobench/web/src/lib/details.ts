@@ -224,7 +224,14 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     if (timings.stage != null) parts.push(`落库 ${fmtSeconds(timings.stage)}`);
     const breakdown = parts.length ? ` · ${parts.join(" · ")}` : "";
     const total = timings.total != null ? fmtSeconds(timings.total) : fmtSeconds(phaseSeconds(phase, "upload_seconds"));
-    return `导入 ${p.accepted_count ?? 0}/${p.total_media ?? p.total_photos ?? "?"} 个媒体 · 失败 ${p.failed_count ?? 0} · 总计 ${total}${breakdown}`;
+    // The synchronous import endpoint does not report media counts until it returns.
+    // Keep that interval visibly unknown instead of presenting missing values as zero.
+    const count = (value: unknown): string =>
+      typeof value === "number" && Number.isInteger(value) && value >= 0 ? String(value) : "?";
+    const accepted = count(p.accepted_count);
+    const totalMedia = count(p.total_media ?? p.total_photos);
+    const failed = count(p.failed_count);
+    return `导入 ${accepted}/${totalMedia} 个媒体 · 失败 ${failed} · 总计 ${total}${breakdown}`;
   }
   if (key === "pipeline_processing" && p.progress) {
     const progress = dict(p.progress);

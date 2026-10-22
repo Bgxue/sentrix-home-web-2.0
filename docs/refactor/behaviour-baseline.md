@@ -872,7 +872,7 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 - build 不依赖QA/Judge，0题和评分未适用；构建完整性与scope嵌入配置独立记录，不复用不完整/已变更索引。
 - Sentrix安全HTTP重试有总预算且不重放不确定POST；Judge策略独立。排队取消在execute前保留，后续run不可逃过取消。
 - Mac集中profile缺省600/180秒、QA2、导入86400秒，显式覆盖及QA0语义保留；provider从Settings注入，不静默CPU回退。
-- 模型名记录原始端点ID，Qwen3.5不截断，未记录不以__current__伪装名称；导入等待展示不假造媒体进度。
+- 模型名记录原始端点ID，Qwen3.5不截断，未记录不以__current__伪装名称；同步导入等待期间媒体完成数/失败数未知显示 `?`，不以 `0` 伪造媒体进度。
 
 ### 2026-10-22 内存展示口径补核
 
