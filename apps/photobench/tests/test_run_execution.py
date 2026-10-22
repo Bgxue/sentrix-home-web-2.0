@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -26,6 +28,7 @@ from fakes_execution import (
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.service import RunExecution, RunRequest
+from photobench.domain.runs.execution import RunCancelledError
 
 ALBUM = "album-x"
 QA_SET = "qa-1"
@@ -981,6 +984,53 @@ def test_sampling_can_be_disabled_for_an_environment_without_telemetry(monkeypat
     execution.execute(_request())
     assert writer.resets == []
     assert writer.gpu_samples == []
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_terminal_status_is_not_published_until_final_hardware_observation_finishes(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+):
+    """读侧看到终态时，采样/末尾观测和scope收尾必须已经完成。"""
+    execution, _client, writer, _lifecycle, _albums = _execution()
+    entered, release = threading.Event(), threading.Event()
+    snapshot = execution._hardware_snapshot
+    calls = 0
+
+    def blocked_final_snapshot():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+            assert release.wait(5), "test must release final observation"
+        return snapshot()
+
+    monkeypatch.setattr(execution, "_hardware_snapshot", blocked_final_snapshot)
+    if outcome != "completed":
+
+        def fail_phase(*_args):
+            if outcome == "cancelled":
+                raise RunCancelledError("cancelled during aggregate")
+            raise RuntimeError("aggregate failed")
+
+        monkeypatch.setattr(execution, "_phase_aggregate", fail_phase)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution.execute, _request())
+        try:
+            assert entered.wait(5)
+            state = execution.state
+            assert state is not None
+            state.persist(wait=True)
+            assert state.get("status") in {"running", "cancelling"}
+            assert state.get("finished_at") is None
+            assert writer.last_state()["status"] in {"running", "cancelling"}
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+    assert result["status"] == outcome
+    assert result["finished_at"]
+    assert result["current_phase"] is None
+    assert result["hardware_snapshots"]["end"] is not None
+    assert writer.last_state() == result
 
 
 def test_hardware_snapshots_are_written_at_both_ends():

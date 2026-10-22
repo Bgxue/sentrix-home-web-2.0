@@ -887,3 +887,10 @@ ReadRuns合并同一run的并发详情计算，不创建新线程或永久活跃
 不同run不互相阻塞，首个读取的异常原样传播给等待者，错误后仍可重新观测。
 API/端口/指标公式、null、全样本统计和3秒验收阈值不变，不减少原始采样或分母。
 验证：useRuns.test.ts回调变更/最新loader；test_run_read.py八并发、错误传播、完成态刷新及不同run隔离。
+
+### T006 终态发布顺序（2026-10-22）
+
+完成、失败、取消均先保存待发布终态，采样停止、最终统计和末尾硬件快照完成前保持running/cancelling。
+随后统一写hardware_snapshots.end/current_phase=null/finished_at/status，再等待最终快照落盘。
+旧版提前completed会让读侧停止轮询、套件误以为空闲，raw在终态后仍变化；新规则不改变QA结果、评分或公式。
+覆盖完成/失败/取消三种阻塞末尾观测场景，验证中途非终态及最后落盘与返回一致；不增加API字段。

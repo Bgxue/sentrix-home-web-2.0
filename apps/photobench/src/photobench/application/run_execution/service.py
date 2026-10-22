@@ -437,6 +437,7 @@ class RunExecution:
             self.writer.reset_gpu_samples(run_id)
             sampler.start()
         current: str | None = None
+        terminal_status = "failed"
         try:
             for name, phase in phases:
                 if state.cancelled:
@@ -451,19 +452,19 @@ class RunExecution:
             partial = any(
                 bucket.get("status") == "partial" for bucket in (state.get("phases") or {}).values()
             )
-            state.set("status", "completed_with_errors" if partial else "completed")
+            terminal_status = "completed_with_errors" if partial else "completed"
         except RunCancelledError as exc:
             # **取消与失败必须分开**：一次主动取消落到 ``failed`` 会让读侧把它当成
             # 「这轮评测炸了」，而事实是有人叫停了它（1.0 ``:2417`` 的同一条区分）。
             if current:
                 state.record_phase(current, "status", "cancelled")
                 state.record_phase(current, "error", str(exc))
-            state.set("status", "cancelled")
+            terminal_status = "cancelled"
             state.set("cancelled_phase", current)
         except Exception as exc:  # noqa: BLE001 —— 1.0 ``:2404``：任何相位异常都收成 failed
             if current:
                 state.phase_failed(current, str(exc))
-            state.set("status", "failed")
+            terminal_status = "failed"
             state.set("failed_phase", current)
             state.set("fatal_error", str(exc))
             if isinstance(exc, RequestOutcomeUnknownError):
@@ -494,11 +495,15 @@ class RunExecution:
                         "source_run_id": run_id,
                     },
                 )
-            state.set("current_phase", None)
-            state.set("finished_at", now_iso())
             snapshots = dict(state.get("hardware_snapshots") or {})
             snapshots["end"] = self._hardware_snapshot()
-            state.set("hardware_snapshots", snapshots)
+            # 终态也是读侧停止轮询/归档、套件允许下一轮启动的信号。
+            # 采样与末尾观测完成前不能提前发布，否则终态raw仍会继续变化。
+            with state.lock:
+                state.set("hardware_snapshots", snapshots)
+                state.set("current_phase", None)
+                state.set("finished_at", now_iso())
+                state.set("status", terminal_status)
             state.persist()
             state.stop_persist_writer()
         return state.data
