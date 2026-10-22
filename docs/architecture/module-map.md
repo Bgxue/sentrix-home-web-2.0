@@ -244,3 +244,8 @@
 `scripts/run_real_tests.py` 由 Makefile 的 `test-real` 调用，依赖标准库及 pytest 子进程，
 不导入业务模块、不参与 bootstrap 装配、不新增 domain 端口。对应门禁测试为
 `apps/api/tests/unit/test_real_test_gate.py`；失败、缺依赖跳过、零用例及报告防覆盖均由实际子进程验证。
+
+测试装配`apps/api/tests/conftest.py::isolated_app`统一提供无外部模型/权重推理的HTTP夹具，
+assistant/search契约在此基础上覆盖脚本化适配器；
+`apps/api/tests/unit/test_contract_fixture_isolation.py`验证实际导入不调用FaceAdapter。
+这些文件不进入生产依赖图。

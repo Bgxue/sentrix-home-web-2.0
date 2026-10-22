@@ -17,11 +17,9 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from sentrix.config import Settings
 from sentrix.domain.assistant.models import ChatMessage, ModelReply, ToolCall
 from sentrix.domain.assistant.tools import TOOL_SPECS, ToolSpec
 from sentrix.domain.retrieval import scheme
-from sentrix.main import create_app
 
 #: 规划那次调用的 system 提示词开头。**分流按它，不按 ``tools`` 空不空**——JIT 剪枝
 #: 之后工具循环也可能合法地拿到空元组（额度用尽时 ``select_tools`` 返回空集）。
@@ -78,12 +76,12 @@ def planner_reply(*evidence_types: str, goal: str = "看海边的照片") -> Mod
 
 
 @pytest.fixture
-def client(settings) -> TestClient:
+def client(isolated_app) -> TestClient:
     """把模型换成脚本化的假件，其余装配（真 SQLite、真迁移）保持原样。
 
     默认剧本是「直接给一个不带交付的答案」——大多数契约用例只关心会话与回合的形状。
     """
-    app = create_app(settings)
+    app = isolated_app
     app.state.container = dataclasses.replace(
         app.state.container, chat_model=ScriptedChatModel([final("这是一句回答。")])
     )
@@ -296,9 +294,9 @@ _RED_JPEG = jpeg("red")
 
 
 @pytest.fixture
-def candidate_client(settings: Settings) -> TestClient:
+def candidate_client(isolated_app) -> TestClient:
     """脚本化嵌入器 + 一份「检索后正文收尾」的模型剧本。"""
-    app = create_app(settings)
+    app = isolated_app
     app.state.container = dataclasses.replace(
         app.state.container,
         visual_embedder=ScriptedEmbedder(),

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from sentrix.config import Settings
 from sentrix.domain.assistant.models import ChatMessage, ModelReply
+from sentrix.domain.identity.models import FaceDetection
 from sentrix.domain.media.models import AudioMetadata, VideoMetadata
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
@@ -212,6 +213,16 @@ class FakeChatModel:
         )
 
 
+class FakeFaceDetector:
+    """通用 HTTP 夹具不做真人脸推理；身份契约用例自行注入有脸/失败的假件。"""
+
+    def detect(self, path: str) -> Sequence[FaceDetection]:
+        return []
+
+    def detect_identity_photo(self, path: str) -> Sequence[FaceDetection]:
+        return []
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Settings:
     monkeypatch.setenv("SENTRIX_DATA_DIR", str(tmp_path))
@@ -219,8 +230,8 @@ def settings(tmp_path, monkeypatch) -> Settings:
 
 
 @pytest.fixture
-def client(settings) -> TestClient:
-    """装配好的应用，但把三个模型适配器换成确定性假件。
+def isolated_app(settings):
+    """装配好的应用，但将外部模型与人脸推理换成确定性假件。
 
     Container 是 frozen dataclass，用 dataclasses.replace 换掉适配器，
     其余装配路径（真 SQLite、真迁移、真 Qdrant）保持原样。
@@ -243,6 +254,7 @@ def client(settings) -> TestClient:
         embedding_health=FakeEmbeddingHealth(),
         vlm_observer=FakeVlmObserver(),
         chat_model=FakeChatModel(),
+        face_detector=FakeFaceDetector(),
         # 视频探测与转码同理：真适配器起 ffprobe/ffmpeg 子进程，契约测试不该依赖它们。
         video_metadata_reader=FakeVideoMetadataReader(),
         video_transcoder=FakeVideoTranscoder(),
@@ -252,7 +264,12 @@ def client(settings) -> TestClient:
         # 所以契约测试能走完整条「导入视频 → 场景成型 → 关键帧落库」的链。
         video_keyframe_extractor=FakeVideoKeyframeExtractor(),
     )
-    return TestClient(app)
+    return app
+
+
+@pytest.fixture
+def client(isolated_app) -> TestClient:
+    return TestClient(isolated_app)
 
 
 @pytest.fixture
