@@ -74,3 +74,15 @@ describe("api 客户端", () => {
     expect(fetchStub).toHaveBeenCalledTimes(1);
   });
 });
+
+it("调用方取消会终止底层请求且不重试，也不误报超时", async () => {
+  const caller = new AbortController();
+  const fetchStub = vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+    init.signal?.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")));
+  }));
+  vi.stubGlobal("fetch", fetchStub);
+  const result = api("/runs/r", { signal: caller.signal });
+  caller.abort();
+  await expect(result).rejects.toMatchObject({ name: "AbortError", message: "请求已取消" });
+  expect(fetchStub).toHaveBeenCalledTimes(1);
+});

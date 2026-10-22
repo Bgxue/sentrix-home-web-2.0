@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import IO
 
 from photobench.domain.runs.analysis import now_iso
+from photobench.infrastructure.results.store import committed_path, read_entry, write_committed_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +35,22 @@ class FileRunStartupRecovery:
         lease.write(str(os.getpid()))
         lease.flush()
         recovered = 0
-        for path in sorted(self._root.glob("*/run.json")):
+        for run_dir in sorted(self._root.iterdir()):
+            if not run_dir.is_dir() or run_dir.name.startswith("."):
+                continue
+            path = run_dir / "run.json"
             try:
+                path = committed_path(run_dir, "run.json")
+                try:
+                    entry = read_entry(run_dir)
+                except ValueError:
+                    # Old recovery also accepts records without run_id.
+                    entry = json.loads(path.read_bytes())
+                if (
+                    entry.get("status") not in {"running", "pending", "cancelling"}
+                    and (entry.get("rejudge") or {}).get("status") != "running"
+                ):
+                    continue
                 original = path.read_bytes()
                 state = json.loads(original)
                 if not isinstance(state, dict):
@@ -49,10 +64,10 @@ class FileRunStartupRecovery:
                 orphan_judge = isinstance(rejudge, dict) and rejudge.get("status") == "running"
                 if not active and not orphan_judge:
                     continue
-                backup = path.with_name("run.before-orphan-recovery.json")
+                backup = run_dir / ("run.before-orphan-recovery.json")
                 # A crash after backup but before replacement must remain recoverable.
                 if backup.exists():
-                    backup = path.with_name(f"run.before-orphan-recovery.{uuid.uuid4().hex}.json")
+                    backup = run_dir / (f"run.before-orphan-recovery.{uuid.uuid4().hex}.json")
                 with backup.open("xb") as handle:
                     handle.write(original)
                 timestamp = now_iso()
@@ -71,11 +86,9 @@ class FileRunStartupRecovery:
                         "finished_at": timestamp,
                         "error": "previous_instance_lost",
                     }
-                temporary = path.with_suffix(".recovery.tmp")
-                temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-                temporary.replace(path)
+                write_committed_snapshot(run_dir, state)
                 recovered += 1
-            except (OSError, ValueError):
+            except (OSError, ValueError, KeyError, TypeError):
                 log.exception("Could not recover run state: %s", path)
         log.info(
             "PhotoBench instance %s owns %s; recovered %s orphan runs", os.getpid(), self._root, recovered

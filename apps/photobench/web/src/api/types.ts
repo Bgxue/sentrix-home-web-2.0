@@ -45,7 +45,33 @@ export interface MediaRef {
 // ---------------------------------------------------------------------------
 
 /** `phases.<key>.progress`；键取自一次真实 run 的 `qa_eval`（`/api/v1/runs` 实测）。 */
+export interface ImportObservation {
+  operation_id?: string;
+  scope_id?: string;
+  status?: string;
+  stage?: string;
+  total?: number | null;
+  completed?: number | null;
+  imported?: number | null;
+  deduplicated?: number | null;
+  failed?: number | null;
+  current_file?: string | null;
+  updated_at?: string | null;
+  observed_at?: string | null;
+  sequence?: number;
+  error?: string | null;
+}
+
 export interface PhaseProgress {
+  operation_id?: string;
+  observation?: ImportObservation | null;
+  availability?: string;
+  query_error?: string | null;
+  last_received_at?: string;
+  last_checked_at?: string;
+  request_status?: string;
+  request_error?: string | null;
+  observer_stop_pending?: boolean;
   current_directory?: string;
   request_started_at?: string;
   directories_done?: number;
@@ -72,6 +98,7 @@ export interface PhaseProgress {
  * 另有 `gpu_metrics` 这种非执行阶段。
  */
 export interface Phase {
+  scanned_count?: number | null;
   sampling_integrity?: {
     callback_failures?: number;
     last_callback_failure?: string | null;
@@ -175,6 +202,9 @@ export interface RejudgeTask {
 
 /** 一条 run。字段来自 `/api/v1/runs` 实测响应（2026-10-06，8771）。 */
 export interface Run {
+  read_revision?: string | null;
+  history_mode?: "full" | "checkpoint" | null;
+  persistence?: { status?: string; error?: string } | null;
   metrics_contract_version?: number;
   build_revision?: string;
   runtime_snapshot?: Readonly<Record<string, unknown>> | null;

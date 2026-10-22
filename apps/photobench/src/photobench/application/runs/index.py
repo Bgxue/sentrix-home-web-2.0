@@ -78,6 +78,12 @@ class RunIndex:
         with self._lock:
             return list(self._entries.values())
 
+    def entry(self, run_id: str) -> dict[str, Any] | None:
+        """A detached skinny entry, including failures newer than the last disk commit."""
+        with self._lock:
+            entry = self._entries.get(run_id)
+            return dict(entry) if entry is not None else None
+
     def upsert(self, entry: dict[str, Any]) -> None:
         """写侧在 run 结束时把新条目推进来（`RunSuites`）。
 

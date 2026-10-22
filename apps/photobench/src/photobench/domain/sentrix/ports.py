@@ -148,3 +148,20 @@ class SentrixClient(Protocol):
         由 HTTP 层决定转哪几个。
         """
         ...
+
+
+@runtime_checkable
+class ProgressTrackedImports(Protocol):
+    """Optional import observations. Legacy SentrixClient signatures remain unchanged."""
+
+    def import_album_tracked(
+        self,
+        *,
+        scope_id: str,
+        directory: str,
+        limit: int,
+        timeout: int,
+        operation_id: str,
+    ) -> dict[str, Any]: ...
+
+    def import_progress(self, *, operation_id: str, timeout: int = 3) -> dict[str, Any]: ...

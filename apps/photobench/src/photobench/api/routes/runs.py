@@ -37,9 +37,11 @@ def list_runs(request: Request, page: str = "1", page_size: str = "20") -> dict[
 
 
 @router.get("/runs/{run_id}", response_model=RunMetricsResponse, response_model_exclude_unset=True)
-def get_run(request: Request, run_id: str) -> dict[str, Any]:
+def get_run(request: Request, run_id: str, include_history: bool = True) -> dict[str, Any]:
     """1.0 ``:7739``。run 不存在时 ``KeyError`` → 404（handler 在 ``api/errors.py``）。"""
-    return get_container(request).runs.get_run(run_id)
+    if include_history:
+        return get_container(request).runs.get_run(run_id)
+    return get_container(request).runs.get_run(run_id, include_history=False)
 
 
 @router.get("/runs/{run_id}/items", response_model=RunItemsResponse, response_model_exclude_unset=True)

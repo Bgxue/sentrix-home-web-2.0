@@ -30,6 +30,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -73,6 +74,7 @@ RUN_MODES = ("full", "reuse", "build")
 
 #: 1.0 ``:2043`` 的 ``dirty_statuses``。
 DIRTY_STATUSES = {"running", "pending", "cancelling"}
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -141,9 +143,53 @@ class RunSuites:
             if run.state is None or run.state.get("status") in DIRTY_STATUSES
         ]
 
+    @staticmethod
+    def _stop_pending(state: Mapping[str, Any]) -> bool:
+        return bool(
+            (state.get("persistence") or {}).get("status") == "stop_pending"
+            or (state.get("phases") or {})
+            .get("photo_import", {})
+            .get("progress", {})
+            .get("observer_stop_pending")
+            or (state.get("phases") or {})
+            .get("gpu_metrics", {})
+            .get("sampling_integrity", {})
+            .get("stop_pending_threads")
+        )
+
+    def _execute_and_release(self, run_id: str, request: RunRequest) -> None:
+        with self._lock:
+            execution = self._active.get(run_id)
+        if execution is None:
+            return
+        finished: dict[str, Any] = {}
+        try:
+            finished = execution.execute(request)
+        except Exception as exc:  # noqa: BLE001 — execution/storage failure stays visible
+            log.exception("Run execution/cleanup failed: %s", run_id)
+            if execution.state is not None:
+                with execution.state.lock:
+                    execution.state.data.update(status="failed", fatal_error=str(exc), finished_at=now_iso())
+                    finished = dict(execution.state.data)
+            else:
+                finished = {"run_id": run_id, "status": "failed", "fatal_error": str(exc)}
+        finally:
+            try:
+                self._index.upsert(analysis.run_list_entry(finished))
+            finally:
+                with self._lock:
+                    if not self._stop_pending(finished):
+                        self._active.pop(run_id, None)
+
     def _require_inactive(self) -> None:
         busy = self._active_ids()
-        if busy or any(thread.is_alive() for thread in self._threads.values()):
+        if (
+            busy
+            or any(thread.is_alive() for thread in self._threads.values())
+            or any(
+                run.state is not None and self._stop_pending(run.state.data) for run in self._active.values()
+            )
+        ):
             raise InvalidRequestError(f"another benchmark suite is still active: {', '.join(busy)}")
 
     def _state_if_exists(self, run_id: str) -> dict[str, Any] | None:
@@ -283,18 +329,12 @@ class RunSuites:
                 created.append(run_id)
 
         def _run_sequentially() -> None:
-            for run_id in created:
-                execution = self._active.get(run_id)
-                if execution is None:
-                    continue
-                request = requests[run_id]
-                try:
-                    # ``execute`` 自己把失败/取消写进 state；这里只保证线程不会因为一个
-                    # 异常而死掉（死了 index 就永远不会更新，前端会一直看到旧状态）。
-                    finished = execution.execute(request)
-                except Exception:  # noqa: BLE001
-                    finished = execution.state.data if execution.state else {}
-                self._index.upsert(analysis.run_list_entry(finished))
+            try:
+                for run_id in created:
+                    self._execute_and_release(run_id, requests[run_id])
+            finally:
+                with self._lock:
+                    self._threads.pop(suite_id, None)
 
         thread = threading.Thread(target=_run_sequentially, name=f"suite-{suite_id}", daemon=True)
         with self._lock:
@@ -409,15 +449,11 @@ class RunSuites:
             self._active[new_run_id] = self._new_execution(request)
 
         def _run_resumed() -> None:
-            execution = self._active.get(new_run_id)
-            if execution is None:
-                return
             try:
-                finished = execution.execute(request)
+                self._execute_and_release(new_run_id, request)
             finally:
                 with self._lock:
-                    self._active.pop(new_run_id, None)
-            self._index.upsert(analysis.run_list_entry(finished))
+                    self._threads.pop(new_run_id, None)
 
         thread = threading.Thread(target=_run_resumed, name=f"resume-{new_run_id}", daemon=True)
         with self._lock:
@@ -438,15 +474,13 @@ class RunSuites:
         """``POST /api/runs/{id}/cancel``（1.0 ``cancel_run`` ``:6879``）。"""
         with self._lock:
             execution = self._active.get(run_id)
-            if execution is not None and execution.state is None:
-                execution.cancel(source="run_api")
-                return {"cancelled": True, "run_id": run_id}
             if execution is not None and execution.state is not None:
                 status = execution.state.get("status")
-                if status in DIRTY_STATUSES:
-                    execution.cancel(source="run_api")
-                    return {"cancelled": True, "run_id": run_id}
-                return {"cancelled": False, "run_id": run_id, "reason": f"run status is {status}"}
+                if status not in DIRTY_STATUSES:
+                    return {"cancelled": False, "run_id": run_id, "reason": f"run status is {status}"}
+        if execution is not None:
+            execution.cancel(source="run_api")
+            return {"cancelled": True, "run_id": run_id}
         if self._state_if_exists(run_id) is None:
             raise KeyError(run_id)
         return {"cancelled": False, "run_id": run_id, "reason": "run not active (loaded from disk)"}
@@ -478,7 +512,11 @@ class RunSuites:
         if isinstance(state, dict) and (state.get("rejudge") or {}).get("status") == "running":
             raise InvalidRequestError("cannot delete a run while rejudge is running")
         with self._lock:
-            self._active.pop(run_id, None)
+            execution = self._active.get(run_id)
+            if execution is not None:
+                raise InvalidRequestError("cannot delete a run until its workers have stopped")
+        if state is not None and state.get("status") in DIRTY_STATUSES:
+            raise InvalidRequestError("cannot delete an active run")
         self._writer.delete_run(run_id)
         self._index.remove(run_id)
         return {"deleted": True, "run_id": run_id}
@@ -975,13 +1013,12 @@ class RunSuites:
                 # 浅拷贝：调用方（列表页）不该拿到执行体正在改的那只 dict。
                 # 取 ``.data`` 而不是 ``dict(state)``——``RunState`` 是带锁的**包装**，
                 # 它本身不是 dict。
-                states[run_id] = dict(execution.state.data)
+                with execution.state.lock:
+                    states[run_id] = analysis.run_list_entry(execution.state.data)
             return states
 
     def active_run_ids(self) -> list[str]:
-        """还在跑（``running`` / ``pending`` / ``cancelling``）的 run——**注册表里的
-        已完成 run 不算**：``_active`` 保留它们只为让 ``cancel``/``delete`` 能按 id 找到
-        刚跑完的那一个，而「有没有活跃 suite」的判据必须是状态，不是「表里有没有条目」。"""
+        """Still executing runs; stopped executions are released, stop-pending blocks admission."""
         with self._lock:
             return [
                 run_id

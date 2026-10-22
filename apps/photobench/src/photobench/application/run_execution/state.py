@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import threading
 import time
@@ -41,6 +42,8 @@ from photobench.domain.results.ports import RunResultWriter
 from photobench.domain.runs.analysis import now_iso
 
 #: 1.0 ``:211`` 的 ``PERSIST_DEBOUNCE_SECONDS``。合并同一短窗口里的多次快照请求。
+log = logging.getLogger(__name__)
+
 PERSIST_DEBOUNCE_SECONDS = max(0.05, float(os.environ.get("PHOTOBENCH_PERSIST_DEBOUNCE_SECONDS", "0.25")))
 
 
@@ -54,6 +57,7 @@ class RunState:
         run_id: str = "",
         writer: RunResultWriter | None = None,
         debounce: float = PERSIST_DEBOUNCE_SECONDS,
+        persist_timeout: float = 10.0,
     ) -> None:
         self._lock = threading.RLock()
         self.data = initial
@@ -61,6 +65,7 @@ class RunState:
         self.run_id = run_id
         self._writer = writer
         self.debounce = debounce
+        self.persist_timeout = persist_timeout
         #: 取消信号。**它在构造时就存在**（不是被取消时才建）——等待方拿到的必须是
         #: 同一个 Event，否则「取消」对已经在等的那一段永远不可见。
         self.cancel_event = threading.Event()
@@ -179,104 +184,87 @@ class RunState:
         )
         self._persist_thread.start()
 
-    def _persist_loop(self) -> None:
-        """1.0 ``:2056``：合并短窗口内的请求，**在锁外**做磁盘 IO。
+    def snapshot(self) -> dict[str, Any]:
+        """Detach a consistent state; never hold the condition while taking state.lock."""
+        with self._lock:
+            return copy.deepcopy(self.data)
 
-        **整条循环包在 ``try`` 里，``finally`` 负责唤醒等待者。** 2026-10-07 实测：
-        深拷贝那一步原先在 ``try`` 之外，它一抛异常线程就**静默死掉**，而
-        ``persist(wait=True)`` 还等在条件变量上——run 于是永远收不了尾（卡在
-        486/487、栈里连 persist 线程都看不到）。
-        「线程没起来」有防护（``persist`` 里那条 ``_persist_thread is None`` 分支），
-        **「线程中途死了」没有**，而后者更隐蔽：``_persist_thread is not None`` 依然成立，
-        所有空值防护全部失效。
-        """
+    def _persist_loop(self) -> None:
         try:
             while True:
                 with self._persist_condition:
-                    while self._persist_written >= self._persist_requested and not self._persist_stopping:
-                        self._persist_condition.wait()
-                    if self._persist_stopping and self._persist_written >= self._persist_requested:
+                    self._persist_condition.wait_for(
+                        lambda: self._persist_stopping or self._persist_requested > self._persist_written
+                    )
+                    if self._persist_stopping:
                         return
                     self._persist_condition.wait(timeout=self.debounce)
                     target = self._persist_requested
-                    try:
-                        stored = copy.deepcopy(self.data)
-                    except Exception as exc:  # noqa: BLE001 —— 与写失败同一个出口
-                        self._persist_error = exc
-                        self._persist_written = max(self._persist_written, target)
-                        self._persist_condition.notify_all()
-                        continue
-                writer = self._writer
-                if writer is None:  # start_persist_writer 保证了非空；这里只为类型收窄
-                    return
                 try:
+                    stored = self.snapshot()
+                    writer = self._writer
+                    assert writer is not None
                     writer.write_snapshot(self.run_id, stored)
-                except Exception as exc:  # noqa: BLE001 —— 写失败要能被下一个 wait=True 的调用看见
+                except Exception as exc:  # noqa: BLE001 — publish failure and stop, never mark as written
+                    log.exception("Run snapshot failed: %s", self.run_id)
+                    with self._lock:
+                        self.data["persistence"] = {"status": "failed", "error": str(exc)}
                     with self._persist_condition:
                         self._persist_error = exc
-                        self._persist_written = max(self._persist_written, target)
                         self._persist_condition.notify_all()
-                    continue
+                    return
                 with self._persist_condition:
-                    self._persist_written = max(self._persist_written, target)
+                    self._persist_written = target
                     self._persist_condition.notify_all()
         finally:
-            # 线程无论怎么退出，都不能让等着的调用者永远等下去。
-            # 正常收尾（``_persist_stopping``）不算错——那是 stop_persist_writer 要的结局。
             with self._persist_condition:
                 if not self._persist_stopping and self._persist_error is None:
-                    self._persist_error = RuntimeError(
-                        "persist writer exited before writing the requested snapshot"
-                    )
+                    self._persist_error = RuntimeError("persist writer exited unexpectedly")
                 self._persist_condition.notify_all()
 
     def persist(self, wait: bool = False) -> None:
-        """请求一份快照；``wait=True`` 时等到它落盘（1.0 ``persist`` ``:2080``）。
-
-        **写线程没起来时同步写**：``persist(wait=True)`` 在一条不存在的线程上等下去会
-        永久挂住——而最可能调用它的两条路（``cancel()`` 与 ``stop_persist_writer()``）
-        恰好都是「收尾」路径，挂在那里等于 run 永远不结束。1.0 里线程在
-        ``__init__`` 就起了，所以没有这个形状；2.0 的写线程是 ``execute`` 才起的。
-        """
+        """Request a snapshot; bounded waiting acknowledges only successfully committed revisions."""
         writer = self._writer
         if writer is None:
             return
         if self._persist_thread is None:
-            writer.write_snapshot(self.run_id, copy.deepcopy(self.data))
+            writer.write_snapshot(self.run_id, self.snapshot())
             return
+        deadline = time.monotonic() + self.persist_timeout
         with self._persist_condition:
-            if self._persist_error is not None and wait:
+            if self._persist_error is not None:
                 raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")
+            if self._persist_stopping:
+                raise RuntimeError("benchmark state writer has stopped")
             self._persist_requested += 1
             target = self._persist_requested
-            self._persist_condition.notify()
+            self._persist_condition.notify_all()
             if not wait:
                 return
             while self._persist_written < target:
-                # 循环里也要查 ``_persist_error``：写线程中途死掉时它会带着错误唤醒
-                # 我们（见 ``_persist_loop`` 的 finally），只查进入那一次是醒不过来的。
                 if self._persist_error is not None:
                     raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")
-                self._persist_condition.wait()
-            if self._persist_error is not None:
-                raise RuntimeError(f"benchmark state persistence failed: {self._persist_error}")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("benchmark state persistence deadline exceeded")
+                self._persist_condition.wait(timeout=remaining)
 
     def stop_persist_writer(self) -> None:
-        """1.0 ``_stop_persist_writer`` ``:2095``：先等最后一份，再收线程。
-
-        线程没起过（``start_persist_writer`` 之前就出错）时**同步写一次**再返回——
-        让 ``persist(wait=True)`` 在一条不存在的线程上等下去会挂死，而那正是「run
-        已经失败了，收尾又挂住」的最坏形状。
-        """
-        writer = self._writer
-        if writer is None:
-            return
-        self.persist(wait=True)
-        with self._persist_condition:
-            self._persist_stopping = True
-            self._persist_condition.notify_all()
-        if self._persist_thread is not None:
-            self._persist_thread.join(timeout=10)
+        """Signal stop even on persistence failure; report any writer still holding resources."""
+        deadline = time.monotonic() + self.persist_timeout
+        try:
+            self.persist(wait=True)
+        finally:
+            with self._persist_condition:
+                self._persist_stopping = True
+                self._persist_condition.notify_all()
+            thread = self._persist_thread
+            if thread is not None:
+                thread.join(timeout=max(0, deadline - time.monotonic()))
+                if thread.is_alive():
+                    with self._lock:
+                        self.data["persistence"] = {"status": "stop_pending", "error": "writer_stop_timeout"}
+                    raise TimeoutError("benchmark state writer did not stop before deadline")
 
 
 __all__ = ["PERSIST_DEBOUNCE_SECONDS", "RunState"]

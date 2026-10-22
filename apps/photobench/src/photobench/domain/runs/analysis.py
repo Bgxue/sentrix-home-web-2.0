@@ -1647,6 +1647,7 @@ def run_list_entry(state: dict[str, Any]) -> dict[str, Any]:
             "fatal_error",
             "telemetry_source",
             "runtime_framework",
+            "persistence",
         )
         if state.get(key) is not None
     }

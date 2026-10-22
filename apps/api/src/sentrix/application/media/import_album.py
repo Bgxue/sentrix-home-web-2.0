@@ -39,6 +39,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from sentrix.application.media.import_assets import (
     ImportAssets,
@@ -116,7 +117,9 @@ class ImportAlbum:
         importer: ImportAssets,
         summarize_event: Callable[[str], object] | None = None,
         workers: int = DEFAULT_ALBUM_WORKERS,
+        progress: Callable[..., None] | None = None,
     ) -> None:
+        self._progress = progress
         self._importer = importer
         self._workers = max(1, int(workers))
         # 不传就退化成纯导入（与 ``ImportAssets`` 的其余可选协作者同一个形状）：
@@ -132,6 +135,7 @@ class ImportAlbum:
             path for path in root.iterdir() if path.is_file() and path.suffix.lower() in SCAN_SUFFIXES
         )[: max(1, int(request.limit))]
 
+        self._report(stage="media_processing", total=len(paths))
         imported = deduplicated = events = lexical_terms = 0
         # 分项计时：同步导入里这些阶段是**交织**的（prepare 在池里跑、finish 按序收），
         # 所以 prepare 取「总墙钟 − 其余三项」，保证四项相加就是这次导入的真实耗时。
@@ -156,6 +160,7 @@ class ImportAlbum:
                 while next_submit < len(paths) and next_submit - next_finish < self._workers:
                     index = next_submit
                     next_submit += 1
+                    self._report(stage="media_staging", current_file=paths[index].name)
                     stage_started = time.perf_counter()
                     try:
                         outcome = self._importer.stage(self._request_for(request, paths[index]))
@@ -177,7 +182,16 @@ class ImportAlbum:
                 next_finish += 1
                 # 换一个名字：``outcome`` 在预取那一段里已被推成非 None 的类型。
                 ready = staged.pop(index)
+                self._report(
+                    stage="media_processing",
+                    current_file=paths[index].name,
+                    completed=index,
+                    imported=imported,
+                    deduplicated=deduplicated,
+                    failed=index - imported - deduplicated,
+                )
                 if ready is None:
+                    self._report(completed=index + 1, failed=index + 1 - imported - deduplicated)
                     continue
                 future = pending.pop(index, None)
                 # **等模型 ≠ 归属。** `future.result()` 是 VLM 观察的等待时间，把它
@@ -197,11 +211,13 @@ class ImportAlbum:
                     else:
                         assert isinstance(ready, StagedImport)
                         assert prepared is not None
+                        self._report(stage="event_assignment")
                         result = self._importer.finish(ready, prepared)
                 except Exception as error:
                     failures[index] = AlbumFailure(
                         file_name=paths[index].name, reason=f"{type(error).__name__}: {error}"
                     )
+                    self._report(completed=index + 1, failed=index + 1 - imported - deduplicated)
                     continue
                 finish_seconds += time.perf_counter() - finish_started
                 if result.deduplicated:
@@ -213,8 +229,15 @@ class ImportAlbum:
                     if result.event_id not in event_ids:  # 保序去重：一个事件只总结一次
                         event_ids.append(result.event_id)
                 lexical_terms += result.lexical_terms
+                self._report(
+                    completed=index + 1,
+                    imported=imported,
+                    deduplicated=deduplicated,
+                    failed=index + 1 - imported - deduplicated,
+                )
 
         # 事件总结在批末，单独计时——它是一次模型调用/事件，跟导入/观察不是一回事。
+        self._report(stage="event_summarization", current_file=None)
         summarize_started = time.perf_counter()
         summarize_count = self._summarize_events(event_ids)
         summarize_seconds = time.perf_counter() - summarize_started
@@ -248,6 +271,10 @@ class ImportAlbum:
             summarized=summarize_count,
             failures=tuple(failures[index] for index in sorted(failures)),
         )
+
+    def _report(self, **changes: Any) -> None:
+        if self._progress is not None:
+            self._progress(**changes)
 
     @staticmethod
     def _request_for(request: AlbumImportRequest, path: Path) -> ImportRequest:

@@ -124,3 +124,29 @@ class RunStartupRecovery(Protocol):
     def acquire_and_recover(self) -> int: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class RunRevisions(Protocol):
+    """Opaque committed file identity; deletion raises KeyError, IO errors propagate.
+
+    New read capability; the legacy RunStore methods remain supported.
+    """
+
+    def revision(self, run_id: str) -> str: ...
+
+
+@runtime_checkable
+class RunReadViews(Protocol):
+    """Optional lightweight committed view, without loading item traces.
+
+    load_overview preserves item_count/effective summary at its checkpoint.
+    Old directories may fall back to the full reader, without rewriting raw data.
+    telemetry_revision changes on append, replacement or truncation (absent is
+    distinct). Missing run raises KeyError; storage/corruption errors propagate.
+    Legacy RunStore methods remain available for at least one release.
+    """
+
+    def load_overview(self, run_id: str) -> dict[str, Any]: ...
+
+    def telemetry_revision(self, run_id: str) -> str: ...

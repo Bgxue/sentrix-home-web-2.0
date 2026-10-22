@@ -1228,3 +1228,13 @@ Judge一致性v3进一步限定为明确“模型/助手的回答/答案/结论�
 - Jetson每轮共享一次nvmap账本；监听socket缓存按端口集合隔离、最多32份且最长2秒，每次核验原持有者身份/socket，变化即重查；相关PID单次smaps同时取RSS/PSS，总探测时间达到1秒后不再读后续PID，未读分量保持null。单次内核文件读取无法由线程硬抢占，该预算不是硬实时承诺。 端口发现仅检查真实监听候选；进程清单先以stat建身份/父子图，仅对端口根及当前子孙读取详情并复核身份。本机PID/无端口关键词及旧无scope配置保留全量发现，远端服务不扩大本机归属。
 - 正常生产保持fail-open；严格验收独立重算分量值龄及最老必要来源，仍以3秒门槛判断。确认无辅助服务的0也依赖新鲜拓扑；不完整不得伪装完整。停止最长共同等待10秒，未退出线程明确记异常，不能据此宣称资源已释放。
 - 本轮用户要求仅本地修代码、暂不启动测评；不改驱动、CUDA/ORT环境或远端服务。新代码的真机时序与覆盖效果待后续授权验证，历史无逐分量时间不补造。
+
+### PhotoBench 长期运行读写补充（2026-10-23）
+
+结果新增能力先定义 `RunRevisions` / `RunReadViews`，旧 `RunStore` / `RunResultWriter` 不变；具体文件读写、提交清单、派生历史索引仍在 infrastructure，由既有 bootstrap 装配。application 只协调一致快照、缓存失效/预算、线程释放和轻量投影；API 收包后将同步用例交线程池，不在事件循环直接执行文件或 HTTP IO。指标公式未变，`include_history=false` 明确表示检查点/窗口展示，不冒称全轮重算。提交、兼容导出及失败语义见 [指标契约](photobench-metrics-contract.md) 和 [本轮偏差](../refactor/2026-10-23-long-running-deviations.md)。新增预算为内部有界策略，没有散落环境变量；旧格式及入口至少保留一个发布周期。
+
+### 2026-10-23 导入进度协议
+
+保留同步 `POST /api/v1/imports`，新增可选 `operation_id` 和独立 `GET /api/v1/imports/{operation_id}/progress`。产品仅输出通用处理事实；`completed = imported + deduplicated + failed`，`total` 为实际扫描并应用 limit 后的支持媒体数，扫描前为 null。媒体计数完成后仍依次进行事件总结、参与者刷新、家庭图谱、人物画像，只有同步请求完成才终态。updated_at 是步骤更新时间，observed_at 是查询时间，不能互换。查询不会重放导入。
+
+由 domain ImportProgressStore 端口、application TrackImport 和 bootstrap 装配的有界进程内适配器实现；最多32个活跃跟踪、128条终态，重启或淘汰后404。重复在册ID409，容量不足429，均发生在副作用前。此能力不是持久作业队列，不承诺跨进程查询或取消产品执行。PhotoBench 使用运行快照中的同一客户端，每秒轮询、单次3秒超时，保存最后事实及查询故障；不盲重试导入POST。旧服务无进度时明确不可用。

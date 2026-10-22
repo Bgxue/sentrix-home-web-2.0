@@ -40,13 +40,49 @@ class TelemetryProjection(BaseModel):
     sampling: dict[str, Any] | None = None
 
 
+class ImportObservationProjection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    operation_id: str | None = None
+    scope_id: str | None = None
+    total: int | None = None
+    completed: int | None = None
+    imported: int | None = None
+    deduplicated: int | None = None
+    failed: int | None = None
+    stage: str | None = None
+    status: str | None = None
+    current_file: str | None = None
+    updated_at: str | None = None
+    observed_at: str | None = None
+    sequence: int | None = None
+    error: str | None = None
+
+
+class PhaseProgressProjection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    observation: ImportObservationProjection | None = None
+    operation_id: str | None = None
+    availability: str | None = None
+    last_received_at: str | None = None
+    last_checked_at: str | None = None
+    query_error: str | None = None
+    request_status: str | None = None
+    request_error: str | None = None
+    observer_stop_pending: bool | None = None
+
+
 class PhaseMetricsProjection(BaseModel):
     model_config = ConfigDict(extra="allow")
     sampling_integrity: dict[str, Any] | None = None
+    progress: PhaseProgressProjection | None = None
+    scanned_count: int | None = None
 
 
 class RunMetricsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
+    read_revision: str | None = None
+    history_mode: str | None = None
+    persistence: dict[str, Any] | None = None
     metrics_contract_version: int | None = None
     build_revision: str | None = None
     runtime_snapshot: dict[str, Any] | None = None

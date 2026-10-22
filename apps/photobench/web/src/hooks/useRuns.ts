@@ -52,6 +52,7 @@ export interface RunPageState {
   has_previous: boolean;
   has_next: boolean;
   active_count: number;
+  scan?: RunPage["scan"];
 }
 
 const INITIAL_RUN_PAGE: RunPageState = {
@@ -120,6 +121,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       has_previous: Boolean(payload.has_previous),
       has_next: Boolean(payload.has_next),
       active_count: Number(payload.active_count || 0),
+      scan: payload.scan,
     };
     runPageRef.current = next;
     setRunPage(next);
@@ -188,7 +190,7 @@ export function useRuns(options: UseRunsOptions = {}) {
         await loadRuns();
         if (activeRunIdRef.current) await pollDetailLoader.current();
         if (cancelled) return;
-        if (hasRunningNow()) {
+        if (hasRunningNow() || ["pending", "running"].includes(String(runPageRef.current.scan?.state))) {
           timer = window.setTimeout(poll, 2000);
         } else {
           setPolling(false);
@@ -227,7 +229,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       setActiveRun({ ...run });
       scrollToRunDetail();
       void loadActiveRun({ resetPage: true }).catch((err: unknown) => {
-        if (activeRunIdRef.current === run.run_id) {
+        if ((err as Error).name !== "AbortError" && activeRunIdRef.current === run.run_id) {
           setError((err as Error).message || "读取评测详情失败");
         }
       });

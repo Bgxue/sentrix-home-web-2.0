@@ -118,3 +118,8 @@ it("初始化失败时保留未知题目数，不显示零题", () => {
   renderTable([run({ status: "failed", qa_count: null })]);
   expect(screen.getByText("题目数未记录")).toBeTruthy();
 });
+
+it("历史扫描未完成时明确告知列表不完整", () => {
+  renderTable([], { scan: { state: "running", scanned: 120 } });
+  expect(screen.getByText(/历史记录正在加载（已读取 120 条），当前列表尚未完整/)).toBeTruthy();
+});

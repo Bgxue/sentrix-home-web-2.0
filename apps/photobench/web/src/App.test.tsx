@@ -161,7 +161,7 @@ describe("记忆面板接线（P2 / 1.0 :3147）", () => {
         return Promise.resolve({ items: [], page: 1, page_size: 20, total: 0, pages: 1 });
       }
       if (path.startsWith("/runs/runX/reviews")) return Promise.resolve({ reviews: {} });
-      if (path.startsWith("/runs/runX")) return Promise.resolve({ run_id: "runX", status: "done", mode: "reuse" });
+      if (path.startsWith("/runs/runX?include_history=false")) return Promise.resolve({ run_id: "runX", status: "done", mode: "reuse" });
       return Promise.resolve({});
     });
 
@@ -198,14 +198,14 @@ describe("init() 的自动选中（1.0 :2758 / :2761-2765）", () => {
       if (path.startsWith("/runs/runX/items")) {
         return Promise.resolve({ items: [], page: 1, page_size: 20, total: 0, pages: 1 });
       }
-      if (path.startsWith("/runs/runX")) return Promise.resolve({ run_id: "runX", status: "running", mode: "reuse" });
+      if (path.startsWith("/runs/runX?include_history=false")) return Promise.resolve({ run_id: "runX", status: "running", mode: "reuse" });
       return Promise.resolve({});
     });
 
     render(<App />);
 
     await waitFor(() =>
-      expect(mockApi.mock.calls.some(([path]) => path === "/runs/runX")).toBe(true),
+      expect(mockApi.mock.calls.some(([path]) => path === "/runs/runX?include_history=false")).toBe(true),
     );
   });
 });

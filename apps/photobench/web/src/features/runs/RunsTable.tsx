@@ -75,6 +75,10 @@ export function RunsTable({
         ) : null}
         <span className="muted">共 {runPage.total} 条</span>
       </div>
+      {["pending", "running"].includes(String(runPage.scan?.state)) ? (
+        <p className="muted">历史记录正在加载（已读取 {Number(runPage.scan?.scanned || 0)} 条），当前列表尚未完整。</p>
+      ) : null}
+      {runPage.scan?.state === "failed" ? <p className="error">历史记录加载失败：{String(runPage.scan.error || "未知原因")}</p> : null}
       <div className="runs-list">
         <table>
           <thead>

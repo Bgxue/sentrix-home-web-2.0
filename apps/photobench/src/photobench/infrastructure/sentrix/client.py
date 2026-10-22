@@ -135,6 +135,32 @@ class HttpxSentrixClient:
             )
         )
 
+    def import_album_tracked(
+        self,
+        *,
+        scope_id: str,
+        directory: str,
+        limit: int,
+        timeout: int,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        return dict(
+            self._http.request_json(
+                self._url("/imports"),
+                {"scope_id": scope_id, "directory": directory, "limit": limit, "operation_id": operation_id},
+                "POST",
+                timeout,
+            )
+        )
+
+    def import_progress(self, *, operation_id: str, timeout: int = 3) -> dict[str, Any]:
+        return dict(
+            self._http.request_json(
+                self._url(f"/imports/{_quote(operation_id)}/progress"),
+                timeout=timeout,
+            )
+        )
+
     def list_assets(self, *, scope_id: str, limit: int, timeout: int = 60) -> list[dict[str, Any]]:
         """``GET /api/v1/assets``（``api/routes/media.py:290``），解封 ``{"items": [...]}``。
 

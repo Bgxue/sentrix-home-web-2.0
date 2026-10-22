@@ -1340,3 +1340,28 @@ def test_late_sample_callback_does_not_reopen_or_append_to_a_finished_run():
     execution._sample_writer(state)({"temperature_c": 50})
     assert writer.gpu_samples == []
     assert "telemetry_live" not in state.data
+
+
+def test_import_final_scan_count_uses_product_outcomes_not_manifest_expectation():
+    albums = FakeAlbums(
+        manifest=_manifest(),
+        qa_rows=_rows(),
+        files={"faces/1.jpg": b"J"},
+        directory_entries={"photos": 5},
+    )
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        import_result={
+            "imported": 1,
+            "deduplicated": 1,
+            "events": 1,
+            "summarized": 1,
+            "failures": [{"file_name": "extra.png", "reason": "bad encoding"}],
+        },
+    )
+    execution, *_ = _execution(albums=albums, client=client)
+    phase = execution.execute(_request(mode="build"))["phases"]["photo_import"]
+    assert phase["total_media"] == 2  # immutable manifest expectation remains traceable
+    assert phase["scanned_count"] == 3  # five entries, three supported media actually settled
+    assert (phase["accepted_count"], phase["deduplicated_count"], phase["failed_count"]) == (1, 1, 1)
+    assert phase["directories"][0]["progress"]["request_status"] == "returned"

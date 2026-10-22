@@ -126,10 +126,29 @@ build 不解析题库或 Judge 配置，题集为空、题数0、结果空列表
 
 `model_identity={status,raw_id,display_name,candidates,reason,observed_at}` 保存实际端点身份；只去除明确权重文件扩展名，不截断 Qwen3.5 等型号。多候选且无明确 ID 时保留未知，不选第一项。
 
-`execution_budgets`、`product_settings` 和部署诊断中的有效预算/provider 都可追溯。POST 发送后的结果不确定会记录 `fatal_error_details`/相位 `request_failure`，不自动重放；同步导入未返回期间只展示目录、目录计数和等待时长，媒体完成数与失败数未知时保持 `?`，不得用 `0` 伪造进度。
+`execution_budgets`、`product_settings` 和部署诊断中的有效预算/provider 都可追溯。POST 发送后的结果不确定会记录 `fatal_error_details`/相位 `request_failure`，不自动重放；旧服务无进度协议时，同步导入未返回期间只展示目录、目录计数和等待时长，媒体完成数与失败数未知时保持 `?`，不得用 `0` 伪造进度。
 
 导入阶段墙钟以 `photo_import.total_seconds` 为准，兼容历史 `upload_seconds` 或完整起止时间；`timings.total` 只作为“后端计时”单列，不能替代请求墙钟。真实 Mac 记录为墙钟1208秒、内部计时738.1秒，二者范围不同。前端阶段耗时缺少完整起止事实时，`null`、布尔、空字符串和负数保持不可用；真实数字0保留原有起止时间回退语义。本次只改前端投影，不改原始记录、后端公式、执行或公开schema。
 
 本轮共用执行语义变化，固定版本后四机 full10QA，并在 NX/Mac 各做独立 build→reuse10QA。build 的严格遥测验收只覆盖导入/处理；reuse 只覆盖 QA，未适用阶段不补点。单次及首尾3秒门槛、null与TTL、三类验收结论、历史保全均沿用。
 
 输入初始化失败：`failed_phase="initialization"`，`qa_count=null`、`input_integrity=null`表示无法获得输入事实；保存真实failed记录且不调用产品。build正常初始化的题目数仍为0，验收不得要求10题；评分不适用不豁免遥测覆盖。
+
+## 长期运行读取与提交（2026-10-23）
+
+新增可选 `RunRevisions` / `RunReadViews` 端口，旧 `RunStore` 和写端口保留。
+`GET /runs/{id}` 增加 `include_history`（默认 true，兼容旧客户端）；false 只返回最近成功提交的检查点摘要、实时窗口，不读原始遥测全文件。响应可带 `read_revision` 和 `history_mode=full|checkpoint`，表示本次读取版本和统计来源；checkpoint 不能冒称全历史重算。前端普通轮询用 checkpoint，完整曲线可手动读取；分析展开才加载。
+
+新快照先写 `.snapshots/<generation>/{run.json,results.jsonl,metadata.json}`，文件和目录 fsync 后原子发布 `snapshot-commit.json`。该指针选择的一对文件为权威；两个根文件保留旧格式兼容导出，不能把两次 rename 当事务。提交前失败保留旧提交；提交后导出/清理失败记录日志，须从指针选中的版本修复，不回滚已成功提交的数据。根目录兼容导出只适合离线工具，运行中一致读取必须遵循提交指针。保留当前与上一提交；旧历史原文不迁移，旧目录仅新增可重建的文件版本索引。进程内按 run 的有界条带锁协调读写、删除与清理；仍要求单实例目录租约。
+
+持久化快照持状态锁复制，IO 在锁外。等待提交/停止有共同截止，失败不记成成功写入；即使磁盘失败也发退出信号。未退出明确 `persistence.status=stop_pending` 并阻止新轮和删除；写盘异常为 failed，日志保留原因。正常结束释放执行体与线程注册。终态缓存按修订失效，同时限制条数/字节；删除后不得继续返回缓存。
+
+写盘失败的诊断可能无法写回同一块已满磁盘。此时进程内瘦索引保留失败原因，详情以 `persistence.diagnostic_source=current_process` 和 `checkpoint_status` 明示运行状态比最近提交更新；`read_revision` 仍指最后成功的检查点，原文件不伪改成已保存。进程退出后的状态由原有备份恢复规则接管。首次历史索引尚在构建时前端展示 scan 状态并继续轮询，不把部分列表当全部结果。
+
+## 导入观测投影（2026-10-23）
+
+`phases.photo_import.progress`可选operation_id、availability、observation、last_received_at、last_checked_at、query_error、request_status/request_error、observer_stop_pending；observation为产品通用原事实（operation_id/scope_id/status/stage/total/completed/imported/deduplicated/failed/current_file/sequence/updated_at/observed_at/error），不从manifest补数。每目录最终progress保存在directories条目。availability不可用时保留旧观测和原接收时间，前端明确为上次事实，不冒充实时。total=null不转0，媒体100%不代表批末或整个阶段完成。同步POST返回成功与独立观测状态单列；POST结果不确定时不盲重发，也不宣称产品已停止。查询故障不自动使已返回的导入失败；观察记录不能保存或观察线程停不下属于测评服务故障。
+
+前端进行中阶段按started_at显示持续墙钟，终态仍用保存的真实墙钟。产品步骤updated_at不等于采样心跳，query observed_at/本地last_received_at用于区分查询断连与长步骤；遥测值龄门槛不套用到已结算计数。产品进度内存有界、重启不可用；PB已保存观测不删除。
+
+终态导入新增可选`scanned_count`，只在产品响应提供完整合法的新增/去重/失败计数时计算；它表示实际已结算的扫描媒体总数，`total_media`仍保留manifest预期数量。前端新记录显示完成/实际扫描、新增、去重及失败，旧记录缺事实时不重算分母。进程内保存失败投影同时携带真实结束时间/错误，终态页面不持续累计旧running检查点的墙钟。

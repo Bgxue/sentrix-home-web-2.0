@@ -231,6 +231,15 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     // Keep that interval visibly unknown instead of presenting missing values as zero.
     const count = (value: unknown): string =>
       typeof value === "number" && Number.isInteger(value) && value >= 0 ? String(value) : "?";
+    const observation = dict(dict(p.progress).observation);
+    if (p.status === "running" && Object.keys(observation).length) {
+      return `当前目录已处理 ${count(observation.completed)}/${count(observation.total)} 个媒体 · 新增 ${count(observation.imported)} · 去重 ${count(observation.deduplicated)} · 失败 ${count(observation.failed)} · 阶段墙钟 ${total}`;
+    }
+    if (typeof p.scanned_count === "number") {
+      const completed = typeof p.accepted_count === "number" && typeof p.deduplicated_count === "number" &&
+        typeof p.failed_count === "number" ? p.accepted_count + p.deduplicated_count + p.failed_count : null;
+      return `已处理 ${count(completed)}/${count(p.scanned_count)} 个媒体 · 新增 ${count(p.accepted_count)} · 去重 ${count(p.deduplicated_count)} · 失败 ${count(p.failed_count)} · 阶段墙钟 ${total}${backendTotal}${breakdown}`;
+    }
     const accepted = count(p.accepted_count);
     const totalMedia = count(p.total_media ?? p.total_photos);
     const failed = count(p.failed_count);

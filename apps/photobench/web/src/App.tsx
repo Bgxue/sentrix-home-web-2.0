@@ -178,6 +178,10 @@ export function App({ initialLoading = false }: AppProps) {
   const autoSelected = useRef(false);
   useEffect(() => {
     if (!initDone || autoSelected.current) return;
+    if (["pending", "running"].includes(String(runs.runPage.scan?.state))) {
+      runs.startPolling();
+      return;
+    }
     autoSelected.current = true;
     const current = runs.runs.find((run) => ["running", "pending"].includes(String(run.status)));
     if (!current) return;

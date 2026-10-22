@@ -54,6 +54,7 @@ export interface MemoryLayerPanelProps {
   onCloseChainDetail: () => void;
   /** 1.0 `openImage(media)`（lightbox 归另一切片）。 */
   onOpenImage?: (media: ChainMedia) => void;
+  onExpandedChange?: (open: boolean) => void;
 }
 
 export function MemoryLayerPanel({
@@ -70,6 +71,7 @@ export function MemoryLayerPanel({
   onOpenChainNode,
   onCloseChainDetail,
   onOpenImage,
+  onExpandedChange,
 }: MemoryLayerPanelProps) {
   const [chainMode, setChainMode] = useState("creation");
 
@@ -106,7 +108,7 @@ export function MemoryLayerPanel({
   const correctness = memoryEffectiveness?.details?.answer_correctness;
 
   return (
-    <details className="memory-layer-panel">
+    <details className="memory-layer-panel" onToggle={(event) => onExpandedChange?.(event.currentTarget.open)}>
       <summary className="memory-layer-head">
         <div>
           <h3>记忆层级与有效证据链</h3>

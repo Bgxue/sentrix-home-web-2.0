@@ -52,7 +52,8 @@ def test_write_snapshot_leaves_no_temporary_file_behind(tmp_path: Path):
     writer = FileResultWriter(tmp_path)
     writer.write_snapshot("run_x", STATE)
     leftovers = [path.name for path in (tmp_path / "run_x").iterdir() if path.name != "run.json"]
-    assert leftovers == ["results.jsonl"]
+    assert set(leftovers) == {"results.jsonl", "snapshot-commit.json", ".snapshots"}
+    assert not list((tmp_path / "run_x").rglob("*.tmp"))
 
 
 def test_reset_then_append_leaves_exactly_one_sample(tmp_path: Path):

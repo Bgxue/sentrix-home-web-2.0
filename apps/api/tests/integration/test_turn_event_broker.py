@@ -171,3 +171,38 @@ def test_two_subscribers_both_get_every_event():
 
     assert first == [1, 2]
     assert second == [1, 2]
+
+
+def test_closed_channel_during_subscription_cannot_wait_for_another_wakeup():
+    """Closing after subscriber lookup but before queue registration is a valid handover."""
+    import asyncio
+
+    from sentrix.infrastructure.assistant.events import InProcessTurnEventBroker
+
+    async def scenario():
+        broker = InProcessTurnEventBroker()
+        broker.open("t")
+        channel = broker._channels["t"]
+        channel.closed = True  # finish has run; no future broadcast will arrive
+        values = [event async for event in broker.subscribe("t")]
+        assert values == [None]
+        assert broker.pending() == 0
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=1))
+
+
+def test_finish_during_backlog_delivery_drains_events_before_scheduled_callbacks():
+    async def scenario():
+        broker = InProcessTurnEventBroker()
+        broker.publish("t", event(1))
+        stream = broker.subscribe("t")
+        assert (await anext(stream)).step_index == 1
+        broker.publish("t", event(2))
+        broker.finish("t")
+        # No intervening await that would deliver the queued call_soon callbacks.
+        remaining = [item async for item in stream]
+        assert [item.step_index for item in remaining if item is not None] == [2]
+        assert remaining[-1] is None
+        assert broker.pending() == 0
+
+    asyncio.run(scenario())

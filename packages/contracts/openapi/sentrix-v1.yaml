@@ -746,6 +746,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/imports/{operation_id}/progress:
+    get:
+      tags:
+      - timeline
+      summary: Get Import Progress
+      operationId: get_import_progress_api_v1_imports__operation_id__progress_get
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Operation Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportProgressResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/videos/{asset_id}:
     get:
       tags:
@@ -4380,6 +4406,12 @@ components:
           minimum: 1.0
           title: Limit
           default: 200
+        operation_id:
+          anyOf:
+          - type: string
+            pattern: ^[A-Za-z0-9_-]{1,96}$
+          - type: 'null'
+          title: Operation Id
       type: object
       required:
       - directory
@@ -4451,6 +4483,73 @@ components:
       - file_name
       - reason
       title: ImportFailure
+    ImportProgressResponse:
+      properties:
+        operation_id:
+          type: string
+          title: Operation Id
+        scope_id:
+          type: string
+          title: Scope Id
+        status:
+          type: string
+          title: Status
+        stage:
+          type: string
+          title: Stage
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total
+        completed:
+          type: integer
+          title: Completed
+        imported:
+          type: integer
+          title: Imported
+        deduplicated:
+          type: integer
+          title: Deduplicated
+        failed:
+          type: integer
+          title: Failed
+        current_file:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Current File
+        updated_at:
+          type: string
+          title: Updated At
+        sequence:
+          type: integer
+          title: Sequence
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        observed_at:
+          type: string
+          title: Observed At
+      type: object
+      required:
+      - operation_id
+      - scope_id
+      - status
+      - stage
+      - total
+      - completed
+      - imported
+      - deduplicated
+      - failed
+      - current_file
+      - updated_at
+      - sequence
+      - error
+      - observed_at
+      title: ImportProgressResponse
     ImportResponse:
       properties:
         asset_id:

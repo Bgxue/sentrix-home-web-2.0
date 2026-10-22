@@ -54,6 +54,7 @@ from sentrix.domain.media.ports import (
     VideoTranscoder,
     VlmObserver,
 )
+from sentrix.domain.media.progress import ImportProgressStore
 from sentrix.domain.memories.ports import (
     EventParticipantRepository,
     EventRepository,
@@ -78,6 +79,7 @@ from sentrix.infrastructure.assistant.model_endpoint import ServedModel, probe_c
 from sentrix.infrastructure.build import read_build_revision
 from sentrix.infrastructure.media.audio_metadata import FfprobeAudioMetadataReader
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
+from sentrix.infrastructure.media.import_progress import InProcessImportProgressStore
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
 from sentrix.infrastructure.media.person_vision import (
     PillowPersonCropRenderer,
@@ -157,6 +159,7 @@ class Container:
 
     spaces: SpaceRepository
 
+    import_progress: ImportProgressStore
     asset_repository: AssetRepository
     observation_repository: ObservationRepository
     media_storage: MediaStorage
@@ -305,6 +308,7 @@ class Container:
             build_revision=read_build_revision(),
             settings=settings,
             database=database,
+            import_progress=InProcessImportProgressStore(),
             spaces=SqliteSpaceRepository(database),
             asset_repository=assets,
             observation_repository=observations,

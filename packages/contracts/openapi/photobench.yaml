@@ -274,6 +274,13 @@ paths:
         schema:
           type: string
           title: Run Id
+      - name: include_history
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+          title: Include History
       responses:
         '200':
           description: Successful Response
@@ -983,6 +990,81 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    ImportObservationProjection:
+      properties:
+        operation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Operation Id
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total
+        completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Completed
+        imported:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Imported
+        deduplicated:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Deduplicated
+        failed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Failed
+        stage:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stage
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+        current_file:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Current File
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        observed_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Observed At
+        sequence:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Sequence
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      additionalProperties: true
+      type: object
+      title: ImportObservationProjection
     JudgeObservation:
       properties:
         score:
@@ -1155,9 +1237,67 @@ components:
             type: object
           - type: 'null'
           title: Sampling Integrity
+        progress:
+          anyOf:
+          - $ref: '#/components/schemas/PhaseProgressProjection'
+          - type: 'null'
+        scanned_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scanned Count
       additionalProperties: true
       type: object
       title: PhaseMetricsProjection
+    PhaseProgressProjection:
+      properties:
+        observation:
+          anyOf:
+          - $ref: '#/components/schemas/ImportObservationProjection'
+          - type: 'null'
+        operation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Operation Id
+        availability:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Availability
+        last_received_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Received At
+        last_checked_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Checked At
+        query_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Query Error
+        request_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Status
+        request_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Error
+        observer_stop_pending:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Observer Stop Pending
+      additionalProperties: true
+      type: object
+      title: PhaseProgressProjection
     RunItemObservation:
       properties:
         judge:
@@ -1190,6 +1330,22 @@ components:
       title: RunItemsResponse
     RunMetricsResponse:
       properties:
+        read_revision:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Read Revision
+        history_mode:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: History Mode
+        persistence:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Persistence
         metrics_contract_version:
           anyOf:
           - type: integer

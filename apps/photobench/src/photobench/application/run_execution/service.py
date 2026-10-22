@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import copy
 import json
 import os
 import threading
@@ -56,6 +57,7 @@ from typing import Any
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSampler
+from photobench.application.run_execution.import_progress import import_with_progress
 from photobench.application.run_execution.judge import InlineImages, JudgeRunner
 from photobench.application.run_execution.state import RunState
 from photobench.domain.datasets.ports import AlbumSource
@@ -472,58 +474,61 @@ class RunExecution:
                 if current:
                     state.record_phase(current, "request_failure", exc.facts)
         finally:
-            if sampling:
-                sampler.stop()
-                # The last in-flight sample may finish after gpu_metrics was
-                # aggregated. Persist statistics over the same complete raw set.
-                if (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "done":
-                    for key, value in sampler.aggregate().items():
-                        state.record_phase("gpu_metrics", key, value)
-                else:
-                    # Cancellation keeps the observations already collected,
-                    # including persistence failures, without claiming a full run.
-                    state.phase_done(
-                        "gpu_metrics",
+            try:
+                if sampling:
+                    sampler.stop()
+                    # The last in-flight sample may finish after gpu_metrics was
+                    # aggregated. Persist statistics over the same complete raw set.
+                    if (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "done":
+                        for key, value in sampler.aggregate().items():
+                            state.record_phase("gpu_metrics", key, value)
+                    else:
+                        # Cancellation keeps the observations already collected,
+                        # including persistence failures, without claiming a full run.
+                        state.phase_done(
+                            "gpu_metrics",
+                            {
+                                **sampler.aggregate(),
+                                "status": "partial",
+                                "partial": True,
+                                "collection_end_reason": terminal_status,
+                            },
+                        )
+                if request.mode in {"full", "build"}:
+                    build_phases = state.get("phases") or {}
+                    build_ready = all(
+                        (build_phases.get(key) or {}).get("status") == "done"
+                        for key in ("identity_seed", "photo_import", "pipeline_processing")
+                    )
+                    state.set(
+                        "scope_build",
                         {
-                            **sampler.aggregate(),
-                            "status": "partial",
-                            "partial": True,
-                            "collection_end_reason": terminal_status,
+                            "status": "ready" if build_ready else "incomplete",
+                            "embedding": self.runtime_snapshot.connection().get("embedding")
+                            if self.runtime_snapshot
+                            else None,
+                            "source_run_id": run_id,
                         },
                     )
-            if request.mode in {"full", "build"}:
-                build_phases = state.get("phases") or {}
-                build_ready = all(
-                    (build_phases.get(key) or {}).get("status") == "done"
-                    for key in ("identity_seed", "photo_import", "pipeline_processing")
-                )
-                state.set(
-                    "scope_build",
-                    {
-                        "status": "ready" if build_ready else "incomplete",
-                        "embedding": self.runtime_snapshot.connection().get("embedding")
-                        if self.runtime_snapshot
-                        else None,
-                        "source_run_id": run_id,
-                    },
-                )
-            snapshots = dict(state.get("hardware_snapshots") or {})
-            snapshots["end"] = self._hardware_snapshot()
-            # 终态也是读侧停止轮询/归档、套件允许下一轮启动的信号。
-            # 采样与末尾观测完成前不能提前发布，否则终态raw仍会继续变化。
-            with state.lock:
-                state.set("hardware_snapshots", snapshots)
-                live = state.data.get("telemetry_live")
-                if isinstance(live, dict):
-                    integrity = (state.data.get("phases", {}).get("gpu_metrics") or {}).get(
-                        "sampling_integrity", {}
-                    )
-                    live["status"] = "stop_pending" if integrity.get("stop_pending_threads") else "stopped"
-                state.set("current_phase", None)
-                state.set("finished_at", now_iso())
-                state.set("status", terminal_status)
-            state.persist()
-            state.stop_persist_writer()
+                snapshots = dict(state.get("hardware_snapshots") or {})
+                snapshots["end"] = self._hardware_snapshot()
+                # 终态也是读侧停止轮询/归档、套件允许下一轮启动的信号。
+                # 采样与末尾观测完成前不能提前发布，否则终态raw仍会继续变化。
+                with state.lock:
+                    state.set("hardware_snapshots", snapshots)
+                    live = state.data.get("telemetry_live")
+                    if isinstance(live, dict):
+                        integrity = (state.data.get("phases", {}).get("gpu_metrics") or {}).get(
+                            "sampling_integrity", {}
+                        )
+                        live["status"] = (
+                            "stop_pending" if integrity.get("stop_pending_threads") else "stopped"
+                        )
+                    state.set("current_phase", None)
+                    state.set("finished_at", now_iso())
+                    state.set("status", terminal_status)
+            finally:
+                state.stop_persist_writer()
         return state.data
 
     # ---- 状态与落盘 ---------------------------------------------------------
@@ -1154,6 +1159,7 @@ class RunExecution:
         failures: list[dict[str, Any]] = []
         timings_total: dict[str, float] = {}
         per_directory: list[dict[str, Any]] = []
+        scanned_count: int | None = 0
         for relative in directories:
             # 逐个目录检查取消（1.0 ``:2843``）：一个 7200 秒超时的导入正在跑时，
             # 取消至少要能在**下一个目录之前**生效，而不是等整段结束。
@@ -1173,7 +1179,17 @@ class RunExecution:
             state.persist()
             absolute, entry_count = self.albums.import_target(album_id, relative)
             limit = min(1000, max(1, entry_count))
-            result = self.client.import_album(
+
+            def save_progress(observed: dict[str, Any]) -> None:
+                with state.lock:
+                    progress = dict(state.mutate("phases")["photo_import"].get("progress") or {})
+                    progress.update(observed)
+                    state.record_phase("photo_import", "progress", progress)
+                state.persist()
+
+            result = import_with_progress(
+                self.client,
+                observe=save_progress,
                 scope_id=scope_id,
                 directory=absolute,
                 limit=limit,
@@ -1183,6 +1199,17 @@ class RunExecution:
             # 分项耗时由后端回传，这里累加后单独记进相位，别让 64 分钟全叫「导入」。
             for key, value in (result.get("timings") or {}).items():
                 timings_total[key] = timings_total.get(key, 0.0) + float(value or 0)
+            raw_counts = [result.get("imported"), result.get("deduplicated")]
+            raw_failures = result.get("failures")
+            valid_counts = [
+                value
+                for value in raw_counts
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            ]
+            if scanned_count is not None and len(valid_counts) == 2 and isinstance(raw_failures, list):
+                scanned_count += sum(valid_counts) + len(raw_failures)
+            else:
+                scanned_count = None
             accepted += int(result.get("imported") or 0)
             deduplicated += int(result.get("deduplicated") or 0)
             events += int(result.get("events") or 0)
@@ -1197,6 +1224,8 @@ class RunExecution:
                             "reason": str(failure.get("reason") or "Sentrix 拒绝了这张媒体"),
                         }
                     )
+            with state.lock:
+                directory_progress = copy.deepcopy(state.mutate("phases")["photo_import"].get("progress"))
             per_directory.append(
                 {
                     "directory": absolute,
@@ -1208,13 +1237,19 @@ class RunExecution:
                     "lexical_terms": result.get("lexical_terms"),
                     "summarized": result.get("summarized"),
                     "timings": result.get("timings"),
+                    "progress": directory_progress,
                 }
             )
             state.record_phase("photo_import", "accepted_count", accepted)
             state.record_phase(
                 "photo_import",
                 "progress",
-                {"directories_done": len(per_directory), "directories_total": len(directories)},
+                {
+                    **dict(state.mutate("phases")["photo_import"].get("progress") or {}),
+                    "directories_done": len(per_directory),
+                    "directories_total": len(directories),
+                    "request_status": "returned",
+                },
             )
             self._persist(str(state.get("run_id")), state)
         total_media = len(album_media_entries(manifest))
@@ -1229,7 +1264,8 @@ class RunExecution:
             "timings": {key: round(value, 1) for key, value in timings_total.items()},
             "total_photos": len(manifest.get("photos") or []),
             "total_videos": len(manifest.get("videos") or []),
-            "total_media": total_media,
+            "total_media": total_media,  # manifest expectation retained for compatibility
+            "scanned_count": scanned_count,  # actual product directory scans, including the limit
             "accepted_count": accepted,
             "deduplicated_count": deduplicated,
             "event_count": events,
@@ -1616,7 +1652,7 @@ class RunExecution:
             begin, begin_iso = time.perf_counter(), now_iso()
             try:
                 assert judge is not None
-                return judge.judge_item(item, row, assets_by_name)
+                return judge.judge_item(copy.deepcopy(item), row, assets_by_name)
             finally:
                 with judge_bounds_lock:
                     judge_bounds.append((begin, time.perf_counter(), begin_iso, now_iso()))
@@ -1687,10 +1723,13 @@ class RunExecution:
                 for judge_future in concurrent.futures.as_completed(tuple(judge_futures)):
                     index = judge_futures[judge_future]
                     try:
-                        judge_future.result()
+                        judged = judge_future.result()
+                        with state.lock:
+                            items[index] = judged
                     except Exception as exc:  # noqa: BLE001 —— judge 崩了不能让整轮没有结果
-                        items[index]["judge_status"] = "failed"
-                        items[index]["judge"] = {"score": None, "reason": f"judge_error: {exc}"}
+                        with state.lock:
+                            items[index]["judge_status"] = "failed"
+                            items[index]["judge"] = {"score": None, "reason": f"judge_error: {exc}"}
                     judge_done += 1
                     state.record_phase("qa_eval", "judge_completed", judge_done)
                     with state.lock:
