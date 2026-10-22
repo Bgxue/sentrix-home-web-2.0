@@ -393,12 +393,12 @@ class RunExecution:
         self._judge = None if request.mode == "build" else self._build_judge(request, state)
         state.start_persist_writer()
         state.persist()
-        # 采样回调要在 ``on_sample`` 里拿到采样器本身（发布滚动聚合），而采样器的构造
-        # 又要先有回调——用一个一格容器解开这个环，等价于 1.0 里 ``self._gpu_sampler``
-        # 这个属性（它的回调是方法，能随时读 self）。
-        sampler_holder: list[GpuSampler] = []
-        sampler = GpuSampler(self.telemetry, on_sample=self._sample_writer(state, sampler_holder))
-        sampler_holder.append(sampler)
+        sampler = GpuSampler(
+            self.telemetry,
+            on_sample=self._sample_writer(state),
+            on_aggregate=lambda metrics: self._publish_partial_gpu_metrics(state, metrics),
+            publish_interval=GPU_METRICS_PUBLISH_SECONDS,
+        )
         self._sampler = sampler
         sampling = self._sampling_enabled() and self.telemetry_source != "unavailable"
         # **reuse 只跑「问答与收尾」四个相位。** 那三个导入相位（``identity_seed`` /
@@ -479,6 +479,18 @@ class RunExecution:
                 if (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "done":
                     for key, value in sampler.aggregate().items():
                         state.record_phase("gpu_metrics", key, value)
+                else:
+                    # Cancellation keeps the observations already collected,
+                    # including persistence failures, without claiming a full run.
+                    state.phase_done(
+                        "gpu_metrics",
+                        {
+                            **sampler.aggregate(),
+                            "status": "partial",
+                            "partial": True,
+                            "collection_end_reason": terminal_status,
+                        },
+                    )
             if request.mode in {"full", "build"}:
                 build_phases = state.get("phases") or {}
                 build_ready = all(
@@ -501,6 +513,12 @@ class RunExecution:
             # 采样与末尾观测完成前不能提前发布，否则终态raw仍会继续变化。
             with state.lock:
                 state.set("hardware_snapshots", snapshots)
+                live = state.data.get("telemetry_live")
+                if isinstance(live, dict):
+                    integrity = (state.data.get("phases", {}).get("gpu_metrics") or {}).get(
+                        "sampling_integrity", {}
+                    )
+                    live["status"] = "stop_pending" if integrity.get("stop_pending_threads") else "stopped"
                 state.set("current_phase", None)
                 state.set("finished_at", now_iso())
                 state.set("status", terminal_status)
@@ -628,9 +646,7 @@ class RunExecution:
             inline_images=self.inline_images,
         )
 
-    def _sample_writer(
-        self, state: RunState, sampler_holder: list[GpuSampler] | None = None
-    ) -> Callable[[dict[str, Any]], None]:
+    def _sample_writer(self, state: RunState) -> Callable[[dict[str, Any]], None]:
         """采样回调：打相位标签、追加 JSONL、并维护 run.json 的实时视图。
 
         1.0 ``_persist_gpu_sample``（``:2110``）的三段在这里逐段对应：
@@ -639,18 +655,12 @@ class RunExecution:
            完整曲线的权威来源。
         2. **更新 ``telemetry_live``**（``domain.runs.analysis.apply_live_sample``）：
            latest/peak/history/phase_snapshots 的滚动视图，给实时 GPU 卡片看。
-        3. **发布一次滚动聚合**到 ``phases.gpu_metrics``（节流
-           ``GPU_METRICS_PUBLISH_SECONDS``，1.0 ``_refresh_gpu_metrics_phase``
-           ``:2209``）——卡片不必等到整轮结束才有数字。
-
-        ``sampler_holder`` 是那格「装着采样器自己的容器」：回调要在 ``on_sample`` 里
-        读 ``sampler.samples`` 来算滚动聚合，而采样器要先用回调构造。没有它（用例里
-        直接调这个闭包）时第 3 段跳过。
+        滚动聚合由采样器的独立发布线程回调，避免空holder绑定及采样锁内全量统计。
         """
-        sampler = sampler_holder[0] if sampler_holder else None
-        last_publish = [0.0]
 
         def on_sample(sample: dict[str, Any]) -> None:
+            if state.get("finished_at"):
+                return
             phase = str(state.get("current_phase") or "unassigned")
             label = PHASE_LABELS.get(phase, phase)
             sample.setdefault("phase", phase)
@@ -659,30 +669,24 @@ class RunExecution:
             self.writer.append_gpu_sample(state.run_id, persisted)
             live = state.mutate("telemetry_live")
             with state.lock:
+                if state.data.get("finished_at"):
+                    return
                 apply_live_sample(live, sample, phase, label, tail=LIVE_TELEMETRY_TAIL_POINTS)
                 if sample.get("llama_server_args") and not state.data.get("llama_server_args"):
                     state.data["llama_server_args"] = sample.get("llama_server_args")
-            if sampler is not None:
-                now = time.monotonic()
-                if now - last_publish[0] >= GPU_METRICS_PUBLISH_SECONDS:
-                    last_publish[0] = now
-                    self._publish_partial_gpu_metrics(state, sampler)
             state.persist()
 
         return on_sample
 
-    def _publish_partial_gpu_metrics(self, state: RunState, sampler: GpuSampler) -> None:
+    def _publish_partial_gpu_metrics(self, state: RunState, partial: dict[str, Any]) -> None:
         """1.0 ``_refresh_gpu_metrics_phase``（``:2209``）：让 GPU 卡片是活的。
 
         **已经 ``done`` / ``skipped`` 的相位不再被覆盖**——那说明聚合已经由
         ``_phase_gpu_metrics`` 写过，滚动值把它盖回去会让最终数字随机停在某一秒。
         """
         existing = (state.get("phases") or {}).get("gpu_metrics") or {}
-        if existing.get("status") in {"done", "skipped"}:
+        if existing.get("status") in {"done", "skipped"} or state.get("finished_at"):
             return
-        if not sampler.samples:
-            return
-        partial = sampler.aggregate()
         if not partial.get("samples_count"):
             return
         partial.update(
@@ -695,7 +699,10 @@ class RunExecution:
             }
         )
         with state.lock:
-            state.data.setdefault("phases", {})["gpu_metrics"] = partial
+            current = state.data.setdefault("phases", {}).get("gpu_metrics") or {}
+            if current.get("status") not in {"done", "skipped"} and not state.data.get("finished_at"):
+                state.data["phases"]["gpu_metrics"] = partial
+        state.persist()
 
     def _sampling_enabled(self) -> bool:
         return os.environ.get("PHOTOBENCH_DISABLE_GPU_SAMPLING", "0") != "1"

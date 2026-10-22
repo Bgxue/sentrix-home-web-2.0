@@ -72,6 +72,16 @@ export interface PhaseProgress {
  * 另有 `gpu_metrics` 这种非执行阶段。
  */
 export interface Phase {
+  sampling_integrity?: {
+    callback_failures?: number;
+    last_callback_failure?: string | null;
+    publisher_failures?: number;
+    last_publisher_failure?: string | null;
+    collection_failures?: number;
+    last_collection_failure?: string | null;
+    missed_intervals?: number;
+    stop_pending_threads?: string[];
+  };
   key?: string;
   label?: string;
   status?: string;
@@ -97,6 +107,10 @@ export type RunPhases = Record<string, Phase | undefined>;
  * 下存在的可空字段。
  */
 export interface TelemetryLive {
+  memory_observation_version?: number;
+  memory_observations?: Record<string, MemorySourceObservation>;
+  memory_dependencies?: Record<string, string[]>;
+  sampling_diagnostics?: Record<string, unknown>;
   device_freshness_version?: number;
   device_observation_ttl_seconds?: number | null;
   metrics_contract_version?: number;
@@ -115,6 +129,20 @@ export interface TelemetryLive {
   all_processes?: Array<Record<string, unknown>>;
   phase_snapshots?: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
+}
+
+export interface MemorySourceObservation {
+  source?: string;
+  status?: string;
+  reason?: string | null;
+  observed_at_monotonic?: number | null;
+  finished_at_monotonic?: number | null;
+  ttl_seconds?: number | null;
+  age_seconds?: number | null;
+  fresh?: boolean;
+  cache_hit?: boolean;
+  pid?: number;
+  start_ticks?: string | null;
 }
 
 // ---------------------------------------------------------------------------

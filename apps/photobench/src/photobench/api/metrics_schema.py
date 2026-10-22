@@ -12,6 +12,10 @@ class MemoryObservation(BaseModel):
     memory_accounting: str | None = None
     memory_complete: bool | None = None
     component_validity: dict[str, str] | None = None
+    memory_observation_version: int | None = None
+    memory_observations: dict[str, dict[str, Any]] | None = None
+    memory_dependencies: dict[str, list[str]] | None = None
+    sampling_diagnostics: dict[str, Any] | None = None
     observed_at_epoch: float | None = None
     device_observation_age_seconds: float | None = None
     device_observed_at_monotonic: float | None = None
@@ -36,6 +40,11 @@ class TelemetryProjection(BaseModel):
     sampling: dict[str, Any] | None = None
 
 
+class PhaseMetricsProjection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    sampling_integrity: dict[str, Any] | None = None
+
+
 class RunMetricsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     metrics_contract_version: int | None = None
@@ -47,6 +56,7 @@ class RunMetricsResponse(BaseModel):
     snapshot_source: str | None = None
     qa_count: int | None = None
     telemetry_live: TelemetryProjection | None = None
+    phases: dict[str, PhaseMetricsProjection | None] | None = None
 
 
 class JudgeObservation(BaseModel):

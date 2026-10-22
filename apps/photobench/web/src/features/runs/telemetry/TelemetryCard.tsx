@@ -27,6 +27,7 @@ import { jetsonUnifiedFromRun, telemetryNumber, telemetryPlatform } from "../../
 import {
   liveTelemetryPhaseRows,
   liveTelemetryRows,
+  telemetryObservationRows,
   telemetryChart,
   telemetryLiveState,
   telemetryProcessList,
@@ -243,7 +244,7 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
   const chartRef = useRef<EChartsType | null>(null);
   const sampleCount = telemetrySampleCount(run);
   const live = telemetryLiveState(run);
-  const rows = liveTelemetryRows(run);
+  const rows = [...liveTelemetryRows(run), ...telemetryObservationRows(run)];
   const phaseRows = liveTelemetryPhaseRows(run);
   const processes = telemetryProcessList(run);
   const chartData = useMemo(() => telemetryChart(run), [run]);
@@ -300,7 +301,7 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
     chartRef.current?.resize();
   }
 
-  if (!sampleCount) return null;
+  if (!sampleCount && !telemetryObservationRows(run).length) return null;
   return (
     <details
       open
@@ -310,7 +311,7 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
       <summary className="phase-title">
         <b>实时资源遥测</b>
         <span className={`phase-status ${live.status === "running" ? "running" : "completed"}`}>
-          {live.status === "running" ? "实时更新中" : "已停止"}
+          {live.status === "stop_pending" ? "停止未确认" : live.status === "running" ? "实时更新中" : "已停止"}
         </span>
       </summary>
       <p className="metric-calc-time">

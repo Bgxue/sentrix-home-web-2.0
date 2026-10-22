@@ -17,6 +17,7 @@ import {
   telemetryLiveState,
   telemetryProcessList,
   telemetrySampleCount,
+  telemetryObservationRows,
   tokenDistributionCount,
   tokenDistributionRows,
 } from "./telemetry.ts";
@@ -488,4 +489,44 @@ describe("jetsonUnifiedFromRun", () => {
     const unified = { ...legacy, memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } };
     expect(gpuMetricRows(unified)[0][0]).toBe("主模型占用（smaps Rss + GPU）");
   });
+});
+
+
+describe("telemetryObservationRows", () => {
+  it("显示真实来源值龄、过期来源及记录失败，不把未知耗时转零", () => {
+    const rows = telemetryObservationRows({
+      phases: { gpu_metrics: { sampling_integrity: {
+        callback_failures: 1, publisher_failures: 0, collection_failures: 0, stop_pending_threads: ["gpu-sampler"],
+      } } },
+      telemetry_live: { latest: {
+        memory_observation_version: 1,
+        memory_observations: {
+          nvmap: { age_seconds: 3.2, fresh: false },
+          system: { age_seconds: 0.1, fresh: true },
+        },
+        sampling_diagnostics: { collection_seconds: null, schedule_lateness_seconds: 0.25 },
+      } },
+    });
+    expect(rows.find((row) => row[0] === "内存观测值龄")?.[1]).toBe("3.200 s");
+    expect(rows.find((row) => row[0] === "内存来源有效性")?.slice(1)).toEqual(["1/2", "不可用或过期：nvmap"]);
+    expect(rows.find((row) => row[0] === "采集 / 调度延迟")?.[1]).toBe("不可用 / 0.250 s");
+    expect(rows.find((row) => row[0] === "采样记录 / 发布 / 采集异常")?.slice(1)).toEqual([
+      "1 / 0 / 0", "停止超时，线程待退出：gpu-sampler",
+    ]);
+  });
+
+  it("历史缺少来源记录时不补造；真实零耗时保留", () => {
+    expect(telemetryObservationRows({})).toEqual([]);
+    const rows = telemetryObservationRows({ telemetry_live: { latest: {
+      sampling_diagnostics: { collection_seconds: 0, schedule_lateness_seconds: 0 },
+    } } });
+    expect(rows[0][1]).toBe("0.000 s / 0.000 s");
+  });
+});
+
+
+it("取消后的partial遥测保持部分采集标记", () => {
+  expect(gpuMetricsView({ status: "cancelled", phases: { gpu_metrics: {
+    status: "partial", partial: true, samples_count: 10, collection_end_reason: "cancelled",
+  } } })).toMatchObject({ status: "partial", partial: true, collection_end_reason: "cancelled" });
 });

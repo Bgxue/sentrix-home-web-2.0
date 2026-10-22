@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from fakes_execution import FakeTelemetry
 
 from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSampler
@@ -56,6 +57,61 @@ def test_a_sample_merges_the_gpu_row_with_process_and_system_memory():
     assert sample["system_memory_used_mib"] == 30000
     assert sample["source"] == "fake"
     assert sample["_t"] > 0
+
+
+@pytest.mark.parametrize("work, expected_starts", [(0.2, [0, 0.5, 1]), (1.2, [0, 1.5, 3])])
+def test_sampler_uses_absolute_schedule_and_skips_missed_ticks(monkeypatch, work, expected_starts):
+    from photobench.application.run_execution import gpu_sampler
+
+    now = [0.0]
+    starts = []
+
+    class Stop:
+        def is_set(self):
+            return len(starts) >= 3
+
+        def wait(self, delay):
+            assert delay > 0
+            now[0] += delay
+
+    sampler = GpuSampler(FakeTelemetry())
+    sampler._stop = Stop()
+
+    def sample(**kwargs):
+        starts.append(now[0])
+        now[0] += work
+
+    monkeypatch.setattr(gpu_sampler.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(sampler, "sample_once", sample)
+    sampler._run()
+    assert starts == pytest.approx(expected_starts)
+    assert sampler._missed_intervals == (6 if work > 0.5 else 0)
+
+
+def test_slow_publishing_does_not_hold_sampling_lock_and_stops_cleanly(monkeypatch):
+    import threading
+
+    entered, release, collected = threading.Event(), threading.Event(), threading.Event()
+    sampler = GpuSampler(
+        FakeTelemetry(), interval=0.01, on_aggregate=lambda metrics: None, publish_interval=0.01
+    )
+
+    def slow_aggregate():
+        entered.set()
+        assert release.wait(2)
+        return {"samples_count": len(sampler.samples)}
+
+    monkeypatch.setattr(sampler, "aggregate", slow_aggregate)
+    sampler.start()
+    try:
+        assert entered.wait(2)
+        sampler.on_sample = lambda sample: collected.set()
+        assert collected.wait(2), "sampling must continue while the publisher is blocked"
+    finally:
+        release.set()
+        sampler.stop()
+    assert not sampler._thread.is_alive()
+    assert not sampler._publisher.is_alive()
 
 
 def test_jetson_cpu_gpu_split_fields_survive_the_sample_mapping():
@@ -232,3 +288,56 @@ def test_all_sources_failed_preserves_reason_and_null_without_reusing_old_values
     sampler.stop()
     sampler.sample_once()
     assert len(sampler.samples) == 1
+
+
+def test_callback_failure_remains_visible_after_a_later_success():
+    sampler, _samples, _telemetry = _sampler()
+
+    def fail(sample):
+        raise OSError("disk full")
+
+    sampler.on_sample = fail
+    sampler.sample_once()
+    sampler.on_sample = lambda sample: None
+    sampler.sample_once()
+    integrity = sampler.aggregate()["sampling_integrity"]
+    assert integrity["callback_failures"] == 1
+    assert "disk full" in integrity["last_callback_failure"]
+    assert sampler.samples[-1]["sampling_diagnostics"]["previous_callback_error"] == "OSError: disk full"
+
+
+def test_publisher_failure_has_diagnostic_and_retries_are_bounded_by_period():
+    import threading
+
+    failed = threading.Event()
+
+    def fail(metrics):
+        failed.set()
+        raise RuntimeError("snapshot failed")
+
+    sampler = GpuSampler(FakeTelemetry(), on_aggregate=fail, publish_interval=0.01)
+    sampler.start()
+    assert failed.wait(2)
+    sampler.stop()
+    integrity = sampler.aggregate()["sampling_integrity"]
+    assert integrity["publisher_failures"] >= 1
+    assert integrity["last_publisher_failure"] == "RuntimeError: snapshot failed"
+    assert integrity["stop_pending_threads"] == []
+
+
+def test_stop_timeout_is_explicit_instead_of_claiming_worker_exit():
+    class Pending:
+        name = "blocked-provider"
+
+        def join(self, timeout):
+            assert 0 <= timeout <= 10
+
+        def is_alive(self):
+            return True
+
+    sampler = GpuSampler(FakeTelemetry())
+    sampler._thread = Pending()
+    sampler.stop()
+    assert sampler.aggregate()["sampling_integrity"]["stop_pending_threads"] == ["blocked-provider"]
+    with pytest.raises(RuntimeError, match="already running"):
+        sampler.start()

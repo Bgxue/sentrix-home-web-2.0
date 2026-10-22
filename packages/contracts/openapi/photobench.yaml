@@ -1044,6 +1044,34 @@ components:
             type: object
           - type: 'null'
           title: Component Validity
+        memory_observation_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Memory Observation Version
+        memory_observations:
+          anyOf:
+          - additionalProperties:
+              additionalProperties: true
+              type: object
+            type: object
+          - type: 'null'
+          title: Memory Observations
+        memory_dependencies:
+          anyOf:
+          - additionalProperties:
+              items:
+                type: string
+              type: array
+            type: object
+          - type: 'null'
+          title: Memory Dependencies
+        sampling_diagnostics:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Sampling Diagnostics
         observed_at_epoch:
           anyOf:
           - type: number
@@ -1119,6 +1147,17 @@ components:
       additionalProperties: true
       type: object
       title: MemoryObservation
+    PhaseMetricsProjection:
+      properties:
+        sampling_integrity:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Sampling Integrity
+      additionalProperties: true
+      type: object
+      title: PhaseMetricsProjection
     RunItemObservation:
       properties:
         judge:
@@ -1198,6 +1237,15 @@ components:
           anyOf:
           - $ref: '#/components/schemas/TelemetryProjection'
           - type: 'null'
+        phases:
+          anyOf:
+          - additionalProperties:
+              anyOf:
+              - $ref: '#/components/schemas/PhaseMetricsProjection'
+              - type: 'null'
+            type: object
+          - type: 'null'
+          title: Phases
       additionalProperties: true
       type: object
       title: RunMetricsResponse

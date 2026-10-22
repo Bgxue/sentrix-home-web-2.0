@@ -28,12 +28,17 @@ import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
 
-from photobench.domain.runtime.metrics import component_total, system_used
+from photobench.domain.runtime.metrics import (
+    MEMORY_OBSERVATION_TTL_SECONDS,
+    component_total,
+    memory_freshness,
+    system_used,
+)
 from photobench.infrastructure.runtime.telemetry_scope import (
     dedupe_rows,
     load_telemetry_services,
@@ -100,6 +105,19 @@ NVMAP_CLIENTS_PATH = os.environ.get("PHOTOBENCH_NVMAP_CLIENTS_PATH", "/sys/kerne
 NVMAP_CACHE_SECONDS = max(0.0, float(os.environ.get("PHOTOBENCH_NVMAP_CACHE_SECONDS", "2")))
 
 _nvmap_cache: dict[str, Any] = {"at": float("-inf"), "table": None}
+_nvmap_lock = threading.RLock()
+NVMAP_READ_TIMEOUT_SECONDS = 0.2
+
+
+def _observation(source: str, started: float, *, available: bool, **facts: Any) -> dict[str, Any]:
+    return {
+        "source": source,
+        "status": "available" if available else "unavailable",
+        "observed_at_monotonic": started,
+        "finished_at_monotonic": time.monotonic(),
+        "ttl_seconds": MEMORY_OBSERVATION_TTL_SECONDS,
+        **facts,
+    }
 
 
 def _read_nvmap_clients() -> str | None:
@@ -121,7 +139,7 @@ def _read_nvmap_clients() -> str | None:
             [sudo, "-n", "cat", NVMAP_CLIENTS_PATH],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=NVMAP_READ_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -132,8 +150,14 @@ def _read_nvmap_clients() -> str | None:
 
 def _nvmap_clients_mib() -> dict[int, float] | None:
     """Per-PID nvmap (GPU/UMA) allocation in MiB, or None when unreadable."""
+    with _nvmap_lock:
+        return _refresh_nvmap_clients_mib()
+
+
+def _refresh_nvmap_clients_mib() -> dict[int, float] | None:
     now = time.monotonic()
     if now - float(_nvmap_cache["at"]) < NVMAP_CACHE_SECONDS:
+        _nvmap_cache["observation"] = {**(_nvmap_cache.get("observation") or {}), "cache_hit": True}
         cached = _nvmap_cache["table"]
         return cached if isinstance(cached, dict) else None
     text = _read_nvmap_clients()
@@ -154,11 +178,22 @@ def _nvmap_clients_mib() -> dict[int, float] | None:
         table = parsed
     _nvmap_cache["at"] = now
     _nvmap_cache["table"] = table
+    _nvmap_cache["observation"] = _observation(
+        "nvmap_iovmm",
+        now,
+        available=table is not None,
+        cache_hit=False,
+        reason=None if table is not None else "nvmap_unreadable_or_timeout",
+    )
     return table
 
 
 def _process_gpu_memory_mib(
-    model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
+    model_pids: set[int],
+    *,
+    rss_mib: float | None,
+    host_rss_mib: float | None,
+    ledger: Mapping[int, float] | None | Literal["probe"] = "probe",
 ) -> tuple[float | None, str]:
     """GPU/UMA memory charged to the model process, plus which source supplied it.
 
@@ -168,7 +203,7 @@ def _process_gpu_memory_mib(
     charge GPU pages to the process. A zero residual therefore means "not
     accounted", never "not used", and must not be reported as a real value.
     """
-    table = _nvmap_clients_mib()
+    table = _nvmap_clients_mib() if ledger == "probe" else ledger
     if table is not None and model_pids:
         # The table is complete, so an absent PID really does mean zero and a
         # listed value outranks the residual.
@@ -207,7 +242,11 @@ def apply_jetson_memory_metadata(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def unified_model_memory(
-    model_pids: set[int], *, rss_mib: float | None, host_rss_mib: float | None
+    model_pids: set[int],
+    *,
+    rss_mib: float | None,
+    host_rss_mib: float | None,
+    ledger: Mapping[int, float] | None | Literal["probe"] = "probe",
 ) -> dict[str, Any]:
     """Jetson CPU residency + GPU allocation estimate, with explicit unknowns.
 
@@ -227,7 +266,9 @@ def unified_model_memory(
         result["model_process_system_memory_scope"] = "host_smaps_rss_plus_gpu_uma"
         result["model_process_gpu_memory_source"] = "unavailable"
         return result
-    gpu_mib, gpu_source = _process_gpu_memory_mib(model_pids, rss_mib=rss_mib, host_rss_mib=host_rss_mib)
+    gpu_mib, gpu_source = _process_gpu_memory_mib(
+        model_pids, rss_mib=rss_mib, host_rss_mib=host_rss_mib, ledger=ledger
+    )
     total = component_total([host_rss_mib, gpu_mib])
     result["memory_accounting"] = "jetson_pss_plus_nvmap_estimate"
     result["memory_complete"] = total is not None
@@ -239,12 +280,41 @@ def unified_model_memory(
     return result
 
 
+_listener_cache: dict[str, Any] = {}
+_listener_lock = threading.Lock()
+
+
+def _process_start_ticks(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _socket_inodes(pid: int) -> set[str]:
+    inodes: set[str] = set()
+    try:
+        fds = list(Path(f"/proc/{pid}/fd").iterdir())
+    except OSError:
+        return inodes
+    for fd in fds:
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        match = re.fullmatch(r"socket:\[(\d+)\]", target)
+        if match:
+            inodes.add(match.group(1))
+    return inodes
+
+
 def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, set[str]]:
     """``/proc/net/tcp`` 的监听 socket → 持有它的 PID。只收 ``target_ports`` 里的端口。
 
-    1.0 照搬。socket inode 是两张表之间的桥：``/proc/net/tcp`` 给 inode→端口，
+    socket inode 是两张表之间的桥：``/proc/net/tcp`` 给 inode→端口，
     ``/proc/*/fd`` 的 readlink 给 fd→inode。不给 ``target_ports`` 过滤的话，一台
-    跑满连接的机器上这一步会扫遍所有 fd——这是采样线程每 0.5 秒跑一次的热路径。
+    跑满连接的机器上这一步会扫遍所有 fd。限定端口时，2秒内仅重查已知持有者的
+    socket与启动标识；监听集合/身份变化立即全扫，避免把固定PID当长期身份。
     """
     target_ports = {str(port) for port in (target_ports or set())}
     socket_ports: dict[str, str] = {}
@@ -266,23 +336,40 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
             socket_ports[parts[9]] = port
     if not socket_ports:
         return {}
+    signature = tuple(sorted(socket_ports.items()))
+    with _listener_lock:
+        cached = _listener_cache.get("owners", {})
+        identities = _listener_cache.get("identities", {})
+        if (
+            target_ports
+            and _listener_cache.get("signature") == signature
+            and time.monotonic() < _listener_cache.get("expires", 0)
+            and cached
+            and all(
+                identities.get(pid) is not None
+                and _process_start_ticks(pid) == identities[pid]
+                and held <= _socket_inodes(pid)
+                for pid, held in cached.items()
+            )
+        ):
+            return {pid: {socket_ports[inode] for inode in held} for pid, held in cached.items()}
+    owners: dict[int, set[str]] = {}
     result: dict[int, set[str]] = {}
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
             continue
-        fd_dir = proc / "fd"
-        try:
-            fds = list(fd_dir.iterdir())
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(fd)
-            except OSError:
-                continue
-            match = re.fullmatch(r"socket:\[(\d+)\]", target)
-            if match and match.group(1) in socket_ports:
-                result.setdefault(int(proc.name), set()).add(socket_ports[match.group(1)])
+        before = _process_start_ticks(int(proc.name))
+        held = _socket_inodes(int(proc.name)) & socket_ports.keys()
+        if held and before is not None and before == _process_start_ticks(int(proc.name)):
+            owners[int(proc.name)] = held
+            result[int(proc.name)] = {socket_ports[inode] for inode in held}
+    with _listener_lock:
+        _listener_cache.update(
+            signature=signature,
+            owners=owners,
+            identities={pid: _process_start_ticks(pid) for pid in owners},
+            expires=time.monotonic() + 2.0,
+        )
     return result
 
 
@@ -293,21 +380,23 @@ def _process_parent_pid(pid: int) -> int | None:
         return None
 
 
-def _host_process_rows() -> list[dict[str, Any]]:
-    ports_by_pid = _listening_ports_by_pid(set())
+def _host_process_rows(target_ports: set[str] | None = None) -> list[dict[str, Any]]:
+    ports_by_pid = _listening_ports_by_pid(target_ports)
     rows = []
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
             continue
         pid = int(proc.name)
+        before = _process_start_ticks(pid)
         rss_mib = _process_rss_mib(pid)
         cmdline = _process_cmdline(pid)
-        if rss_mib is None and not cmdline:
+        if (rss_mib is None and not cmdline) or before is None or before != _process_start_ticks(pid):
             continue
         rows.append(
             {
                 "pid": pid,
                 "ppid": _process_parent_pid(pid),
+                "start_ticks": before,
                 "process_name": Path(cmdline.split(" ", 1)[0]).name if cmdline else "",
                 "rss_mib": rss_mib,
                 "listening_ports": sorted(ports_by_pid.get(pid, set()), key=lambda value: int(value)),
@@ -378,11 +467,27 @@ def _augment_local_process_memory(
         model_process_gpu_memory_source="unavailable",
         memory_accounting="jetson_pss_plus_nvmap_estimate",
     )
+    scope = telemetry_services if telemetry_services is not None else load_telemetry_services()
+    started = time.monotonic()
+    target_ports: set[str] = {str(endpoint_port)}
+    if not scope:
+        target_ports.update(SYSTEM_PROCESS_PORTS)
+    if scope:
+        embedding_spec = dict(scope.get("embedding") or {})
+        profile_spec = dict((embedding_spec.get("profiles") or {}).get(embedding_spec.get("mode")) or {})
+        for spec in [
+            scope.get("main_model"),
+            scope.get("sentrix"),
+            profile_spec,
+            *(scope.get("product") or []),
+        ]:
+            if isinstance(spec, Mapping) and spec.get("local") is not False:
+                target_ports.update(str(port) for port in spec.get("ports") or [])
     try:
-        rows = _host_process_rows()
+        rows = _host_process_rows(target_ports)
     except Exception:
         rows = []
-    scope = telemetry_services if telemetry_services is not None else load_telemetry_services()
+    topology_observation = _observation("proc_listener_topology", started, available=bool(rows))
     if scope:
         main_spec = dict(scope.get("main_model") or {})
         model_rows = service_rows(rows, main_spec) if main_spec.get("local") is not False else []
@@ -416,10 +521,32 @@ def _augment_local_process_memory(
             row for row in product_rows if row.get("pid") not in {item.get("pid") for item in model_rows}
         ]
         auxiliary_rows = []
-    observations = {
-        int(row["pid"]): _process_smaps_memory_mib(int(row["pid"]))
-        for row in dedupe_rows(sentrix_rows + model_rows)
-    }
+    observations: dict[int, tuple[float | None, float | None]] = {}
+    memory_observations: dict[str, Any] = {"topology": topology_observation}
+    for row in dedupe_rows(model_rows + sentrix_rows):
+        pid = int(row["pid"])
+        before = _process_start_ticks(pid)
+        observed = time.monotonic()
+        over_budget = observed - started >= 1.0
+        pss, rss = (None, None) if over_budget else _process_smaps_memory_mib(pid)
+        after = _process_start_ticks(pid)
+        same_process = before is not None and before == after and row.get("start_ticks") == before
+        observations[pid] = (pss, rss) if same_process else (None, None)
+        for basis, value in (("pss", pss), ("rss", rss), ("identity", before)):
+            memory_observations[f"process:{pid}:{basis}"] = _observation(
+                f"proc_{basis}",
+                observed,
+                available=same_process and value is not None and not over_budget,
+                pid=pid,
+                start_ticks=before,
+                reason="process_probe_budget_exhausted"
+                if over_budget
+                else (
+                    "process_identity_changed_or_unreadable"
+                    if not same_process
+                    else ("smaps_component_unreadable" if value is None else None)
+                ),
+            )
     for row in sentrix_rows + model_rows + product_rows + auxiliary_rows:
         row["pss_mib"], row["smaps_rss_mib"] = observations[int(row["pid"])]
     model_pids = {row["pid"] for row in model_rows}
@@ -428,11 +555,31 @@ def _augment_local_process_memory(
     model_smaps_rss = _sum_mib(model_rows, "smaps_rss_mib")
     sentrix_pss = _sum_mib(sentrix_rows, "pss_mib")
     auxiliary_pids = {row["pid"] for row in auxiliary_rows}
-    auxiliary_memory = unified_model_memory(
-        auxiliary_pids,
-        rss_mib=_sum_mib(auxiliary_rows, "rss_mib"),
-        host_rss_mib=_sum_mib(auxiliary_rows, "smaps_rss_mib"),
-    )
+    # Share exactly one ledger observation across main and auxiliary totals.
+    # Keep its original timestamp even when the global cache is reused.
+    with _nvmap_lock:
+        identities = {row["pid"]: row.get("start_ticks") for row in model_rows + auxiliary_rows}
+        previous_identities = _nvmap_cache.get("process_identities") or {}
+        if any(previous_identities.get(pid) != identity for pid, identity in identities.items()):
+            _nvmap_cache["at"] = float("-inf")
+        ledger = _nvmap_clients_mib()
+        _nvmap_cache["process_identities"] = identities
+        nvmap_observation = dict(_nvmap_cache.get("observation") or {})
+        auxiliary_memory = unified_model_memory(
+            auxiliary_pids,
+            rss_mib=_sum_mib(auxiliary_rows, "rss_mib"),
+            host_rss_mib=_sum_mib(auxiliary_rows, "smaps_rss_mib"),
+            ledger=ledger,
+        )
+        model_memory = unified_model_memory(
+            model_pids, rss_mib=model_rss, host_rss_mib=model_smaps_rss, ledger=ledger
+        )
+    memory_observations["nvmap"] = nvmap_observation
+    for row in dedupe_rows(model_rows + sentrix_rows):
+        if _process_start_ticks(int(row["pid"])) != row.get("start_ticks"):
+            memory_observations[f"process:{row['pid']}:identity"].update(
+                status="unavailable", reason="process_identity_changed_after_observation"
+            )
     auxiliary_expected = (
         bool(
             embedding.get("local") is not False
@@ -444,7 +591,6 @@ def _augment_local_process_memory(
     auxiliary_uma = (
         auxiliary_memory.get("model_process_gpu_memory_mib") if auxiliary_rows or auxiliary_expected else 0.0
     )
-    model_memory = unified_model_memory(model_pids, rss_mib=model_rss, host_rss_mib=model_smaps_rss)
     main_complete = bool(model_rows) and (not scope or service_resolved(rows, main_spec))
     data["root_pid"] = next(
         (
@@ -455,6 +601,7 @@ def _augment_local_process_memory(
         None,
     )
     data["process_memory_used_mib"] = model_pss if main_complete else None
+    data["model_process_memory_used_mib"] = data["process_memory_used_mib"]
     data["model_system_processes"] = []
     if model_memory and main_complete:
         data.update(model_memory)
@@ -523,7 +670,56 @@ def _augment_local_process_memory(
         data.get("model_process_system_memory_used_mib") is not None
         and data.get("product_stack_memory_mib") is not None
     )
-    data["pss_sampled_at_monotonic"] = time.monotonic()
+
+    def refs(selected: list[dict[str, Any]], basis: str = "pss") -> list[str]:
+        if not selected:
+            # Confirmed absence also expires with the topology observation.
+            return ["topology"]
+        return list(
+            dict.fromkeys(
+                [
+                    "topology",
+                    *(f"process:{row['pid']}:identity" for row in selected),
+                    *(f"process:{row['pid']}:{basis}" for row in selected),
+                ]
+            )
+        )
+
+    main_refs, stack_refs, auxiliary_refs = refs(model_rows), refs(sentrix_rows), refs(auxiliary_rows)
+    main_gpu_refs = (
+        [*refs(model_rows, "identity"), "nvmap"]
+        if model_memory.get("model_process_gpu_memory_source") == "nvmap_iovmm"
+        else refs(model_rows, "rss")
+    )
+    auxiliary_gpu_refs = (
+        (
+            [*refs(auxiliary_rows, "identity"), "nvmap"]
+            if auxiliary_memory.get("model_process_gpu_memory_source") == "nvmap_iovmm"
+            else refs(auxiliary_rows, "rss")
+        )
+        if auxiliary_rows
+        else ["topology"]
+    )
+    dependencies = {
+        "model_process_memory_used_mib": main_refs,
+        "model_process_host_memory_mib": refs(model_rows, "rss"),
+        "model_process_gpu_memory_mib": main_gpu_refs,
+        "model_process_system_memory_used_mib": list(dict.fromkeys(refs(model_rows, "rss") + main_gpu_refs)),
+        "sentrix_stack_pss_mib": stack_refs,
+        "sentrix_product_pss_mib": refs(product_rows),
+        "sentrix_auxiliary_model_pss_mib": auxiliary_refs,
+        "sentrix_auxiliary_model_uma_mib": auxiliary_gpu_refs,
+        "product_stack_memory_mib": list(
+            dict.fromkeys(main_refs + stack_refs + main_gpu_refs + auxiliary_gpu_refs)
+        ),
+    }
+    dependencies["benchmark_process_memory_used_mib"] = dependencies["product_stack_memory_mib"]
+    data.update(
+        memory_observation_version=1,
+        memory_observations=memory_observations,
+        memory_dependencies=dependencies,
+        pss_sampled_at_monotonic=started,
+    )
     return data
 
 
@@ -734,6 +930,8 @@ class LocalJetsonLlamaCppTelemetryProvider:
         command = [os.fsdecode(arg) for arg in args if arg]
         if "--port" not in command or command[command.index("--port") + 1] != str(self.port):
             raise ValueError("PID is not serving the selected endpoint port")
+        if str(self.port) not in _listening_ports_by_pid({str(self.port)}).get(pid, set()):
+            raise ValueError("PID no longer owns the selected listening socket")
         return pid
 
     def _pid_from_port(self) -> int:
@@ -788,7 +986,9 @@ class LocalJetsonLlamaCppTelemetryProvider:
         try:
             # Optional KV counters must not consume the core-memory sampling
             # budget when the inference server is busy with a visual request.
-            response = httpx.get(f"{self.endpoint}/metrics", timeout=0.2)
+            response = httpx.get(
+                f"{self.endpoint}/metrics", timeout=0.2, trust_env=False, follow_redirects=False
+            )
             response.raise_for_status()
             values: dict[str, float] = {}
             for line in response.text.splitlines():
@@ -880,6 +1080,11 @@ class LocalJetsonLlamaCppTelemetryProvider:
             augmented = _augment_local_process_memory(
                 data, model_pid=None, endpoint_port=str(self.port), telemetry_services=self.telemetry_services
             )
+            augmented, _ = memory_freshness({**augmented, "_t": time.monotonic()})
+            augmented.pop("_t", None)
+            augmented["process_memory_used_mib"] = augmented.get(
+                "model_process_memory_used_mib", augmented.get("process_memory_used_mib")
+            )
             return {
                 "status": "available",
                 "source": "jetson_local_pss",
@@ -889,6 +1094,7 @@ class LocalJetsonLlamaCppTelemetryProvider:
             return {"status": "unavailable", "source": "jetson_local_pss", "reason": str(error)}
 
     def system_memory(self) -> dict[str, Any]:
+        started = time.monotonic()
         data: dict[str, Any] = _meminfo_mib()
         keys = {
             "system_memory_used_mib",
@@ -898,8 +1104,9 @@ class LocalJetsonLlamaCppTelemetryProvider:
         }
         data = {key: value for key, value in data.items() if key in keys}
         if "system_memory_used_mib" not in data:
-            return {"status": "unavailable", "source": "tegrastats", "reason": "ram_sample_unavailable"}
-        return {"status": "available", "source": "tegrastats", "data": data}
+            return {"status": "unavailable", "source": "proc_meminfo", "reason": "ram_sample_unavailable"}
+        data["system_observation"] = _observation("proc_meminfo", started, available=True)
+        return {"status": "available", "source": "proc_meminfo", "data": data}
 
     def kv_cache(self) -> dict[str, Any]:
         data: dict[str, Any] = self._last_memory.get("data") or {}

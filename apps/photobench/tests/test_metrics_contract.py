@@ -19,6 +19,70 @@ def test_unknown_nvmap_does_not_become_zero(monkeypatch: pytest.MonkeyPatch) -> 
     assert result["memory_complete"] is False
 
 
+def _component_sample():
+    return {
+        "_t": 103.0,
+        "memory_observation_version": 1,
+        "model_process_host_memory_mib": 10,
+        "model_process_gpu_memory_mib": 20,
+        "model_process_system_memory_used_mib": 30,
+        "product_stack_memory_mib": 35,
+        "system_memory_used_mib": 100,
+        "memory_dependencies": {
+            "model_process_host_memory_mib": ["pss"],
+            "model_process_gpu_memory_mib": ["nvmap"],
+            "model_process_system_memory_used_mib": ["pss", "nvmap"],
+            "product_stack_memory_mib": ["pss", "nvmap"],
+            "system_memory_used_mib": ["system"],
+        },
+        "memory_observations": {
+            key: {
+                "status": "available",
+                "observed_at_monotonic": time,
+                "finished_at_monotonic": time + 0.1,
+                "ttl_seconds": 3,
+                "cache_hit": key == "nvmap",
+            }
+            for key, time in (("pss", 102), ("nvmap", 100), ("system", 102.5))
+        },
+    }
+
+
+def test_memory_uses_original_cached_observation_and_oldest_dependency():
+    raw = _component_sample()
+    projected, _ = analysis.validated_telemetry_sample(raw)
+    assert projected["process_observed_at_monotonic"] == 100
+    assert projected["memory_observations"]["nvmap"]["age_seconds"] == 3
+    assert projected["memory_complete"] is True
+    assert "age_seconds" not in raw["memory_observations"]["nvmap"]
+    raw["_t"] = 103.001
+    expired, rejected = analysis.validated_telemetry_sample(raw)
+    assert expired["model_process_host_memory_mib"] == 10
+    assert expired["system_memory_used_mib"] == 100
+    assert expired["model_process_gpu_memory_mib"] is None
+    assert expired["model_process_system_memory_used_mib"] is None
+    assert expired["product_stack_memory_mib"] is None
+    assert expired["process_observed_at_monotonic"] is None
+    assert "product_stack_memory_mib" in rejected
+    assert raw["product_stack_memory_mib"] == 35
+
+
+@pytest.mark.parametrize("bad", [None, True, float("nan"), 104])
+def test_memory_missing_invalid_or_future_observation_is_not_fresh(bad):
+    raw = _component_sample()
+    raw["memory_observations"]["nvmap"]["observed_at_monotonic"] = bad
+    result, _ = analysis.validated_telemetry_sample(raw)
+    assert result["model_process_gpu_memory_mib"] is None
+    assert result["model_process_host_memory_mib"] == 10
+
+
+def test_new_version_cannot_claim_a_total_without_dependencies_and_legacy_is_preserved():
+    raw = {"_t": 103, "product_stack_memory_mib": 35}
+    assert analysis.validated_telemetry_sample(raw)[0]["product_stack_memory_mib"] == 35
+    result, _ = analysis.validated_telemetry_sample({**raw, "memory_observation_version": 1})
+    assert result["product_stack_memory_mib"] is None
+
+
 def test_nx_power_is_board_power_and_keeps_rails() -> None:
     sample = jetson._parse_tegrastats_line(
         "RAM 4000/16000MB GR3D_FREQ 75% gpu@55C "
@@ -482,10 +546,22 @@ def test_orphan_rejudge_on_terminal_run_is_also_recovered(tmp_path):
 
 
 def test_jetson_no_auxiliary_is_zero_and_disappeared_model_cannot_reuse_total(monkeypatch):
-    rows = [{"pid": 1, "ppid": 0, "rss_mib": 10, "listening_ports": [8100], "process_name": "llama-server"}]
-    monkeypatch.setattr(jetson, "_host_process_rows", lambda: rows)
+    rows = [
+        {
+            "pid": 1,
+            "ppid": 0,
+            "start_ticks": "123",
+            "rss_mib": 10,
+            "listening_ports": [8100],
+            "process_name": "llama-server",
+        }
+    ]
+    monkeypatch.setattr(jetson, "_host_process_rows", lambda ports: rows)
+    monkeypatch.setattr(jetson, "_process_start_ticks", lambda pid: "123")
     monkeypatch.setattr(jetson, "_process_smaps_memory_mib", lambda pid: (8, 10))
-    monkeypatch.setattr(jetson, "_nvmap_clients_mib", lambda: {1: 20})
+    jetson._nvmap_cache.clear()
+    jetson._nvmap_cache.update(at=float("-inf"), table=None)
+    monkeypatch.setattr(jetson, "_read_nvmap_clients", lambda: "llama 0 1 20480K\n")
     scope = {"main_model": {"ports": [8100]}, "embedding": {}, "sentrix": {}, "product": []}
     good = jetson._augment_local_process_memory(
         {}, model_pid=None, endpoint_port="8100", telemetry_services=scope
@@ -576,3 +652,72 @@ def test_per_run_product_url_overrides_stale_product_port_and_remote_is_not_loca
     connection["sentrix_url"] = "http://remote.invalid:8292"
     product = services_from_connection(connection)["product"][0]
     assert product["ports"] == [] and product["local"] is False
+
+
+def test_confirmed_absence_requires_fresh_topology_even_for_zero():
+    raw = _component_sample()
+    raw["sentrix_auxiliary_model_uma_mib"] = 0
+    raw["memory_dependencies"]["sentrix_auxiliary_model_uma_mib"] = []
+    assert analysis.validated_telemetry_sample(raw)[0]["sentrix_auxiliary_model_uma_mib"] is None
+    raw["memory_dependencies"]["sentrix_auxiliary_model_uma_mib"] = ["pss"]
+    assert analysis.validated_telemetry_sample(raw)[0]["sentrix_auxiliary_model_uma_mib"] == 0
+    raw["_t"] = 106
+    assert analysis.validated_telemetry_sample(raw)[0]["sentrix_auxiliary_model_uma_mib"] is None
+
+
+@pytest.mark.parametrize(
+    "key,bad",
+    [
+        ("memory_observations", []),
+        ("memory_dependencies", []),
+        ("component_validity", []),
+        ("source_diagnostics", []),
+    ],
+)
+def test_malformed_memory_metadata_does_not_break_historical_reading(key, bad):
+    raw = _component_sample()
+    raw[key] = bad
+    raw["_t"] = 110
+    result, _ = analysis.validated_telemetry_sample(raw)
+    assert result["product_stack_memory_mib"] is None
+
+
+def test_coverage_does_not_count_stale_or_boolean_memory_as_core_observation():
+    raw = _component_sample()
+    raw["_t"] = 104
+    assert analysis.telemetry_sampling([raw])["phases"]["unassigned"]["core_memory_valid"] == 0
+    assert (
+        analysis.telemetry_sampling([{"system_memory_used_mib": True}])["phases"]["unassigned"][
+            "core_memory_valid"
+        ]
+        == 0
+    )
+
+
+def test_additive_observation_and_integrity_contract_round_trips_without_changing_null():
+    from photobench.api.metrics_schema import RunMetricsResponse
+
+    raw = _component_sample()
+    raw["_t"] = 104
+    projected, _ = analysis.validated_telemetry_sample(raw)
+    payload = {
+        "telemetry_live": {"latest": projected},
+        "phases": {
+            "gpu_metrics": {
+                "status": "done",
+                "samples_count": 1,
+                "sampling_integrity": {
+                    "callback_failures": 1,
+                    "last_callback_failure": "OSError: full",
+                    "stop_pending_threads": [],
+                },
+            },
+            "old_optional": None,
+        },
+    }
+    assert RunMetricsResponse.model_validate(payload).model_dump(exclude_unset=True) == payload
+    live = {}
+    analysis.attach_gpu_sample_history(live, [json.dumps(projected)])
+    assert live["latest"]["model_process_gpu_memory_mib"] is None
+    assert live["latest"]["memory_observations"]["nvmap"]["observed_at_monotonic"] == 100
+    assert live["latest"]["memory_observations"]["nvmap"]["fresh"] is False

@@ -105,11 +105,16 @@ def test_sampler_walks_each_process_once_even_when_device_stats_are_collected(mo
     monkeypatch.setattr(provider, "_llama_args", lambda pid: {})
     monkeypatch.setattr(provider, "_device", lambda: {})
     monkeypatch.setattr(jetson, "_meminfo_mib", lambda: {"system_memory_used_mib": 100})
-    monkeypatch.setattr(jetson, "_nvmap_clients_mib", lambda: {42: 3})
+    jetson._nvmap_cache.clear()
+    jetson._nvmap_cache.update(at=float("-inf"), table=None)
+    monkeypatch.setattr(jetson, "_read_nvmap_clients", lambda: "llama 0 42 3072K\n")
+    monkeypatch.setattr(jetson, "_process_start_ticks", lambda pid: "123")
     monkeypatch.setattr(
         jetson,
         "_host_process_rows",
-        lambda: [{"pid": 42, "identity": "llama-server --port 8100", "rss_mib": 1}],
+        lambda ports: [
+            {"pid": 42, "start_ticks": "123", "identity": "llama-server --port 8100", "rss_mib": 1}
+        ],
     )
     walks = []
 
@@ -143,8 +148,9 @@ def test_busy_optional_metrics_endpoint_has_a_short_budget(monkeypatch):
 
     provider = jetson.LocalJetsonLlamaCppTelemetryProvider("http://127.0.0.1:8100")
 
-    def busy(url, *, timeout):
+    def busy(url, *, timeout, trust_env, follow_redirects):
         assert timeout <= 0.2
+        assert trust_env is False and follow_redirects is False
         raise httpx.ReadTimeout("busy model metrics")
 
     monkeypatch.setattr(jetson.httpx, "get", busy)
@@ -180,3 +186,151 @@ def test_real_busy_metrics_http_does_not_wait_for_model_work():
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_nvmap_cache_preserves_observation_time_and_refreshes_once_expired(monkeypatch):
+    clock, reads = [100.0], []
+    monkeypatch.setattr(jetson.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(jetson, "_nvmap_cache", {"at": float("-inf"), "table": None})
+
+    def read():
+        reads.append(clock[0])
+        clock[0] += 0.1
+        return "llama 0 42 1024K\n"
+
+    monkeypatch.setattr(jetson, "_read_nvmap_clients", read)
+    assert jetson._nvmap_clients_mib() == {42: 1}
+    first = dict(jetson._nvmap_cache["observation"])
+    clock[0] = 101
+    assert jetson._nvmap_clients_mib() == {42: 1}
+    cached = jetson._nvmap_cache["observation"]
+    assert cached["cache_hit"] is True
+    assert cached["observed_at_monotonic"] == first["observed_at_monotonic"] == 100
+    clock[0] = 103
+    jetson._nvmap_clients_mib()
+    assert reads == [100, 103]
+    assert jetson._nvmap_cache["observation"]["observed_at_monotonic"] == 103
+
+
+def test_sudo_nvmap_probe_uses_short_timeout_and_returns_unavailable(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(jetson.Path, "read_text", lambda *a, **k: (_ for _ in ()).throw(PermissionError()))
+    monkeypatch.setattr(jetson.shutil, "which", lambda name: "/usr/bin/sudo")
+
+    def run(command, **options):
+        assert command[:3] == ["/usr/bin/sudo", "-n", "cat"]
+        assert options["timeout"] <= 0.2
+        raise subprocess.TimeoutExpired(command, options["timeout"])
+
+    monkeypatch.setattr(jetson.subprocess, "run", run)
+    assert jetson._read_nvmap_clients() is None
+
+
+def test_listener_cache_revalidates_socket_and_process_identity(monkeypatch, tmp_path):
+
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    for pid in (1, 2, 3):
+        (proc / str(pid)).mkdir()
+    (proc / "net/tcp").write_text(
+        "header\n0: 0100007F:1FA4 0:0 0A 0 0 0 0 0 100\n1: 0100007F:1FAA 0:0 0A 0 0 0 0 0 200\n"
+    )
+    (proc / "net/tcp6").write_text("header\n")
+    monkeypatch.setattr(
+        jetson, "Path", lambda name: proc / str(name).removeprefix("/proc/") if str(name) != "/proc" else proc
+    )
+    identities = {1: "old", 2: "other", 3: "new"}
+    sockets = {1: {"100"}, 2: {"200"}, 3: set()}
+    calls = []
+    monkeypatch.setattr(jetson, "_process_start_ticks", lambda pid: identities[pid])
+    monkeypatch.setattr(jetson, "_listener_cache", {})
+
+    def inodes(pid):
+        calls.append(pid)
+        return sockets[pid]
+
+    monkeypatch.setattr(jetson, "_socket_inodes", inodes)
+    assert jetson._listening_ports_by_pid({"8100"}) == {1: {"8100"}}
+    calls.clear()
+    assert jetson._listening_ports_by_pid({"8100"}) == {1: {"8100"}}
+    assert calls == [1], "cached topology should inspect only validated holders"
+    # A reused PID with the same socket inode must not inherit old ownership.
+    identities[1] = "reused"
+    sockets[1], sockets[3] = set(), {"100"}
+    assert jetson._listening_ports_by_pid({"8100"}) == {3: {"8100"}}
+
+
+def test_pid_identity_change_invalidates_collected_memory(monkeypatch):
+    from photobench.domain.runtime.metrics import memory_freshness
+
+    clock = [100.0]
+    monkeypatch.setattr(jetson.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        jetson,
+        "_host_process_rows",
+        lambda ports: [
+            {
+                "pid": 42,
+                "ppid": 0,
+                "start_ticks": "old",
+                "rss_mib": 10,
+                "listening_ports": [8100],
+            }
+        ],
+    )
+    identities = iter(["old", "new", "new"])
+    monkeypatch.setattr(jetson, "_process_start_ticks", lambda pid: next(identities))
+    monkeypatch.setattr(jetson, "_process_smaps_memory_mib", lambda pid: (8, 10))
+    monkeypatch.setattr(jetson, "_nvmap_cache", {"at": float("-inf"), "table": None})
+    monkeypatch.setattr(jetson, "_read_nvmap_clients", lambda: "llama 0 42 20480K\n")
+    data = jetson._augment_local_process_memory(
+        {},
+        model_pid=None,
+        endpoint_port="8100",
+        telemetry_services={"main_model": {"ports": [8100]}},
+    )
+    result, _ = memory_freshness({**data, "_t": 100.1})
+    assert result["model_process_system_memory_used_mib"] is None
+    assert result["product_stack_memory_mib"] is None
+
+
+def test_probe_budget_stops_additional_smaps_and_does_not_claim_complete_memory(monkeypatch):
+    clock, walks = [100.0], []
+    monkeypatch.setattr(jetson.time, "monotonic", lambda: clock[0])
+    rows = [
+        {
+            "pid": pid,
+            "ppid": 0,
+            "start_ticks": str(pid),
+            "rss_mib": 10,
+            "listening_ports": [8100 if pid == 1 else 8103],
+        }
+        for pid in (1, 2)
+    ]
+    monkeypatch.setattr(jetson, "_host_process_rows", lambda ports: rows)
+    monkeypatch.setattr(jetson, "_process_start_ticks", lambda pid: str(pid))
+
+    def smaps(pid):
+        walks.append(pid)
+        clock[0] += 1.2
+        return 8, 10
+
+    monkeypatch.setattr(jetson, "_process_smaps_memory_mib", smaps)
+    monkeypatch.setattr(jetson, "_nvmap_cache", {"at": float("-inf"), "table": None})
+    monkeypatch.setattr(jetson, "_read_nvmap_clients", lambda: "llama 0 1 20480K\nclip 0 2 10240K\n")
+    result = jetson._augment_local_process_memory(
+        {},
+        model_pid=None,
+        endpoint_port="8100",
+        telemetry_services={
+            "main_model": {"ports": [8100]},
+            "embedding": {
+                "mode": "clip",
+                "profiles": {"clip": {"ports": [8103]}},
+            },
+        },
+    )
+    assert walks == [1]
+    assert result["product_stack_memory_mib"] is None
+    assert result["memory_observations"]["process:2:pss"]["reason"] == "process_probe_budget_exhausted"

@@ -2,6 +2,23 @@
 
 本契约是 T006 指标正确性修复的兼容性基线；不补齐 vLLM 专项指标。
 
+## 2026-10-22 采样与分量观测补充（memory_observation_version=1）
+
+新增可选 `memory_observations`（来源ID到观测事实）、`memory_dependencies`（指标到必要来源ID列表）、
+`memory_observation_version=1` 与 `sampling_diagnostics`。来源事实包含 `source/status/reason`、
+`observed_at_monotonic`（开始读取时刻，保守计龄）、`finished_at_monotonic`、`ttl_seconds`、
+`cache_hit`，进程来源另含PID及启动标识。nvmap缓存复用原观测时间，不以返回时间刷新。
+合计依赖最老的必要分量；过期/缺失/进程身份变化使该分量及其依赖合计为null，其他有效分量保留。
+明确不存在的辅助分量可为0，但仍依赖新鲜topology观测；空依赖不可证明有效；历史无version不补造时间，新采集严格验证在domain集中执行，
+写入、读取及汇总共用。系统内存独立观测，不因GPU来源失效而清空。
+
+`sampling_diagnostics`记录锁等待、三个provider耗时、采集总耗时、计划延迟、错过周期及上次回调耗时。
+采样按单调时钟计划，超预算跳过错过的周期，不忙等追赶；所有实际点及超时事实保留。
+阶段内滚动聚合由单个可停止的发布线程读取全样本快照执行，不在采样锁中计算，不建立无界队列。
+原始JSONL仍逐点写入；写回调失败记录原因，不能静默宣称保存完整。`gpu_metrics.sampling_integrity`记录callback/publisher/collection失败及原因、missed_intervals和stop_pending_threads；正常停止后才发布任务终态，若共同等待10秒仍有线程则明确记录停止未确认（telemetry_live.status=stop_pending），严格验收失败，不把遥测增强改为终止生产任务。成功停止为stopped。
+可选探针缩短预算，进程扫描利用冻结拓扑；内核单次不可抢占IO仍如实记录超预算，不宣称硬实时保证。
+失败/取消未走完采样阶段时以gpu_metrics.status=partial保留已有统计，前端不得清掉partial标记。四方法端口和生产fail-open语义不变，无新部署开关；3秒覆盖门槛不放宽。本轮仅本地修复，不启动真实测评。
+
 ## Additive interfaces
 
 - New runs persist `metrics_contract_version=2`, `build_revision` and an immutable,

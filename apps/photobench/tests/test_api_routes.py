@@ -286,3 +286,67 @@ def test_explicit_historical_score_derivation_is_consistent_and_does_not_rewrite
     assert summary["answer_quality_mean"] == 1
     assert summary["judge_valid_count"] == 1
     assert path.read_bytes() == raw
+
+
+def test_memory_component_freshness_survives_raw_store_to_http_projection(client: TestClient):
+    container = client.app.state.container
+    directory = container.settings.results_root / "run-a"
+    path = directory / "run.json"
+    state = json.loads(path.read_text())
+    state["telemetry_live"] = {}
+    state["phases"] = {
+        "gpu_metrics": {
+            "status": "done",
+            "sampling_integrity": {
+                "callback_failures": 0,
+                "publisher_failures": 1,
+                "last_publisher_failure": "OSError: full",
+                "collection_failures": 0,
+                "stop_pending_threads": [],
+            },
+        }
+    }
+    path.write_text(json.dumps(state))
+    sample = {
+        "_t": 10,
+        "memory_observation_version": 1,
+        "memory_accounting": "jetson_pss_plus_nvmap_estimate",
+        "model_process_host_memory_mib": 10,
+        "model_process_gpu_memory_mib": 20,
+        "model_process_system_memory_used_mib": 30,
+        "product_stack_memory_mib": 40,
+        "memory_dependencies": {
+            "model_process_host_memory_mib": ["rss"],
+            "model_process_gpu_memory_mib": ["nvmap"],
+            "model_process_system_memory_used_mib": ["rss", "nvmap"],
+            "product_stack_memory_mib": ["rss", "nvmap"],
+        },
+        "memory_observations": {
+            source: {
+                "status": "available",
+                "observed_at_monotonic": at,
+                "finished_at_monotonic": at + 0.1,
+                "ttl_seconds": 3,
+                "cache_hit": True,
+            }
+            for source, at in (("rss", 9), ("nvmap", 6))
+        },
+        "sampling_diagnostics": {"collection_seconds": 0.2},
+    }
+    raw = json.dumps(sample) + "\n"
+    (directory / "gpu_samples.jsonl").write_text(raw)
+    container.run_index.refresh(container.run_store)
+    response = client.get("/api/v1/runs/run-a")
+    assert response.status_code == 200
+    body = response.json()
+    latest = body["telemetry_live"]["latest"]
+    assert latest["model_process_host_memory_mib"] == 10
+    assert latest["model_process_gpu_memory_mib"] is None
+    assert latest["product_stack_memory_mib"] is None
+    assert latest["memory_observations"]["nvmap"]["age_seconds"] == 4
+    assert latest["sampling_diagnostics"]["collection_seconds"] == 0.2
+    assert (
+        body["phases"]["gpu_metrics"]["sampling_integrity"]
+        == state["phases"]["gpu_metrics"]["sampling_integrity"]
+    )
+    assert (directory / "gpu_samples.jsonl").read_text() == raw

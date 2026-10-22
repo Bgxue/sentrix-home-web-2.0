@@ -107,12 +107,92 @@ def expected_total(parts: list[Any], actual: Any, tolerance: float = 0.1) -> boo
 
 
 def check_jetson_product_total(sample: dict[str, Any]) -> bool:
+    if sample.get("memory_observation_version") == 1 and not memory_dependencies_fresh(
+        sample, "product_stack_memory_mib"
+    ):
+        return sample.get("product_stack_memory_mib") is None
     rows = sample.get("benchmark_processes") or []
     # An absent process observation is unknown, including while the API restarts.
     # GPU allocations alone cannot stand in for the missing related-process PSS.
     parts = [row.get("pss_mib") for row in rows] if rows else [None]
     parts += [sample.get("model_process_gpu_memory_mib"), sample.get("sentrix_auxiliary_model_uma_mib")]
     return expected_total(parts, sample.get("product_stack_memory_mib"))
+
+
+def memory_dependencies_fresh(sample: dict[str, Any], key: str) -> bool:
+    """Independent oracle: do not trust a persisted age or the production validator."""
+    dependencies = sample.get("memory_dependencies")
+    refs = dependencies.get(key) if isinstance(dependencies, dict) else None
+    sources = sample.get("memory_observations") or {}
+    captured = sample.get("_t", sample.get("t"))
+    if not finite(captured) or not isinstance(refs, list):
+        return False
+    if not refs:
+        return False
+    for ref in refs:
+        row = sources.get(ref) if isinstance(ref, str) and isinstance(sources, dict) else None
+        if not isinstance(row, dict) or row.get("status") != "available":
+            return False
+        observed, finished, ttl = (
+            row.get(k) for k in ("observed_at_monotonic", "finished_at_monotonic", "ttl_seconds")
+        )
+        if not finite(observed) or not finite(finished) or not finite(ttl):
+            return False
+        if not (0 < ttl <= 3 and observed <= finished <= captured and 0 <= captured - observed <= ttl):
+            return False
+    return True
+
+
+def check_memory_freshness(sample: dict[str, Any]) -> list[str]:
+    if sample.get("memory_observation_version") != 1:
+        return []
+    errors = []
+    dependencies = sample.get("memory_dependencies") or {}
+    if not isinstance(dependencies, dict):
+        return ["invalid_memory_dependencies"]
+    fields = {
+        "model_process_memory_used_mib",
+        "model_process_host_memory_mib",
+        "model_process_gpu_memory_mib",
+        "model_process_system_memory_used_mib",
+        "sentrix_stack_pss_mib",
+        "sentrix_product_pss_mib",
+        "sentrix_auxiliary_model_pss_mib",
+        "sentrix_auxiliary_model_uma_mib",
+        "product_stack_memory_mib",
+        "benchmark_process_memory_used_mib",
+        "system_memory_used_mib",
+        "system_memory_total_mib",
+        "system_memory_available_mib",
+    }
+    for key in fields | dependencies.keys():
+        if not memory_dependencies_fresh(sample, key) and sample.get(key) is not None:
+            errors.append(f"stale_or_unverified_memory:{key}")
+    if sample.get("memory_complete") is True:
+        totals = ("model_process_system_memory_used_mib", "product_stack_memory_mib")
+        if any(not finite(sample.get(key)) or not memory_dependencies_fresh(sample, key) for key in totals):
+            errors.append("memory_complete_with_unavailable_inputs")
+        refs = {
+            ref
+            for key, values in dependencies.items()
+            if not key.startswith("system_")
+            and isinstance(values, list)
+            and finite(sample.get(key))
+            and memory_dependencies_fresh(sample, key)
+            for ref in values
+            if isinstance(ref, str)
+        }
+        raw_sources = sample.get("memory_observations")
+        sources = raw_sources if isinstance(raw_sources, dict) else {}
+        times = [
+            row.get("observed_at_monotonic") for ref in refs if isinstance(row := sources.get(ref), dict)
+        ]
+        declared = sample.get("process_observed_at_monotonic")
+        if not times or not all(finite(value) for value in times) or not finite(declared):
+            errors.append("missing_oldest_memory_observation")
+        elif abs(min(float(value) for value in times if finite(value)) - declared) > 0.01:
+            errors.append("memory_observation_not_oldest_input")
+    return errors
 
 
 def check_agent_summary(
@@ -670,6 +750,10 @@ def audit(runtime: Path) -> dict[str, Any]:
     samples = [json.loads(line) for line in lines if line]
     chain_errors: list[str] = []
     metric_errors: list[str] = check_statistics(samples, saved, api)
+    integrity = ((saved.get("phases") or {}).get("gpu_metrics") or {}).get("sampling_integrity") or {}
+    for key in ("callback_failures", "publisher_failures", "collection_failures", "stop_pending_threads"):
+        if integrity.get(key):
+            chain_errors.append(f"telemetry_integrity:{key}")
     mode = saved.get("mode", "full")
     required_phases = ["model_deploy", "scope_setup", "gpu_metrics", "aggregate"]
     if mode != "reuse":
@@ -744,6 +828,17 @@ def audit(runtime: Path) -> dict[str, Any]:
                 )
             )
             and s.get("memory_complete") is True
+            and (
+                s.get("memory_observation_version") != 1
+                or all(
+                    memory_dependencies_fresh(s, key)
+                    for key in (
+                        "system_memory_used_mib",
+                        "model_process_system_memory_used_mib",
+                        "product_stack_memory_mib",
+                    )
+                )
+            )
             and finite(s.get("process_observed_at_monotonic"))
             and 0 <= s["_t"] - s["process_observed_at_monotonic"] <= 3
         ]
@@ -782,6 +877,7 @@ def audit(runtime: Path) -> dict[str, Any]:
     rails: set[str] = set()
     for index, sample in enumerate(samples):
         metric_errors.extend(f"{index}:{reason}" for reason in check_device_freshness(sample))
+        metric_errors.extend(f"{index}:{reason}" for reason in check_memory_freshness(sample))
         accounting = sample.get("memory_accounting")
         if accounting == "jetson_pss_plus_nvmap_estimate":
             components = [
@@ -789,6 +885,10 @@ def audit(runtime: Path) -> dict[str, Any]:
                 sample.get("model_process_gpu_memory_mib"),
             ]
             expected = sum(components) if all(finite(v) for v in components) else None
+            if sample.get("memory_observation_version") == 1 and not memory_dependencies_fresh(
+                sample, "model_process_system_memory_used_mib"
+            ):
+                expected = None
             actual = sample.get("model_process_system_memory_used_mib")
             if (
                 expected is None

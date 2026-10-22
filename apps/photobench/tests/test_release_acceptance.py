@@ -468,3 +468,61 @@ def test_rollback_precheck_accepts_previous_settings_without_runtime_diagnostics
     product = release.read_json(config / "runtime_connection.json")["product_settings"]
     assert product["agent_wall_time_s"] == 180
     assert product["face_providers"] == "CPUExecutionProvider"
+
+
+def test_acceptance_checks_component_timestamps_and_oldest_input_independently():
+    acceptance = script("photobench_acceptance")
+    sample = {
+        "_t": 10,
+        "memory_observation_version": 1,
+        "memory_complete": True,
+        "model_process_system_memory_used_mib": 10,
+        "product_stack_memory_mib": 10,
+        "memory_dependencies": {
+            "model_process_system_memory_used_mib": ["rss", "nvmap"],
+            "product_stack_memory_mib": ["rss", "nvmap"],
+        },
+        "memory_observations": {
+            key: {
+                "status": "available",
+                "observed_at_monotonic": at,
+                "finished_at_monotonic": at + 0.1,
+                "ttl_seconds": 3,
+                "age_seconds": 0,
+            }
+            for key, at in (("rss", 9), ("nvmap", 7))
+        },
+        "process_observed_at_monotonic": 7,
+    }
+    assert acceptance.check_memory_freshness(sample) == []
+    sample["process_observed_at_monotonic"] = 9
+    assert "memory_observation_not_oldest_input" in acceptance.check_memory_freshness(sample)
+    sample["_t"] = 10.01
+    assert not acceptance.memory_dependencies_fresh(sample, "product_stack_memory_mib")
+    assert "stale_or_unverified_memory:product_stack_memory_mib" in acceptance.check_memory_freshness(sample)
+    sample["product_stack_memory_mib"] = None
+    assert acceptance.check_jetson_product_total(sample)
+
+
+@pytest.mark.parametrize(
+    "dependencies,sources",
+    [
+        (None, None),
+        ([], []),
+        ({"product_stack_memory_mib": None}, {}),
+        ({"product_stack_memory_mib": [False]}, []),
+        ({"product_stack_memory_mib": []}, {}),
+    ],
+)
+def test_acceptance_malformed_or_empty_dependencies_cannot_verify_a_zero(dependencies, sources):
+    acceptance = script("photobench_acceptance")
+    sample = {
+        "_t": 10,
+        "memory_observation_version": 1,
+        "memory_complete": True,
+        "memory_dependencies": dependencies,
+        "memory_observations": sources,
+        "product_stack_memory_mib": 0,
+    }
+    assert not acceptance.memory_dependencies_fresh(sample, "product_stack_memory_mib")
+    assert acceptance.check_memory_freshness(sample)

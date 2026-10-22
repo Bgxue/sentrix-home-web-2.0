@@ -32,7 +32,13 @@ from pathlib import Path
 from typing import Any
 
 from photobench.domain.runs.judge import normalize_judge_score, parse_judge_json
-from photobench.domain.runtime.metrics import apple_power, apple_temperature, device_freshness
+from photobench.domain.runtime.metrics import (
+    apple_power,
+    apple_temperature,
+    device_freshness,
+    finite_number,
+    memory_freshness,
+)
 
 # 1.0 ``:933`` / ``:1261``。
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -1846,7 +1852,8 @@ def validated_telemetry_sample(sample: dict[str, Any]) -> tuple[dict[str, Any], 
         if invalid:
             result[key] = None
             rejected.append(key)
-    return result, rejected
+    result, memory_rejected = memory_freshness(result)
+    return result, list(dict.fromkeys([*rejected, *memory_rejected]))
 
 
 def telemetry_sampling(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -1855,18 +1862,19 @@ def telemetry_sampling(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         {
             float(s.get("t", s.get("_t", 0)))
             for s in samples
-            if isinstance(s.get("t", s.get("_t")), (int, float))
+            if finite_number(s.get("t", s.get("_t"))) is not None
         }
     )
     intervals = [b - a for a, b in zip(times, times[1:], strict=False) if b > a]
     phases: dict[str, Any] = {}
     for sample in samples:
+        sample, _ = memory_freshness(sample)
         phase = str(sample.get("phase") or "unassigned")
         row = phases.setdefault(phase, {"samples": 0, "core_memory_valid": 0})
         row["samples"] += 1
         row["core_memory_valid"] += int(
             all(
-                isinstance(sample.get(key), (int, float))
+                (value := finite_number(sample.get(key))) is not None and value >= 0
                 for key in (
                     "system_memory_used_mib",
                     "model_process_system_memory_used_mib",
@@ -1960,6 +1968,10 @@ def _is_telemetry_series_key(key: str) -> bool:
             "source_diagnostics",
             "observed_at_epoch",
             "component_validity",
+            "memory_observation_version",
+            "memory_observations",
+            "memory_dependencies",
+            "sampling_diagnostics",
             "process_observed_at_monotonic",
             "device_observation_age_seconds",
             "device_observed_at_monotonic",
@@ -2110,6 +2122,10 @@ def aggregate_gpu_samples(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "metrics_contract_version",
         "memory_accounting",
         "component_validity",
+        "memory_observation_version",
+        "memory_observations",
+        "memory_dependencies",
+        "sampling_diagnostics",
         "process_observed_at_monotonic",
         "device_freshness_version",
         "memory_complete",

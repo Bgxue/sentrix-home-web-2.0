@@ -962,6 +962,72 @@ def test_sampling_writes_labelled_samples_and_is_stopped_at_the_end():
     assert telemetry.calls.count("gpu_stats") >= 2  # 采样一次 + 起止硬件快照
 
 
+def test_real_execution_constructor_publishes_metrics_before_qa_finishes(monkeypatch):
+    """A late-bound callback must reach the sampler built by execute(), not an empty holder."""
+    import photobench.application.run_execution.service as service
+
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    entered, published, release = threading.Event(), threading.Event(), threading.Event()
+    original = execution._publish_partial_gpu_metrics
+
+    def publish(state, metrics):
+        original(state, metrics)
+        if entered.is_set() and (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "running":
+            published.set()
+
+    def qa(state, request):
+        entered.set()
+        assert release.wait(3)
+        state.phase_done("qa_eval", {})
+
+    monkeypatch.setattr(service, "GPU_METRICS_PUBLISH_SECONDS", 0.01)
+    monkeypatch.setattr(execution, "_publish_partial_gpu_metrics", publish)
+    monkeypatch.setattr(execution, "_phase_qa_eval", qa)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution.execute, _request())
+        try:
+            assert entered.wait(3)
+            assert published.wait(3), "metrics must be published while the run is active"
+            assert not future.done()
+        finally:
+            release.set()
+        result = future.result(timeout=3)
+    assert result["phases"]["gpu_metrics"]["status"] == "done"
+    assert result["phases"]["gpu_metrics"]["sampling_integrity"]["stop_pending_threads"] == []
+    assert result["telemetry_live"]["status"] == "stopped"
+
+
+@pytest.mark.parametrize("status", ["done", "skipped"])
+def test_partial_publication_does_not_replace_final_metrics(status):
+    from photobench.application.run_execution.state import RunState
+
+    execution, *_ = _execution()
+    state = RunState({"phases": {"gpu_metrics": {"status": status, "samples_count": 7}}}, run_id="run_test")
+    execution._publish_partial_gpu_metrics(state, {"samples_count": 2})
+    assert state.get("phases")["gpu_metrics"] == {"status": status, "samples_count": 7}
+
+
+def test_cancelled_run_keeps_partial_telemetry_and_persistence_failure(monkeypatch):
+    execution, _client, writer, *_ = _execution()
+
+    def fail_write(*args):
+        raise OSError("disk full")
+
+    def cancel(state, request):
+        raise RunCancelledError("user requested stop")
+
+    monkeypatch.setattr(writer, "append_gpu_sample", fail_write)
+    monkeypatch.setattr(execution, "_phase_qa_eval", cancel)
+    result = execution.execute(_request())
+    assert result["status"] == "cancelled"
+    metrics = result["phases"]["gpu_metrics"]
+    assert metrics["partial"] is True
+    assert metrics["status"] == "partial"
+    assert metrics["collection_end_reason"] == "cancelled"
+    assert metrics["sampling_integrity"]["callback_failures"] > 0
+    assert "disk full" in metrics["sampling_integrity"]["last_callback_failure"]
+
+
 def test_a_sample_carries_the_label_of_the_phase_that_was_running():
     """相位标签是采样行的一部分（1.0 ``:2113``），读侧靠它把曲线切成段。
 
@@ -1264,3 +1330,13 @@ def test_initialization_failure_persists_a_terminal_run(failure, monkeypatch):
     assert state["finished_at"]
     assert client.calls == []
     assert writer.snapshots[-1][1]["status"] == "failed"
+
+
+def test_late_sample_callback_does_not_reopen_or_append_to_a_finished_run():
+    from photobench.application.run_execution.state import RunState
+
+    execution, _client, writer, *_ = _execution()
+    state = RunState({"finished_at": "2026-10-22T00:00:00", "status": "cancelled"}, run_id="run_test")
+    execution._sample_writer(state)({"temperature_c": 50})
+    assert writer.gpu_samples == []
+    assert "telemetry_live" not in state.data

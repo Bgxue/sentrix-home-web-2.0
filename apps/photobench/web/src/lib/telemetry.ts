@@ -191,7 +191,9 @@ export function gpuMetricsView(run: unknown): Dict {
     ];
     const out: Dict = { memory_accounting: live.latest?.memory_accounting, memory_complete: live.latest?.memory_complete,
       power_scope: live.latest?.power_scope, power_rail: live.latest?.power_rail,
-      sampling: live.sampling, ...phaseObj };
+      sampling: live.sampling, memory_observation_version: live.latest?.memory_observation_version,
+      memory_observations: live.latest?.memory_observations, memory_dependencies: live.latest?.memory_dependencies,
+      sampling_diagnostics: live.latest?.sampling_diagnostics, ...phaseObj };
     for (const key of keys) {
       const current = out[key];
       const hasPeak = current && typeof current === "object" && current.peak != null;
@@ -204,13 +206,13 @@ export function gpuMetricsView(run: unknown): Dict {
     return out;
   };
   if (phase.status === "done" || phase.status === "skipped" || (phase.samples_count && !phase.partial)) {
-    return fill({ ...phase, partial: false });
+    return fill({ ...phase, partial: phase.partial === true });
   }
   if (phase.samples_count) {
     return fill({
       ...phase,
       status: finished ? (phase.status || "partial") : "running",
-      partial: !finished,
+      partial: finished ? phase.partial === true || phase.status === "partial" : true,
     });
   }
   if (!history.length && !live.samples_count) return fill(phase);
@@ -233,6 +235,38 @@ export function gpuMetricsView(run: unknown): Dict {
 }
 
 // ── 1.0 :941-991 实时遥测行 ──────────────────────────────────────────────
+
+/** Recorded source freshness and collection integrity, without synthesizing legacy facts. */
+export function telemetryObservationRows(run: unknown): MetricRow[] {
+  const live = telemetryLiveState(run);
+  const latest = dict(live.latest);
+  const sources = Object.entries(dict(latest.memory_observations));
+  const rows: MetricRow[] = [];
+  if (latest.memory_observation_version === 1) {
+    const ages = sources.map(([, value]) => telemetryNumber(dict(value).age_seconds))
+      .filter((age): age is number => age !== null && age >= 0);
+    const unavailable = sources.filter(([, value]) => dict(value).fresh !== true).map(([key]) => key);
+    rows.push(["内存观测值龄", ages.length ? `${Math.max(...ages).toFixed(3)} s` : "不可用",
+      "采样时最老来源的值龄；缓存命中不刷新原观测时间"]);
+    rows.push(["内存来源有效性", `${sources.length - unavailable.length}/${sources.length}`,
+      unavailable.length ? `不可用或过期：${unavailable.join("、")}` : "所有已记录来源均新鲜；各合计另按必要依赖判定"]);
+  }
+  const diagnostics = dict(latest.sampling_diagnostics);
+  const collection = telemetryNumber(diagnostics.collection_seconds);
+  const lateness = telemetryNumber(diagnostics.schedule_lateness_seconds);
+  if (Object.keys(diagnostics).length) {
+    rows.push(["采集 / 调度延迟", `${collection === null ? "不可用" : collection.toFixed(3) + " s"} / ${lateness === null ? "不可用" : lateness.toFixed(3) + " s"}`,
+      "单次采集耗时 / 相对单调时钟计划的延迟；不包含后续写盘回调"]);
+  }
+  const integrity = dict(gpuMetricsView(run).sampling_integrity);
+  if (Object.keys(integrity).length) {
+    const counts = ["callback_failures", "publisher_failures", "collection_failures"].map((key) => telemetryNumber(integrity[key]));
+    const pending = Array.isArray(integrity.stop_pending_threads) ? integrity.stop_pending_threads : [];
+    rows.push(["采样记录 / 发布 / 采集异常", counts.map((value) => value === null ? "未记录" : String(value)).join(" / "),
+      pending.length ? `停止超时，线程待退出：${pending.join("、")}` : "异常计数独立于被测任务成败；跳过的采样周期另见覆盖统计"]);
+  }
+  return rows;
+}
 
 /**
  * 1.0 `:941-991`。apple_unified 与「其余（NVIDIA / Orin）」两套行；
