@@ -66,6 +66,53 @@ describe("loadRuns / changeRunPage（1.0 :2233 / :2249）", () => {
 });
 
 describe("startPolling 的 2 秒轮询（1.0 :2697-2708）", () => {
+  it("调用方重建详情 loader 时仍遵守两秒间隔", async () => {
+    apiMock.mockResolvedValue(pagePayload(1, "running"));
+    const firstLoader = vi.fn().mockResolvedValue(undefined);
+    const secondLoader = vi.fn().mockResolvedValue(undefined);
+    const { result, rerender } = renderHook(
+      ({ loader }) => useRuns({ loadQaPage: loader }),
+      { initialProps: { loader: firstLoader } },
+    );
+    await act(async () => {
+      result.current.startPolling();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    await act(async () => { rerender({ loader: secondLoader }); });
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(apiMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("下一轮使用新的 QA loader，渲染不会让旧请求重叠", async () => {
+    apiMock.mockImplementation(async (path) => {
+      if (path.startsWith("/runs?")) return pagePayload(1, "running");
+      return { run_id: "a", status: "running", summary: {} };
+    });
+    const firstLoader = vi.fn().mockResolvedValue(undefined);
+    const secondLoader = vi.fn().mockResolvedValue(undefined);
+    const { result, rerender } = renderHook(
+      ({ loader }) => useRuns({ loadQaPage: loader }),
+      { initialProps: { loader: firstLoader } },
+    );
+    await act(async () => {
+      result.current.selectRun({ run_id: "a", status: "running" });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    firstLoader.mockClear();
+    await act(async () => {
+      result.current.startPolling();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(firstLoader).toHaveBeenCalledTimes(1);
+    await act(async () => { rerender({ loader: secondLoader }); });
+    expect(secondLoader).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(firstLoader).toHaveBeenCalledTimes(1);
+    expect(secondLoader).toHaveBeenCalledTimes(1);
+  });
+
   it("有任务在跑：每 2 秒一轮", async () => {
     apiMock.mockResolvedValue(pagePayload(1, "running"));
     const { result } = renderHook(() => useRuns());

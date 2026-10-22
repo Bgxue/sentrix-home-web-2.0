@@ -151,3 +151,12 @@ CUDA/cuDNN大版本必须匹配。LD_LIBRARY_PATH只允许候选进程指向已�
 官方依据：https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html 、 https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html 。PyPI ORT≥1.27默认CUDA13，不适合直接套用CUDA12.6 Jetson。已核验的设备事实与候选测试记录另见本轮独立报告。
 
 前端内存说明补核版只改变标签/说明及accounting元数据投影，后端生产文件与3cb480a逐字节相同。完整CI、固定提交与统一制品后，等待各机当前验证序列终态再切release；四机重新预检，并用保留的真实API结果验证新前端的内存标签、公式和null显示。保留3cb实际运行版本与原始证据，不将其改标为新SHA，也不因此再调用60题模型。切换前先保存PID/资源连续性和日志，切换本身作为授权部署记录，不报意外重启。
+
+
+#### 实时详情轮询负载回归
+
+轮询等待必须从上一轮完成时计起，正常2秒、异常5秒；渲染或QA loader引用变化不重启计时器。
+同run重叠详情读取共享在途计算；完成后下一批重新观测，错误也传播给全部等待者并清理。
+验证时保留有实时详情访问的运行证据，并检查遥测最大间隔、首尾缺口、读取响应和内存压力。
+若发现采样停滞，保全raw/API/日志后按严格门槛判定，不能删除异常采样或扩大3秒阈值。
+本次共用读侧修正固定提交后四机full10QA，NX/Mac再build→reuse；旧失败轮保留，不按质量筛选。

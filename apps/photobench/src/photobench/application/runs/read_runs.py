@@ -19,6 +19,7 @@ import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -71,6 +72,7 @@ class ReadRuns:
         self._live_states = live_states
         self._lock = threading.RLock()
         self._states: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._run_reads: dict[str, Future[dict[str, Any]]] = {}
         self._qa_metadata: dict[str, dict[str, Any]] | None = None
 
     # -- 内部 ---------------------------------------------------------------
@@ -183,6 +185,29 @@ class ReadRuns:
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         """``GET /api/runs/{id}``（1.0 ``get_run`` ``:5354``）。"""
+        # 多个浏览器/轮询请求共享正在生成的同一份投影；不保留活跃 run 的
+        # 完成态缓存。否则每个 HTTP worker 都解析整份 JSONL，读侧内存可随
+        # 并发倍增并挤压实际执行及采样。不同 run 不互相等待。
+        with self._lock:
+            pending = self._run_reads.get(run_id)
+            leader = pending is None
+            if pending is None:
+                pending = Future()
+                self._run_reads[run_id] = pending
+        if not leader:
+            return pending.result()
+        try:
+            result = self._project_run(run_id)
+            pending.set_result(result)
+            return result
+        except BaseException as error:
+            pending.set_exception(error)
+            raise
+        finally:
+            with self._lock:
+                self._run_reads.pop(run_id, None)
+
+    def _project_run(self, run_id: str) -> dict[str, Any]:
         state = self._state(run_id)
         result = {key: value for key, value in state.items() if key != "items"}
         result["item_count"] = len(state.get("items") or [])

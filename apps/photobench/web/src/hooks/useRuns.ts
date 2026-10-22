@@ -152,6 +152,12 @@ export function useRuns(options: UseRunsOptions = {}) {
     judgePromptFallback,
   });
   const { loadActiveRun, setActiveRun } = detail;
+  // App 的 QA 桥接函数可在每次渲染时重建；它们只更新下一次轮询用的
+  // loader，不能重启计时器，否则一次状态更新就会立即再发一轮请求。
+  const pollDetailLoader = useRef(loadActiveRun);
+  useEffect(() => {
+    pollDetailLoader.current = loadActiveRun;
+  }, [loadActiveRun]);
 
   /** 1.0 `:352-353`。用 ref 现算，好让轮询的异步闭包读到最新值。 */
   const hasRunningNow = useCallback(
@@ -180,7 +186,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       timer = null;
       try {
         await loadRuns();
-        if (activeRunIdRef.current) await loadActiveRun();
+        if (activeRunIdRef.current) await pollDetailLoader.current();
         if (cancelled) return;
         if (hasRunningNow()) {
           timer = window.setTimeout(poll, 2000);
@@ -196,7 +202,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [polling, loadRuns, loadActiveRun, hasRunningNow]);
+  }, [polling, loadRuns, hasRunningNow]);
 
   const changeRunPage = useCallback(
     async (page: number) => {
