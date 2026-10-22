@@ -292,6 +292,10 @@ describe("phaseSeconds (:759-768)", () => {
     expect(phaseSeconds(null)).toBeNull();
     expect(phaseSeconds({})).toBeNull();
     expect(phaseSeconds({ total_seconds: "abc" })).toBeNull();
+    expect(phaseSeconds({ total_seconds: null })).toBeNull();
+    expect(phaseSeconds({ total_seconds: false })).toBeNull();
+    expect(phaseSeconds({ total_seconds: "" })).toBeNull();
+    expect(phaseSeconds({ total_seconds: -1 })).toBeNull();
   });
   it("正的 preferred 优先；0 也回 0（不是 null）", () => {
     expect(phaseSeconds({ total_seconds: 5 })).toBe(5);

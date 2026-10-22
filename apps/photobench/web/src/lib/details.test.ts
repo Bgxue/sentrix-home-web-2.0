@@ -249,10 +249,14 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
     ).toBe("预置 3 人 · 关系 4/5 · 2s");
     expect(phaseSummary("identity_seed", {})).toBe("预置 0 人 · -");
     expect(phaseSummary("photo_import", { accepted_count: 8, total_media: 10, failed_count: 2, upload_seconds: 1.5 })).toBe(
-      "导入 8/10 个媒体 · 失败 2 · 总计 1.5s",
+      "导入 8/10 个媒体 · 失败 2 · 阶段墙钟 1.5s",
     );
     // Counts are unknown until the synchronous import response returns; never display fake zeroes.
-    expect(phaseSummary("photo_import", {})).toBe("导入 ?/? 个媒体 · 失败 ? · 总计 -");
+    expect(phaseSummary("photo_import", {})).toBe("导入 ?/? 个媒体 · 失败 ? · 阶段墙钟 -");
+    // Real Mac full-run values: backend subtotal must not replace the request wall clock.
+    expect(phaseSummary("photo_import", { total_seconds: 1208, timings: { total: 738.1 } })).toBe(
+      "导入 ?/? 个媒体 · 失败 ? · 阶段墙钟 1208s · 后端计时 738.1s",
+    );
   });
 
   it("pipeline_processing：有 progress 才展开，否则落到通用「耗时」", () => {

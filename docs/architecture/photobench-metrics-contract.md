@@ -111,6 +111,8 @@ build 不解析题库或 Judge 配置，题集为空、题数0、结果空列表
 
 `execution_budgets`、`product_settings` 和部署诊断中的有效预算/provider 都可追溯。POST 发送后的结果不确定会记录 `fatal_error_details`/相位 `request_failure`，不自动重放；同步导入未返回期间只展示目录、目录计数和等待时长，媒体完成数与失败数未知时保持 `?`，不得用 `0` 伪造进度。
 
+导入阶段墙钟以 `photo_import.total_seconds` 为准，兼容历史 `upload_seconds` 或完整起止时间；`timings.total` 只作为“后端计时”单列，不能替代请求墙钟。真实 Mac 记录为墙钟1208秒、内部计时738.1秒，二者范围不同。前端阶段耗时缺少完整起止事实时，`null`、布尔、空字符串和负数保持不可用；真实数字0保留原有起止时间回退语义。本次只改前端投影，不改原始记录、后端公式、执行或公开schema。
+
 本轮共用执行语义变化，固定版本后四机 full10QA，并在 NX/Mac 各做独立 build→reuse10QA。build 的严格遥测验收只覆盖导入/处理；reuse 只覆盖 QA，未适用阶段不补点。单次及首尾3秒门槛、null与TTL、三类验收结论、历史保全均沿用。
 
 输入初始化失败：`failed_phase="initialization"`，`qa_count=null`、`input_integrity=null`表示无法获得输入事实；保存真实failed记录且不调用产品。build正常初始化的题目数仍为0，验收不得要求10题；评分不适用不豁免遥测覆盖。

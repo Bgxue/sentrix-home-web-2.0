@@ -223,7 +223,10 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     if (timings.summarize != null) parts.push(`总结 ${fmtSeconds(timings.summarize)}`);
     if (timings.stage != null) parts.push(`落库 ${fmtSeconds(timings.stage)}`);
     const breakdown = parts.length ? ` · ${parts.join(" · ")}` : "";
-    const total = timings.total != null ? fmtSeconds(timings.total) : fmtSeconds(phaseSeconds(phase, "upload_seconds"));
+    // Backend timings cover internal work and may exclude request waiting/queueing.
+    // Keep the measured phase wall clock authoritative and label the subtotal separately.
+    const total = fmtSeconds(phaseSeconds(phase) ?? phaseSeconds(phase, "upload_seconds"));
+    const backendTotal = timings.total != null ? ` · 后端计时 ${fmtSeconds(timings.total)}` : "";
     // The synchronous import endpoint does not report media counts until it returns.
     // Keep that interval visibly unknown instead of presenting missing values as zero.
     const count = (value: unknown): string =>
@@ -231,7 +234,7 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     const accepted = count(p.accepted_count);
     const totalMedia = count(p.total_media ?? p.total_photos);
     const failed = count(p.failed_count);
-    return `导入 ${accepted}/${totalMedia} 个媒体 · 失败 ${failed} · 总计 ${total}${breakdown}`;
+    return `导入 ${accepted}/${totalMedia} 个媒体 · 失败 ${failed} · 阶段墙钟 ${total}${backendTotal}${breakdown}`;
   }
   if (key === "pipeline_processing" && p.progress) {
     const progress = dict(p.progress);
