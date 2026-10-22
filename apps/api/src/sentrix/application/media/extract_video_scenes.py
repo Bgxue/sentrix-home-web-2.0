@@ -87,6 +87,7 @@ class ExtractVideoScenes:
         # 这一层要的是「把一张已落库的图片走完整条链」，不是导入用例本身
         # （它还要负责去重、落盘、探测）。第二参是 ``forced_event_id``。
         process_image: Callable[[Asset, str], object],
+        scene_planner: Callable[[Path, str, float], tuple[SceneWindow, ...]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets
@@ -95,6 +96,7 @@ class ExtractVideoScenes:
         self._video_repository = video_repository
         self._keyframes = keyframes
         self._process_image = process_image
+        self._scene_planner = scene_planner
         self._clock = clock
 
     def execute(self, source_asset_id: str) -> VideoSceneExtraction:
@@ -104,7 +106,11 @@ class ExtractVideoScenes:
 
         probe = self._video_repository.probe(source_asset_id)
         duration = (probe.metadata.duration_sec if probe and probe.metadata else 0.0) or 0.0
-        windows = plan_scenes(duration)
+        windows = (
+            self._scene_planner(Path(asset.path), asset.id, duration)
+            if self._scene_planner is not None
+            else plan_scenes(duration)
+        )
         if not windows:
             # 探测没读到时长（ffprobe 失败 / 还没探测过）。**不猜时长**：编一个只会
             # 得到「场景数量看着对、时间全是假的」，而那是没人能看出来的错误。
