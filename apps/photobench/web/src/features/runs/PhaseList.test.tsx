@@ -67,3 +67,22 @@ describe("阶段卡（1.0 :3099-3129）", () => {
     expect(fill?.style.width).toBe("50%");
   });
 });
+
+
+it("build 显示评分未适用并隐藏问答阶段", () => {
+  const { container, getByText } = render(<PhaseList activeRun={{ run_id: "b", mode: "build" }} />);
+  expect(container.querySelectorAll(".phase-card")).toHaveLength(5);
+  expect(getByText(/QA、Judge 和评分有效性不适用/)).toBeTruthy();
+});
+
+it("同步导入显示目录与等待时长，不显示伪造媒体进度", () => {
+  const { getByTestId } = render(<PhaseList activeRun={{ run_id: "i", phases: { photo_import: {
+    status: "failed", finished_at: "2026-10-22T01:02:00Z", progress: {
+      current_directory: "photos/day1", directories_done: 1, directories_total: 3,
+      request_started_at: "2026-10-22T01:00:00Z"
+    }
+  } } }} />);
+  expect(getByTestId("import-waiting").textContent).toContain("photos/day1");
+  expect(getByTestId("import-waiting").textContent).toContain("120 秒");
+  expect(getByTestId("import-waiting").textContent).toContain("1/3");
+});

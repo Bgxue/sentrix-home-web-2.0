@@ -12,9 +12,39 @@ from collections.abc import Callable
 import httpx
 import pytest
 
+from photobench.domain.errors import RequestOutcomeUnknownError
 from photobench.infrastructure.http.client import HttpxJsonClient, build_multipart
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+@pytest.mark.parametrize(
+    "method,error,retries",
+    [
+        ("GET", httpx.RemoteProtocolError, 3),
+        ("POST", httpx.ConnectError, 3),
+        ("POST", httpx.ReadError, 1),
+        ("POST", httpx.WriteError, 1),
+        ("POST", httpx.RemoteProtocolError, 1),
+        ("POST", httpx.ReadTimeout, 1),
+    ],
+)
+def test_retries_are_bounded_and_never_replay_an_uncertain_post(method, error, retries):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise error("injected disconnect", request=request)
+
+    client = HttpxJsonClient(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        retry_connections=True,
+        sleep=lambda _: None,
+    )
+    expected = RequestOutcomeUnknownError if method == "POST" and retries == 1 else error
+    with pytest.raises(expected):
+        client.request_json("http://local/imports", {}, method)
+    assert len(calls) == retries
 
 
 def _client(handler: Handler) -> HttpxJsonClient:
@@ -206,3 +236,27 @@ def test_request_multipart_rewrites_a_non_2xx_into_the_shared_message():
     with pytest.raises(RuntimeError) as excinfo:
         _client(handler).request_multipart("http://sentrix/api/v1/people/seed", {}, [])
     assert str(excinfo.value).endswith(": 文件里没有检测到人脸")
+
+
+def test_retry_uses_one_total_budget_and_backoff_is_bounded():
+    now = [0.0]
+    observed = []
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    def handler(request):
+        observed.append(request.extensions["timeout"]["read"])
+        now[0] += 0.3
+        raise httpx.ReadError("injected", request=request)
+
+    client = HttpxJsonClient(
+        httpx.Client(transport=httpx.MockTransport(handler)),
+        retry_connections=True,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+    with pytest.raises(httpx.ReadError):
+        client.request_json("http://local/read", timeout=1)
+    assert observed == [1, 0.5]
+    assert now[0] == pytest.approx(0.8)

@@ -76,10 +76,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties:
-                  type: string
-                type: object
-                title: Response Diagnostics Api V1 Diagnostics Get
+                $ref: '#/components/schemas/DiagnosticsResponse'
   /api/v1/media/import:
     post:
       tags:
@@ -2590,6 +2587,41 @@ components:
           default: ''
       type: object
       title: CreateConversationRequest
+    DiagnosticsResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+        version:
+          type: string
+          title: Version
+        build_revision:
+          type: string
+          title: Build Revision
+        database:
+          type: string
+          title: Database
+        embeddings:
+          type: string
+          title: Embeddings
+        embeddings_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embeddings Error
+        runtime_configuration:
+          additionalProperties: true
+          type: object
+          title: Runtime Configuration
+      type: object
+      required:
+      - status
+      - version
+      - build_revision
+      - database
+      - embeddings
+      - runtime_configuration
+      title: DiagnosticsResponse
     EntityDetailAppearance:
       properties:
         id:

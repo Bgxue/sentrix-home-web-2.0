@@ -12,9 +12,23 @@ SIGTERM 打断正在跑的评测 run。1.0 因此拆成 ``/api/health``（0.15�
 - ``/api/v1/diagnostics``：完整诊断（数据库 + 嵌入侧车 + 降级原因）。
 """
 
+from typing import Any
+
 from fastapi import APIRouter, Request
+from pydantic import BaseModel
 
 from sentrix import __version__
+
+
+class DiagnosticsResponse(BaseModel):
+    status: str
+    version: str
+    build_revision: str
+    database: str
+    embeddings: str
+    embeddings_error: str | None = None
+    runtime_configuration: dict[str, Any]
+
 
 router = APIRouter(tags=["health"])
 
@@ -51,10 +65,13 @@ def health(request: Request) -> dict[str, str]:
     return _diagnostics(request)
 
 
-@router.get("/diagnostics")
-def diagnostics(request: Request) -> dict[str, str]:
+@router.get("/diagnostics", response_model=DiagnosticsResponse, response_model_exclude_none=True)
+def diagnostics(request: Request) -> dict[str, Any]:
     """完整诊断：数据库 + 嵌入侧车 + 降级原因。与 ``/health`` 同一份实现。"""
-    return _diagnostics(request)
+    return {
+        **_diagnostics(request),
+        "runtime_configuration": request.app.state.container.settings.runtime_configuration(),
+    }
 
 
 def _diagnostics(request: Request) -> dict[str, str]:

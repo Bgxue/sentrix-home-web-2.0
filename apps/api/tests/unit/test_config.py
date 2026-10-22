@@ -43,3 +43,32 @@ def test_no_model_name_is_configurable(tmp_path, monkeypatch):
 
     assert not hasattr(settings, "chat_model_name")
     assert not hasattr(settings, "vlm_model_name")
+
+
+def test_mac_profile_defaults_and_explicit_values(monkeypatch, tmp_path):
+    from sentrix.config import Settings
+
+    monkeypatch.delenv("SENTRIX_EMBEDDING_SCHEME", raising=False)
+    monkeypatch.delenv("SENTRIX_CHAT_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("SENTRIX_AGENT_WALL_TIME_S", raising=False)
+    settings = Settings(deployment_profile="mac", data_dir=tmp_path)
+    assert settings.embedding_scheme == "legacy"
+    assert settings.agent_wall_time_s == 600
+    assert settings.chat_timeout_s == 180
+    explicit = Settings(
+        deployment_profile="mac", embedding_scheme="wemm", agent_wall_time_s=77, chat_timeout_s=88
+    )
+    assert (explicit.embedding_scheme, explicit.agent_wall_time_s, explicit.chat_timeout_s) == (
+        "wemm",
+        77,
+        88,
+    )
+
+
+def test_invalid_deployment_profile_rejected():
+    import pytest
+
+    from sentrix.config import Settings
+
+    with pytest.raises(ValueError):
+        Settings(deployment_profile="unknown")

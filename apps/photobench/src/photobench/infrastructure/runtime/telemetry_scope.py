@@ -100,7 +100,18 @@ def _from_runtime_connection(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             else [],
             "local": urlparse(sentrix_url).hostname in _local_hosts(),
         },
-        "product": list(raw.get("product") or []),
+        "product": [
+            {
+                **item,
+                "ports": [sentrix_port]
+                if sentrix_port and urlparse(sentrix_url).hostname in _local_hosts()
+                else [],
+                "local": urlparse(sentrix_url).hostname in _local_hosts(),
+            }
+            if isinstance(item, dict) and item.get("id") == "sentrix_api"
+            else item
+            for item in raw.get("product") or []
+        ],
     }
 
 

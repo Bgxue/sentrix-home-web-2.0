@@ -819,6 +819,7 @@ def test_with_a_manager_the_model_is_stopped_then_started_then_probed():
     assert execution.inference.calls == [
         "chat",
         "chat",
+        "list_models",
         "chat_stream",
         "health",
         "max_concurrency",
@@ -1121,3 +1122,95 @@ def test_a_full_run_still_records_mode_and_scope_source():
     assert state["scope_source"] == "created_by_import"
     assert state["existing_scope_id"] is None
     assert "photo_import" in state["phases"]
+
+
+def test_reuse_synchronizes_product_without_touching_model_lifecycle():
+    process = FakeSentrixProcess(current="http://127.0.0.1:8100/v1")
+    execution, _client, _writer, lifecycle, _albums = _execution(sentrix_switch=SentrixModelSwitch(process))
+    state = execution.execute(
+        _request(
+            mode="reuse",
+            scope_id="existing",
+            model_base_url="http://127.0.0.1:8106/v1",
+            manager_url="http://manager",
+        )
+    )
+    assert process.restarts == ["http://127.0.0.1:8106/v1"]
+    assert state["phases"]["model_deploy"]["gamma_sync"]["ok"] is True
+    assert not any(name in {"start", "stop"} for name, _ in lifecycle.calls)
+
+
+def test_build_does_not_read_qa_or_construct_judge(monkeypatch):
+    execution, client, *_ = _execution()
+    monkeypatch.setattr(execution.albums, "qa_rows", lambda *_: pytest.fail("build read QA"))
+    monkeypatch.setattr(execution, "_build_judge", lambda *_: pytest.fail("build created Judge"))
+    state = execution.execute(_request(mode="build", qa_set=""))
+    assert state["status"] == "completed"
+    assert state["qa_count"] == 0 and state["items"] == []
+    assert "qa_eval" not in state["phases"]
+    assert state["run_valid"] is None
+    assert state["summary"]["run_valid"] is None
+    assert not any(call[0] == "start_turn" for call in client.calls)
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["vlm_base_url", "legacy_clip_url", "agent_wall_time_s", "build_revision"]
+)
+def test_frozen_configuration_is_verified_before_import_or_qa(mismatch):
+    import json
+
+    from photobench.domain.runtime.ports import RunRuntimeSnapshot
+
+    execution, client, *_ = _execution()
+    connection = {
+        "model_base_url": "http://local:8100/v1",
+        "sentrix_url": "http://local:8291",
+        "embedding": {"mode": "split_text_image", "image_url": "http://local:8103"},
+        "product_settings": {"agent_wall_time_s": 600},
+        "required_build_revision": "fixed",
+    }
+    effective = {
+        "vlm_base_url": "http://local:8100/v1",
+        "embedding_scheme": "legacy",
+        "legacy_clip_url": "http://local:8103",
+        "agent_wall_time_s": 600,
+    }
+    observed = {"runtime_configuration": effective, "build_revision": "fixed"}
+    if mismatch == "build_revision":
+        observed[mismatch] = "old"
+    else:
+        effective[mismatch] = "wrong"
+    execution.runtime_snapshot = RunRuntimeSnapshot(json.dumps(connection), "fixed")
+    execution.client.runtime_diagnostics = observed
+    execution.sentrix_switch = SentrixModelSwitch(FakeSentrixProcess(current="http://local:8100/v1"))
+    state = execution.execute(_request(model_base_url="http://local:8100/v1"))
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "model_deploy"
+    assert mismatch in state["fatal_error"]
+    assert "import_album" not in execution.client.call_names()
+
+
+def test_cancel_before_execute_is_retained_and_makes_no_product_calls():
+    execution, client, *_ = _execution()
+    execution.cancel(source="queued_cancel")
+    state = execution.execute(_request())
+    assert state["status"] == "cancelled"
+    assert not client.calls
+
+
+@pytest.mark.parametrize("failure", ["manifest", "qa_rows", "integrity"])
+def test_initialization_failure_persists_a_terminal_run(failure, monkeypatch):
+    execution, client, writer, _, albums = _execution()
+
+    def broken(*args, **kwargs):
+        raise ValueError(f"invalid input: {failure}")
+
+    monkeypatch.setattr(albums, failure, broken)
+    state = execution.execute(_request(run_id="bad-input"))
+    assert state["run_id"] == "bad-input"
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "initialization"
+    assert state["fatal_error"] == f"invalid input: {failure}"
+    assert state["finished_at"]
+    assert client.calls == []
+    assert writer.snapshots[-1][1]["status"] == "failed"

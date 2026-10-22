@@ -58,7 +58,7 @@ describe("esc (:323)", () => {
 
 describe("modelName / albumName / qaName (:324-326)", () => {
   it("按优先级回退，末位是各自的固定兜底", () => {
-    expect(modelName({ model_profile: "p", model_name: "n" })).toBe("p");
+    expect(modelName({ model_profile: "p", model_name: "n" })).toBe("n");
     expect(modelName({ model_name: "n", profile: "pf" })).toBe("n");
     expect(modelName({ profile: "pf" })).toBe("pf");
     expect(modelName({})).toBe("unknown");

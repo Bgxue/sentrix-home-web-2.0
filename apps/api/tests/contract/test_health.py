@@ -100,7 +100,11 @@ def test_health_live_does_not_touch_dependencies(client: TestClient):
 
 def test_diagnostics_carries_the_full_payload(client: TestClient):
     """完整诊断与 ``/health`` 同源，保留既有消费方的字段。"""
-    assert client.get("/api/v1/diagnostics").json() == client.get("/api/v1/health").json()
+    result = client.get("/api/v1/diagnostics").json()
+    effective = result.pop("runtime_configuration")
+    assert effective["vlm_base_url"]
+    assert effective["agent_wall_time_s"] > 0
+    assert result == client.get("/api/v1/health").json()
 
 
 def test_health_live_responds_with_the_entire_worker_pool_occupied(client: TestClient):

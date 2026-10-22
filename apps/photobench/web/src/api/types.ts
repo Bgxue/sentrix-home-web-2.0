@@ -46,6 +46,11 @@ export interface MediaRef {
 
 /** `phases.<key>.progress`；键取自一次真实 run 的 `qa_eval`（`/api/v1/runs` 实测）。 */
 export interface PhaseProgress {
+  current_directory?: string;
+  request_started_at?: string;
+  directories_done?: number;
+  directories_total?: number;
+
   total?: number;
   completed?: number;
   agent_completed?: number;
@@ -118,6 +123,7 @@ export interface TelemetryLive {
 
 /** run 指标汇总。后端 `summary` 的字段是开放的，前端 `effectiveRunSummary` 现算 60+ 项。 */
 export interface RunSummary {
+  run_valid?: boolean | null;
   completed?: number;
   total?: number;
   judge_valid_count?: number;
@@ -152,12 +158,15 @@ export interface Run {
   scope_name?: string;
   album_id?: string;
   model_profile?: string;
-  model_name?: string;
+  model_name?: string | null;
+  model_identity?: Record<string, unknown> | null;
+  execution_budgets?: Record<string, unknown> | null;
+  snapshot_source?: string;
   model_source?: string;
   model_backend?: string;
   qa_set?: string;
   qa_name?: string;
-  qa_count?: number;
+  qa_count?: number | null;
   status?: string;
   created_at?: string;
   started_at?: string;

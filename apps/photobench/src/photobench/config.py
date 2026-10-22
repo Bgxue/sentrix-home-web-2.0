@@ -81,9 +81,52 @@ class Settings:
     #: 生产（``deploy/systemd/`` 的单元）填 ``sentrix-api.service``。
     sentrix_service_unit: str = ""
 
+    deployment_profile: str = "server"
+    qa_concurrency: int = 0
+    import_timeout: int = 7200
+
+    agent_wall_time_s: float = 180.0
+    chat_timeout_s: float = 120.0
+    face_providers: str = "CPUExecutionProvider"
+    retinaface_providers: str = "CPUExecutionProvider"
+
+    def __post_init__(self) -> None:
+        if self.deployment_profile not in {"server", "mac"}:
+            raise ValueError("SENTRIX_DEPLOYMENT_PROFILE must be server or mac")
+
+    def budget_defaults(self) -> dict[str, object]:
+        product = {
+            "deployment_profile": self.deployment_profile,
+            "agent_wall_time_s": self.agent_wall_time_s,
+            "chat_timeout_s": self.chat_timeout_s,
+            "face_providers": self.face_providers,
+            "retinaface_providers": self.retinaface_providers,
+        }
+        return {
+            "qa_concurrency": self.qa_concurrency,
+            "import_timeout": self.import_timeout,
+            "product_settings": product,
+        }
+
     @classmethod
     def load(cls) -> Settings:
+        profile = os.environ.get("SENTRIX_DEPLOYMENT_PROFILE", "server").strip().lower()
         return cls(
+            deployment_profile=profile,
+            agent_wall_time_s=float(
+                os.environ.get("SENTRIX_AGENT_WALL_TIME_S", "600" if profile == "mac" else "180")
+            ),
+            chat_timeout_s=float(
+                os.environ.get("SENTRIX_CHAT_TIMEOUT_S", "180" if profile == "mac" else "120")
+            ),
+            face_providers=os.environ.get("FACE_PROVIDERS", "CPUExecutionProvider"),
+            retinaface_providers=os.environ.get("RETINAFACE_PROVIDERS", "CPUExecutionProvider"),
+            qa_concurrency=int(
+                os.environ.get("PHOTOBENCH_QA_CONCURRENCY") or ("2" if profile == "mac" else "0")
+            ),
+            import_timeout=int(
+                os.environ.get("PHOTOBENCH_IMPORT_TIMEOUT") or ("86400" if profile == "mac" else "7200")
+            ),
             config_root=_root("PHOTOBENCH_CONFIG_ROOT", APP_ROOT / "config"),
             results_root=_root("PHOTOBENCH_RESULTS_ROOT", APP_ROOT / "results"),
             data_root=_root("PHOTOBENCH_DATA_ROOT", APP_ROOT / "datasets"),

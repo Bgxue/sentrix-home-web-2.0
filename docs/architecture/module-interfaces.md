@@ -824,6 +824,8 @@ def test_chat_model_maps_prompt_too_long():
 
 | 变量 | 作用 | 默认 | 影响 | 必填 |
 |---|---|---|---|---|
+| `SENTRIX_DEPLOYMENT_PROFILE` | 集中部署预设server/mac；显式值优先 | `server` | 嵌入方案、Agent/Chat预算、人脸provider默认 | 否 |
+| `SENTRIX_AGENT_WALL_TIME_S` | Agent墙钟预算；mac缺省600 | `180` | Agent预算 | 否 |
 | `SENTRIX_DATA_DIR` | 数据根，派生 db/media/previews/qdrant/geo | `data` | 全部持久化/索引 | 生产必设 |
 | `SENTRIX_WEB_DIST_DIR` | 前端构建产物 | `apps/web/dist` | Web 挂载 | 否 |
 | `SENTRIX_API_HOST` | 监听地址 | `0.0.0.0` | API | 否 |
@@ -880,6 +882,8 @@ T006 指标 v2 的可选契约见 [photobench-metrics-contract.md](photobench-me
 
 | 变量/配置 | 作用 |
 |---|---|
+| `PHOTOBENCH_QA_CONCURRENCY` | QA并发；server默认0自动，mac默认2；显式0仍自动 |
+| `PHOTOBENCH_IMPORT_TIMEOUT` | 同步导入预算；server7200秒、mac86400秒，显式值优先 |
 | `PHOTOBENCH_JUDGE_CONCURRENCY` | Judge 并发覆盖（默认 `min(8, qa_concurrency)`） |
 | `judge_providers.json` | Judge 端点/模型/密钥 env 名 |
 | `runtime_connection.json` | 主模型、Sentrix、嵌入及产品服务拓扑唯一配置源；每run冻结，已运行快照不变 |
@@ -1190,3 +1194,18 @@ make ci 是否绿？       □ 是
 *本文档中的行号以 2026-10-19 的 `psh2.0` 工作树为准；代码移动后请同步更新。*
 
 Judge一致性v3进一步限定为明确“模型/助手的回答/答案/结论”或分句开头针对回答的肯定断言；参考答案已回答正确地点而模型未能作答的合法0分不重问。真正模型回答正确却给0仍重问一次；v1/v2历史语义保留，新执行consistency_version=3，标准化v1不变。
+
+
+### 2026-10-22 运行配置与硬件核验补充
+
+- `SentrixClient.diagnostics(timeout=10)` 为新增语义端口，返回非密钥的有效启动事实；旧方法不变。`TelemetryProvider` 四方法签名不变。
+- `RunSuites` 创建队列前冻结 `RunRuntimeSnapshot`；full/build/reuse 均先同步并验证产品主模型、嵌入、产品预算/provider 和构建版本。resume 继承原快照/预算并记录来源，旧记录无快照时显式注明采用当前配置。只有登记的本机产品 API 可自动重启，其他 API 只核验。
+- build 不读 QA、不构造 Judge，`qa_set=""`、`qa_count=0`、`items=[]`、`run_valid=null`；`scope_build` 记录完整导入状态和嵌入配置，配置改变须新建 scope，不能冒称旧索引已重建。
+- 模型身份保存部署后 `/models` 的原始 ID、展示名、候选及原因；多模型无明确匹配不盲选，名称保留小数点。
+- Sentrix 独立 HTTP 策略：GET/HEAD 瞬时断连最多三次，退避0.2/0.4秒，共享总预算；POST 仅连接建立失败可重试。发出后读写/协议超时结果未确认，不重放，保存 `request_outcome_unknown`。Judge 独立既有重试策略不变。
+- 产品 `Settings` 集中解析 `SENTRIX_DEPLOYMENT_PROFILE=server|mac`；Mac 缺省 legacy、Agent600秒、Chat180秒、人脸CPU，显式设置优先。PhotoBench 同一启动入口解析 QA2/导入86400秒，显式 QA0表示自动。profile 不在 application/ONNX 适配器重复读取；provider 经 bootstrap 注入。
+- 新可选事实：`model_identity`、`execution_budgets`、`snapshot_source`、`scope_build`；诊断附 `runtime_configuration`；配置 API 保留并校验白名单 `product_settings`。同步导入显示目录、已完成目录、等待起点，不伪造逐媒体进度。两份 OpenAPI/投影/前端同步。
+- 硬件诊断属部署层：`runtime_acceleration_probe.py` 在有界子进程记录实际导入路径、包版本/来源记录哈希、用户 site、动态库、真实矩阵/卷积算子，以及本地 ONNX 推理的实际 kernel provider。CUDA 请求退为CPU必须失败；明确CPU合法。诊断不安装、不下载、不改服务。
+- 安装入口拒绝覆盖现存 venv；Jetson 需完整带哈希依赖锁，在独立环境验证。禁止以软链接伪装 CUDA 大版本、盲改全局 LD_LIBRARY_PATH、复制不匹配的 Python/JetPack 环境。现用CPU路径可保留并报告限制。
+
+输入初始化失败仍保存failed终态并标记failed_phase=initialization；无法读取的qa_count/input_integrity为null，前端展示未记录，不冒称0题。非法qa_set创建前拒绝。build验收expected_count=0且评分不适用；导入、处理和遥测门槛不变。

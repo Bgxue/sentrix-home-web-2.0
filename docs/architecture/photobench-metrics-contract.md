@@ -99,3 +99,18 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 测试确认在服务端任务结束前返回不可用；完整采样测试确认每PID仅一次smaps遍历。
 影响范围仅NX/AGX；固定新提交、完整CI后这两机新scope full10QA。3090/Mac继续使用
 9dad22b正式证据及该版本前端产物，不将旧run改标新SHA，版本分别追踪。
+
+
+## 2026-10-22 执行与构建契约（新增可选字段）
+
+创建时冻结拓扑与预算，实际 HTTP 与遥测共用同一快照，排队后全局配置修改只影响新 run。reuse 也执行产品同步与诊断核验；resume 使用原运行依赖事实并记录 `snapshot_source=resumed_run`，兼容旧记录时明确 `legacy_resume_current_config`。自动重启限部署登记的本机API。
+
+build 不解析题库或 Judge 配置，题集为空、题数0、结果空列表；评分和运行评分有效性未适用，`run_valid=null`（保存、读取、列表、前端一致）。`scope_build={status,embedding,source_run_id}` 为新增来源事实，只有身份种子/导入/处理全部完成才 ready；已知嵌入配置变更或构建未完成的 scope 不得 reuse。历史无该字段的 scope 保留兼容语义，不补造构建证据。
+
+`model_identity={status,raw_id,display_name,candidates,reason,observed_at}` 保存实际端点身份；只去除明确权重文件扩展名，不截断 Qwen3.5 等型号。多候选且无明确 ID 时保留未知，不选第一项。
+
+`execution_budgets`、`product_settings` 和部署诊断中的有效预算/provider 都可追溯。POST 发送后的结果不确定会记录 `fatal_error_details`/相位 `request_failure`，不自动重放；同步导入未返回期间只展示目录、目录计数和等待时长。
+
+本轮共用执行语义变化，固定版本后四机 full10QA，并在 NX/Mac 各做独立 build→reuse10QA。build 的严格遥测验收只覆盖导入/处理；reuse 只覆盖 QA，未适用阶段不补点。单次及首尾3秒门槛、null与TTL、三类验收结论、历史保全均沿用。
+
+输入初始化失败：`failed_phase="initialization"`，`qa_count=null`、`input_integrity=null`表示无法获得输入事实；保存真实failed记录且不调用产品。build正常初始化的题目数仍为0，验收不得要求10题；评分不适用不豁免遥测覆盖。

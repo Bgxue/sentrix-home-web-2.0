@@ -51,7 +51,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from photobench.application.deploy.service import SentrixModelSwitch
@@ -59,6 +59,7 @@ from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSa
 from photobench.application.run_execution.judge import InlineImages, JudgeRunner
 from photobench.application.run_execution.state import RunState
 from photobench.domain.datasets.ports import AlbumSource
+from photobench.domain.errors import RequestOutcomeUnknownError
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.results.ports import RunResultWriter
 from photobench.domain.runs.analysis import (
@@ -198,6 +199,44 @@ class RunRequest:
     judge_prompts: Mapping[str, str | None] = field(default_factory=dict)
     evidence_judge_enabled: bool = False
     runtime_snapshot: RunRuntimeSnapshot | None = None
+    snapshot_source: str = "creation_config"
+
+
+def freeze_runtime_request(
+    request: RunRequest, connection: Mapping[str, Any], revision: str = "development"
+) -> RunRequest:
+    """Freeze application inputs before a run can be queued; adapters only consume them."""
+    if request.runtime_snapshot is not None:
+        return request
+    frozen = {
+        key: connection.get(key)
+        for key in (
+            "sentrix_url",
+            "model_base_url",
+            "vllm_manager_url",
+            "endpoint_model",
+            "embedding",
+            "product",
+            "product_settings",
+        )
+    }
+    if request.model_base_url and request.model_base_url.rstrip("/") != str(
+        connection.get("model_base_url") or ""
+    ).rstrip("/"):
+        frozen["endpoint_model"] = None
+    frozen.update(
+        sentrix_url=request.sentrix_url,
+        model_base_url=request.model_base_url or connection.get("model_base_url"),
+        vllm_manager_url=request.manager_url,
+        runtime_framework=request.runtime_framework,
+        execution_budgets={
+            "import_timeout": request.import_timeout,
+            "turn_timeout": request.turn_timeout,
+            "qa_concurrency": request.qa_concurrency,
+        },
+        required_build_revision=revision if revision != "development" else None,
+    )
+    return replace(request, runtime_snapshot=RunRuntimeSnapshot(json.dumps(frozen), revision))
 
 
 @dataclass(frozen=True)
@@ -251,6 +290,8 @@ class RunExecution:
     #: 塞进去会让每一次快照写都抛 ``TypeError``，而错误被后台写线程记成
     #: ``_persist_error`` 之后只会表现为「run.json 一直没有出现」。
     _request: RunRequest | None = field(default=None, repr=False)
+    _cancel_signal: threading.Event = field(default_factory=threading.Event, repr=False)
+    _cancel_source: str = field(default="api", repr=False)
 
     @property
     def state(self) -> RunState | None:
@@ -269,6 +310,8 @@ class RunExecution:
         T922 要处理它）。这里不假装调过——那会让 run.json 里出现一个假的
         ``batch_cancel_requested``。
         """
+        self._cancel_source = source
+        self._cancel_signal.set()
         state = self._state
         if state is None:
             return
@@ -300,10 +343,44 @@ class RunExecution:
     def execute(self, request: RunRequest) -> dict[str, Any]:
         run_id = request.run_id or f"run_{uuid.uuid4().hex[:12]}"
         album_id = request.album_id
-        manifest = self.albums.manifest(album_id)
         scope_id = request.scope_id or self._default_scope_id(album_id, request.model_profile)
+        # Dataset files can disappear or become invalid after a request is accepted.
+        # Keep an explicit terminal record even when no input facts could be loaded.
+        try:
+            manifest = self.albums.manifest(album_id)
+            initial = self._initial_state(run_id, request, manifest, scope_id, album_id)
+        except Exception as exc:  # noqa: BLE001 — accepted runs must not disappear
+            initial = {
+                "metrics_contract_version": 2,
+                "build_revision": self.runtime_snapshot.build_revision
+                if self.runtime_snapshot
+                else "development",
+                "runtime_snapshot": self.runtime_snapshot.connection() if self.runtime_snapshot else None,
+                "run_id": run_id,
+                "album_id": album_id,
+                "qa_set": request.qa_set,
+                "qa_count": None,
+                "mode": request.mode,
+                "scope_id": scope_id,
+                "model_profile": request.model_profile,
+                "sentrix_url": request.sentrix_url,
+                "model_base_url": request.model_base_url,
+                "input_integrity": None,
+                "status": "failed",
+                "failed_phase": "initialization",
+                "fatal_error": str(exc),
+                "created_at": now_iso(),
+                "finished_at": now_iso(),
+                "phases": {},
+                "items": [],
+                "summary": {},
+                "run_valid": None if request.mode == "build" else False,
+            }
+            self._state = RunState(initial, run_id=run_id, writer=self.writer)
+            self._state.persist()
+            return self._state.data
         state = RunState(
-            self._initial_state(run_id, request, manifest, scope_id, album_id),
+            initial,
             run_id=run_id,
             writer=self.writer,
         )
@@ -311,7 +388,9 @@ class RunExecution:
         # state 里：state 要被 json.dumps 落盘，见 ``_request`` 的注释。
         self._request = request
         self._state = state
-        self._judge = self._build_judge(request, state)
+        if self._cancel_signal.is_set():
+            state.request_cancel(self._cancel_source)
+        self._judge = None if request.mode == "build" else self._build_judge(request, state)
         state.start_persist_writer()
         state.persist()
         # 采样回调要在 ``on_sample`` 里拿到采样器本身（发布滚动聚合），而采样器的构造
@@ -332,6 +411,7 @@ class RunExecution:
         # 那句「这一轮绑在哪个 scope 上」正好有地方记。
         if request.mode == "reuse":
             phases: list[tuple[str, Callable[[RunState, RunRequest], None]]] = [
+                ("model_deploy", self._phase_model_deploy),
                 ("scope_setup", self._phase_scope_setup),
                 ("qa_eval", self._phase_qa_eval),
                 ("gpu_metrics", self._phase_gpu_metrics),
@@ -348,6 +428,8 @@ class RunExecution:
                 ("gpu_metrics", self._phase_gpu_metrics),
                 ("aggregate", self._phase_aggregate),
             ]
+        if request.mode == "build":
+            phases = [(name, phase) for name, phase in phases if name != "qa_eval"]
         state.set("status", "running")
         state.set("started_at", now_iso())
         state.set("hardware_snapshots", {"start": self._hardware_snapshot(), "end": None})
@@ -384,6 +466,10 @@ class RunExecution:
             state.set("status", "failed")
             state.set("failed_phase", current)
             state.set("fatal_error", str(exc))
+            if isinstance(exc, RequestOutcomeUnknownError):
+                state.set("fatal_error_details", exc.facts)
+                if current:
+                    state.record_phase(current, "request_failure", exc.facts)
         finally:
             if sampling:
                 sampler.stop()
@@ -392,6 +478,22 @@ class RunExecution:
                 if (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "done":
                     for key, value in sampler.aggregate().items():
                         state.record_phase("gpu_metrics", key, value)
+            if request.mode in {"full", "build"}:
+                build_phases = state.get("phases") or {}
+                build_ready = all(
+                    (build_phases.get(key) or {}).get("status") == "done"
+                    for key in ("identity_seed", "photo_import", "pipeline_processing")
+                )
+                state.set(
+                    "scope_build",
+                    {
+                        "status": "ready" if build_ready else "incomplete",
+                        "embedding": self.runtime_snapshot.connection().get("embedding")
+                        if self.runtime_snapshot
+                        else None,
+                        "source_run_id": run_id,
+                    },
+                )
             state.set("current_phase", None)
             state.set("finished_at", now_iso())
             snapshots = dict(state.get("hardware_snapshots") or {})
@@ -424,7 +526,7 @@ class RunExecution:
         scope_id: str,
         album_id: str,
     ) -> dict[str, Any]:
-        rows = self.albums.qa_rows(album_id, request.qa_set)
+        rows = [] if request.mode == "build" else self.albums.qa_rows(album_id, request.qa_set)
         return {
             "metrics_contract_version": 2,
             "build_revision": self.runtime_snapshot.build_revision
@@ -443,7 +545,12 @@ class RunExecution:
             "album_id": album_id,
             "album_name": manifest.get("album_name"),
             "model_profile": request.model_profile,
-            "model_name": request.model_profile,
+            "model_name": None,
+            "model_identity": {"status": "pending"},
+            "snapshot_source": request.snapshot_source,
+            "execution_budgets": (
+                self.runtime_snapshot.connection().get("execution_budgets") if self.runtime_snapshot else None
+            ),
             "qa_set": request.qa_set,
             "qa_count": len(rows),
             "scope_id": scope_id,
@@ -463,7 +570,9 @@ class RunExecution:
             or None,
             "rejudge": None,
             "memory_profile": None,
-            "input_integrity": self.albums.integrity(album_id, manifest, request.qa_set),
+            "input_integrity": self.albums.integrity(
+                album_id, manifest, "" if request.mode == "build" else request.qa_set
+            ),
             "hardware_snapshots": {"start": None, "end": None},
             "status": "pending",
             "created_at": now_iso(),
@@ -472,7 +581,7 @@ class RunExecution:
             "phases": {},
             "items": [],
             "summary": {},
-            "run_valid": False,
+            "run_valid": None if request.mode == "build" else False,
             "fatal_error": None,
         }
 
@@ -633,7 +742,7 @@ class RunExecution:
         占位——**两个分支都要做**：没有 Manager 的「外部端点」正是 153 上的形态，
         而 2.0 的助手用哪个模型只由它自己的 ``vlm_base_url`` 决定，与有没有 Manager 无关。
         """
-        if not request.manager_url:
+        if request.mode == "reuse" or not request.manager_url:
             state.phase_done(
                 "model_deploy",
                 {
@@ -642,6 +751,7 @@ class RunExecution:
                     "manager_status": "not_applicable",
                     "model_base_url": request.model_base_url or None,
                     "gamma_sync": self._sync_sentrix_endpoint(request),
+                    "model_identity": self._record_model_identity(state, request),
                 },
             )
             return
@@ -678,6 +788,7 @@ class RunExecution:
         state.phase_done(
             "model_deploy",
             {
+                "model_identity": self._record_model_identity(state, request),
                 "source": "managed",
                 "deployment_mode": "model_manager",
                 "manager_status": "ready",
@@ -716,15 +827,76 @@ class RunExecution:
         端点又正好对得上，是 153 上最常见的形态。
         """
         if self.sentrix_switch is None:
+            if self.runtime_snapshot is not None:
+                raise RuntimeError("Frozen run requires a wired product configuration verifier")
             return {
                 "ok": False,
                 "error": "sentrix process controller is not wired",
                 "restarted": False,
             }
         outcome = self.sentrix_switch.ensure_endpoint(request.model_base_url)
-        if outcome.restarted and not outcome.ok:
+        if not outcome.ok:
             raise RuntimeError(f"could not point Sentrix at {outcome.endpoint or '(none)'}: {outcome.error}")
-        return outcome.to_state()
+        result = outcome.to_state()
+        if self.runtime_snapshot is not None:
+            expected = self.runtime_snapshot.connection()
+            observed = self.client.diagnostics()
+            effective = observed.get("runtime_configuration")
+            if not isinstance(effective, dict):
+                raise RuntimeError("Sentrix did not report effective runtime configuration")
+            mismatches = []
+            if str(effective.get("vlm_base_url", "")).rstrip("/") != str(expected["model_base_url"]).rstrip(
+                "/"
+            ):
+                mismatches.append("vlm_base_url")
+            embedding = expected.get("embedding") or {}
+            mode = embedding.get("mode")
+            pairs = (
+                {"wemm_url": "wemm_url"}
+                if mode == "unified_multimodal"
+                else {"text_url": "text_embedder_url", "image_url": "legacy_clip_url"}
+            )
+            if mode and effective.get("embedding_scheme") != (
+                "wemm" if mode == "unified_multimodal" else "legacy"
+            ):
+                mismatches.append("embedding_scheme")
+            for source, target in pairs.items():
+                if embedding.get(source) and str(embedding[source]).rstrip("/") != str(
+                    effective.get(target, "")
+                ).rstrip("/"):
+                    mismatches.append(target)
+            for key, value in (expected.get("product_settings") or {}).items():
+                if effective.get(key) != value:
+                    mismatches.append(key)
+            if (
+                expected.get("required_build_revision")
+                and observed.get("build_revision") != expected["required_build_revision"]
+            ):
+                mismatches.append("build_revision")
+            if mismatches:
+                raise RuntimeError("Sentrix effective configuration mismatch: " + ", ".join(mismatches))
+            result["runtime_configuration"] = effective
+            result["build_revision"] = observed.get("build_revision")
+        return result
+
+    def _record_model_identity(self, state: RunState, request: RunRequest) -> dict[str, Any]:
+        from photobench.domain.runs.execution import model_identity
+
+        requested = (
+            str(self.runtime_snapshot.connection().get("endpoint_model") or "")
+            if self.runtime_snapshot
+            else ""
+        )
+        if requested == "__current__":
+            requested = ""
+        try:
+            identity = model_identity(self.inference.list_models(), requested)
+        except Exception as exc:
+            identity = {"status": "unavailable", "reason": str(exc), "source": "endpoint_models"}
+        identity["observed_at"] = now_iso()
+        state.set("model_identity", identity)
+        state.set("model_name", identity.get("display_name"))
+        return identity
 
     def _cancel_wait(self, seconds: float) -> None:
         """等一段时间；被取消就抛 ``RunCancelledError``。1.0 ``self._cancel.wait(...)``。
@@ -975,6 +1147,18 @@ class RunExecution:
             # 取消至少要能在**下一个目录之前**生效，而不是等整段结束。
             if state.cancelled:
                 raise RunCancelledError("cancelled during photo_import")
+            state.record_phase(
+                "photo_import",
+                "progress",
+                {
+                    "directories_done": len(per_directory),
+                    "directories_total": len(directories),
+                    "current_directory": relative,
+                    "request_started_at": now_iso(),
+                    "status": "waiting_for_synchronous_import",
+                },
+            )
+            state.persist()
             absolute, entry_count = self.albums.import_target(album_id, relative)
             limit = min(1000, max(1, entry_count))
             result = self.client.import_album(
@@ -1263,7 +1447,8 @@ class RunExecution:
         requested = (
             max(1, request.qa_concurrency)
             if request.qa_concurrency
-            else self._env_qa_concurrency() or self._snapshot_qa_concurrency(state)
+            else (None if self.runtime_snapshot else self._env_qa_concurrency())
+            or self._snapshot_qa_concurrency(state)
         )
         if requested is None:
             requested = runtime_limit or 1

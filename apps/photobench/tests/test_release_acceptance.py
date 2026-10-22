@@ -52,8 +52,21 @@ def test_release_registers_the_launched_api_so_full_run_does_not_restart_it(tmp_
     monkeypatch.setattr(
         release.subprocess,
         "check_output",
-        lambda *args, **kwargs: (
-            f"{root}/apps/api/src/sentrix/__init__.py\n{root}/apps/photobench/src/photobench/__init__.py\n"
+        lambda *args, **kwargs: json.dumps(
+            {
+                "paths": [
+                    f"{root}/apps/api/src/sentrix/__init__.py",
+                    f"{root}/apps/photobench/src/photobench/__init__.py",
+                ],
+                "python": [3, 11],
+                "runtime": {
+                    "deployment_profile": "server",
+                    "agent_wall_time_s": 180,
+                    "chat_timeout_s": 120,
+                    "face_providers": "CPUExecutionProvider",
+                    "retinaface_providers": "CPUExecutionProvider",
+                },
+            }
         ),
     )
     monkeypatch.setattr(release, "wait_ready", lambda revision: None)
@@ -64,7 +77,7 @@ def test_release_registers_the_launched_api_so_full_run_does_not_restart_it(tmp_
     assert json.loads(record.read_text()) == {
         "pid": 100,
         "endpoint": endpoint,
-        "runtime_connection": {"model_base_url": endpoint, "sentrix_url": "http://127.0.0.1:8291"},
+        "runtime_connection": release.read_json(config / "runtime_connection.json"),
     }
     assert environments[1]["PHOTOBENCH_SENTRIX_PID_FILE"] == str(record)
     process = SubprocessSentrixProcess(
@@ -326,3 +339,78 @@ def test_acceptance_score_parser_rejects_bool_and_accepts_finite_integral_string
     assert a.explicit_score("1.0") == 1
     assert a.explicit_score(True) is None
     assert a.explicit_score("得2分") is None
+
+
+def test_environment_failure_is_detected_before_any_listener_is_touched(tmp_path, monkeypatch):
+    release = script("photobench_release")
+    config = tmp_path / "config"
+    config.mkdir()
+    release.write_json(
+        config / "runtime_connection.json",
+        {"model_base_url": "http://127.0.0.1:8100/v1", "sentrix_url": "http://127.0.0.1:8291"},
+    )
+
+    def bad_interpreter(*args, **kwargs):
+        raise RuntimeError("missing dependency")
+
+    monkeypatch.setattr(release.subprocess, "check_output", bad_interpreter)
+    monkeypatch.setattr(
+        release, "listener", lambda _: pytest.fail("touched listeners before environment check")
+    )
+    bindings = {key: str(tmp_path / key) for key in ("venv", "data", "datasets", "results")}
+    bindings.update(config=str(config), environments={"api": {}, "photobench": {}})
+    with pytest.raises(RuntimeError, match="missing dependency"):
+        release.launch(tmp_path / "release", tmp_path / "runtime", bindings, "fixed")
+
+
+def test_build_acceptance_does_not_require_qa_terminals(tmp_path, monkeypatch):
+    acceptance = script("photobench_acceptance")
+    results = tmp_path / "results" / "build-run"
+    results.mkdir(parents=True)
+    runtime = tmp_path / "attempt"
+    runtime.mkdir()
+    for name, data in {
+        "bindings": {"results": str(results.parent)},
+        "preflight": {"revision": "fixed", "api_pid": 1, "pb_pid": 2, "dataset": {}},
+        "run-response": {"run_ids": ["build-run"]},
+    }.items():
+        (runtime / f"{name}.json").write_text(json.dumps(data))
+    state = {
+        "mode": "build",
+        "status": "completed",
+        "qa_count": 0,
+        "run_valid": None,
+        "build_revision": "fixed",
+        "scope_build": {"status": "ready"},
+        "items": [],
+        "summary": {"judge_valid_count": 0},
+        "phases": {
+            name: {"status": "done"}
+            for name in (
+                "model_deploy",
+                "scope_setup",
+                "gpu_metrics",
+                "aggregate",
+                "identity_seed",
+                "photo_import",
+                "pipeline_processing",
+            )
+        },
+    }
+    (results / "run.json").write_text(json.dumps(state))
+    (results / "gpu_samples.jsonl").write_text("")
+    monkeypatch.setattr(acceptance, "http", lambda *args: state)
+    monkeypatch.setattr(acceptance, "listener", lambda port: 1 if port == 8291 else 2)
+    report = acceptance.audit(runtime)
+    assert report["chain_errors"] == []
+    assert report["scoring_complete"] is None
+    assert report["tasks"]["expected_count"] == 0
+    assert report["scoring"] == {
+        "valid": 0,
+        "expected": 0,
+        "applicable": False,
+        "missing": [],
+        "standardized_responses": [],
+    }
+    # Empty telemetry must still fail: build is not exempt from memory coverage.
+    assert "no_core_memory_in_photo_import" in report["metric_errors"]

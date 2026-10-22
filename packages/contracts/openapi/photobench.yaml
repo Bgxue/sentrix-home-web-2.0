@@ -617,9 +617,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Get Config Api V1 Config Get
+                $ref: '#/components/schemas/RuntimeConfigResponse'
     post:
       tags:
       - config
@@ -635,9 +633,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Save Config Api V1 Config Post
+                $ref: '#/components/schemas/RuntimeConfigResponse'
   /api/v1/judge-prompts:
     get:
       tags:
@@ -1171,6 +1167,33 @@ components:
             type: object
           - type: 'null'
           title: Runtime Snapshot
+        run_valid:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Run Valid
+        model_identity:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Model Identity
+        execution_budgets:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Execution Budgets
+        snapshot_source:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Snapshot Source
+        qa_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Qa Count
         telemetry_live:
           anyOf:
           - $ref: '#/components/schemas/TelemetryProjection'
@@ -1178,6 +1201,55 @@ components:
       additionalProperties: true
       type: object
       title: RunMetricsResponse
+    RuntimeConfigResponse:
+      properties:
+        runtime_config:
+          $ref: '#/components/schemas/RuntimeConnectionResponse'
+      additionalProperties: true
+      type: object
+      required:
+      - runtime_config
+      title: RuntimeConfigResponse
+    RuntimeConnectionResponse:
+      properties:
+        sentrix_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sentrix Url
+        model_base_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Base Url
+        endpoint_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Endpoint Model
+        embedding:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Embedding
+        product:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Product
+        product_settings:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Product Settings
+      additionalProperties: true
+      type: object
+      title: RuntimeConnectionResponse
     TelemetryProjection:
       properties:
         latest:

@@ -91,6 +91,7 @@ from sentrix.infrastructure.media.video_metadata import FfprobeVideoMetadataRead
 from sentrix.infrastructure.media.video_transcode import FfmpegVideoTranscoder
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
+from sentrix.infrastructure.models.face_detector import RetinaFaceTiledDetector
 from sentrix.infrastructure.models.legacy import (
     BgeSidecarEmbedder,
     ChineseClipSidecarEmbedder,
@@ -338,7 +339,10 @@ class Container:
             face_repository=SqliteFaceRepository(database),
             entity_repository=entities,
             semantic_repository=SqliteSemanticRepository(database),
-            face_detector=FaceAdapter(),
+            face_detector=FaceAdapter(
+                detector=RetinaFaceTiledDetector(providers=settings.retinaface_providers.split(",")),
+                providers=settings.face_providers.split(","),
+            ),
             appearance_repository=SqliteAppearanceRepository(database),
             person_vision=OpenAIPersonVision(
                 settings.vlm_base_url,

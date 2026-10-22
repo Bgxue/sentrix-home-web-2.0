@@ -42,7 +42,8 @@ export function esc(value: unknown): string {
 /** 1.0 `:324` */
 export function modelName(run: unknown): string {
   const r = dict(run);
-  return str(r.model_profile) || str(r.model_name) || str(r.profile) || "unknown";
+  const profile = str(r.model_profile) || str(r.profile);
+  return str(r.model_name) || (profile === "__current__" ? "未记录模型名称" : profile) || "unknown";
 }
 
 /** 1.0 `:325` */

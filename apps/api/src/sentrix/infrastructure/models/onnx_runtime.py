@@ -24,7 +24,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 # 两个 provider 链分开：RetinaFace 与 buffalo_l 的显存预算是各算各的（1.0 同此）。
@@ -95,14 +95,14 @@ def _session_limit_mib(provider_env: str) -> int:
         return DEFAULT_SESSION_LIMIT_MIB
 
 
-def face_onnx_providers(provider_env: str) -> list[Any]:
+def face_onnx_providers(provider_env: str, *, providers: Sequence[str] | None = None) -> list[Any]:
     """``onnxruntime.InferenceSession`` 的 ``providers`` 实参。
 
     CUDA 那一项带着 ``provider_options``（元组形态），其余是裸字符串——这是
     onnxruntime 的入参约定，不是本仓库的发明。
     """
-    requested = provider_chain(provider_env)
-    if not _cuda_requested(provider_env):
+    requested = list(providers) if providers is not None else provider_chain(provider_env)
+    if CUDA_EXECUTION_PROVIDER not in requested:
         return list(requested)
     preload_cuda_runtime()
     options = {
@@ -115,14 +115,16 @@ def face_onnx_providers(provider_env: str) -> list[Any]:
     return [(item, dict(options)) if item == CUDA_EXECUTION_PROVIDER else item for item in requested]
 
 
-def face_onnx_provider_options(provider_env: str) -> list[dict[str, Any]]:
+def face_onnx_provider_options(
+    provider_env: str, *, providers: Sequence[str] | None = None
+) -> list[dict[str, Any]]:
     """与 ``face_onnx_providers`` 同序的 options 列表。
 
     insightface 的 ``FaceAnalysis`` 收的是 ``providers`` + ``provider_options`` **两个平行
     列表**，不是元组——同一个预算要从同一个地方算出来，所以由上面那个函数派生。
     """
     options: list[dict[str, Any]] = []
-    for provider in face_onnx_providers(provider_env):
+    for provider in face_onnx_providers(provider_env, providers=providers):
         options.append(dict(provider[1]) if isinstance(provider, tuple) else {})
     return options
 
@@ -146,7 +148,9 @@ class CudaProviderMissingError(RuntimeError):
     """
 
 
-def require_requested_providers(session: Any, provider_env: str, *, label: str) -> list[str]:
+def require_requested_providers(
+    session: Any, provider_env: str, *, label: str, providers: Sequence[str] | None = None
+) -> list[str]:
     """请求了 CUDA 而 session 实际拿到 CPU → 抛错拒启。返回实际生效的 provider 链。
 
     **判据只能是 ``session.get_providers()``。** ``get_available_providers()`` 只说明 EP 被
@@ -160,7 +164,8 @@ def require_requested_providers(session: Any, provider_env: str, *, label: str) 
     防的东西，所以不能给它留一条「打了日志继续跑」的岔路。
     """
     actual = session_providers(session)
-    if CUDA_EXECUTION_PROVIDER in provider_chain(provider_env) and CUDA_EXECUTION_PROVIDER not in actual:
+    requested = list(providers) if providers is not None else provider_chain(provider_env)
+    if CUDA_EXECUTION_PROVIDER in requested and CUDA_EXECUTION_PROVIDER not in actual:
         raise CudaProviderMissingError(_degraded_message(label, provider_env, actual))
     return actual
 

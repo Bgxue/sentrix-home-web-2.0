@@ -106,3 +106,20 @@ def test_main_model_ports_do_not_match_embedding_llama_server() -> None:
     main_row = {"pid": 2, "identity": "llama-server", "listening_ports": ["8100"]}
     assert matches_service(main_row, scope["main_model"])
     assert not matches_service(bge_row, scope["main_model"])
+
+
+def test_unregistered_api_uses_diagnostics_and_refuses_process_restart() -> None:
+    from fakes_execution import FakeHttpClient
+
+    from photobench.infrastructure.deploy.sentrix_process import ObservedSentrixProcess
+
+    http = FakeHttpClient(
+        [
+            {"runtime_configuration": {"vlm_base_url": "http://other-host:8100/v1"}},
+        ]
+    )
+    observed = ObservedSentrixProcess(api_url="http://other-host:8291", http=http)
+    assert observed.running_endpoint() == "http://other-host:8100/v1"
+    outcome = observed.restart(endpoint="http://other-host:8101/v1")
+    assert not outcome.ok and not outcome.restarted
+    assert outcome.reason == "unregistered_product_service"

@@ -40,8 +40,9 @@ export function PhaseList({ activeRun }: PhaseListProps) {
   return (
     <>
       <h3>Pipeline 执行阶段</h3>
+      {activeRun.mode === "build" ? <p>仅构建记忆空间；QA、Judge 和评分有效性不适用。</p> : null}
       <div className="phase-list">
-        {EXECUTION_PHASES.map((phaseDef, index) => {
+        {EXECUTION_PHASES.filter((p) => activeRun.mode !== "build" || p.key !== "qa_eval").map((phaseDef, index) => {
           const phase = activeRun.phases?.[phaseDef.key];
           const errors = phaseErrorDetails(phase);
           const metrics = pipelineMetricRows(phase);
@@ -57,6 +58,16 @@ export function PhaseList({ activeRun }: PhaseListProps) {
                 </span>
               </div>
               <p className="phase-summary">{phaseSummary(phaseDef.key, phase, activeRun.item_count)}</p>
+              {phaseDef.key === "photo_import" && phase?.progress?.current_directory ? (
+                <p className="phase-summary" data-testid="import-waiting">
+                  当前目录：{String(phase.progress.current_directory)}；
+                  已完成目录：{Number(phase.progress.directories_done ?? 0)}/{Number(phase.progress.directories_total ?? 0)}；
+                  等待同步导入响应：{Math.max(0, Math.floor((
+                    (typeof phase.finished_at === "string" ? Date.parse(phase.finished_at) : Date.now()) -
+                    Date.parse(String(phase.progress.request_started_at))
+                  ) / 1000))} 秒（请求返回前无逐媒体进度）
+                </p>
+              ) : null}
               {errors.length > 0 ? (
                 <details className="phase-errors">
                   <summary>{phaseErrorSummary(phase)}</summary>

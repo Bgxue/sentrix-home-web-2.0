@@ -28,6 +28,7 @@ export SENTRIX_VLM_BASE_URL="${SENTRIX_VLM_BASE_URL:-http://127.0.0.1:8100/v1}"
 
 case "$_profile" in
   153)
+    export SENTRIX_DEPLOYMENT_PROFILE="${SENTRIX_DEPLOYMENT_PROFILE:-server}"
     # 153: reserve the device for its local main/embedding models; faces run on CPU.
     export FACE_PROVIDERS="${FACE_PROVIDERS:-CPUExecutionProvider}"
     export RETINAFACE_PROVIDERS="${RETINAFACE_PROVIDERS:-CPUExecutionProvider}"
@@ -35,6 +36,7 @@ case "$_profile" in
     export SENTRIX_WEMM_URL="${SENTRIX_WEMM_URL:-http://127.0.0.1:8102}"
     ;;
   jetson)
+    export SENTRIX_DEPLOYMENT_PROFILE="${SENTRIX_DEPLOYMENT_PROFILE:-server}"
     # 46/118：16–64 GB 统一内存，WeMM 2B 与主模型抢内存；用 1.0 的 legacy 方案。
     export SENTRIX_EMBEDDING_SCHEME="${SENTRIX_EMBEDDING_SCHEME:-legacy}"
     export SENTRIX_LEGACY_CLIP_URL="${SENTRIX_LEGACY_CLIP_URL:-http://127.0.0.1:8103}"
@@ -43,16 +45,21 @@ case "$_profile" in
     export RETINAFACE_PROVIDERS="${RETINAFACE_PROVIDERS:-CPUExecutionProvider}"
     ;;
   mac)
+    export SENTRIX_DEPLOYMENT_PROFILE="${SENTRIX_DEPLOYMENT_PROFILE:-mac}"
     export SENTRIX_EMBEDDING_SCHEME="${SENTRIX_EMBEDDING_SCHEME:-legacy}"
     export SENTRIX_LEGACY_CLIP_URL="${SENTRIX_LEGACY_CLIP_URL:-http://127.0.0.1:8103}"
     export SENTRIX_TEXT_EMBEDDER_URL="${SENTRIX_TEXT_EMBEDDER_URL:-http://127.0.0.1:8101}"
     export FACE_PROVIDERS="${FACE_PROVIDERS:-CPUExecutionProvider}"
     export RETINAFACE_PROVIDERS="${RETINAFACE_PROVIDERS:-CPUExecutionProvider}"
     ;;
-  legacy|*)
+  legacy)
     export SENTRIX_EMBEDDING_SCHEME="${SENTRIX_EMBEDDING_SCHEME:-legacy}"
     export FACE_PROVIDERS="${FACE_PROVIDERS:-CPUExecutionProvider}"
     export RETINAFACE_PROVIDERS="${RETINAFACE_PROVIDERS:-CPUExecutionProvider}"
+    ;;
+  *)
+    printf 'Unknown platform profile: %s\n' "$_profile" >&2
+    return 2 2>/dev/null || exit 2
     ;;
 esac
 

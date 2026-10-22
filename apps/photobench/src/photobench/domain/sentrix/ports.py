@@ -59,6 +59,10 @@ API_PREFIX = "/api/v1"
 class SentrixClient(Protocol):
     """主产品侧的一次评测主链所需的全部调用。"""
 
+    def diagnostics(self, *, timeout: int = 10) -> dict[str, Any]:
+        """Read effective runtime configuration; transport failures propagate."""
+        ...
+
     def seed_person(
         self,
         *,

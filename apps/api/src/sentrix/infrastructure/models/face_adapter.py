@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -195,12 +196,14 @@ class FaceAdapter:
         *,
         model_name: str | None = None,
         model_root: str | None = None,
+        providers: Sequence[str] | None = None,
     ) -> None:
         self._detector = detector if detector is not None else RetinaFaceTiledDetector()
         self._model_name = model_name or os.getenv(MODEL_NAME_ENV) or DEFAULT_MODEL_NAME
         self._model_root = model_root or os.getenv(MODEL_ROOT_ENV) or DEFAULT_MODEL_ROOT
         self._app: Any = None
         self._recognition_session: Any = None
+        self._providers = list(providers) if providers is not None else provider_chain(FACE_PROVIDERS_ENV)
         self._load_lock = threading.Lock()
         self._analysis_lock = threading.Lock()
         self._recognition_lock = threading.Lock()
@@ -417,13 +420,13 @@ class FaceAdapter:
             # onnxruntime 那种 ``(name, options)`` 元组：给元组它直接退化成 CPU，报的是
             # 「Only string values for 'providers' are supported」——一行警告，然后
             # 整条链路在 CPU 上跑，日志里看不出区别。实测踩过。
-            providers=provider_chain(FACE_PROVIDERS_ENV),
-            provider_options=face_onnx_provider_options(FACE_PROVIDERS_ENV),
+            providers=self._providers,
+            provider_options=face_onnx_provider_options(FACE_PROVIDERS_ENV, providers=self._providers),
             allowed_modules=list(ALLOWED_MODULES),
             root=self._model_root,
         )
         det_size = int(os.getenv(DET_SIZE_ENV, str(DEFAULT_DET_SIZE)))
-        use_cuda = CUDA_EXECUTION_PROVIDER in provider_chain(FACE_PROVIDERS_ENV)
+        use_cuda = CUDA_EXECUTION_PROVIDER in self._providers
         analysis.prepare(ctx_id=0 if use_cuda else -1, det_size=(det_size, det_size))
         # 逐个模块读实际链路。``FaceAnalysis`` 自己**没有** ``get_providers``——provider 是
         # 传给每个模型各自的 ``InferenceSession`` 的，退化也发生在那一个个 session 上，所以
@@ -432,7 +435,9 @@ class FaceAdapter:
             session = getattr(model, "session", None)
             if session is None:
                 raise RuntimeError(f"buffalo_l 的 {taskname} 模块没有建出 ONNX session")
-            require_requested_providers(session, FACE_PROVIDERS_ENV, label=f"buffalo_l {taskname}")
+            require_requested_providers(
+                session, FACE_PROVIDERS_ENV, label=f"buffalo_l {taskname}", providers=self._providers
+            )
         return analysis
 
     def _load_buffalo_recognition(self) -> Any:
@@ -447,13 +452,15 @@ class FaceAdapter:
 
             if not Path(self.recognition_path).is_file():
                 return None
-            providers = face_onnx_providers(FACE_PROVIDERS_ENV)
+            providers = face_onnx_providers(FACE_PROVIDERS_ENV, providers=self._providers)
             session = onnxruntime.InferenceSession(
                 self.recognition_path,
                 sess_options=ort_session_options(),
                 providers=providers,
             )
-            require_requested_providers(session, FACE_PROVIDERS_ENV, label="buffalo_l w600k_r50")
+            require_requested_providers(
+                session, FACE_PROVIDERS_ENV, label="buffalo_l w600k_r50", providers=self._providers
+            )
             return session
         except CudaProviderMissingError:
             # 下面那个 ``return None`` 是「权重缺失」的合法降级。退化不是——把它折进 None，

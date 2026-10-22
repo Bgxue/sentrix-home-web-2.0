@@ -76,7 +76,7 @@ full run模型和嵌入拓扑一致时不能再次重启API；源码release内�
   --root <release> --runtime <runtime>
 ```
 
-preflight要求版本一致、完整diagnostics正常、没有活跃孤儿；核对有效产品环境与PhotoBench配置；检查实际本机监听进程，拒绝代理/重定向/远程卸载；分别执行主文本、主视觉、文本嵌入、图像嵌入真实请求并校验向量维度及有效值。核对CPU人脸环境，并在独立进程实际加载本地RetinaFace、SCRFD、ArcFace权重，记录哈希与实际CPU provider。存储使用本机数据路径，不下载权重。Judge采用独立配置，不把密钥写入报告。
+preflight要求版本一致、完整diagnostics正常、没有活跃孤儿；核对有效产品环境与PhotoBench配置；检查实际本机监听进程，拒绝代理/重定向/远程卸载；分别执行主文本、主视觉、文本嵌入、图像嵌入真实请求并校验向量维度及有效值。核对显式人脸provider，在独立进程实际推理本地RetinaFace、SCRFD、ArcFace权重，记录哈希和profile里的实际kernel provider；请求CUDA而实得CPU必须失败，明确CPU合法。存储使用本机数据路径，不下载权重。Judge采用独立配置，不把密钥写入报告。
 
 NX文本8101现为BGE-M3 q8_0 GGUF、llama.cpp pooling=none；产品和独立预检均须实际执行有界协议协商，不能用`/health`200作为编码成功。原生token矩阵使用官方CLS+L2，报告`text_embedding_protocol=llama_cpp_bge_m3_cls_l2`；禁止mean pooling或重启模型规避协议问题。Mac/AGX原Python侧车继续使用`/embed`。
 
@@ -132,3 +132,18 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 测试确认在服务端任务结束前返回不可用；完整采样测试确认每PID仅一次smaps遍历。
 影响范围仅NX/AGX；固定新提交、完整CI后这两机新scope full10QA。3090/Mac继续使用
 9dad22b正式证据及该版本前端产物，不将旧run改标新SHA，版本分别追踪。
+
+
+## 2026-10-22 新轮验证与硬件环境
+
+固定新SHA后四机full10QA；NX/Mac再各执行build→reuse10QA，所有scope独立，目标60条QA终态/有效评分，任务能力失败另报。Mac使用集中mac预设（Agent600、Chat180、QA2、导入86400），显式配置优先，QA0仍表示自动；server保持原预算。保留原run及适用版本，不能改标旧证据。
+
+配置源为runtime_connection.json；白名单product_settings可指定deployment_profile、agent_wall_time_s、chat_timeout_s、face_providers、retinaface_providers。配置API更新仅影响新run，队列和resume保持快照。不同产品URL不授予按同端口杀本机服务的权限，只有登记本机API允许自动重启。
+
+硬件环境先运行当前解释器下的runtime_acceleration_probe.py，保存实际包路径/版本/RECORD哈希、用户site、动态库和真实算子结果。可用`--torch-device cuda|mps|cpu`和`--onnx <本地权重> --provider CUDAExecutionProvider|CPUExecutionProvider`；每个探针有总超时。生产预检逐个人脸权重做实际推理并检查profile kernel provider。
+
+新安装指定全新SENTRIX_INSTALL_VENV；Jetson还必须提供SENTRIX_DEPENDENCY_LOCK完整带哈希锁（含匹配JetPack/Python的原始wheel及SHA256）。安装不覆盖现存环境，pip check后保存runtime-inventory.json与requirements.observed.txt，后者只表示已安装事实，不能单独充当带来源哈希的重建锁。CUDA候选侧车可用自己的Python版本；不能用Python3.10运行要求≥3.11的产品包。
+
+CUDA/cuDNN大版本必须匹配。LD_LIBRARY_PATH只允许候选进程指向已核验匹配的真实库；不能把lib*.so.12软链成.so.13。不要将两个ORT发行包共用命名空间或用户site污染视为正常加速证据；独立环境选择一个实际运行版本，并核验import与kernel。隔离候选未通过前现用服务和模型不切换。
+
+官方依据：https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html 、 https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html 。PyPI ORT≥1.27默认CUDA13，不适合直接套用CUDA12.6 Jetson。已核验的设备事实与候选测试记录另见本轮独立报告。

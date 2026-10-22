@@ -357,6 +357,7 @@ class ConfigService:
             "judge_provider_id": self.judge_provider_id,
             "embedding": self._runtime.get("embedding") or {},
             "product": self._runtime.get("product") or [],
+            "product_settings": dict(self._runtime.get("product_settings") or {}),
         }
 
     def public_config(self) -> dict[str, Any]:
@@ -418,9 +419,11 @@ class ConfigService:
         if not values["judge_model"]:
             raise InvalidRequestError("Judge model is required")
         # 同一份 runtime_connection.json 里保留服务拓扑；遥测/API 都读它。
-        for key in ("embedding", "product"):
+        for key in ("embedding", "product", "product_settings"):
             if key in self._runtime:
                 values[key] = self._runtime[key]
+        if "product_settings" in payload:
+            values["product_settings"] = _validated_product_settings(payload["product_settings"])
         # product 里的 Sentrix API 端口必须跟着 sentrix_url 走，否则页面换地址后
         # 遥测仍按旧端口找进程。
         sentrix_port = _port_of(values["sentrix_url"])
@@ -461,3 +464,39 @@ def _validated_service_url(value: str | None, label: str, *, optional: bool = Fa
     if not parsed.netloc:
         raise InvalidRequestError(f"{label} must be a host:port or HTTP(S) URL")
     return normalized
+
+
+def _validated_product_settings(value: Any) -> dict[str, Any]:
+    """Only non-secret, declared startup settings cross the configuration API."""
+    if not isinstance(value, dict):
+        raise InvalidRequestError("product_settings must be an object")
+    allowed = {
+        "deployment_profile",
+        "agent_wall_time_s",
+        "chat_timeout_s",
+        "face_providers",
+        "retinaface_providers",
+    }
+    if set(value) - allowed:
+        raise InvalidRequestError("unknown product_settings keys")
+    result = dict(value)
+    if "deployment_profile" in result and result["deployment_profile"] not in {"server", "mac"}:
+        raise InvalidRequestError("deployment_profile must be server or mac")
+    for key in ("agent_wall_time_s", "chat_timeout_s"):
+        if key in result:
+            raw = result[key]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 < raw <= 86400:
+                raise InvalidRequestError(f"{key} must be finite and in (0, 86400]")
+    for key in ("face_providers", "retinaface_providers"):
+        if key in result:
+            raw = result[key]
+            if not isinstance(raw, str) or not raw.strip():
+                raise InvalidRequestError(f"{key} must be a nonempty provider chain")
+            chain = [part.strip() for part in raw.split(",")]
+            if any(
+                part not in {"CUDAExecutionProvider", "CPUExecutionProvider", "CoreMLExecutionProvider"}
+                for part in chain
+            ):
+                raise InvalidRequestError(f"unsupported {key}")
+            result[key] = ",".join(chain)
+    return result

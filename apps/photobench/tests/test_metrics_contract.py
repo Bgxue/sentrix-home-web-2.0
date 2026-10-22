@@ -562,3 +562,17 @@ def test_jetson_partial_rollup_keeps_missing_component_unavailable(monkeypatch):
 
     monkeypatch.setattr(builtins, "open", lambda *a, **k: io.StringIO("Rss: 10240 kB\n"))
     assert jetson._process_smaps_memory_mib(42) == (None, 10)
+
+
+def test_per_run_product_url_overrides_stale_product_port_and_remote_is_not_local():
+    from photobench.infrastructure.runtime.telemetry_scope import services_from_connection
+
+    connection = {
+        "sentrix_url": "http://127.0.0.1:8292",
+        "model_base_url": "http://127.0.0.1:8100/v1",
+        "product": [{"id": "sentrix_api", "ports": [8291], "local": True}],
+    }
+    assert services_from_connection(connection)["product"][0]["ports"] == [8292]
+    connection["sentrix_url"] = "http://remote.invalid:8292"
+    product = services_from_connection(connection)["product"][0]
+    assert product["ports"] == [] and product["local"] is False

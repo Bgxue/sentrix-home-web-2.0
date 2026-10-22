@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = Path(
@@ -26,6 +27,11 @@ def main() -> None:
         data = json.loads(PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
+    for name, value in connection_environment(data).items():
+        print(f"export {name}={shlex.quote(value)}")
+
+
+def connection_environment(data: dict[str, Any]) -> dict[str, str]:
     embedding = data.get("embedding") or {}
     exports: dict[str, str] = {}
     if data.get("model_base_url"):
@@ -42,8 +48,12 @@ def main() -> None:
                 exports["SENTRIX_TEXT_EMBEDDER_URL"] = str(embedding["text_url"])
             if embedding.get("image_url"):
                 exports["SENTRIX_LEGACY_CLIP_URL"] = str(embedding["image_url"])
-    for name, value in exports.items():
-        print(f"export {name}={shlex.quote(value)}")
+    for key, value in (data.get("product_settings") or {}).items():
+        if key in {"deployment_profile", "agent_wall_time_s", "chat_timeout_s"}:
+            exports["SENTRIX_" + key.upper()] = str(value)
+        elif key in {"face_providers", "retinaface_providers"}:
+            exports[key.upper()] = str(value)
+    return exports
 
 
 if __name__ == "__main__":

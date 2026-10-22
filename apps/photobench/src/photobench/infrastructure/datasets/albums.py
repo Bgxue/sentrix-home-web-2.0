@@ -170,8 +170,8 @@ class JsonAlbumSource:
         没有它时题目按自己的 ``expected_action`` 走，那也是一份合法的输入。
         """
         album_dir = self._album_dir(album_id)
-        relative_qa = str((manifest.get("qa_sets") or {})[qa_set])
-        entries = ["manifest.json", relative_qa]
+        relative_qa = str((manifest.get("qa_sets") or {})[qa_set]) if qa_set else ""
+        entries = ["manifest.json"] + ([relative_qa] if relative_qa else [])
         entries.extend(
             str(item).strip()
             for key in ("photos", "videos")
@@ -195,7 +195,7 @@ class JsonAlbumSource:
         return {
             "algorithm": "sha256",
             "manifest_sha256": sha256_file(album_dir / "manifest.json"),
-            "qa_sha256": sha256_file(album_dir / relative_qa),
+            "qa_sha256": sha256_file(album_dir / relative_qa) if relative_qa else None,
             "task_action_policy_sha256": sha256_file(self._policy_path)
             if self._policy_path.is_file()
             else None,

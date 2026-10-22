@@ -211,7 +211,7 @@ class SubprocessSentrixProcess:
                 raw = json.loads(self._pid_file.read_text())
                 observed = raw.get("runtime_connection") or {}
                 desired = self._runtime_snapshot.connection()
-                if observed.get("embedding") != desired.get("embedding"):
+                if any(observed.get(key) != desired.get(key) for key in ("embedding", "product_settings")):
                     return ""
             except (OSError, ValueError, AttributeError):
                 return ""
@@ -329,3 +329,27 @@ class SubprocessSentrixProcess:
         if self._runtime_snapshot is not None:
             record["runtime_connection"] = self._runtime_snapshot.connection()
         self._pid_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+
+class ObservedSentrixProcess:
+    """Read an unregistered API's facts; never signal a local PID for its URL."""
+
+    def __init__(self, *, api_url: str, http: JsonHttpClient) -> None:
+        self._url = api_url.rstrip("/")
+        self._http = http
+
+    def running_endpoint(self) -> str:
+        try:
+            payload = self._http.request_json(f"{self._url}/api/v1/diagnostics", timeout=10)
+            return str((payload.get("runtime_configuration") or {}).get("vlm_base_url") or "")
+        except Exception:  # noqa: BLE001 — inability to verify is not permission to restart
+            return ""
+
+    def restart(self, *, endpoint: str, timeout: float = 60) -> RestartOutcome:
+        return RestartOutcome(
+            ok=False,
+            restarted=False,
+            endpoint=endpoint,
+            reason="unregistered_product_service",
+            error="Product URL is not the registered managed API; configure it externally",
+        )

@@ -1421,7 +1421,7 @@ def list_summary(state: dict[str, Any]) -> dict[str, Any]:
     return saved
 
 
-def _run_valid(state: dict[str, Any], items: list[dict[str, Any]]) -> bool:
+def _run_valid(state: dict[str, Any], items: list[dict[str, Any]]) -> bool | None:
     """这一轮**是不是一份可信的结果**。1.0 ``:3816-3830`` 的 ``_compute_run_valid``。
 
     **为什么必须读侧重算。** 2.0 原先只在 ``_phase_qa_eval`` 收尾时写一次
@@ -1432,6 +1432,8 @@ def _run_valid(state: dict[str, Any], items: list[dict[str, Any]]) -> bool:
     判据逐条照 1.0：没有任何 partial/failed 相位、题数齐、每题都执行成功、每题都判过。
     （1.0 还有一条「基础设施未熔断」——2.0 没有熔断器，那条留给以后接守卫时一起加。）
     """
+    if state.get("mode") == "build":
+        return None
     phases = state.get("phases") or {}
     invalid_phase = any(
         str((bucket or {}).get("status") or "").lower() in {"partial", "failed", "stalled"}
@@ -1617,11 +1619,16 @@ def run_list_entry(state: dict[str, Any]) -> dict[str, Any]:
             "run_id",
             "mode",
             "scope_source",
+            "scope_build",
             "scope_id",
             "scope_name",
             "album_id",
             "model_profile",
             "model_name",
+            "model_identity",
+            "execution_budgets",
+            "snapshot_source",
+            "build_revision",
             "model_source",
             "model_backend",
             "qa_set",
@@ -1639,6 +1646,7 @@ def run_list_entry(state: dict[str, Any]) -> dict[str, Any]:
     }
     result["item_count"] = len(state.get("items") or [])
     result["summary"] = {key: summary.get(key) for key in summary_keys if summary.get(key) is not None}
+    result["summary"]["run_valid"] = summary.get("run_valid")
     qa_phase: dict[str, Any] = (state.get("phases") or {}).get("qa_eval") or {}
     if qa_phase:
         result["phases"] = {

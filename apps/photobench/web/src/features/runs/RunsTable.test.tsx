@@ -113,3 +113,8 @@ describe("分页（1.0 :2992-2997）", () => {
     expect(screen.getByText("共 1 条")).not.toBeNull();
   });
 });
+
+it("初始化失败时保留未知题目数，不显示零题", () => {
+  renderTable([run({ status: "failed", qa_count: null })]);
+  expect(screen.getByText("题目数未记录")).toBeTruthy();
+});

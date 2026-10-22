@@ -33,12 +33,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 import httpx
 
+from photobench.domain.errors import RequestOutcomeUnknownError
 from photobench.domain.http.ports import HttpStream
 
 
@@ -94,10 +96,69 @@ class HttpxJsonClient:
     ``urlopen`` 每次新建连接；这不改变任何返回值，只是少几次握手。
     """
 
-    def __init__(self, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        *,
+        retry_connections: bool = False,
+        keep_alive: bool = True,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._client = (
-            client if client is not None else httpx.Client(verify=False, follow_redirects=True, timeout=120)
+            client
+            if client is not None
+            else httpx.Client(
+                verify=False,
+                follow_redirects=True,
+                timeout=120,
+                limits=httpx.Limits(max_keepalive_connections=20 if keep_alive else 0),
+            )
         )
+        self._retry_connections = retry_connections
+        self._sleep = sleep
+        self._clock = clock
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: int = 120,
+    ) -> httpx.Response:
+        """Only connection establishment failures are safe to retry for POST."""
+        deadline = self._clock() + timeout
+        for attempt in range(3):
+            budget = timeout if attempt == 0 else deadline - self._clock()
+            try:
+                return self._client.request(method, url, content=content, headers=headers, timeout=budget)
+            except (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.RemoteProtocolError,
+                httpx.ReadTimeout,
+            ) as exc:
+                safe = method.upper() in {"GET", "HEAD"} or isinstance(
+                    exc, (httpx.ConnectError, httpx.ConnectTimeout)
+                )
+                if self._retry_connections and not safe:
+                    raise RequestOutcomeUnknownError(
+                        method=method, cause_type=type(exc).__name__, attempts=attempt + 1
+                    ) from exc
+                remaining = deadline - self._clock()
+                if (
+                    not self._retry_connections
+                    or not safe
+                    or attempt == 2
+                    or remaining <= (0.2, 0.4, 0)[attempt]
+                ):
+                    raise
+                self._sleep((0.2, 0.4)[attempt])
+        raise AssertionError("bounded retry exhausted")
 
     def request_json(
         self,
@@ -111,7 +172,7 @@ class HttpxJsonClient:
         headers = {"Content-Type": "application/json"}
         headers.update(extra_headers or {})
         try:
-            response = self._client.request(method, url, content=content, headers=headers, timeout=timeout)
+            response = self._request(method, url, content=content, headers=headers, timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             response = exc.response
@@ -123,7 +184,7 @@ class HttpxJsonClient:
     def request_bytes(self, url: str, timeout: int = 120) -> bytes:
         """1.0 ``:799``。**非 2xx 不做文案转换**——1.0 这一段没有 except，``HTTPError``
         原样冒出去；这里保持同一分工，让 ``raise_for_status`` 的异常原样冒。"""
-        response = self._client.get(url, timeout=timeout)
+        response = self._request("GET", url, timeout=timeout)
         response.raise_for_status()
         return response.content
 
@@ -147,8 +208,8 @@ class HttpxJsonClient:
         """
         body, content_type = build_multipart(fields, files)
         try:
-            response = self._client.post(
-                url, content=body, headers={"Content-Type": content_type}, timeout=timeout
+            response = self._request(
+                "POST", url, content=body, headers={"Content-Type": content_type}, timeout=timeout
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

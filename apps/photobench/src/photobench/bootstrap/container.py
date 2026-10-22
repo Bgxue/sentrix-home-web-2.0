@@ -24,17 +24,22 @@
 
 from __future__ import annotations
 
-import json
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from photobench.application.config.service import ConfigService
 from photobench.application.datasets.service import DatasetCatalog
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.model_profiles.service import ModelProfiles
-from photobench.application.run_execution.service import JudgeSettings, RunExecution, RunRequest
+from photobench.application.run_execution.service import (
+    JudgeSettings,
+    RunExecution,
+    RunRequest,
+    freeze_runtime_request,
+)
 from photobench.application.runs.index import RunIndex
 from photobench.application.runs.read_runs import ReadRuns
 from photobench.application.runs.reports import RunReports
@@ -57,7 +62,7 @@ from photobench.infrastructure.config.env import DotenvSecretStore
 from photobench.infrastructure.config.files import JsonConfigStore, read_build_revision
 from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
-from photobench.infrastructure.deploy.sentrix_process import SubprocessSentrixProcess
+from photobench.infrastructure.deploy.sentrix_process import ObservedSentrixProcess, SubprocessSentrixProcess
 from photobench.infrastructure.deploy.systemd_process import SystemdSentrixProcess
 from photobench.infrastructure.http.client import HttpxJsonClient
 from photobench.infrastructure.http.judge_images import inline_judge_images
@@ -201,7 +206,8 @@ class Container:
         album_source: AlbumSource = JsonAlbumSource(
             settings.data_root, settings.config_root / "qa_task_actions.json"
         )
-        http: JsonHttpClient = HttpxJsonClient()
+        http: JsonHttpClient = HttpxJsonClient(retry_connections=True, keep_alive=False)
+        judge_http: JsonHttpClient = HttpxJsonClient()
         sentrix: SentrixClient = HttpxSentrixClient(http, lambda: config.sentrix_url)
         result_writer: RunResultWriter = FileResultWriter(settings.results_root)
 
@@ -216,6 +222,20 @@ class Container:
         # 看不见这个分叉。
         def sentrix_process_for_run(snapshot: RunRuntimeSnapshot | None = None) -> SentrixProcess:
             api_url = str(snapshot.connection()["sentrix_url"]) if snapshot else settings.sentrix_api_url
+            requested = urlparse(api_url)
+            registered = urlparse(settings.sentrix_api_url)
+            local = {"localhost", "127.0.0.1", "::1"}
+            same_host = requested.hostname == registered.hostname or (
+                requested.hostname in local and registered.hostname in local
+            )
+            if not (
+                same_host
+                and requested.hostname in local
+                and registered.hostname in local
+                and requested.port == registered.port
+                and requested.scheme == registered.scheme
+            ):
+                return ObservedSentrixProcess(api_url=api_url, http=http)
             return (
                 SystemdSentrixProcess(
                     api_url=api_url,
@@ -245,25 +265,12 @@ class Container:
             （``runtime_providers``），judge 要按请求里的覆盖项装配。**取消回收模型**
             也走这条装配出来的生命周期提供者。
             """
-            connection = config.public_runtime_connection_config()
-            connection = {
-                key: connection.get(key)
-                for key in (
-                    "sentrix_url",
-                    "model_base_url",
-                    "vllm_manager_url",
-                    "endpoint_model",
-                    "embedding",
-                    "product",
+            if request.runtime_snapshot is None:
+                request = freeze_runtime_request(
+                    request, config.public_runtime_connection_config(), build_revision
                 )
-            }
-            connection.update(
-                sentrix_url=request.sentrix_url,
-                model_base_url=request.model_base_url or config.model_base_url,
-                vllm_manager_url=request.manager_url,
-                runtime_framework=request.runtime_framework,
-            )
-            snapshot = request.runtime_snapshot or RunRuntimeSnapshot(json.dumps(connection), build_revision)
+            snapshot = request.runtime_snapshot
+            assert snapshot is not None
             providers = runtime_providers_for_run(snapshot)
             run_client: SentrixClient = HttpxSentrixClient(
                 http, lambda: str(snapshot.connection()["sentrix_url"])
@@ -284,7 +291,7 @@ class Container:
                 lifecycle=providers.lifecycle,
                 inference=providers.inference,
                 telemetry=providers.telemetry,
-                http=http,
+                http=judge_http,
                 judge_settings=judge,
                 telemetry_source=providers.source,
                 inline_images=judge_images,
@@ -299,10 +306,12 @@ class Container:
             store=run_store,
             writer=result_writer,
             index=run_index,
+            build_revision=build_revision,
+            budget_defaults=settings.budget_defaults(),
             albums=album_source,
             config=config,
             sentrix=sentrix,
-            http=http,
+            http=judge_http,
             new_execution=run_execution,
             lifecycle_for=lifecycle_provider,
             manager_telemetry_for=manager_telemetry,

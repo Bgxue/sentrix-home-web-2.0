@@ -864,3 +864,12 @@ process_memory又对同PID读完整PSS/RSS；设备探针不再重复遍历smaps
 测试确认在服务端任务结束前返回不可用；完整采样测试确认每PID仅一次smaps遍历。
 影响范围仅NX/AGX；固定新提交、完整CI后这两机新scope full10QA。3090/Mac继续使用
 9dad22b正式证据及该版本前端产物，不将旧run改标新SHA，版本分别追踪。
+
+
+## 2026-10-22 PhotoBench运行/构建基线
+
+- full/build/reuse 创建队列前冻结快照，reuse不得绕过产品配置同步；resume继承原依赖/预算，标注来源。
+- build 不依赖QA/Judge，0题和评分未适用；构建完整性与scope嵌入配置独立记录，不复用不完整/已变更索引。
+- Sentrix安全HTTP重试有总预算且不重放不确定POST；Judge策略独立。排队取消在execute前保留，后续run不可逃过取消。
+- Mac集中profile缺省600/180秒、QA2、导入86400秒，显式覆盖及QA0语义保留；provider从Settings注入，不静默CPU回退。
+- 模型名记录原始端点ID，Qwen3.5不截断，未记录不以__current__伪装名称；导入等待展示不假造媒体进度。

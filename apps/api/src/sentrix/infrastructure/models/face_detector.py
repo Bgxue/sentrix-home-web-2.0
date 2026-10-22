@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -224,7 +225,8 @@ class RetinaFaceTiledDetector:
     重建一次会让导入路径的时间全花在加载上。
     """
 
-    def __init__(self, model_path: str | None = None) -> None:
+    def __init__(self, model_path: str | None = None, *, providers: Sequence[str] | None = None) -> None:
+        self._providers = list(providers) if providers is not None else None
         self.model_path = os.getenv("RETINAFACE_MODEL_PATH", "") or model_path or DEFAULT_MODEL_PATH
         self._session: Any = None
         self._input_name = ""
@@ -244,7 +246,7 @@ class RetinaFaceTiledDetector:
                 try:
                     import onnxruntime
 
-                    providers = face_onnx_providers(RETINAFACE_PROVIDERS_ENV)
+                    providers = face_onnx_providers(RETINAFACE_PROVIDERS_ENV, providers=self._providers)
                     session = onnxruntime.InferenceSession(
                         self.model_path,
                         sess_options=ort_session_options(),
@@ -256,7 +258,9 @@ class RetinaFaceTiledDetector:
                     #
                     # ``self._session`` **过完守卫才赋值**：先赋值的话，抛错之后它已经非空，
                     # 下一次 ``_load`` 在这里就 return 了——硬报错只响一次，之后静默降级。
-                    require_requested_providers(session, RETINAFACE_PROVIDERS_ENV, label="RetinaFace 检测")
+                    require_requested_providers(
+                        session, RETINAFACE_PROVIDERS_ENV, label="RetinaFace 检测", providers=self._providers
+                    )
                     self._input_name = str(session.get_inputs()[0].name)
                     self._session = session
                 except Exception as error:  # 权重缺失/损坏：记下来，由调用方决定降级

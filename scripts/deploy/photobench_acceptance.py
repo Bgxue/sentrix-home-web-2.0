@@ -323,8 +323,11 @@ def check_device_freshness(sample: dict[str, Any]) -> list[str]:
 
 
 def face_weights(effective: dict[str, str]) -> list[dict[str, Any]]:
+    chains = {}
     for key in ("FACE_PROVIDERS", "RETINAFACE_PROVIDERS"):
-        require(effective.get(key) == "CPUExecutionProvider", f"CPU face policy not effective: {key}")
+        chain = [part.strip() for part in effective.get(key, "").split(",") if part.strip()]
+        require(bool(chain), f"Explicit face provider chain missing: {key}")
+        chains[key] = chain[0]
     home = Path(effective.get("HOME", str(Path.home())))
     model_dir = (
         Path(effective.get("FACE_MODEL_ROOT", str(home / ".insightface")))
@@ -336,25 +339,32 @@ def face_weights(effective: dict[str, str]) -> list[dict[str, Any]]:
         model_dir / "det_10g.onnx",
         model_dir / "w600k_r50.onnx",
     ]
-    # Load local ONNX files on CPU in an isolated process; no download path is used.
-    program = """import json,sys,onnxruntime as ort
-options=ort.SessionOptions();options.intra_op_num_threads=1;options.inter_op_num_threads=1
-for path in sys.argv[1:]:
- session=ort.InferenceSession(path,sess_options=options,providers=['CPUExecutionProvider'])
- assert session.get_providers()==['CPUExecutionProvider'], path
-print(json.dumps({'provider':'CPUExecutionProvider','loaded':len(sys.argv)-1}))
+    # Execute real local weights with profiling in a bounded child. Available EP names alone
+    # do not prove acceleration; requesting CUDA then executing only CPU must fail.
+    program = """import json,sys
+from pathlib import Path
+from scripts.deploy.runtime_acceleration_probe import onnx_inference
+specs=json.loads(sys.argv[1])
+print(json.dumps([onnx_inference(Path(path),provider) for path,provider in specs]))
 """
     for path in paths:
         require(path.is_file() and path.stat().st_size > 0, f"Missing local face weight: {path}")
+    specs = [
+        (str(path), chains["RETINAFACE_PROVIDERS" if i == 0 else "FACE_PROVIDERS"])
+        for i, path in enumerate(paths)
+    ]
     env = {**os.environ, **effective}
-    subprocess.run(
-        [sys.executable, "-c", program, *(str(path) for path in paths)],
+    process = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(specs)],
         env=env,
         check=True,
         capture_output=True,
-        timeout=90,
+        text=True,
+        timeout=180,
+        cwd=Path(__file__).resolve().parents[2],
     )
-    return [{"path": str(path), "sha256": digest(path), "provider": "CPUExecutionProvider"} for path in paths]
+    result: list[dict[str, Any]] = json.loads(process.stdout)
+    return result
 
 
 def preflight(root: Path, runtime: Path) -> dict[str, Any]:
@@ -366,7 +376,7 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
     require(diagnostics.get("status") == "ok", f"Degraded product dependency: {diagnostics}")
     require(diagnostics.get("build_revision") == revision, "Product revision mismatch")
     require(config.get("build_revision") == revision, "PhotoBench revision mismatch")
-    for key in ("sentrix_url", "model_base_url", "embedding", "product"):
+    for key in ("sentrix_url", "model_base_url", "embedding", "product", "product_settings"):
         require(
             (config.get("runtime_config") or {}).get(key) == connection.get(key),
             f"Effective PhotoBench configuration differs: {key}",
@@ -463,7 +473,8 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
         "revision": revision,
         "diagnostics": diagnostics,
         "connection": {
-            key: connection.get(key) for key in ("sentrix_url", "model_base_url", "embedding", "product")
+            key: connection.get(key)
+            for key in ("sentrix_url", "model_base_url", "embedding", "product", "product_settings")
         },
         "services": services,
         "models": model_list,
@@ -479,7 +490,7 @@ def preflight(root: Path, runtime: Path) -> dict[str, Any]:
     return report
 
 
-def run(runtime: Path) -> dict[str, Any]:
+def run(runtime: Path, *, mode: str = "full", scope_id: str = "") -> dict[str, Any]:
     preflight_report = read_json(runtime / "preflight.json")
     require(time.time() - preflight_report["checked_at_epoch"] < 900, "Preflight is older than 15 minutes")
     if (runtime / "run-request.json").exists():
@@ -489,16 +500,17 @@ def run(runtime: Path) -> dict[str, Any]:
     connection = preflight_report["connection"]
     request = {
         "album_id": "album3-14",
-        "qa_set": "compact-10q",
-        "mode": "full",
+        "qa_set": "" if mode == "build" else "compact-10q",
+        "mode": mode,
         "models": ["__current__"],
         "model_base_url": connection["model_base_url"],
         "sentrix_url": "http://127.0.0.1:8291",
         "runtime_framework": "llama_cpp",
-        "qa_concurrency": 1,
         "turn_timeout": 900,
-        "import_timeout": 14400,
     }
+    if mode == "reuse":
+        require(bool(scope_id), "reuse requires an existing scope")
+        request["existing_scope_id"] = scope_id
     write_json(runtime / "run-request.json", request)
     response = http("http://127.0.0.1:8872/api/v1/runs", request)
     write_json(runtime / "run-response.json", response)
@@ -658,24 +670,31 @@ def audit(runtime: Path) -> dict[str, Any]:
     samples = [json.loads(line) for line in lines if line]
     chain_errors: list[str] = []
     metric_errors: list[str] = check_statistics(samples, saved, api)
-    for phase in (
-        "model_deploy",
-        "scope_setup",
-        "identity_seed",
-        "photo_import",
-        "pipeline_processing",
-        "qa_eval",
-        "gpu_metrics",
-        "aggregate",
-    ):
+    mode = saved.get("mode", "full")
+    required_phases = ["model_deploy", "scope_setup", "gpu_metrics", "aggregate"]
+    if mode != "reuse":
+        required_phases += ["identity_seed", "photo_import", "pipeline_processing"]
+    if mode != "build":
+        required_phases.append("qa_eval")
+    for phase in required_phases:
         status = ((saved.get("phases") or {}).get(phase) or {}).get("status")
         if status != "done" and not (phase == "qa_eval" and status == "partial"):
             chain_errors.append(f"required_phase_not_done:{phase}")
-    if saved.get("status") != "completed" or len(items) != 10:
-        chain_errors.append("run_not_completed_with_10_items")
+    expected_items = 0 if mode == "build" else 10
+    if saved.get("status") not in {"completed", "completed_with_errors"} or len(items) != expected_items:
+        chain_errors.append(f"run_not_terminal_with_{expected_items}_items")
+    if mode == "build":
+        if (
+            saved.get("qa_count") != 0
+            or saved.get("run_valid") is not None
+            or api.get("summary", {}).get("run_valid") is not None
+        ):
+            metric_errors.append("build_qa_or_validity_not_applicable_contract")
+        if (saved.get("scope_build") or {}).get("status") != "ready":
+            chain_errors.append("scope_build_incomplete")
     if saved.get("build_revision") != pre["revision"] or api.get("build_revision") != pre["revision"]:
         metric_errors.append("revision_mismatch")
-    tasks = assess_tasks(items)
+    tasks = assess_tasks(items, expected_count=expected_items)
     chain_errors.extend(tasks["service_errors"])
     scores: list[float] = []
     missing_scores = []
@@ -704,7 +723,14 @@ def audit(runtime: Path) -> dict[str, Any]:
                 normalizations.append({"index": index, "fact": fact})
     infrastructure_errors: list[str] = []
     phase_report: dict[str, Any] = {}
-    for phase in ("photo_import", "pipeline_processing", "qa_eval"):
+    observed_phases = (
+        ["qa_eval"]
+        if mode == "reuse"
+        else ["photo_import", "pipeline_processing"]
+        if mode == "build"
+        else ["photo_import", "pipeline_processing", "qa_eval"]
+    )
+    for phase in observed_phases:
         points = [s for s in samples if s.get("phase") == phase]
         core = [
             s
@@ -833,12 +859,14 @@ def audit(runtime: Path) -> dict[str, Any]:
     report = {
         "run_id": run_id,
         "revision": pre["revision"],
-        "acceptance_rule_version": 2,
+        "acceptance_rule_version": 3,
+        "mode": mode,
         "service_pass": not chain_errors,
-        "scoring_complete": len(scores) == 10,
+        "scoring_complete": None if mode == "build" else len(scores) == expected_items,
         "scoring": {
             "valid": len(scores),
-            "expected": 10,
+            "expected": expected_items,
+            "applicable": mode != "build",
             "missing": missing_scores,
             "standardized_responses": normalizations,
         },
@@ -867,11 +895,13 @@ def main() -> None:
     parser.add_argument("action", choices=["preflight", "run", "audit"])
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--mode", choices=["full", "build", "reuse"], default="full")
+    parser.add_argument("--scope-id", default="")
     args = parser.parse_args()
     if args.action == "preflight":
         report = preflight(args.root.resolve(), args.runtime.resolve())
     elif args.action == "run":
-        report = run(args.runtime.resolve())
+        report = run(args.runtime.resolve(), mode=args.mode, scope_id=args.scope_id)
     else:
         report = audit(args.runtime.resolve())
     print(json.dumps(report, ensure_ascii=False))

@@ -155,7 +155,10 @@ class SystemdSentrixProcess:
             config_root = _environment_value(fields.get("Environment", ""), "PHOTOBENCH_CONFIG_ROOT")
             try:
                 observed = json.loads((Path(config_root) / "runtime_connection.json").read_text())
-                if observed.get("embedding") != self._runtime_snapshot.connection().get("embedding"):
+                if any(
+                    observed.get(key) != self._runtime_snapshot.connection().get(key)
+                    for key in ("embedding", "product_settings")
+                ):
                     return ""
             except (OSError, ValueError, AttributeError):
                 return ""

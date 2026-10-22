@@ -34,7 +34,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -49,6 +49,7 @@ from photobench.application.run_execution.service import (
     JudgeSettings,
     RunExecution,
     RunRequest,
+    freeze_runtime_request,
 )
 from photobench.application.runs.index import RunIndex
 from photobench.domain.datasets.ports import AlbumSource
@@ -58,7 +59,7 @@ from photobench.domain.results.ports import RunResultWriter, RunStore
 from photobench.domain.runs import analysis
 from photobench.domain.runs.analysis import now_iso
 from photobench.domain.runs.execution import safe_slug
-from photobench.domain.runtime.ports import LifecycleProvider, TelemetryProvider
+from photobench.domain.runtime.ports import LifecycleProvider, RunRuntimeSnapshot, TelemetryProvider
 from photobench.domain.sentrix.ports import SentrixClient
 
 #: 2.0 支持的模式。``build`` 仍不在其中（只导入不问答，尚无调用方要它）。
@@ -68,7 +69,7 @@ from photobench.domain.sentrix.ports import SentrixClient
 #: 在库里留下一个 scope（``_default_scope_id`` 生成的名字同时是 id），
 #: ``GET /api/v1/memory-spaces`` 的 ``reuse_bases`` 一直在列它们、前端 ``useReuseMode``
 #: 也一直在让用户选——**只有写侧不接**。代价是一轮评测必须重跑 66 分钟的导入。
-RUN_MODES = ("full", "reuse")
+RUN_MODES = ("full", "reuse", "build")
 
 #: 1.0 ``:2043`` 的 ``dirty_statuses``。
 DIRTY_STATUSES = {"running", "pending", "cancelling"}
@@ -102,9 +103,13 @@ class RunSuites:
         lifecycle_for: Callable[[str], LifecycleProvider],
         manager_telemetry_for: Callable[[str], TelemetryProvider],
         detect_framework: Callable[[str, str], str],
+        build_revision: str = "development",
+        budget_defaults: Mapping[str, Any] | None = None,
         inline_images: InlineImages | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._build_revision = build_revision
+        self._budget_defaults = dict(budget_defaults or {})
         self._store = store
         self._writer = writer
         self._index = index
@@ -133,12 +138,12 @@ class RunSuites:
         return [
             rid
             for rid, run in self._active.items()
-            if (run.state is not None and run.state.get("status") in DIRTY_STATUSES)
+            if run.state is None or run.state.get("status") in DIRTY_STATUSES
         ]
 
     def _require_inactive(self) -> None:
         busy = self._active_ids()
-        if busy:
+        if busy or any(thread.is_alive() for thread in self._threads.values()):
             raise InvalidRequestError(f"another benchmark suite is still active: {', '.join(busy)}")
 
     def _state_if_exists(self, run_id: str) -> dict[str, Any] | None:
@@ -179,9 +184,15 @@ class RunSuites:
             manifest = self._albums.manifest(album_id)
         except KeyError as exc:
             raise InvalidRequestError(f"manifest not found for album: {album_id}") from exc
-        qa_set = str(payload.get("qa_set") or next(iter(manifest.get("qa_sets") or {}), ""))
-        if not qa_set:
+        qa_set = (
+            ""
+            if mode == "build"
+            else str(payload.get("qa_set") or next(iter(manifest.get("qa_sets") or {}), ""))
+        )
+        if not qa_set and mode != "build":
             raise InvalidRequestError(f"album {album_id} has no qa_sets in manifest")
+        if mode != "build" and qa_set not in (manifest.get("qa_sets") or {}):
+            raise InvalidRequestError(f"unknown qa_set for album {album_id}: {qa_set}")
         models = payload.get("models", [])
         if not isinstance(models, list) or not models:
             raise InvalidRequestError("models must contain at least one model")
@@ -195,7 +206,7 @@ class RunSuites:
             # 同一条兜底）——但**不**替调用方填 Manager：那是「要不要管模型」的决定。
             model_base_url = self._config.model_base_url
         sentrix_url = str(payload.get("sentrix_url") or self._config.sentrix_url)
-        judge = self._judge_settings(payload)
+        judge = JudgeSettings() if mode == "build" else self._judge_settings(payload)
         self._require_inactive()
         deps = _SuiteDeps(
             sentrix_url=sentrix_url,
@@ -207,7 +218,30 @@ class RunSuites:
         suite_id = f"suite-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
         created: list[str] = []
         requests: dict[str, RunRequest] = {}
+        connection = self._config.public_runtime_connection_config()
+        connection["product_settings"] = connection.get("product_settings") or dict(
+            self._budget_defaults.get("product_settings", {})
+        )
+        if mode == "reuse":
+            builds = [
+                entry.get("scope_build")
+                for entry in self._index.entries()
+                if entry.get("scope_id") == existing_scope_id and entry.get("scope_build")
+            ]
+            for build in builds:
+                if not isinstance(build, dict):
+                    continue
+                if build.get("status") != "ready":
+                    raise InvalidRequestError("selected scope has an incomplete build")
+                if build.get("embedding") is not None and build["embedding"] != connection.get("embedding"):
+                    raise InvalidRequestError(
+                        "embedding configuration changed; build a new scope before reuse"
+                    )
+        if payload.get("endpoint_model"):
+            connection["endpoint_model"] = str(payload["endpoint_model"])
+            connection["model_base_url"] = model_base_url
         with self._lock:
+            self._require_inactive()
             for model in models:
                 run_id = (
                     f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{safe_slug(album_id)}-"
@@ -222,10 +256,14 @@ class RunSuites:
                     model_base_url=deps.model_base_url,
                     run_id=run_id,
                     mode=mode,
-                    qa_concurrency=int(payload.get("qa_concurrency") or 0),
+                    qa_concurrency=int(
+                        payload.get("qa_concurrency", self._budget_defaults.get("qa_concurrency", 0))
+                    ),
                     turn_timeout=int(payload.get("turn_timeout") or 900),
                     # 整册导入在 Mac/CPU 上可能远超默认 2h；允许按 run 放宽客户端超时。
-                    import_timeout=int(payload.get("import_timeout") or 0) or 7200,
+                    import_timeout=int(
+                        payload.get("import_timeout") or self._budget_defaults.get("import_timeout") or 7200
+                    ),
                     # reuse 才传；full 留空让 ``execute`` 走 ``_default_scope_id``。
                     scope_id=existing_scope_id,
                     runtime_framework=deps.runtime_framework,
@@ -239,6 +277,7 @@ class RunSuites:
                     },
                     evidence_judge_enabled=deps.judge.evidence_enabled,
                 )
+                request = freeze_runtime_request(request, connection, self._build_revision)
                 requests[run_id] = request
                 self._active[run_id] = self._new_execution(request)
                 created.append(run_id)
@@ -335,6 +374,37 @@ class RunSuites:
             judge_model=str(saved.get("judge_model") or ""),
             prior_items=prior_items,
         )
+        prior_snapshot = saved.get("runtime_snapshot")
+        if (
+            isinstance(prior_snapshot, dict)
+            and prior_snapshot.get("model_base_url")
+            and prior_snapshot.get("sentrix_url")
+        ):
+            budgets = prior_snapshot.get("execution_budgets") or {}
+            # A resumed run is a new execution/build, with the original dependency/budget facts.
+            inherited = dict(
+                prior_snapshot,
+                required_build_revision=self._build_revision
+                if self._build_revision != "development"
+                else None,
+            )
+            request = replace(
+                request,
+                sentrix_url=str(inherited["sentrix_url"]),
+                model_base_url=str(inherited["model_base_url"]),
+                manager_url=str(inherited.get("vllm_manager_url") or ""),
+                import_timeout=int(budgets.get("import_timeout") or 7200),
+                turn_timeout=int(budgets.get("turn_timeout") or 900),
+                qa_concurrency=int(budgets.get("qa_concurrency") or 0),
+                runtime_snapshot=RunRuntimeSnapshot(json.dumps(inherited), self._build_revision),
+                snapshot_source="resumed_run",
+            )
+        else:
+            request = freeze_runtime_request(
+                replace(request, snapshot_source="legacy_resume_current_config"),
+                self._config.public_runtime_connection_config(),
+                self._build_revision,
+            )
         with self._lock:
             self._active[new_run_id] = self._new_execution(request)
 
@@ -368,6 +438,9 @@ class RunSuites:
         """``POST /api/runs/{id}/cancel``（1.0 ``cancel_run`` ``:6879``）。"""
         with self._lock:
             execution = self._active.get(run_id)
+            if execution is not None and execution.state is None:
+                execution.cancel(source="run_api")
+                return {"cancelled": True, "run_id": run_id}
             if execution is not None and execution.state is not None:
                 status = execution.state.get("status")
                 if status in DIRTY_STATUSES:
@@ -390,7 +463,7 @@ class RunSuites:
             targets = list(self._active.items())
         for run_id, execution in targets:
             state = execution.state
-            if state is not None and state.get("status") in DIRTY_STATUSES:
+            if state is None or state.get("status") in DIRTY_STATUSES:
                 execution.cancel(source="cancel_all")
                 cancelled.append(run_id)
             else:

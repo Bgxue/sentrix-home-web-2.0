@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from photobench.api.deps import get_container, json_body
+from photobench.api.metrics_schema import RuntimeConfigResponse
 from photobench.domain.errors import InvalidRequestError
 from photobench.domain.runs.judge import JUDGE_PROMPT_KINDS
 
@@ -26,7 +27,7 @@ router = APIRouter(tags=["config"])
 MAX_JUDGE_PROMPT_LENGTH = 50000
 
 
-@router.get("/config")
+@router.get("/config", response_model=RuntimeConfigResponse, response_model_exclude_unset=True)
 def get_config(request: Request) -> dict[str, Any]:
     """1.0 ``:7536``。"""
     container = get_container(request)
@@ -37,7 +38,7 @@ def get_config(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/config")
+@router.post("/config", response_model=RuntimeConfigResponse, response_model_exclude_unset=True)
 async def save_config(request: Request) -> dict[str, Any]:
     """1.0 ``:7822``：落非密钥的连接参数；带 ``judge_api_key`` 时同时写 ``.env.local``。
 

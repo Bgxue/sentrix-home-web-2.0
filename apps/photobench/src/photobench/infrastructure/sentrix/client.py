@@ -54,6 +54,10 @@ class HttpxSentrixClient:
     def _url(self, path: str) -> str:
         return f"{self._base_url().rstrip('/')}{API_PREFIX}{path}"
 
+    def diagnostics(self, *, timeout: int = 10) -> dict[str, Any]:
+        body: dict[str, Any] = self._http.request_json(self._url("/diagnostics"), timeout=timeout)
+        return body
+
     def seed_person(
         self,
         *,

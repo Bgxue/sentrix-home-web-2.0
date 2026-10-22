@@ -38,7 +38,7 @@ export interface RetrievalMetric {
  * 4 个点取 p95 → `ceil(3.8)-1 = 3` → 最大值，而非线性插值的 38.5。
  */
 export function nearestRankPercentile(values: readonly unknown[], percentile: number): number | null {
-  const valid = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value)).sort((a, b) => a - b);
   if (!valid.length) return null;
   return valid[Math.max(0, Math.min(valid.length - 1, Math.ceil(valid.length * percentile) - 1))];
 }
@@ -120,6 +120,7 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const contextTokens = callTokenCounts.map((call) => call.context);
   return {
     ...saved,
+    run_valid: run?.mode === "build" ? null : saved.run_valid,
     completed: saved.completed ?? items.length,
     total: saved.total ?? run?.qa_count ?? items.length,
     judge_valid_count: saved.judge_valid_count ?? judged.length,

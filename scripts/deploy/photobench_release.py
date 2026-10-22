@@ -16,12 +16,16 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 from urllib.request import ProxyHandler, build_opener
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.deploy.runtime_connection_env import connection_environment  # noqa: E402
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -143,7 +147,13 @@ def wait_ready(revision: str | None, timeout: float = 180) -> None:
     raise RuntimeError(f"New stack did not become ready: {last_error}")
 
 
-def activate(root: Path, previous: Path, runtime: Path, local_model_url: str | None = None) -> None:
+def activate(
+    root: Path,
+    previous: Path,
+    runtime: Path,
+    local_model_url: str | None = None,
+    venv_override: Path | None = None,
+) -> None:
     manifest = verify(root)
     runtime.mkdir(parents=True, exist_ok=True)
     binding_path = runtime / "bindings.json"
@@ -220,7 +230,21 @@ def activate(root: Path, previous: Path, runtime: Path, local_model_url: str | N
         for path in target_config.rglob("*"):
             if path.is_file():
                 path.chmod(0o600)
+    if venv_override is not None:
+        bindings["previous_venv"] = bindings["venv"]
+        bindings["venv"] = str(venv_override.resolve())
+        write_json(binding_path, bindings)
     launch(root, runtime, bindings, manifest["revision"])
+
+
+def pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | None) -> None:
@@ -231,9 +255,83 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
         ("apps/photobench/results", bindings["results"]),
     ):
         target = root / relative
+        if target.is_symlink() and target.resolve() != Path(source).resolve():
+            target.unlink()
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.symlink_to(source, target_is_directory=True)
+    source_path = os.pathsep.join([str(root / "apps/api/src"), str(root / "apps/photobench/src")])
+    environments: dict[str, dict[str, str]] = {}
+    for role in ("api", "photobench"):
+        env = dict(bindings["environments"][role])
+        env.update(
+            PYTHONPATH=source_path,
+            PHOTOBENCH_CONFIG_ROOT=bindings["config"],
+            SENTRIX_DATA_DIR=bindings["data"],
+            PHOTOBENCH_DATA_ROOT=bindings["datasets"],
+            PHOTOBENCH_RESULTS_ROOT=bindings["results"],
+            HF_HUB_OFFLINE="1",
+            TRANSFORMERS_OFFLINE="1",
+            SENTRIX_WEB_DIST_DIR=str(root / "apps/web/dist"),
+            PHOTOBENCH_WEB_DIST_ROOT=str(root / "apps/photobench/web/dist"),
+            SENTRIX_API_PORT="8291",
+            PHOTOBENCH_PORT="8872",
+            PHOTOBENCH_SENTRIX_API_URL="http://127.0.0.1:8291",
+            PHOTOBENCH_SENTRIX_REPO_ROOT=str(root),
+            PHOTOBENCH_SENTRIX_START_COMMAND=f"bash {root}/scripts/deploy/start_api.sh auto",
+            PHOTOBENCH_SENTRIX_PID_FILE=str(runtime / "sentrix-process.json"),
+            PHOTOBENCH_SENTRIX_LOG_PATH=str(runtime / "api.log"),
+        )
+        env.setdefault("FACE_PROVIDERS", "CPUExecutionProvider")
+        env.setdefault("RETINAFACE_PROVIDERS", "CPUExecutionProvider")
+        env.setdefault("SENTRIX_DEPLOYMENT_PROFILE", "mac" if sys.platform == "darwin" else "server")
+        connection = read_json(Path(bindings["config"]) / "runtime_connection.json")
+        env.update(
+            BENCH_SENTRIX_URL=connection["sentrix_url"],
+            BENCH_VLLM_BASE_URL=connection["model_base_url"],
+            BENCH_VLLM_API_URL="",
+        )
+        env.update(connection_environment(connection))
+        model_host = urlparse(connection["model_base_url"]).hostname
+        local_hosts = ["127.0.0.1", "localhost", "::1"]
+        if model_host and model_host not in local_hosts:
+            local_hosts.append(model_host)
+        env["NO_PROXY"] = env["no_proxy"] = ",".join(local_hosts)
+        check = json.loads(
+            subprocess.check_output(
+                [
+                    str(root / ".venv/bin/python"),
+                    "-c",
+                    "import json,sys,sentrix,photobench; from sentrix.config import Settings; "
+                    "print(json.dumps({'paths':[sentrix.__file__,photobench.__file__],"
+                    "'python':list(sys.version_info[:2]),'runtime':Settings().runtime_configuration()}))",
+                ],
+                env=env,
+                cwd=root,
+                text=True,
+            )
+        )
+        paths = check["paths"]
+        if (
+            check["python"] < [3, 11]
+            or len(paths) != 2
+            or any(not str(Path(path)).startswith(str(root) + "/") for path in paths)
+        ):
+            raise RuntimeError(f"Interpreter/version/imports do not match this release: {check}")
+        if role == "api":
+            effective = check["runtime"]
+            connection["product_settings"] = {
+                key: effective[key]
+                for key in (
+                    "deployment_profile",
+                    "agent_wall_time_s",
+                    "chat_timeout_s",
+                    "face_providers",
+                    "retinaface_providers",
+                )
+            }
+            write_json(Path(bindings["config"]) / "runtime_connection.json", connection)
+        environments[role] = env
     # Validate both listeners before stopping either, so a failed check leaves the stack running.
     targets = []
     for port in (8872, 8291):
@@ -255,57 +353,14 @@ def launch(root: Path, runtime: Path, bindings: dict[str, Any], revision: str | 
             raise RuntimeError(f"Listener {port} changed during deployment")
         os.kill(pid, signal.SIGTERM)
         for _ in range(60):
-            if listener(port) is None:
+            if listener(port) is None and not pid_exists(pid):
                 break
             time.sleep(0.5)
         else:
             raise RuntimeError(f"Listener {port} did not stop gracefully")
-    source_path = os.pathsep.join([str(root / "apps/api/src"), str(root / "apps/photobench/src")])
     for role, port in (("api", 8291), ("photobench", 8872)):
-        env = dict(bindings["environments"][role])
-        env.update(
-            PYTHONPATH=source_path,
-            PHOTOBENCH_CONFIG_ROOT=bindings["config"],
-            SENTRIX_DATA_DIR=bindings["data"],
-            PHOTOBENCH_DATA_ROOT=bindings["datasets"],
-            PHOTOBENCH_RESULTS_ROOT=bindings["results"],
-            HF_HUB_OFFLINE="1",
-            TRANSFORMERS_OFFLINE="1",
-            SENTRIX_WEB_DIST_DIR=str(root / "apps/web/dist"),
-            PHOTOBENCH_WEB_DIST_ROOT=str(root / "apps/photobench/web/dist"),
-            SENTRIX_API_PORT="8291",
-            PHOTOBENCH_PORT="8872",
-            PHOTOBENCH_SENTRIX_API_URL="http://127.0.0.1:8291",
-            PHOTOBENCH_SENTRIX_REPO_ROOT=str(root),
-            PHOTOBENCH_SENTRIX_START_COMMAND=f"bash {root}/scripts/deploy/start_api.sh auto",
-            PHOTOBENCH_SENTRIX_PID_FILE=str(runtime / "sentrix-process.json"),
-            PHOTOBENCH_SENTRIX_LOG_PATH=str(runtime / "api.log"),
-            FACE_PROVIDERS="CPUExecutionProvider",
-            RETINAFACE_PROVIDERS="CPUExecutionProvider",
-        )
+        env = environments[role]
         connection = read_json(Path(bindings["config"]) / "runtime_connection.json")
-        env.update(
-            BENCH_SENTRIX_URL=connection["sentrix_url"],
-            BENCH_VLLM_BASE_URL=connection["model_base_url"],
-            BENCH_VLLM_API_URL="",
-        )
-        model_host = urlparse(connection["model_base_url"]).hostname
-        local_hosts = ["127.0.0.1", "localhost", "::1"]
-        if model_host and model_host not in local_hosts:
-            local_hosts.append(model_host)
-        env["NO_PROXY"] = env["no_proxy"] = ",".join(local_hosts)
-        check = subprocess.check_output(
-            [
-                str(root / ".venv/bin/python"),
-                "-c",
-                "import sentrix,photobench; print(sentrix.__file__); print(photobench.__file__)",
-            ],
-            env=env,
-            cwd=root,
-            text=True,
-        ).splitlines()
-        if len(check) != 2 or any(not str(Path(line)).startswith(str(root) + "/") for line in check):
-            raise RuntimeError(f"Python imports escape this release: {check}")
         with (runtime / f"{role}.log").open("ab") as output:
             process = subprocess.Popen(
                 ["bash", str(root / f"scripts/deploy/start_{role}.sh")],
@@ -350,6 +405,7 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--previous", type=Path)
+    parser.add_argument("--venv", type=Path, help="Explicit independently verified runtime environment")
     parser.add_argument("--runtime", type=Path)
     parser.add_argument(
         "--local-model-url", help="Explicit same-host listener address; does not change model port"
@@ -369,7 +425,7 @@ def main() -> None:
     else:
         if args.previous is None or args.runtime is None:
             parser.error("--previous and --runtime are required")
-        activate(root, args.previous.resolve(), args.runtime.resolve(), args.local_model_url)
+        activate(root, args.previous.resolve(), args.runtime.resolve(), args.local_model_url, args.venv)
 
 
 if __name__ == "__main__":

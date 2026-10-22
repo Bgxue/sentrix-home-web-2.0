@@ -41,6 +41,11 @@ class RunMetricsResponse(BaseModel):
     metrics_contract_version: int | None = None
     build_revision: str | None = None
     runtime_snapshot: dict[str, Any] | None = None
+    run_valid: bool | None = None
+    model_identity: dict[str, Any] | None = None
+    execution_budgets: dict[str, Any] | None = None
+    snapshot_source: str | None = None
+    qa_count: int | None = None
     telemetry_live: TelemetryProjection | None = None
 
 
@@ -69,3 +74,18 @@ class RunItemResponse(BaseModel):
 class RunItemsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     items: list[RunItemObservation] | None = None
+
+
+class RuntimeConnectionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    sentrix_url: str | None = None
+    model_base_url: str | None = None
+    endpoint_model: str | None = None
+    embedding: dict[str, Any] | None = None
+    product: list[dict[str, Any]] | None = None
+    product_settings: dict[str, Any] | None = None
+
+
+class RuntimeConfigResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    runtime_config: RuntimeConnectionResponse
