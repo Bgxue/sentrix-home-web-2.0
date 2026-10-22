@@ -343,3 +343,129 @@ def test_probe_budget_stops_additional_smaps_and_does_not_claim_complete_memory(
     assert walks == [1]
     assert result["product_stack_memory_mib"] is None
     assert result["memory_observations"]["process:2:pss"]["reason"] == "process_probe_budget_exhausted"
+
+
+def test_port_discovery_inspects_only_actual_listener_candidates(monkeypatch, tmp_path):
+    provider = jetson.LocalJetsonLlamaCppTelemetryProvider(
+        "http://127.0.0.1:8104", pid_file=str(tmp_path / "absent" / "pid")
+    )
+    monkeypatch.setattr(jetson, "_listening_ports_by_pid", lambda ports: {42: {"8104"}, 43: {"8104"}})
+    seen = []
+
+    def verify(pid):
+        seen.append(pid)
+        if pid == 42:
+            raise ValueError("listener is not the selected inference server")
+        return pid
+
+    monkeypatch.setattr(provider, "_pid_from_proc", verify)
+    # No /proc directory inventory exists in this test; only listener IDs are usable.
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        jetson, "Path", lambda value: tmp_path / "missing-proc" if str(value) == "/proc" else Path(value)
+    )
+    assert provider._pid_from_port() == 43
+    assert seen == [42, 43]
+    monkeypatch.setattr(jetson, "_listening_ports_by_pid", lambda ports: {})
+    with pytest.raises(ValueError, match="no llama-server"):
+        provider._pid_from_port()
+
+
+def test_scoped_process_inventory_reads_details_only_for_listeners_and_new_children(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    proc = tmp_path / "proc"
+    proc.mkdir()
+
+    def write_stat(pid, parent, ticks="123"):
+        directory = proc / str(pid)
+        directory.mkdir(exist_ok=True)
+        fields = ["S", str(parent)] + ["0"] * 17 + [ticks]
+        (directory / "stat").write_text(f"{pid} (name with spaces) " + " ".join(fields))
+
+    for pid, parent in ((1, 0), (2, 1), (3, 2), (8, 0)):
+        write_stat(pid, parent)
+    monkeypatch.setattr(
+        jetson,
+        "Path",
+        lambda value: (
+            proc / str(value).removeprefix("/proc/")
+            if str(value).startswith("/proc/")
+            else proc
+            if str(value) == "/proc"
+            else Path(value)
+        ),
+    )
+    monkeypatch.setattr(
+        jetson,
+        "_listening_ports_by_pid",
+        lambda ports: {1: {"8104"}, 8: {"8106"}} if not ports else {1: {"8104"}},
+    )
+    reads = []
+    monkeypatch.setattr(jetson, "_process_rss_mib", lambda pid: reads.append(pid) or 10.0)
+    monkeypatch.setattr(jetson, "_process_cmdline", lambda pid: "/usr/bin/llama-server --port 8104")
+    rows = jetson._host_process_rows({"8104"})
+    assert {r["pid"] for r in rows} == {1, 2, 3}
+    assert set(reads) == {1, 2, 3}, "unrelated same-name models must not incur RSS/command probes"
+    write_stat(4, 1)
+    assert {r["pid"] for r in jetson._host_process_rows({"8104"})} == {1, 2, 3, 4}
+    assert {r["pid"] for r in jetson._host_process_rows()} == {1, 2, 3, 4, 8}
+
+    def reuse(pid):
+        if pid == 2:
+            write_stat(2, 1, "reused")
+        return 10.0
+
+    monkeypatch.setattr(jetson, "_process_rss_mib", reuse)
+    assert 2 not in {r["pid"] for r in jetson._host_process_rows({"8104"})}
+
+
+@pytest.mark.parametrize("selector", ["legacy", "pid", "keyword", "remote_keyword", "port"])
+def test_port_inventory_optimization_preserves_non_port_service_selectors(monkeypatch, selector):
+    main = {"ports": [8104]}
+    product = {"ports": [8291]}
+    if selector == "pid":
+        product = {"pids": [7], "ports": [8291]}
+    elif selector == "keyword":
+        product = {"keywords": ["sentrix-private-worker"]}
+    elif selector == "remote_keyword":
+        product = {"keywords": ["sentrix-private-worker"], "local": False}
+    scope = {} if selector == "legacy" else {"main_model": main, "product": [product]}
+    rows = [
+        {
+            "pid": 1,
+            "ppid": 0,
+            "start_ticks": "1",
+            "listening_ports": [8104],
+            "identity": "llama-server --port 8104",
+            "rss_mib": 10,
+        },
+        {
+            "pid": 7,
+            "ppid": 0,
+            "start_ticks": "7",
+            "listening_ports": [],
+            "identity": "sentrix-private-worker",
+            "rss_mib": 10,
+        },
+    ]
+    selections, sampled = [], []
+
+    def inventory(ports):
+        selections.append(ports)
+        return rows if ports is None else rows[:1]
+
+    monkeypatch.setattr(jetson, "_host_process_rows", inventory)
+    monkeypatch.setattr(jetson, "_process_start_ticks", lambda pid: str(pid))
+    monkeypatch.setattr(jetson, "_process_smaps_memory_mib", lambda pid: sampled.append(pid) or (8, 10))
+    monkeypatch.setattr(jetson, "SYSTEM_PROCESS_KEYWORDS", ("sentrix-private-worker",))
+    monkeypatch.setattr(jetson, "_nvmap_cache", {"at": float("-inf"), "table": None})
+    monkeypatch.setattr(jetson, "_read_nvmap_clients", lambda: "llama 0 1 20480K\n")
+    jetson._augment_local_process_memory({}, model_pid=1, endpoint_port="8104", telemetry_services=scope)
+    if selector in {"legacy", "pid", "keyword"}:
+        assert selections == [None]
+        assert sampled == [1, 7], "non-listening local services must not disappear from accounting"
+    else:
+        assert selections[0] is not None
+        assert sampled == [1], "explicit port scope must not match unrelated same-name services"

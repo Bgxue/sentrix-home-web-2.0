@@ -383,29 +383,39 @@ def _listening_ports_by_pid(target_ports: set[str] | None = None) -> dict[int, s
     return result
 
 
-def _process_parent_pid(pid: int) -> int | None:
-    try:
-        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
-    except (OSError, ValueError, IndexError):
-        return None
-
-
 def _host_process_rows(target_ports: set[str] | None = None) -> list[dict[str, Any]]:
-    ports_by_pid = _listening_ports_by_pid(target_ports)
-    rows = []
+    # A single stat per PID supplies the ancestry graph. Read RSS/cmdline only
+    # for selected listeners and their current descendants, never every daemon.
+    identities: dict[int, tuple[str, int]] = {}
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
             continue
-        pid = int(proc.name)
-        before = _process_start_ticks(pid)
+        try:
+            fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+            identities[int(proc.name)] = (fields[19], int(fields[1]))
+        except (OSError, ValueError, IndexError):
+            continue
+    # Resolve sockets after the identity snapshot: a PID reused during discovery
+    # cannot inherit old ownership and still pass the final start-tick check.
+    ports_by_pid = _listening_ports_by_pid(target_ports)
+    selected = set(ports_by_pid) if target_ports else set(identities)
+    while True:
+        expanded = selected | {pid for pid, (_, parent) in identities.items() if parent in selected}
+        if expanded == selected:
+            break
+        selected = expanded
+    rows = []
+    for pid, (before, parent) in identities.items():
+        if pid not in selected:
+            continue
         rss_mib = _process_rss_mib(pid)
         cmdline = _process_cmdline(pid)
-        if (rss_mib is None and not cmdline) or before is None or before != _process_start_ticks(pid):
+        if (rss_mib is None and not cmdline) or before != _process_start_ticks(pid):
             continue
         rows.append(
             {
                 "pid": pid,
-                "ppid": _process_parent_pid(pid),
+                "ppid": parent,
                 "start_ticks": before,
                 "process_name": Path(cmdline.split(" ", 1)[0]).name if cmdline else "",
                 "rss_mib": rss_mib,
@@ -480,11 +490,12 @@ def _augment_local_process_memory(
     scope = telemetry_services if telemetry_services is not None else load_telemetry_services()
     started = time.monotonic()
     target_ports: set[str] = {str(endpoint_port)}
-    if not scope:
-        target_ports.update(SYSTEM_PROCESS_PORTS)
+    port_scoped = bool(scope)
     if scope:
         embedding_spec = dict(scope.get("embedding") or {})
         profile_spec = dict((embedding_spec.get("profiles") or {}).get(embedding_spec.get("mode")) or {})
+        if embedding_spec.get("local") is False:
+            profile_spec = {}
         for spec in [
             scope.get("main_model"),
             scope.get("sentrix"),
@@ -493,8 +504,12 @@ def _augment_local_process_memory(
         ]:
             if isinstance(spec, Mapping) and spec.get("local") is not False:
                 target_ports.update(str(port) for port in spec.get("ports") or [])
+                if spec.get("pids") or (spec.get("keywords") and not spec.get("ports")):
+                    port_scoped = False
     try:
-        rows = _host_process_rows(target_ports)
+        # Legacy keyword matching and explicit PID selectors require the full
+        # inventory; narrowing them to listener trees would silently omit RAM.
+        rows = _host_process_rows(target_ports if port_scoped else None)
     except Exception:
         rows = []
     topology_observation = _observation("proc_listener_topology", started, available=bool(rows))
@@ -945,11 +960,11 @@ class LocalJetsonLlamaCppTelemetryProvider:
         return pid
 
     def _pid_from_port(self) -> int:
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdecimal():
-                continue
+        # PID-file writes can be denied (or the file can be stale). The socket
+        # inventory already knows the candidates; do not inspect every cmdline.
+        for pid in _listening_ports_by_pid({str(self.port)}):
             try:
-                return self._pid_from_proc(int(entry.name))
+                return self._pid_from_proc(pid)
             except (ValueError, FileNotFoundError, PermissionError, OSError):
                 continue
         raise ValueError(f"no llama-server is listening on port {self.port}")
