@@ -28,6 +28,7 @@ import { effectiveRunSummary } from "../lib/runSummary.ts";
 import type {
   KeyframeAnalysis,
   MemoryEffectiveness,
+  GraphQuality,
   RejudgeTask,
   ReviewsResponse,
   Run,
@@ -113,6 +114,7 @@ export function useRunDetail(options: RunDetailOptions) {
   const [keyframeAnalysisLoading, setKeyframeAnalysisLoading] = useState(false);
   const [keyframeAnalysisError, setKeyframeAnalysisError] = useState("");
   const [memoryEffectiveness, setMemoryEffectiveness] = useState<MemoryEffectiveness | null>(null);
+  const [graphQuality, setGraphQuality] = useState<GraphQuality | null>(null);
   const [reviewDrafts, setReviewDrafts] = useState<ReviewDrafts>({});
   const [reviewSaving, setReviewSaving] = useState(false);
   // 1.0 `:2487` `exportScores = ref(["0","1","2"])`。
@@ -182,6 +184,23 @@ export function useRunDetail(options: RunDetailOptions) {
     [activeRunIdRef],
   );
 
+  const loadGraphQuality = useCallback(
+    async (runId: string) => {
+      try {
+        const payload = await api<GraphQuality>(
+          `/runs/${encodeURIComponent(runId)}/graph-quality`,
+          { timeoutMs: 60000 },
+        );
+        if (activeRunIdRef.current === runId) setGraphQuality(payload);
+      } catch (error) {
+        if (activeRunIdRef.current === runId) {
+          setGraphQuality({ status: "unavailable", reason: (error as Error).message || "图质量分析失败" });
+        }
+      }
+    },
+    [activeRunIdRef],
+  );
+
   /** 1.0 `:2328`（内联在 `loadActiveRun` 的 resetPage 分支）。 */
   const loadReviews = useCallback(
     async (runId?: string) => {
@@ -214,6 +233,7 @@ export function useRunDetail(options: RunDetailOptions) {
         setKeyframeAnalysis(null);
         setKeyframeAnalysisError("");
         setMemoryEffectiveness(null);
+        setGraphQuality(null);
         resetQaState?.();
         setReviewDrafts({});
         await loadReviews(runId);
@@ -221,6 +241,7 @@ export function useRunDetail(options: RunDetailOptions) {
       await Promise.all([
         loadKeyframeAnalysis(runId),
         loadMemoryEffectiveness(runId),
+        loadGraphQuality(runId),
         loadQaPage ? loadQaPage(resetPage ? 1 : undefined) : Promise.resolve(),
       ]);
     },
@@ -231,6 +252,7 @@ export function useRunDetail(options: RunDetailOptions) {
       loadReviews,
       loadKeyframeAnalysis,
       loadMemoryEffectiveness,
+      loadGraphQuality,
       loadQaPage,
     ],
   );
@@ -437,9 +459,11 @@ export function useRunDetail(options: RunDetailOptions) {
     keyframeAnalysisLoading,
     keyframeAnalysisError,
     memoryEffectiveness,
+    graphQuality,
     loadActiveRun,
     loadKeyframeAnalysis,
     loadMemoryEffectiveness,
+    loadGraphQuality,
     loadReviews,
     reviewDrafts,
     reviewFor,

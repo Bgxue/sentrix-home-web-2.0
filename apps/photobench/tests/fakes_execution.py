@@ -40,6 +40,7 @@ class FakeSentrixClient:
         import_result: dict[str, Any] | None = None,
         entity_ids: dict[str, str] | None = None,
         turns: dict[str, list[dict[str, Any]]] | None = None,
+        turn_errors: dict[str, list[Exception]] | None = None,
         seed_error: dict[str, Exception] | None = None,
         poll_limit: int = 0,
     ) -> None:
@@ -68,6 +69,8 @@ class FakeSentrixClient:
         self.entity_ids = entity_ids or {}
         #: turn_id → 该回合按次消费的 ``get_turn`` 响应队列。
         self.turns = turns or {}
+        #: turn_id → ``get_turn`` 要先抛出的瞬态网络错误。用来钉住评测端的重试语义。
+        self.turn_errors = {key: list(value) for key, value in (turn_errors or {}).items()}
         self.seed_error = seed_error or {}
         self._turn_seq = 0
         self._conversation_seq = 0
@@ -162,7 +165,10 @@ class FakeSentrixClient:
         return {"turn_id": f"turn_{self._turn_seq}", "conversation_id": conversation_id, "status": "running"}
 
     def get_turn(self, *, turn_id: str, timeout: int = 30) -> dict[str, Any]:
-        self._record("get_turn", turn_id=turn_id)
+        self._record("get_turn", turn_id=turn_id, timeout=timeout)
+        errors = self.turn_errors.get(turn_id) or []
+        if errors:
+            raise errors.pop(0)
         queue = list(self.turns.get(turn_id) or [])
         index = self.turn_polls.get(turn_id, 0)
         self.turn_polls[turn_id] = index + 1

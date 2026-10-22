@@ -74,6 +74,8 @@ export interface Phase {
   /** `qa_eval` 上的计时字段，`effectiveRunSummary` 读它（`App.vue:426`）。 */
   agent_phase_wall_ms?: number | null;
   agent_completed?: number | null;
+  judge_completed?: number | null;
+  judge_total?: number | null;
   judge_phase_wall_ms?: number | null;
   judge_concurrency?: number | null;
   [key: string]: unknown;
@@ -122,6 +124,81 @@ export interface RunSummary {
   [key: string]: unknown;
 }
 
+export interface GraphReferenceMetrics {
+  available?: boolean;
+  reference_mode?: string;
+  reference_edge_count?: number;
+  evaluable_predicted_edge_count?: number;
+  reference_edge_true_positive_count?: number;
+  reference_edge_precision?: number | null;
+  reference_edge_recall?: number | null;
+  reference_edge_f1?: number | null;
+  precision?: number | null;
+  recall?: number | null;
+  f1?: number | null;
+  gt_asset_count?: number;
+  identified_image_count?: number;
+  valid_edge_rate?: number | null;
+  edge_consistency_rate?: number | null;
+  edge_attribute_support_rate?: number | null;
+  edge_evidence_support_rate?: number | null;
+  duplicate_edge_rate?: number | null;
+  node_connected_rate?: number | null;
+  unverifiable_edge_ratio?: number | null;
+  node_count?: number;
+  edge_count?: number;
+  independent_ground_truth_available?: boolean;
+  note?: string;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface FaceClusteringMetrics {
+  available?: boolean;
+  metric_definition_version?: number;
+  identity_gallery?: GraphReferenceMetrics;
+  image_identity_links?: GraphReferenceMetrics;
+  gt_single_image_count?: number;
+  single_face_detection_rate?: number | null;
+  asset_name_coverage_count?: number;
+  identity_gallery_seed_count?: number;
+  verified_detection_image_count?: number;
+  gt_multi_identity_image_count?: number;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface GraphQaByTypeRow {
+  type?: string;
+  label?: string;
+  sample_count?: number;
+  graph_routed_count?: number;
+  graph_enabled_count?: number;
+  graph_effect_count?: number;
+  graph_recall_delta?: number | null;
+  graph_gt_improved_count?: number;
+  graph_gt_worsened_count?: number;
+  graph_rank_changed_count?: number;
+  graph_candidate_set_changed_count?: number;
+  telemetry_status?: string;
+  retrieval_recall?: number | null;
+  retrieval_precision?: number | null;
+  retrieval_f1?: number | null;
+  answer_quality_mean?: number | null;
+  evidence_supported_rate?: number | null;
+  [key: string]: unknown;
+}
+
+export interface GraphQuality {
+  status?: string;
+  run_id?: string;
+  scope_id?: string;
+  graph?: GraphReferenceMetrics;
+  face_clustering?: FaceClusteringMetrics;
+  graph_qa_by_type?: GraphQaByTypeRow[];
+  [key: string]: unknown;
+}
+
 /** 重评分任务（`activeRejudge` `App.vue:317`）。 */
 export interface RejudgeTask {
   status?: string;
@@ -142,6 +219,7 @@ export interface Run {
   album_id?: string;
   model_profile?: string;
   model_name?: string;
+  endpoint_model?: string;
   model_source?: string;
   model_backend?: string;
   qa_set?: string;

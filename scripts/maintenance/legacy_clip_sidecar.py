@@ -27,6 +27,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 DIMENSION = 768
 DEFAULT_CHECKPOINT = Path.home() / ".cache" / "clip" / "clip_cn_vit-l-14.pt"
@@ -125,7 +126,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict[str, object]:
         length = int(self.headers.get("Content-Length", 0) or 0)
-        return json.loads(self.rfile.read(length) or b"{}")
+        return cast(dict[str, object], json.loads(self.rfile.read(length) or b"{}"))
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的约定
         if self.path == "/health":

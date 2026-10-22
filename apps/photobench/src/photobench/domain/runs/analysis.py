@@ -30,6 +30,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from photobench.domain.runs.graph_quality import aggregate_graph_qa_by_type
+
 # 1.0 ``:933`` / ``:1261``。
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 RANKING_KS = (1, 5, 10)
@@ -1426,6 +1428,9 @@ def effective_summary(state: dict[str, Any]) -> dict[str, Any]:
             "tool_performance": aggregate_tool_performance(items),
             "attribution": {"primary": attribution_primary, "layer_failures": attribution_layers},
             "delivery_breakdown": saved.get("delivery_breakdown", aggregate_delivery(items)),
+            # 历史 run 没有 graph_* 遥测时仍输出题型表，但行内会明确标记
+            # ``telemetry_status=not_recorded``，不把普通检索结果冒充图拓展结果。
+            "graph_qa_by_type": aggregate_graph_qa_by_type(items),
         }
     )
     for key, value in capability_summary(items, state.get("phases") or {}).items():
@@ -1473,6 +1478,7 @@ def run_list_entry(state: dict[str, Any]) -> dict[str, Any]:
             "album_id",
             "model_profile",
             "model_name",
+            "endpoint_model",
             "model_source",
             "model_backend",
             "qa_set",

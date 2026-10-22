@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from sentrix.application.media.index_place import IndexAssetPlace
 from sentrix.application.media.maintain_entities import MaintainObservationEntities
 from sentrix.application.media.observe_asset import ObserveAsset
 from sentrix.application.memories.assign_events import AssignEvents, EventVisualSimilarity
+from sentrix.application.memories.build_graph import BuildMemoryGraph
 from sentrix.application.memories.maintain_facts import MaintainFacts
 from sentrix.application.retrieval.index_observation_text import IndexObservationText
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
@@ -24,6 +26,7 @@ from sentrix.bootstrap.container import Container
 from sentrix.domain.media.models import Asset, MediaType, Observation
 
 router = APIRouter(tags=["media"])
+log = logging.getLogger("sentrix.api.media")
 
 PREVIEW_MAX_DIMENSION = 1600
 PREVIEW_QUALITY = 85
@@ -70,6 +73,7 @@ async def import_media(
             content=content,
         )
     )
+    refresh_memory_graph(container, scope_id)
     return ImportResponse(
         asset_id=result.asset_id,
         observation_id=result.observation_id,
@@ -83,6 +87,28 @@ async def import_media(
         video_scenes=result.video_scenes,
         audio_probed=result.audio_probed,
     )
+
+
+def build_memory_graph(container: Container) -> BuildMemoryGraph:
+    """把 2.0 标准记忆端口接到独立图投影用例。"""
+    return BuildMemoryGraph(
+        assets=container.asset_repository,
+        observations=container.observation_repository,
+        events=container.event_repository,
+        participants=container.event_participant_repository,
+        entities=container.entity_repository,
+        facts=container.fact_repository,
+        relationships=container.relationship_repository,
+        graph=container.memory_graph,
+    )
+
+
+def refresh_memory_graph(container: Container, scope_id: str) -> None:
+    """在写入链路结束后重建派生图；图失败不阻断权威记忆写入。"""
+    try:
+        build_memory_graph(container).execute(scope_id)
+    except Exception as error:  # noqa: BLE001 - 派生投影必须可降级
+        log.warning("记忆图重建失败（scope=%s），保留主链路结果: %s", scope_id, error)
 
 
 def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:

@@ -48,6 +48,7 @@ def _default_providers() -> str:
     profile = os.environ.get("SENTRIX_DEPLOYMENT_PROFILE", "server").strip().lower()
     return CPU_EXECUTION_PROVIDER if profile == "mac" else DEFAULT_PROVIDERS
 
+
 # 每个 ONNX session 的显存上限。1.0 取 256 MiB 是有理由的：一个人脸适配器可能同时持有
 # 好几个 session（RetinaFace 检测 + buffalo_l 检测 + buffalo_l 识别），预算是**逐个**
 # session 算的，所以单个不能定大。

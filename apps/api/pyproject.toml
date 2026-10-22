@@ -16,6 +16,9 @@ dependencies = [
     "torch>=2.5,<3",
     "torchvision>=0.20,<1",
     "cn-clip>=1.6,<2",
+    # 本地 Mac legacy 部署的 BGE-M3 sidecar 使用 transformers 加载 CPU 权重；API
+    # 进程本身仍只通过 HTTP 访问它，不会因此在启动时载入文本模型。
+    "transformers>=4.48,<5",
     # 嵌入式 Qdrant 做派生索引；权威始终是 SQLite 的 memory_vectors。
     "qdrant-client>=1.12,<2",
     # 地点解析（设计 §3.3）：PyGeoCN 提供国内省/市/区县的**面**（内置 16MB 天地图边界
@@ -37,8 +40,10 @@ dependencies = [
     # ``get_providers()``：**请求了 CUDA 而实际只有 CPU 就直接抛错拒启**，报错里给出的修复
     # 命令钉的正是下面这个版本号——两处必须一起改，改一处另一处就成了谎话。
     # 纯 CPU 部署是合法形态，但要**显式**声明：``FACE_PROVIDERS=CPUExecutionProvider``
-    # （``RETINAFACE_PROVIDERS`` 同）。
-    "onnxruntime-gpu==1.30.0",
+    # （``RETINAFACE_PROVIDERS`` 同）。macOS arm64 没有 ``onnxruntime-gpu`` wheel，
+    # 所以在依赖层直接分流到同版本 CPU 包，否则 Apple Silicon 连安装都无法解析。
+    "onnxruntime-gpu==1.30.0; platform_system != 'Darwin'",
+    "onnxruntime==1.30.0; platform_system == 'Darwin'",
     "insightface==1.0.1",
     # headless：服务端不装 GUI 那份，1.0 两份都装了是因为它还要在开发机上跑预览。
     "opencv-python-headless>=4.10,<6",

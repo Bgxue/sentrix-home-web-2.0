@@ -21,8 +21,9 @@ import { modeBadgeClass, modeLabel } from "../../lib/qaBrowser.ts";
 function runProgressLabel(run: Run): string {
   if (run.mode === "build") return "—";
   const progress = run.phases?.qa_eval?.progress;
-  if (progress && progress.judge_total != null) {
-    return `${progress.judge_completed ?? 0}/${progress.judge_total}`;
+  const phase = run.phases?.qa_eval;
+  if (progress?.judge_total != null || phase?.judge_total != null) {
+    return `${progress?.judge_completed ?? phase?.judge_completed ?? 0}/${progress?.judge_total ?? phase?.judge_total}`;
   }
   return `${run.summary?.completed || 0}/${run.summary?.total || run.qa_count || 0}`;
 }

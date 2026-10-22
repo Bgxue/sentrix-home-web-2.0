@@ -135,6 +135,7 @@ class SubprocessSentrixProcess:
         log_path: Path,
         http: JsonHttpClient,
         vlm_env_var: str = VLM_BASE_URL_ENV,
+        environment: Mapping[str, str] | None = None,
         startup_timeout: float = 60.0,
         shutdown_timeout: float = 30.0,
         poll_interval: float = 0.5,
@@ -156,6 +157,7 @@ class SubprocessSentrixProcess:
         self._log_path = log_path
         self._http = http
         self._vlm_env_var = vlm_env_var
+        self._environment = dict(environment or {})
         self._startup_timeout = startup_timeout
         self._shutdown_timeout = shutdown_timeout
         self._poll_interval = poll_interval
@@ -192,7 +194,7 @@ class SubprocessSentrixProcess:
         self._stop_running()
         pid = self._spawn(
             self._command,
-            {**os.environ, self._vlm_env_var: target},
+            {**os.environ, **self._environment, self._vlm_env_var: target},
             self._cwd,
             self._log_path,
         )

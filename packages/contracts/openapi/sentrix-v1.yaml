@@ -584,6 +584,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory-graph/quality:
+    get:
+      tags:
+      - diagnostics
+      summary: Memory Graph Quality
+      description: 返回当前 scope 图的结构契约审计，不读取任何 PhotoBench GT。
+      operationId: memory_graph_quality_api_v1_memory_graph_quality_get
+      parameters:
+      - name: scope_id
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Memory Graph Quality Api V1 Memory Graph Quality Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/timeline:
     get:
       tags:
@@ -860,6 +890,13 @@ paths:
           - type: string
           - type: 'null'
           title: Scope Id
+      - name: include_all_samples
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include All Samples
       responses:
         '200':
           description: Successful Response
@@ -3588,6 +3625,9 @@ components:
         quality:
           type: number
           title: Quality
+        validity:
+          type: string
+          title: Validity
         crop_url:
           type: string
           title: Crop Url
@@ -3601,6 +3641,7 @@ components:
       - bbox
       - detection_confidence
       - quality
+      - validity
       - crop_url
       title: FaceCropRef
       description: 簇里的一张样本脸。``crop_url`` 直接可打开，前端不再拼路径。
@@ -4335,6 +4376,12 @@ components:
         summarized:
           type: integer
           title: Summarized
+        timings:
+          additionalProperties:
+            type: number
+          type: object
+          title: Timings
+          default: {}
         failures:
           items:
             $ref: '#/components/schemas/ImportFailure'

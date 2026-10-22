@@ -231,11 +231,14 @@ def _crop_ref(instance: FaceInstanceRecord) -> FaceCropRef:
         bbox=list(instance.bbox),
         detection_confidence=instance.detection_confidence,
         quality=instance.quality,
+        validity=instance.validity,
         crop_url=f"/api/v1/face-instances/{instance.id}/crop",
     )
 
 
-def _cluster_payload(container: Container, cluster: FaceClusterRecord) -> FaceClusterSummary:
+def _cluster_payload(
+    container: Container, cluster: FaceClusterRecord, *, include_all_samples: bool = False
+) -> FaceClusterSummary:
     instances = container.face_repository.list_instances(cluster.id)
     return FaceClusterSummary(
         id=cluster.id,
@@ -252,7 +255,10 @@ def _cluster_payload(container: Container, cluster: FaceClusterRecord) -> FaceCl
         updated_at=_optional_isoformat(cluster.updated_at),
         reviewable=cluster.status != CLUSTER_STATUS_REJECTED and cluster.member_count > 0,
         single_sample=cluster.status == CLUSTER_STATUS_PENDING and cluster.member_count <= 1,
-        samples=[_crop_ref(item) for item in instances[:CLUSTER_SAMPLES_LIMIT]],
+        samples=[
+            _crop_ref(item)
+            for item in (instances if include_all_samples else instances[:CLUSTER_SAMPLES_LIMIT])
+        ],
     )
 
 
@@ -277,6 +283,7 @@ def _person_or_404(container: Container, person_id: str) -> EntityRecord:
 def list_face_clusters(
     status: str | None = None,
     scope_id: str | None = None,
+    include_all_samples: bool = False,
     container: Container = Depends(get_container),
 ) -> FaceClusterListResponse:
     clusters = container.face_repository.list_clusters(status=status)
@@ -284,7 +291,11 @@ def list_face_clusters(
         # 1.0 在路由里做的同一条过滤（``app.py:1972``）：仓储的 ``list_clusters`` 是
         # 「进人物视图的全部簇」，按空间再切一刀是调用方的事。
         clusters = [item for item in clusters if item.scope_id == scope_id]
-    return FaceClusterListResponse(clusters=[_cluster_payload(container, item) for item in clusters])
+    return FaceClusterListResponse(
+        clusters=[
+            _cluster_payload(container, item, include_all_samples=include_all_samples) for item in clusters
+        ]
+    )
 
 
 @router.post("/face-clusters/{cluster_id}/confirm")

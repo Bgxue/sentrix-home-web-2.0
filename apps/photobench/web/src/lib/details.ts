@@ -235,7 +235,9 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     if (progress && (dict(progress).completed != null || dict(progress).in_flight != null)) {
       const pr = dict(progress);
       const agentText = `Agent ${pr.agent_completed ?? pr.completed ?? 0}/${pr.agent_total ?? pr.total ?? "?"}`;
-      const judgeText = `Judge ${pr.judge_completed ?? 0}/${pr.judge_total ?? pr.total ?? "?"}`;
+      // 旧 run 把 Judge 计数写在 qa_eval 阶段根上，新 run 同步写进 progress。
+      // 两处都兼容，避免历史结果被展示成 Judge 0/N。
+      const judgeText = `Judge ${pr.judge_completed ?? p.judge_completed ?? 0}/${pr.judge_total ?? p.judge_total ?? pr.total ?? "?"}`;
       const concurrencyText =
         Number(pr.qa_concurrency) > 1 || Number(pr.judge_concurrency) > 1
           ? ` · 并发 Agent ${pr.qa_concurrency ?? "-"} / Judge ${pr.judge_concurrency ?? "-"}`

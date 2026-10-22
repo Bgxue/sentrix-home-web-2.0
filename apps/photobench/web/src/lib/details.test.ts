@@ -287,6 +287,13 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
     expect(phaseSummary("qa_eval", { progress: { in_flight: 1, judge_total: 10 } }, 0)).toBe(
       "Agent 0/? · Judge 0/10 · -",
     );
+    expect(
+      phaseSummary(
+        "qa_eval",
+        { progress: { completed: 74, agent_completed: 74, agent_total: 74 }, judge_completed: 71, judge_total: 74 },
+        0,
+      ),
+    ).toBe("Agent 74/74 · Judge 71/74 · -");
     expect(phaseSummary("qa_eval", { total_seconds: 9 }, 7)).toBe("7 题 · 9s");
   });
 

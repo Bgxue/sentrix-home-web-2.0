@@ -101,6 +101,25 @@ PIPELINE_FAILED_STATUSES = frozenset({"failed"})
 
 #: 2.0 的 ``TurnStatus``（``domain/assistant/models.py:40``）里非终态的两种。
 TURN_PENDING_STATUSES = frozenset({"pending", "running"})
+#: 单次轮询请求的超时不能与整条回合等待上限混为一谈。Mac 上做视频视觉取证时，
+#: Sentrix 的轮询端点偶尔会被同一进程里的重计算拖到 30 秒以上；原先沿用
+#: ``SentrixClient.get_turn`` 的 30 秒默认值，会把一个随后已经落库的回合误记成
+#: ``agent_error``。这里给轮询一个独立的网络预算，整条回合仍由 ``RunRequest.turn_timeout``
+#: 控制。
+TURN_POLL_HTTP_TIMEOUT_SECONDS = 60
+#: 连接级短暂错误不应让已经在服务端运行的回合丢失。重试有上限且受同一个回合
+#: deadline 约束；非瞬态错误（例如 404）仍然立即冒出。
+TURN_POLL_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
+TRANSIENT_TURN_POLL_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "bad file descriptor",
+    "connection reset",
+    "connection aborted",
+    "server disconnected",
+    "broken pipe",
+    "temporarily unavailable",
+)
 
 #: 模型装载的参数。1.0 是写死的局部量（``:2557`` / ``:2568``），抽成模块常量只为
 #: 让用例能 monkeypatch——**在用例里真睡 5 秒 + 30 秒退避是不可接受的**，而那两段
@@ -178,6 +197,8 @@ class RunRequest:
     sentrix_url: str
     manager_url: str = ""
     model_base_url: str = ""
+    #: ``__current__`` 是 UI 的选择占位符；保存真实端点模型名，供列表和报告展示。
+    endpoint_model: str = ""
     run_id: str = ""
     #: ``full`` 或 ``reuse``。``reuse`` 时 ``scope_id`` 必须是**已存在**的空间，
     #: 且三个导入相位会被跳过（1.0 的 ``scope_attach`` 那条路）。
@@ -428,7 +449,12 @@ class RunExecution:
             "album_id": album_id,
             "album_name": manifest.get("album_name"),
             "model_profile": request.model_profile,
-            "model_name": request.model_profile,
+            "model_name": (
+                request.endpoint_model
+                if request.model_profile == "__current__" and request.endpoint_model
+                else request.model_profile
+            ),
+            "endpoint_model": request.endpoint_model or None,
             "qa_set": request.qa_set,
             "qa_count": len(rows),
             "scope_id": scope_id,
@@ -1365,17 +1391,25 @@ class RunExecution:
         if judge is not None:
             state.record_phase("qa_eval", "judge_total", len(rows))
 
+        judge_done = 0
+        judge_total = len(rows) if judge is not None else None
+
         def record_progress(done: int) -> None:
+            progress = {
+                "total": len(rows),
+                "completed": done,
+                "agent_completed": done,
+                "agent_total": len(rows),
+                "qa_concurrency": concurrency,
+            }
+            # 前端阶段卡读取的是 progress 内的 Judge 计数；阶段根上虽然也会写
+            # ``judge_completed``，但只写那里会造成历史页面显示 ``Judge 0/N``。
+            if judge_total is not None:
+                progress.update({"judge_completed": judge_done, "judge_total": judge_total})
             state.record_phase(
                 "qa_eval",
                 "progress",
-                {
-                    "total": len(rows),
-                    "completed": done,
-                    "agent_completed": done,
-                    "agent_total": len(rows),
-                    "qa_concurrency": concurrency,
-                },
+                progress,
             )
 
         # **resume：上一次的结果先摆回来。** 1.0 的做法是把整份旧 state 当
@@ -1395,7 +1429,6 @@ class RunExecution:
         pending_rows = [(index, row) for index, row in enumerate(rows) if index not in items]
         record_progress(len(items))
         judge_futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
-        judge_done = 0
         judge_pool = (
             concurrent.futures.ThreadPoolExecutor(
                 max_workers=judge_concurrency, thread_name_prefix="qa-judge"
@@ -1461,6 +1494,10 @@ class RunExecution:
                         items[index]["judge"] = {"score": None, "reason": f"judge_error: {exc}"}
                     judge_done += 1
                     state.record_phase("qa_eval", "judge_completed", judge_done)
+                    succeeded = sum(
+                        1 for entry in items.values() if entry.get("execution_status") == "completed"
+                    )
+                    record_progress(succeeded)
                     with state.lock:
                         state.data["items"] = [items[i] for i in sorted(items)]
                     state.persist()
@@ -1760,15 +1797,38 @@ class RunExecution:
         「模型答错/被 guard 拦下」与「网络断了」压成同一个 ``execution_status``。
         """
         deadline = time.monotonic() + request.turn_timeout
-        polled = self.client.get_turn(turn_id=turn_id)
-        while str(polled.get("status") or "") in TURN_PENDING_STATUSES:
+        retry_index = 0
+        while True:
+            try:
+                polled = self.client.get_turn(
+                    turn_id=turn_id,
+                    timeout=TURN_POLL_HTTP_TIMEOUT_SECONDS,
+                )
+                # 一次成功的轮询说明连接已经恢复，后续瞬态错误从最短退避重新开始。
+                retry_index = 0
+            except Exception as exc:  # noqa: BLE001 — 只吞连接级瞬态错误
+                error_text = f"{type(exc).__name__}: {exc}".lower()
+                transient = any(marker in error_text for marker in TRANSIENT_TURN_POLL_ERROR_MARKERS)
+                if not transient:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"assistant turn {turn_id} polling did not recover within {request.turn_timeout}s"
+                    ) from exc
+                backoff = TURN_POLL_RETRY_BACKOFF_SECONDS[
+                    min(retry_index, len(TURN_POLL_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                retry_index += 1
+                self._cancel_wait(min(backoff, max(0.0, deadline - time.monotonic())))
+                continue
+
+            if str(polled.get("status") or "") not in TURN_PENDING_STATUSES:
+                return polled
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"assistant turn {turn_id} did not complete within {request.turn_timeout}s"
                 )
             self._cancel_wait(0.5)
-            polled = self.client.get_turn(turn_id=turn_id)
-        return polled
 
 
 def _parse_sse_line(line: str) -> dict[str, Any] | None:

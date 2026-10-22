@@ -290,6 +290,7 @@ make lint format-check typecheck arch photobench-check check-docs coverage
 | `EventRepository` | `domain/memories/ports.py:13` | 15 | `SqliteEventRepository` |
 | `EventParticipantRepository` | `:135` | 5 | `SqliteEventParticipantRepository` |
 | `FactRepository` | `:219` | 8 | `SqliteFactRepository` |
+| `MemoryGraphRepository` | `domain/memories/ports.py` | 3 | `SqliteMemoryGraphRepository` |
 | `FaceDetector` | `domain/identity/ports.py:55` | `detect` / `detect_identity_photo` | `FaceAdapter` |
 | `FaceEnroller` | `:88` | `prepare/commit` | `EnrollFaces`（application） |
 | `FaceRepository` | `:105` | 28 | `SqliteFaceRepository` |
@@ -317,6 +318,13 @@ make lint format-check typecheck arch photobench-check check-docs coverage
 | `VideoRepository.cleanup_derivatives` | 先删随行，再删主行 |
 | `VectorRepository.update_metadata` | 整份替换，避免并发写入互相覆盖 |
 | `FaceEnroller.commit` | 匹配建簇必须在 commit 内完成（要读同批刚写的簇） |
+
+**结构化记忆图的独立接入约束**
+
+- `BuildMemoryGraph` 只消费 `AssetRepository`、`ObservationRepository`、`EventRepository`、参与者、实体、事实和关系端口；不读取关键帧文件、Qdrant payload 或旧版 `backend` 存储。
+- 图是 SQLite 中的可重建派生投影，按 `scope_id` 原子替换；权威记忆仍在标准记忆表里，图构建失败不得阻断导入主链路。
+- `RetrieveGraph` 是独立的 `graph` 拓展通道：先用 primary 召回结果作种子，再做最多 4 hop 的有界遍历；没有明确 scope 或图尚未构建时必须在 channel trace 中显式降级。
+- 冻结的 `adjacency` 通道不被重新启用；`graph` 只在应用层覆盖新能力的 0.5 权重，不修改 `DEFAULT_CHANNEL_WEIGHTS` 行为基线。
 
 ### 3.7 PhotoBench
 

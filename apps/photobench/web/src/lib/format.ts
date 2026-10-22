@@ -42,7 +42,24 @@ export function esc(value: unknown): string {
 /** 1.0 `:324` */
 export function modelName(run: unknown): string {
   const r = dict(run);
-  return str(r.model_profile) || str(r.model_name) || str(r.profile) || "unknown";
+  const profile = str(r.model_profile);
+  const savedName = str(r.model_name);
+  if (profile === "__current__" || savedName === "__current__") {
+    const endpointModel = str(r.endpoint_model);
+    if (endpointModel) return endpointModel;
+
+    // 旧的运行记录没有保存 endpoint_model；复用相册的 scope 名仍保留了实际模型后缀。
+    const albumId = str(r.album_id);
+    const scopeName = str(r.scope_name);
+    const marker = albumId ? `${albumId}-` : "";
+    const markerIndex = marker ? scopeName.lastIndexOf(marker) : -1;
+    if (markerIndex >= 0) {
+      const inferred = scopeName.slice(markerIndex + marker.length).trim();
+      if (inferred && inferred !== "__current__" && inferred !== "current") return inferred;
+    }
+    return "current";
+  }
+  return profile || savedName || str(r.profile) || "unknown";
 }
 
 /** 1.0 `:325` */

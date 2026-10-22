@@ -67,6 +67,7 @@ export function RunsView({ runs, judgeModel, judgeConfig, saveJudgePrompt, memor
         onExportTraces={runs.exportTraces}
         onExportSftTraces={runs.exportSftTraces}
         memory={memory}
+        graphQuality={runs.graphQuality}
         rejudge={{
           activeRejudge: runs.activeRejudge,
           judgePromptKinds: runs.judgePromptKinds,

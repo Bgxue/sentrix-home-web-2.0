@@ -12,7 +12,7 @@ from sentrix.api.deps import get_container
 from sentrix.api.routes.family import TRIGGER_INGEST, run_family_graph_for_scope
 from sentrix.api.routes.identity import _confirmed_person_events
 from sentrix.api.routes.insights import run_insights_for_scope
-from sentrix.api.routes.media import build_import_assets
+from sentrix.api.routes.media import build_import_assets, refresh_memory_graph
 from sentrix.api.schemas.family import FamilyRunResponse
 from sentrix.api.schemas.timeline import (
     ImportBatchRequest,
@@ -160,6 +160,7 @@ def import_album(
     # 刷新会顺带按参与者重写摘要（``participant_summary``），人名因此进入事件。
     observations = container.observation_repository.list_scope(request.scope_id, limit=100000)
     _confirmed_person_events(container).refresh_participants([item.id for item in observations])
+    refresh_memory_graph(container, request.scope_id)
     # **顺序照 1.0**：``pipeline.py:733-734`` 是先 family 后 person-insights。
     family_graph = _maybe_run_family_graph(container, request.scope_id)
     insights = _maybe_run_insights(container, request.scope_id, result.imported)

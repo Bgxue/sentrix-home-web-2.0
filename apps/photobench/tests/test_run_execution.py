@@ -502,6 +502,30 @@ def test_a_partial_turn_is_a_completed_item_not_a_failure():
     assert len([name for name in client.call_names() if name == "get_turn"]) == 1
 
 
+def test_transient_turn_poll_errors_are_retried_without_losing_the_completed_turn():
+    """轮询端的短暂超时/断连接不能覆盖服务端已经在执行的回合。
+
+    Mac 上视频视觉取证可能让一次轮询连接先超时或收到 ``Bad file descriptor``，
+    但同一个 turn 仍会在 Sentrix 后台继续执行。评测端必须复用原 turn_id 重试，
+    而不是把这道题写成一个没有答案的 agent_error。
+    """
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        turns={"turn_1": [_completed_turn()]},
+        turn_errors={"turn_1": [TimeoutError("timed out"), OSError(9, "Bad file descriptor")]},
+        import_result={"imported": 2, "events": 1, "summarized": 1, "failures": []},
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+    state = execution.execute(_request())
+    item = state["items"][0]
+
+    assert item["execution_status"] == "completed"
+    assert item["answer"] == "海边的是 a.jpg"
+    polls = [kwargs for name, kwargs in client.calls if name == "get_turn"]
+    assert len(polls) == 3
+    assert all(poll["timeout"] == 60 for poll in polls)
+
+
 def test_the_delivery_set_is_the_attachments_and_is_scored_against_the_ground_truth():
     """交付集 = ``result.attachments[].asset_id``，GT = 题面里的 ``retrieval_image_ids``。
 

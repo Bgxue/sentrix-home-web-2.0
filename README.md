@@ -45,6 +45,7 @@ make pb-dev         # PhotoBench 8772
 
 ```bash
 SENTRIX_DEPLOYMENT_PROFILE=mac ./scripts/deploy/start_legacy_mac.sh
+./scripts/deploy/start_photobench_mac.sh  # PhotoBench 8772；保留 Mac legacy 重启环境
 ```
 
 详见 [`docs/runbooks/mac-mini-legacy.md`](docs/runbooks/mac-mini-legacy.md)。
@@ -99,6 +100,10 @@ docs/refactor/     重构计划、裁决、能力登记、偏离记录
 docs/runbooks/     部署与运维手册
 scripts/           开发、部署、维护脚本
 ```
+
+记忆图模块是可插拔的派生能力：`BuildMemoryGraph` 从 2.0 的标准资产/观察/事件/实体/事实/关系端口构图，`RetrieveGraph` 在检索阶段做有界拓展；它不依赖关键帧提取器或旧版存储，图未构建时按文档约定显式降级。
+
+记忆图模块是可插拔的派生能力：`BuildMemoryGraph` 从 2.0 的标准资产/观察/事件/实体/事实/关系端口构图，`RetrieveGraph` 在检索阶段做有界拓展；它不依赖关键帧提取器或旧版存储，图未构建时按文档约定显式降级。
 
 ---
 
