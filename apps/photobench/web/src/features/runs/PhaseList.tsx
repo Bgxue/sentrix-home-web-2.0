@@ -88,31 +88,44 @@ export function PhaseList({ activeRun }: PhaseListProps) {
               </div>
               <p className="phase-summary">{phaseSummary(phaseDef.key, displayPhase, activeRun.item_count)}</p>
               {phaseDef.key === "photo_import" && phase?.progress?.current_directory ? (
-                <p className="phase-summary" data-testid="import-waiting">
-                  当前目录：{String(phase.progress.current_directory)}；
-                  已完成目录：{Number(phase.progress.directories_done ?? 0)}/{Number(phase.progress.directories_total ?? 0)}；
-                  本目录请求已用 {elapsedSeconds(progress?.request_started_at, end)} 秒。
-                  {observation ? <>
-                    {importStageLabels[observation.stage ?? ""] ?? observation.stage ?? "步骤未知"}
-                    {observation.current_file ? ` · ${observation.current_file}` : ""}；
-                    后端状态：{observation.status ?? "未知"}；
-                    步骤更新：{observation.updated_at ?? "未记录"}；
-                    最近查询距今 {elapsedSeconds(progress?.last_received_at, end)} 秒。
-                    {observation.error ? ` 后端错误：${observation.error}` : ""}
-                  </> : "逐媒体进度尚不可用。"}
-                  {progress?.request_error ? ` 请求错误：${progress.request_error}；产品是否已停止以独立进度为准。` : null}
-                  {progress?.availability !== "available"
-                    ? ` 查询状态：${progress?.availability ?? "未接入"}，${progress?.query_error ?? "等待进度接口"}；保留的计数不是当前实时进度。`
-                    : null}
+                <div className="import-progress-panel" data-testid="import-waiting">
+                  <div className="import-progress-head">
+                    <div className="import-progress-location">
+                      <span className="import-progress-eyebrow">当前目录</span>
+                      <strong title={String(phase.progress.current_directory)}>{String(phase.progress.current_directory)}</strong>
+                    </div>
+                    <span className="import-progress-clock">本目录请求已用 {elapsedSeconds(progress?.request_started_at, end)} 秒</span>
+                  </div>
+                  <div className="import-progress-stats">
+                    <span><b>{observation?.completed ?? "?"}</b><small>已处理</small></span>
+                    <span><b>{observation?.total ?? "?"}</b><small>媒体总数</small></span>
+                    <span><b>{observation?.imported ?? "?"}</b><small>新增</small></span>
+                    <span><b>{observation?.deduplicated ?? "?"}</b><small>去重</small></span>
+                    <span><b>{observation?.failed ?? "?"}</b><small>失败</small></span>
+                  </div>
+                  <div className="import-progress-meta">
+                    <span className="import-progress-stage">
+                      {importStageLabels[observation?.stage ?? ""] ?? observation?.stage ?? "逐媒体进度尚不可用"}
+                      {observation?.current_file ? ` · ${observation.current_file}` : ""}
+                    </span>
+                    <span className="import-progress-freshness">
+                      {observation ? `后端状态：${observation.status ?? "未知"} · 更新于 ${observation.updated_at ?? "未记录"}` : "等待进度接口"}
+                    </span>
+                  </div>
+                  {progress?.request_error ? <p className="import-progress-warning">请求错误：{progress.request_error}；产品是否已停止以独立进度为准。</p> : null}
+                  {progress?.availability !== "available" ? <p className="import-progress-warning">查询状态：{progress?.availability ?? "未接入"} · {progress?.query_error ?? "等待进度接口"}；保留的计数不是当前实时进度。</p> : null}
                   {!terminal && phase?.status === "running" && progress?.last_received_at &&
                     Number(elapsedSeconds(progress.last_received_at, now)) > 10
-                    ? "进度查询超过10秒未刷新，显示的是上次观测。" : null}
-                </p>
+                    ? <p className="import-progress-warning">进度查询超过 10 秒未刷新，当前显示上次观测。</p> : null}
+                  <div className="import-progress-directory">
+                    已完成目录 {Number(phase.progress.directories_done ?? 0)}/{Number(phase.progress.directories_total ?? 0)}
+                  </div>
+                </div>
               ) : null}
               {phaseDef.key === "photo_import" && observation &&
                 typeof observation.total === "number" && observation.total > 0 &&
                 typeof observation.completed === "number" ? (
-                  <div>
+                  <div className="import-progress-bar-wrap">
                     <progress aria-label="当前目录媒体处理进度" max={observation.total} value={observation.completed} />
                     <small>媒体处理进度；事件总结和人物画像另行收尾。</small>
                   </div>
