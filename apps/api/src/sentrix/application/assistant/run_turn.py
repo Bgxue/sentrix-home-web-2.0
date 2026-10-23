@@ -54,6 +54,7 @@ from sentrix.domain.assistant.models import (
     Attachment,
     ChatMessage,
     ChatRole,
+    ModelReply,
     ProgressEvent,
     ProgressStage,
     ProgressStatus,
@@ -74,7 +75,7 @@ from sentrix.domain.assistant.ports import (
 from sentrix.domain.assistant.profile import DEFAULT_PROFILE, TurnProfile
 from sentrix.domain.assistant.task_state import ACTING, FINALIZING, TaskState, ToolCallRecord
 from sentrix.domain.assistant.tool_policy import ToolAction, ToolPolicy
-from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOLS_BY_NAME
+from sentrix.domain.assistant.tools import FINAL_ANSWER_TOOL, TOOLS_BY_NAME, ToolSpec
 from sentrix.domain.errors import DomainError
 
 log = logging.getLogger("sentrix.assistant.run_turn")
@@ -271,7 +272,7 @@ def _turn_trace(session: _Session, planned: PlannerResult | None) -> Mapping[str
     ledger = session.ledger
     requirements = [dict(item) for item in ledger.as_payload()]
     return {
-        "model_calls": list(session.model_calls),
+        "model_calls": [*(planned.model_calls if planned else ()), *session.model_calls],
         "planner": {
             # ``fallback_reason`` 为空 = 规划器正常答了；非空 = 它退回了规则/失败。
             # ``planned`` 为空 = 压根没走到规划（政策拒答那条提前 return 了）。
@@ -678,6 +679,48 @@ class RunTurn:
 
     # ---- 主循环 -------------------------------------------------------------
 
+    def _complete_recorded(
+        self,
+        session: _Session,
+        messages: Sequence[ChatMessage],
+        specs: Sequence[ToolSpec],
+        *,
+        call_type: str = "agent",
+    ) -> ModelReply:
+        started = time.perf_counter()
+        record: dict[str, Any] = {
+            "step_id": _step_id(session.state),
+            "call_type": call_type,
+            "attempt": len(session.model_calls) + 1,
+            "status": "error",
+        }
+        try:
+            reply = self._model.complete(messages, specs)
+            facts = list(reply.tool_argument_parse_facts)
+            if not facts:
+                for call in reply.tool_calls:
+                    try:
+                        call.parse()
+                        valid = True
+                    except ToolArgumentError:
+                        valid = False
+                    facts.append({"call_id": call.call_id, "json_object_valid": valid})
+            record.update(
+                status="complete",
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                finish_reason=reply.finish_reason,
+                tool_calls=[call.name for call in reply.tool_calls],
+                tool_argument_parse_facts=facts,
+            )
+            return reply
+        except Exception as error:
+            record.update(error_type=type(error).__name__, error=str(error))
+            raise
+        finally:
+            record["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            session.model_calls.append(record)
+
     def _converse(self, session: _Session, record: TurnRecord) -> str:
         state = session.state
         messages = self._initial_messages(record)
@@ -714,9 +757,8 @@ class RunTurn:
                 has_result_set=state.current_result_set_id is not None,
                 tools_exhausted=not state.can_call_tool(),
             )
-            call_started_at = time.perf_counter()
             try:
-                reply = self._model.complete(messages, specs)
+                reply = self._complete_recorded(session, messages, specs)
             except PromptTooLongError as error:
                 # 提示词撑爆了窗口。**先压历史再试一次**——这是它区别于别的模型服务
                 # 故障的地方：真因在调用方这一侧，压缩就解决得了。
@@ -742,7 +784,7 @@ class RunTurn:
                         ),
                     )
                     try:
-                        reply = self._model.complete(messages, specs)
+                        reply = self._complete_recorded(session, messages, specs)
                         break
                     except PromptTooLongError:
                         continue
@@ -750,21 +792,6 @@ class RunTurn:
                         return self._model_error_stop(session, retry_error)
             except Exception as error:
                 return self._model_error_stop(session, error)
-
-            # 记下这一次模型调用。``ttft`` **给不出来**：请求是非流式的，客户端拿到的
-            # 是整段响应，没有「第一个 token 什么时候到」这个时刻。要它有就得把 8100
-            # 的请求改成 ``stream=True``——那是另一件事，不在这里假装测到。
-            session.model_calls.append(
-                {
-                    "step_id": _step_id(state),
-                    "call_type": "agent",
-                    "prompt_tokens": reply.prompt_tokens,
-                    "completion_tokens": reply.completion_tokens,
-                    "duration_ms": round((time.perf_counter() - call_started_at) * 1000, 1),
-                    "tool_calls": [call.name for call in reply.tool_calls],
-                    "finish_reason": reply.finish_reason,
-                }
-            )
 
             if not reply.wants_tools:
                 # **正文里的工具调用标记不是答案。** 模型偶尔吐出
@@ -1422,7 +1449,7 @@ class RunTurn:
             ChatMessage(ChatRole.USER, FORCE_FINAL_NUDGE),
         ]
         try:
-            reply = self._model.complete(messages, ())
+            reply = self._complete_recorded(session, messages, (), call_type="recovery")
         except Exception:  # noqa: BLE001 —— 兜底里的兜底：它失败就落回固定文案
             log.warning("强制收尾的模型调用失败，落回确定性兜底", exc_info=True)
             return ""

@@ -207,3 +207,26 @@ def test_the_live_scopes_are_picked_up_from_the_sample():
     assert live["scopes"]["system_memory"] == "host_all_processes"
     assert live["scopes"]["gpu_memory"] == "gpu_device"
     assert live["scopes"]["model_process"] == "gpu_compute_processes"
+
+
+def test_the_unified_profile_wins_when_split_fields_exist():
+    """有 host/gpu 拆分字段时，即使 memory_unit 还是旧值也按新口径解释。
+
+    这是 46 实测的形态：采样行已有 ``model_process_host_memory_mib``，但
+    ``memory_unit`` 仍是 ``process_pss_uma_mib``；前端若只看 unit 就会继续显示
+    VmRSS。聚合层必须给出新的 method/scope。
+    """
+    jetson = aggregate_gpu_samples(
+        [
+            {
+                "memory_unit": "process_pss_uma_mib",
+                "source": "jetson_local_pss",
+                "model_process_host_memory_mib": 1670.84,
+                "model_process_gpu_memory_mib": 5094.35,
+                "model_process_gpu_memory_source": "nvmap_iovmm",
+            }
+        ]
+    )
+    assert jetson["memory_profile"]["method"] == "orin_smaps_rss_plus_gpu_uma_v1"
+    assert jetson["memory_profile"]["memory_unit"] == "host_smaps_rss_plus_gpu_mib"
+    assert jetson["memory_profile"]["scope"] == "host_smaps_rss_plus_gpu_uma"

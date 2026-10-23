@@ -138,8 +138,7 @@ describe("保存提示词用的是用户编辑的那份（P1）", () => {
     const onSave = vi.fn();
     render(<PromptHarness onSave={onSave} />);
 
-    const textarea = await screen.findByRole("textbox");
-    expect((textarea as HTMLTextAreaElement).value).toBe("AQ-DEFAULT");
+    const textarea = await screen.findByDisplayValue("AQ-DEFAULT");
 
     fireEvent.change(textarea, { target: { value: "我编辑过的回答质量提示词" } });
     fireEvent.click(screen.getByRole("button", { name: "保存提示词" }));
@@ -150,7 +149,7 @@ describe("保存提示词用的是用户编辑的那份（P1）", () => {
   it("切到证据核验后再保存：kind 与草稿都跟着切", async () => {
     const onSave = vi.fn();
     render(<PromptHarness onSave={onSave} />);
-    await screen.findByRole("textbox");
+    await screen.findByDisplayValue("AQ-DEFAULT");
 
     fireEvent.click(screen.getByRole("button", { name: /证据核验/ }));
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;

@@ -38,7 +38,7 @@ export interface RetrievalMetric {
  * 4 个点取 p95 → `ceil(3.8)-1 = 3` → 最大值，而非线性插值的 38.5。
  */
 export function nearestRankPercentile(values: readonly unknown[], percentile: number): number | null {
-  const valid = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value)).sort((a, b) => a - b);
   if (!valid.length) return null;
   return valid[Math.max(0, Math.min(valid.length - 1, Math.ceil(valid.length * percentile) - 1))];
 }
@@ -75,9 +75,9 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const saved = (run?.summary || {}) as Loose;
   const items = (run?.items || []) as unknown as Loose[];
   const metricItems = items.filter((item) => String(item?.answerability || "").toLowerCase() !== "unanswerable");
-  const judged = items.filter((item) => item.judge?.score != null && item.judge?.consistency_status !== "inconsistent");
+  const judged = items.filter((item) => typeof item.judge?.score === "number" && [0, 1, 2].includes(item.judge.score) && item.judge?.consistency_status !== "inconsistent");
   const recalls = metricItems.map((item) => item.retrieval_recall).filter((value) => Number.isFinite(Number(value)));
-  const scores = judged.map((item) => Number(item.judge.score)).filter(Number.isFinite);
+  const scores = judged.map((item) => item.judge.score as number);
   const evidenceScores = items.map((item) => item.evidence_judge?.score).filter((score) => [0, 1, 2].includes(score));
   const typedRetrieval = items.some((item) => Object.prototype.hasOwnProperty.call(item, "retrieval_media_refs"));
   const retrievalItems = metricItems.filter((item) => mediaRefs(item).length);
@@ -99,7 +99,7 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const parseTotals = items.map((item) => item.agent_stability?.json_parse_total).filter(Number.isFinite);
   const parseSuccesses = items.map((item) => item.agent_stability?.json_parse_success).filter(Number.isFinite);
   const completion = items.map((item) => item.agent_stability?.completed_within_steps).filter((value) => typeof value === "boolean");
-  const agentTaskLatencies = items.map((item) => Number(item.timing_breakdown?.agent_wall_ms)).filter(Number.isFinite);
+  const agentTaskLatencies = items.map((item) => item.timing_breakdown?.agent_wall_ms ?? (item.metrics_contract_version === 2 ? item.wall_clock_ms : undefined)).filter(Number.isFinite);
   const agentLoopCounts = items.map((item) => {
     const calls: Loose[] = itemCallMetrics(item);
     return calls.some((call) => call.call_type)
@@ -120,6 +120,7 @@ export function effectiveRunSummary(run: Run | null | undefined): RunSummary {
   const contextTokens = callTokenCounts.map((call) => call.context);
   return {
     ...saved,
+    run_valid: run?.mode === "build" ? null : saved.run_valid,
     completed: saved.completed ?? items.length,
     total: saved.total ?? run?.qa_count ?? items.length,
     judge_valid_count: saved.judge_valid_count ?? judged.length,

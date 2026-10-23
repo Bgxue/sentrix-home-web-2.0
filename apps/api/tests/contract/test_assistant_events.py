@@ -91,8 +91,11 @@ class DiesAfterPlanning:
     「上层只认那个类型」这类问题）。文案里就是 8100 缺 tool-call flag 时那句真实的 400。
     """
 
+    planned = False
+
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[object]) -> ModelReply:
-        if not tools:
+        if not self.planned:
+            self.planned = True
             return planner_reply("photo_set", "delivered_photo")  # type: ignore[return-value]
         raise ModelServiceError(
             "模型端点 http://127.0.0.1:8100/v1 上的 gemma4-12b-it 返回 400："
@@ -457,3 +460,31 @@ def test_the_polling_endpoint_answers_a_running_turn_without_a_result(client: Te
         assert body["result"] is None
     else:
         assert body["result"] is not None
+
+
+def test_terminal_transition_between_history_read_and_check_cannot_drop_progress(client, monkeypatch):
+    import time
+
+    _, turn_id = run_turn(client)
+    turns = client.app.state.container.turn_repository
+    deadline = time.monotonic() + 3
+    while not turns.get(turn_id).status.is_terminal:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    original = turns.events_after
+    expected = list(original(turn_id, 0))
+    assert expected
+    first = True
+
+    def read_before_commit(identifier, cursor):
+        nonlocal first
+        if first:
+            first = False
+            return []  # snapshot from just before the worker committed its events
+        return original(identifier, cursor)
+
+    monkeypatch.setattr(turns, "events_after", read_before_commit)
+    events = read_events(client, turn_id)
+    assert [e["id"] for e in events if e["event"] == "progress"] == [e.step_index for e in expected]
+    assert events[0]["data"]["kind"] == "plan"
+    assert events[-1]["event"] == "complete"

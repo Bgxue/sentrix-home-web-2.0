@@ -497,6 +497,12 @@ class VisualEmbedder(Protocol):
   按 `(space, model, dimension)` 分套；不重建就是“索引为空”。
 - 2.0 不提供“某个槽单独换模型”的能力。要换就改 `SCHEMES` 并整方案迁移。
 
+legacy文本HTTP协议：优先`POST /embed`，仅404时协商`/v1/embeddings`；
+仅对BGE-M3及服务明确返回的`pooling=none`错误，使用原生`/embedding`的首token（CLS）
+并在客户端L2归一化。不是mean pooling，不依赖原生接口忽略的`embd_normalize`。
+维度/非有限/零CLS/多输入响应必须失败并保留`load_error`；端口和失败空表语义不变。
+这是同一模型的传输协议兼容，不切换嵌入方案。量化差异记录在运行部署证据中，完整回归使用新scope。
+
 ---
 
 ### 4.6 向量索引（`VectorIndex`）
@@ -643,6 +649,13 @@ class VisualEmbedder(Protocol):
 
 换非 OpenAI 响应形状才需要改 `JudgeRunner._request` 与三个 judge 方法。
 
+T006 Judge一致性v2：新增可选`judge.consistency_version=2`，规则仍在domain，
+重问编排仍在application；只检查同一标点分句中的回答褒义，不能把问题可回答性或参考事实
+当成模型回答正确。合法0分保留，真正矛盾的单次重问与None失败语义不变。
+历史无版本继续v1，不回填未保存的重问分数。数字字符串score按domain统一v1规则确定转换，拒绝bool及非有限/小数/越界/混合文本；记录score_normalization_version/score_normalization及attempts原响应。历史明确原文可生成带源哈希的score_derivation，保留原分/状态；执行、读取、汇总共用规则。接口契约、列表/详情投影及前端类型同步。
+
+Judge实时进度：`phases.qa_eval.progress`为规范计数，阶段外层同值兼容；Judge终态包含失败、跳过单列，有效评分数独立。Agent/Judge任一完成即由application提交同一检查点，不等全部Agent结束。前端缺失计数显示未知，不回写历史。详见指标契约的T006 Judge实时进度。
+
 #### 4.12.2 换推理后端
 
 实现 `InferenceProvider` + `LifecycleProvider` + `TelemetryProvider`，替换：
@@ -781,11 +794,21 @@ class AlbumSource(Protocol):
 |---|---|---|
 | unit | 纯逻辑、错误映射、边界 | `pytest apps/api/tests/unit` |
 | contract | 每个 v1 端点 | `pytest apps/api/tests/contract` |
-| integration | 真后端契约（临时目录/本地 HTTP/合成数据） | `pytest apps/api/tests/integration` |
-| e2e | 真服务 + 黄金数据 | `pytest apps/api/tests/e2e` |
+| integration | 真后端契约（临时目录/本地 HTTP/合成数据） | `make test-integration` |
+| 真实环境专项 | 真相册、GeoNames、人脸权重、真实模型 | `make test-real`，按影响指定 `REAL_TEST_PATHS` |
 | PhotoBench | 适配器替换、相位、指标 | `pytest apps/photobench/tests` |
 
 **A 类 Provider 至少补 integration；C 类仓储至少补 integration + 并发用例。**
+
+2026-10-23 用户确认三层验证：日常 `make ci` 执行全部未标记 `real_environment` 的自动测试，
+继续检查严格类型、分层/可达性、文档、两份 OpenAPI、≥85% 覆盖率及两个前端的测试与构建。
+真实资源用例保留全部原断言，明确标记后独立运行；同文件内的纯算术/阈值用例不得随真实权重测试一起移出。
+专项入口 `scripts/run_real_tests.py` 保留 JUnit，零用例、缺依赖 skip、失败或错误均不能通过；
+`make ci-real` 为日常门禁加全套真实专项。直接 pytest 的 skip 仅是未执行记录，不能作专项通过证据。
+真机10QA另验固定版本部署、本机依赖、执行终态、遥测与评分，不替代专项中的地点/人脸/重复导入断言。
+涉及公共执行或指标的发布验证受影响四机，平台专用变更按影响验证对应设备；纯测试编排不触发额外模型回归。
+详见 [测试分层与证据](../runbooks/testing.md)。
+
 
 失败语义的契约测试模板：
 
@@ -825,6 +848,8 @@ def test_chat_model_maps_prompt_too_long():
 
 | 变量 | 作用 | 默认 | 影响 | 必填 |
 |---|---|---|---|---|
+| `SENTRIX_DEPLOYMENT_PROFILE` | 集中部署预设server/mac；显式值优先 | `server` | 嵌入方案、Agent/Chat预算、人脸provider默认 | 否 |
+| `SENTRIX_AGENT_WALL_TIME_S` | Agent墙钟预算；mac缺省600 | `180` | Agent预算 | 否 |
 | `SENTRIX_DATA_DIR` | 数据根，派生 db/media/previews/qdrant/geo | `data` | 全部持久化/索引 | 生产必设 |
 | `SENTRIX_WEB_DIST_DIR` | 前端构建产物 | `apps/web/dist` | Web 挂载 | 否 |
 | `SENTRIX_API_HOST` | 监听地址 | `0.0.0.0` | API | 否 |
@@ -846,6 +871,14 @@ def test_chat_model_maps_prompt_too_long():
 > 切换方案必须重建向量（旧 `model_name` 的行不会命中）。新增任何同类开关前，
 > 先回答 §5.7 的问题：它是不是部署事实？
 
+T006 指标 v2 的可选契约见 [photobench-metrics-contract.md](photobench-metrics-contract.md)。
+运行拓扑值对象 `RunRuntimeSnapshot` 定义于 `photobench/domain/runtime/ports.py`；
+由配置端口读出并在application建run时冻结，bootstrap的 `runtime_providers_for_run` 注入HTTP与遥测。
+按run构造的SentrixProcess同样注入快照；重启脚本通过既有PHOTOBENCH_CONFIG_ROOT读取原子发布的只读快照文件，模型及嵌入均不得被后续全局配置覆盖。
+旧 `runtime_providers` 装配入口保留一个发布周期。`TelemetryProvider` 四方法签名不变；
+失败继续返回unavailable/not_applicable并附原因。严格遥测仅由独立回归验收器判定。
+产品调用轨迹新增解析尝试/成功数与错误耗时等通用事实，不在产品层定义benchmark规则。
+
 ### 6.2 非 `Settings` 的环境变量
 
 | 变量 | 作用 | 默认 | 所属 |
@@ -866,13 +899,25 @@ def test_chat_model_maps_prompt_too_long():
 | `SENTRIX_FACE_GPU_MAX_CONCURRENCY` | 人脸 GPU 并发 | `1` | 人脸闸门 |
 | `SENTRIX_PLANNER_MAX_ATTEMPTS` | 规划重试 | `3` | application |
 | `SENTRIX_PERSON_INSIGHT_SCOPES` | 画像允许列表 | 空 | application |
+| `SENTRIX_LIB_THREADS` | 数值库/ORT/torch/OpenCV线程上限；入口先设置OMP等 | 空=自动，0=不限制 | process entry / infrastructure |
+| `SENTRIX_PIPELINE_MAX_WORKERS` | 自动线程推导的并发分母 | 4 | thread limits |
 
 ### 6.3 评测侧
 
 | 变量/配置 | 作用 |
 |---|---|
+| `PHOTOBENCH_QA_CONCURRENCY` | QA并发；server默认0自动，mac默认2；显式0仍自动 |
+| `PHOTOBENCH_IMPORT_TIMEOUT` | 同步导入预算；server7200秒、mac86400秒，显式值优先 |
 | `PHOTOBENCH_JUDGE_CONCURRENCY` | Judge 并发覆盖（默认 `min(8, qa_concurrency)`） |
 | `judge_providers.json` | Judge 端点/模型/密钥 env 名 |
+| `runtime_connection.json` | 主模型、Sentrix、嵌入及产品服务拓扑唯一配置源；每run冻结，已运行快照不变 |
+| `PHOTOBENCH_CONFIG_ROOT` | 配置根；优先于旧单文件路径覆盖 |
+| `PHOTOBENCH_RUNTIME_CONNECTION` / `PHOTOBENCH_RUNTIME_SERVICES` | 旧单文件路径入口，未指定CONFIG_ROOT时兼容 |
+| `PHOTOBENCH_DATA_ROOT` / `PHOTOBENCH_RESULTS_ROOT` | 数据集及结果根；发布显式绑定原路径 |
+| `PHOTOBENCH_SENTRIX_PID_FILE` / `PHOTOBENCH_SENTRIX_LOG_PATH` | 既有进程控制参数；固定release绑定runtime内控制记录和日志，登记新API避免首轮无必要重启 |
+| `build-info.json` | 固定release的SHA与指标契约版本；缺文件为development |
+| `SENTRIX_WEB_DIST_DIR` / `PHOTOBENCH_WEB_DIST_ROOT` | 统一构建的前端dist根 |
+| `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | 回归发布设置为1；缺权重在preflight暴露 |
 | `custom_judge_prompt.json` | 自定义评分提示词 |
 | run 请求字段 | 单轮覆盖 judge URL/model |
 
@@ -1171,3 +1216,39 @@ make ci 是否绿？       □ 是
 ---
 
 *本文档中的行号以 2026-10-19 的 `psh2.0` 工作树为准；代码移动后请同步更新。*
+
+Judge一致性v3进一步限定为明确“模型/助手的回答/答案/结论”或分句开头针对回答的肯定断言；参考答案已回答正确地点而模型未能作答的合法0分不重问。真正模型回答正确却给0仍重问一次；v1/v2历史语义保留，新执行consistency_version=3，标准化v1不变。
+
+
+### 2026-10-22 运行配置与硬件核验补充
+
+- `SentrixClient.diagnostics(timeout=10)` 为新增语义端口，返回非密钥的有效启动事实；旧方法不变。`TelemetryProvider` 四方法签名不变。
+- `RunSuites` 创建队列前冻结 `RunRuntimeSnapshot`；full/build/reuse 均先同步并验证产品主模型、嵌入、产品预算/provider 和构建版本。resume 继承原快照/预算并记录来源，旧记录无快照时显式注明采用当前配置。只有登记的本机产品 API 可自动重启，其他 API 只核验。
+- build 不读 QA、不构造 Judge，`qa_set=""`、`qa_count=0`、`items=[]`、`run_valid=null`；`scope_build` 记录完整导入状态和嵌入配置，配置改变须新建 scope，不能冒称旧索引已重建。
+- 模型身份保存部署后 `/models` 的原始 ID、展示名、候选及原因；多模型无明确匹配不盲选，名称保留小数点。
+- Sentrix 独立 HTTP 策略：GET/HEAD 瞬时断连最多三次，退避0.2/0.4秒，共享总预算；POST 仅连接建立失败可重试。发出后读写/协议超时结果未确认，不重放，保存 `request_outcome_unknown`。Judge 独立既有重试策略不变。
+- 产品 `Settings` 集中解析 `SENTRIX_DEPLOYMENT_PROFILE=server|mac`；Mac 缺省 legacy、Agent600秒、Chat180秒、人脸CPU，显式设置优先。PhotoBench 同一启动入口解析 QA2/导入86400秒，显式 QA0表示自动。profile 不在 application/ONNX 适配器重复读取；provider 经 bootstrap 注入。
+- 新可选事实：`model_identity`、`execution_budgets`、`snapshot_source`、`scope_build`；诊断附 `runtime_configuration`；配置 API 保留并校验白名单 `product_settings`。同步导入显示目录、已完成目录、等待起点，不伪造逐媒体进度。两份 OpenAPI/投影/前端同步。
+- 硬件诊断属部署层：`runtime_acceleration_probe.py` 在有界子进程记录实际导入路径、包版本/来源记录哈希、用户 site、动态库、真实矩阵/卷积算子，以及本地 ONNX 推理的实际 kernel provider。CUDA 请求退为CPU必须失败；明确CPU合法。诊断不安装、不下载、不改服务。
+- 安装入口拒绝覆盖现存 venv；Jetson 需完整带哈希依赖锁，在独立环境验证。禁止以软链接伪装 CUDA 大版本、盲改全局 LD_LIBRARY_PATH、复制不匹配的 Python/JetPack 环境。现用CPU路径可保留并报告限制。
+
+输入初始化失败仍保存failed终态并标记failed_phase=initialization；无法读取的qa_count/input_integrity为null，前端展示未记录，不冒称0题。非法qa_set创建前拒绝。build验收expected_count=0且评分不适用；导入、处理和遥测门槛不变。
+
+
+### 2026-10-22 采样调度与分量观测补充
+
+- 仍经 `TelemetryProvider` 四方法采集，不改签名或装配；application内部的采样/发布协作者按单调时钟安排周期，跳过已错过周期，不无界追赶。全样本滚动聚合由单个独立发布线程执行，不持采样锁，不建立无界发布队列。
+- 新可选契约 `memory_observation_version=1`、`memory_observations`、`memory_dependencies`、`sampling_diagnostics`；`gpu_metrics.sampling_integrity`记录采集、写入、发布异常和有界停止后尚存线程。公式和有效性仍归domain，系统文件/进程身份/缓存IO归infrastructure。API只投影、前端展示来源和值龄；缓存保持原观测起止，PID与start_ticks共同核验，不写死PID。
+- Jetson每轮共享一次nvmap账本；监听socket缓存按端口集合隔离、最多32份且最长2秒，每次核验原持有者身份/socket，变化即重查；相关PID单次smaps同时取RSS/PSS，总探测时间达到1秒后不再读后续PID，未读分量保持null。单次内核文件读取无法由线程硬抢占，该预算不是硬实时承诺。 端口发现仅检查真实监听候选；进程清单先以stat建身份/父子图，仅对端口根及当前子孙读取详情并复核身份。本机PID/无端口关键词及旧无scope配置保留全量发现，远端服务不扩大本机归属。
+- 正常生产保持fail-open；严格验收独立重算分量值龄及最老必要来源，仍以3秒门槛判断。确认无辅助服务的0也依赖新鲜拓扑；不完整不得伪装完整。停止最长共同等待10秒，未退出线程明确记异常，不能据此宣称资源已释放。
+- 本轮用户要求仅本地修代码、暂不启动测评；不改驱动、CUDA/ORT环境或远端服务。新代码的真机时序与覆盖效果待后续授权验证，历史无逐分量时间不补造。
+
+### PhotoBench 长期运行读写补充（2026-10-23）
+
+结果新增能力先定义 `RunRevisions` / `RunReadViews`，旧 `RunStore` / `RunResultWriter` 不变；具体文件读写、提交清单、派生历史索引仍在 infrastructure，由既有 bootstrap 装配。application 只协调一致快照、缓存失效/预算、线程释放和轻量投影；API 收包后将同步用例交线程池，不在事件循环直接执行文件或 HTTP IO。指标公式未变，`include_history=false` 明确表示检查点/窗口展示，不冒称全轮重算。提交、兼容导出及失败语义见 [指标契约](photobench-metrics-contract.md) 和 [本轮偏差](../refactor/2026-10-23-long-running-deviations.md)。新增预算为内部有界策略，没有散落环境变量；旧格式及入口至少保留一个发布周期。
+
+### 2026-10-23 导入进度协议
+
+保留同步 `POST /api/v1/imports`，新增可选 `operation_id` 和独立 `GET /api/v1/imports/{operation_id}/progress`。产品仅输出通用处理事实；`completed = imported + deduplicated + failed`，`total` 为实际扫描并应用 limit 后的支持媒体数，扫描前为 null。媒体计数完成后仍依次进行事件总结、参与者刷新、家庭图谱、人物画像，只有同步请求完成才终态。updated_at 是步骤更新时间，observed_at 是查询时间，不能互换。查询不会重放导入。
+
+由 domain ImportProgressStore 端口、application TrackImport 和 bootstrap 装配的有界进程内适配器实现；最多32个活跃跟踪、128条终态，重启或淘汰后404。重复在册ID409，容量不足429，均发生在副作用前。此能力不是持久作业队列，不承诺跨进程查询或取消产品执行。PhotoBench 使用运行快照中的同一客户端，每秒轮询、单次3秒超时，保存最后事实及查询故障；不盲重试导入POST。旧服务无进度时明确不可用。

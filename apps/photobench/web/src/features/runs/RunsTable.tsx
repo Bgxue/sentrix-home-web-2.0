@@ -15,15 +15,16 @@ import type { RefObject } from "react";
 import type { Run } from "../../api/types.ts";
 import type { RunPageState } from "../../hooks/useRuns.ts";
 import { albumName, duration, fmtDate, fmtPct, modelName, statusLabel } from "../../lib/format.ts";
+import { judgeProgressLabel } from "../../lib/details.ts";
 import { modeBadgeClass, modeLabel } from "../../lib/qaBrowser.ts";
 
 /** 1.0 `App.vue:2253-2262`。 */
 function runProgressLabel(run: Run): string {
   if (run.mode === "build") return "—";
-  const progress = run.phases?.qa_eval?.progress;
   const phase = run.phases?.qa_eval;
-  if (progress?.judge_total != null || phase?.judge_total != null) {
-    return `${progress?.judge_completed ?? phase?.judge_completed ?? 0}/${progress?.judge_total ?? phase?.judge_total}`;
+  if (run.qa_count === null) return "题目数未记录";
+  if (phase?.progress || phase?.judge_total != null) {
+    return judgeProgressLabel(phase);
   }
   return `${run.summary?.completed || 0}/${run.summary?.total || run.qa_count || 0}`;
 }
@@ -75,6 +76,10 @@ export function RunsTable({
         ) : null}
         <span className="muted">共 {runPage.total} 条</span>
       </div>
+      {["pending", "running"].includes(String(runPage.scan?.state)) ? (
+        <p className="muted">历史记录正在加载（已读取 {Number(runPage.scan?.scanned || 0)} 条），当前列表尚未完整。</p>
+      ) : null}
+      {runPage.scan?.state === "failed" ? <p className="error">历史记录加载失败：{String(runPage.scan.error || "未知原因")}</p> : null}
       <div className="runs-list">
         <table>
           <thead>

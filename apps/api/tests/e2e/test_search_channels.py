@@ -28,10 +28,14 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from test_album_timeline import FakeChatModel, FakePersonVision
 
 from sentrix.config import Settings
 from sentrix.domain.retrieval import scheme
 from sentrix.main import create_app
+
+# Requires real album data, local weights or a running model; run via make test-real.
+pytestmark = pytest.mark.real_environment
 
 ALBUM = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 SCOPE = "album1"
@@ -113,6 +117,9 @@ def album_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClien
             app.state.container,
             visual_embedder=FakeVisualEmbedder(),
             vlm_observer=FakeVlmObserver(),
+            # 批末事件总结、人物画像也会访问主模型。地点专项的全部模型路径须隔离。
+            chat_model=FakeChatModel(),
+            person_vision=FakePersonVision(),
         )
         client = TestClient(app)
         response = client.post(

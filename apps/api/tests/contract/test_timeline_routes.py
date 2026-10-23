@@ -227,3 +227,51 @@ def test_the_timeline_without_a_scope_covers_every_album(client: TestClient, tmp
 
     assert everything["total"] == one_album["total"] > 0, "空 scope 必须覆盖到具体相册里的事件"
     assert everything["scope_id"] == "", "回给调用方的是用户请求的范围，不是内部的兜底值"
+
+
+def test_import_progress_is_queryable_during_batch_finalization(client, tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sentrix.api.routes import timeline
+
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked_insights(*args):
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    monkeypatch.setattr(timeline, "_maybe_run_insights", blocked_insights)
+    payload = {"directory": str(album(tmp_path)), "scope_id": "album1", "operation_id": "tracked"}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/v1/imports", json=payload)
+        try:
+            assert entered.wait(5)
+            response = client.get("/api/v1/imports/tracked/progress")
+            assert response.status_code == 200
+            fact = response.json()
+            assert (fact["completed"], fact["total"], fact["imported"]) == (1, 1, 1)
+            assert fact["status"] == "running" and fact["stage"] == "person_insights"
+            assert fact["observed_at"] >= fact["updated_at"]
+            assert client.post("/api/v1/imports", json=payload).status_code == 409
+        finally:
+            release.set()
+        assert future.result(timeout=5).status_code == 201
+    final = client.get("/api/v1/imports/tracked/progress").json()
+    assert final["status"] == "completed" and final["sequence"] > fact["sequence"]
+    assert client.get("/api/v1/imports/unknown/progress").status_code == 404
+
+
+def test_tracked_import_failure_keeps_a_truthful_terminal(client, tmp_path):
+    response = client.post(
+        "/api/v1/imports",
+        json={
+            "directory": str(tmp_path / "missing"),
+            "operation_id": "bad-directory",
+        },
+    )
+    assert response.status_code == 400
+    fact = client.get("/api/v1/imports/bad-directory/progress").json()
+    assert fact["status"] == "failed" and fact["total"] is None
+    assert fact["completed"] == 0 and "400" in fact["error"]

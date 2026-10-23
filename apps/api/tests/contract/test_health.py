@@ -22,6 +22,7 @@ def test_health_returns_ok(client: TestClient):
     assert response.json() == {
         "status": "ok",
         "version": "0.1.0",
+        "build_revision": "development",
         "database": "ok",
         "embeddings": "ok",
     }
@@ -70,3 +71,61 @@ def test_unknown_v1_route_is_404(client: TestClient):
 def test_no_unversioned_public_routes(client: TestClient):
     """公开 API 只有 /api/v1；/api/health 这种 1.0 风格路径必须不存在。"""
     assert client.get("/api/health").status_code == 404
+
+
+def test_health_live_does_not_touch_dependencies(client: TestClient):
+    """轻量探针只证明事件循环还能回包：数据库/嵌入侧车都不许碰。
+
+    看门狗用它做 1 分钟级探活，重负载下不能因为一次慢查询/慢侧车被判死。
+    """
+
+    class _Exploding:
+        build_revision = "development"
+
+        def database_healthy(self) -> bool:
+            raise AssertionError("liveness must not query the database")
+
+        @property
+        def embedding_health(self) -> object:
+            raise AssertionError("liveness must not probe embeddings")
+
+    client.app.state.container = _Exploding()
+
+    assert client.get("/api/v1/health/live").json() == {
+        "status": "ok",
+        "version": "0.1.0",
+        "build_revision": "development",
+    }
+
+
+def test_diagnostics_carries_the_full_payload(client: TestClient):
+    """完整诊断与 ``/health`` 同源，保留既有消费方的字段。"""
+    result = client.get("/api/v1/diagnostics").json()
+    effective = result.pop("runtime_configuration")
+    assert effective["vlm_base_url"]
+    assert effective["agent_wall_time_s"] > 0
+    assert result == client.get("/api/v1/health").json()
+
+
+def test_health_live_responds_with_the_entire_worker_pool_occupied(client: TestClient):
+    import asyncio
+
+    import anyio
+    import httpx
+
+    async def exercise():
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        previous = limiter.total_tokens
+        limiter.total_tokens = 1
+        await limiter.acquire()
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=client.app), base_url="http://test"
+            ) as http:
+                response = await asyncio.wait_for(http.get("/api/v1/health/live"), timeout=1)
+            assert response.status_code == 200
+        finally:
+            limiter.release()
+            limiter.total_tokens = previous
+
+    asyncio.run(exercise())

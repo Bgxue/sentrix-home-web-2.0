@@ -37,3 +37,17 @@ class InvalidRequestError(DomainError):
 
     code = "invalid_request"
     status_code = 400
+
+
+class RequestOutcomeUnknownError(RuntimeError):
+    """A non-idempotent request may have executed; automatic replay is forbidden."""
+
+    def __init__(self, *, method: str, cause_type: str, attempts: int) -> None:
+        self.facts = {
+            "code": "request_outcome_unknown",
+            "method": method,
+            "cause_type": cause_type,
+            "attempts": attempts,
+            "automatic_replay": False,
+        }
+        super().__init__(f"{method} outcome unknown after {cause_type}; request was not replayed")

@@ -41,10 +41,15 @@ dependencies = [
     # ``get_providers()``：**请求了 CUDA 而实际只有 CPU 就直接抛错拒启**，报错里给出的修复
     # 命令钉的正是下面这个版本号——两处必须一起改，改一处另一处就成了谎话。
     # 纯 CPU 部署是合法形态，但要**显式**声明：``FACE_PROVIDERS=CPUExecutionProvider``
-    # （``RETINAFACE_PROVIDERS`` 同）。macOS arm64 没有 ``onnxruntime-gpu`` wheel，
-    # 所以在依赖层直接分流到同版本 CPU 包，否则 Apple Silicon 连安装都无法解析。
-    "onnxruntime-gpu==1.30.0; platform_system != 'Darwin'",
-    "onnxruntime==1.30.0; platform_system == 'Darwin'",
+    # （``RETINAFACE_PROVIDERS`` 同）。
+    #
+    # 跨平台安装（2026-10-21）：``onnxruntime-gpu`` 在 macOS 没有 wheel，Jetson 的
+    # aarch64 GPU 包也不在 PyPI；把它们写死在 base 里会让 Mac/118 的 ``make install``
+    # 直接失败。按平台分流：
+    #   · Linux x86_64（153）→ GPU 包，保留 CUDA 人脸；
+    #   · macOS / Linux aarch64（158/46/118）→ CPU 包，显式声明 CPU provider 即可。
+    "onnxruntime-gpu==1.30.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "onnxruntime==1.30.0; sys_platform == 'darwin' or (sys_platform == 'linux' and platform_machine == 'aarch64')",
     "insightface==1.0.1",
     # headless：服务端不装 GUI 那份，1.0 两份都装了是因为它还要在开发机上跑预览。
     "opencv-python-headless>=4.10,<6",

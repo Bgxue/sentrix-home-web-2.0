@@ -14,10 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from sentrix.config import Settings
 from sentrix.domain.media.ports import ObservationSemantics
 from sentrix.domain.retrieval import scheme
-from sentrix.main import create_app
 
 RED = [1.0, 0.0, 0.0, 0.0]
 GREEN = [0.0, 1.0, 0.0, 0.0]
@@ -47,9 +45,9 @@ def jpeg_bytes(color: str) -> bytes:
 
 
 @pytest.fixture
-def scripted_client(settings: Settings) -> TestClient:
+def scripted_client(isolated_app) -> TestClient:
     red, green = jpeg_bytes("red"), jpeg_bytes("green")
-    app = create_app(settings)
+    app = isolated_app
     app.state.container = dataclasses.replace(
         app.state.container,
         visual_embedder=ScriptedEmbedder(images={red: RED, green: GREEN}, texts={"红色": RED, "绿色": GREEN}),
@@ -187,6 +185,17 @@ class WordObserver:
         return ObservationSemantics(caption=word, place=word, activity=word, objects=(word,), confidence=0.65)
 
 
+class CaptionEmbedder(ScriptedEmbedder):
+    def embed_query(self, text: str) -> list[float]:
+        # Ingested semantic text contains labels/newlines. Give the two captions
+        # distinct vectors so their text ranks cannot depend on random asset IDs.
+        if "海边" in text:
+            return list(GREEN)
+        if "雪山" in text:
+            return list(RED)
+        return super().embed_query(text)
+
+
 @pytest.fixture
 def album(tmp_path: Path) -> Path:
     directory = tmp_path / "album"
@@ -197,15 +206,15 @@ def album(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def channel_client(settings: Settings, album: Path) -> TestClient:
+def channel_client(isolated_app, album: Path) -> TestClient:
     """视觉把「雪山」排第一（查询词映射到绿色向量），词法把「海边」排第一。"""
     red, green = jpeg_bytes("red"), jpeg_bytes("green")
     # W1 之后图像与文本是**同一个嵌入器**（同一个空间），导入期写文本向量走的也是
     # 这一槽。**此前这里只换了 ``visual_embedder``**，``text_embedder`` 一直是真
     # WeMM 侧车（8102）——侧车不在时 ``text_ann`` 通道就是空的，下面那条「三路融合」
     # 的用例会红，而它红的理由与代码无关，只是那台机器上没起侧车。
-    embedder = ScriptedEmbedder(images={red: RED, green: GREEN}, texts={"海边": GREEN, "雪山": GREEN})
-    app = create_app(settings)
+    embedder = CaptionEmbedder(images={red: RED, green: GREEN}, texts={})
+    app = isolated_app
     app.state.container = dataclasses.replace(
         app.state.container,
         visual_embedder=embedder,

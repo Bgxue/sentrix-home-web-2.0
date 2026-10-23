@@ -47,6 +47,7 @@ def build_reuse_bases(spaces: list[dict[str, Any]], runs: list[dict[str, Any]]) 
             reverse=True,
         )
         source = linked[0] if linked else {}
+        build = next((run["scope_build"] for run in linked if run.get("scope_build")), None)
         album_id = str(source.get("album_id") or "").strip()
         model_candidates = sorted(
             {str(run.get("model_profile") or "").strip() for run in linked if run.get("model_profile")},
@@ -88,9 +89,12 @@ def build_reuse_bases(spaces: list[dict[str, Any]], runs: list[dict[str, Any]]) 
                 "scope_name": space.get("name") or scope_id,
                 "created_at": space.get("created_at") or "",
                 "source_run_ids": [],
-                "ready": str(space.get("status") or "active") == "active",
+                "ready": str(space.get("status") or "active") == "active"
+                and (build is None or build.get("status") == "ready"),
             },
         )
+        if build is not None:
+            group["scope_build"] = build
         if str(space.get("created_at") or "") > str(group.get("created_at") or ""):
             group.update(
                 {

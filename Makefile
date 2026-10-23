@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration coverage check-docs web-check ci dev photobench-dev web-dev install-services start stop restart status
+.PHONY: help install lint format format-check typecheck arch photobench-check test test-unit test-contract test-integration test-real ci-real coverage check-docs web-check ci dev photobench-dev web-dev install-services start stop restart status
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -67,15 +67,21 @@ test-unit: ## 单元测试
 test-contract: ## 契约测试
 	.venv/bin/pytest apps/api/tests/contract -q
 
-test-integration: ## 集成测试
-	.venv/bin/pytest apps/api/tests/integration -q
+test-integration: ## 无外部模型/真实权重的集成契约测试
+	.venv/bin/pytest apps/api/tests/integration -m "not real_environment" -q
 
-test: ## 全部测试
-	.venv/bin/pytest -q
+test: ## 日常自动测试（真实环境专项另用 test-real）
+	.venv/bin/pytest -m "not real_environment" -q
+
+# 所有原断言保留。可按影响范围指定 REAL_TEST_PATHS；缺依赖/零用例/skip 都不算通过。
+test-real: ## 真实相册、模型、人脸专项；缺依赖必须失败
+	$(PY) scripts/run_real_tests.py $(REAL_TEST_PATHS)
+
+ci-real: ci test-real ## 日常门禁加全部真实环境专项（需预先备齐资源）
 
 # S1 Task 13 已合入：domain/application 有代码，本目标实测 95.6%（阈值 85%），门禁为绿。
-coverage: ## domain + application 覆盖率门禁（设计 §6.4：≥85%）
-	.venv/bin/pytest --cov --cov-report=term-missing
+coverage: ## 日常 domain + application 覆盖率门禁（≥85%，不降低阈值）
+	.venv/bin/pytest -m "not real_environment" --cov --cov-report=term-missing
 
 check-docs: ## 文档防腐校验
 	$(PY) scripts/check_capability_map.py
@@ -88,9 +94,10 @@ check-docs: ## 文档防腐校验
 
 # 注意：所有目标必须从仓库根执行。从 apps/api/ 下跑 pytest 时 coverage 配置
 # 不会被加载，fail_under=85 会静默失效（该目录下有独立的 pyproject.toml）。
-# coverage 本身跑的就是全量测试，所以链上不再单列 test——同一套测试不必跑两遍。
+# coverage 运行日常自动测试；真实资源专项按用户2026-10-23决定独立 test-real。
+# 两者保留原断言和完整清单，10QA另验部署、执行与遥测。
 # web-check 排在链尾：后端检查更快、失败信息更直接，前端构建最慢也最该放在最后。
-ci: lint format-check typecheck arch photobench-check check-docs coverage web-check photobench-web-check ## CI 门禁
+ci: lint format-check typecheck arch photobench-check check-docs coverage web-check photobench-web-check ## 日常 CI 门禁；真实环境专项 test-real
 	@echo "ci: 全部通过"
 
 # 前端门禁。类型检查必须用 `tsc -b`，不能用 `tsc --noEmit`：apps/web/tsconfig.json 是

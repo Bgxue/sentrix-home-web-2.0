@@ -66,7 +66,8 @@ export function RunsView({ runs, judgeModel, judgeConfig, saveJudgePrompt, memor
         onExportScoresChange={runs.setExportScores}
         onExportTraces={runs.exportTraces}
         onExportSftTraces={runs.exportSftTraces}
-        memory={memory}
+        memory={memory ? { ...memory, onExpandedChange: runs.setAnalysisOpen } : undefined}
+        onLoadTelemetry={() => { void runs.loadActiveRun({ includeHistory: true }).catch((error: Error) => { if (error.name !== "AbortError") runs.setError(error.message); }); }}
         graphQuality={runs.graphQuality}
         rejudge={{
           activeRejudge: runs.activeRejudge,

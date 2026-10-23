@@ -23,10 +23,11 @@ import type { EChartsOption, EChartsType } from "echarts";
 import type { Run } from "../../../api/types.ts";
 import { EXECUTION_PHASES } from "../../../lib/constants.ts";
 import { fmtMemory } from "../../../lib/format.ts";
-import { jetsonUnifiedFromRun } from "../../../lib/telemetry.ts";
+import { jetsonUnifiedFromRun, telemetryNumber, telemetryPlatform } from "../../../lib/telemetry.ts";
 import {
   liveTelemetryPhaseRows,
   liveTelemetryRows,
+  telemetryObservationRows,
   telemetryChart,
   telemetryLiveState,
   telemetryProcessList,
@@ -49,6 +50,8 @@ interface TelemetrySeriesDefinition {
   key: string;
   name: string;
   color: string;
+  /** 需要把多个已存字段相加时使用；必要分量缺失时合计不可用。 */
+  keys?: string[];
 }
 
 /** 1.0 `:1041-1060`。按数据源三选一。 */
@@ -60,10 +63,10 @@ function telemetrySeriesDefinitions(
   const isOrin = ["orin_ssh_pss", "jetson_local_pss"].includes(source);
   if (isApple) {
     return [
-      { key: "system_memory_used_mib", name: "整机内存（App+Wired+Compressed）", color: "#20a36a" },
-      { key: "product_stack_memory_mib", name: "整套产品内存（相关进程 phys_footprint）", color: "#d9488b" },
-      { key: "sentrix_stack_pss_mib", name: "Sentrix 周边（不含主模型，phys_footprint）", color: "#8b6de8" },
-      { key: "model_process_system_memory_used_mib", name: "主模型进程 phys_footprint", color: "#f2b84b" },
+      { key: "system_memory_used_mib", name: "整机内存（active+wired+compressor，平台特定）", color: "#20a36a" },
+      { key: "product_stack_memory_mib", name: "整套产品内存（相关进程 footprint+权重）", color: "#d9488b" },
+      { key: "sentrix_stack_pss_mib", name: "Sentrix 周边（不含主模型，footprint+权重）", color: "#8b6de8" },
+      { key: "model_process_system_memory_used_mib", name: "主模型进程占用（footprint+权重映射）", color: "#f2b84b" },
       // 1.0 `:1063-1069` 的第五条。它是 **AGXAccelerator 设备级**的 working set，
       // 含其他进程，不能归因给主模型——所以单独一条、不并入上面四条。
       { key: "gpu_in_use_unified_memory_mib", name: "全机 GPU 在用统一内存", color: "#e05a4f" },
@@ -72,12 +75,17 @@ function telemetrySeriesDefinitions(
   if (isOrin) {
     return [
       { key: "system_memory_used_mib", name: "整机 RAM（Orin UMA）", color: "#20a36a" },
-      { key: "product_stack_memory_mib", name: "整套产品 RAM（相关进程 PSS + 主模型 UMA 补偿）", color: "#d9488b" },
-      { key: "sentrix_stack_pss_mib", name: "Sentrix 周边 PSS（不含模型）", color: "#8b6de8" },
+      { key: "product_stack_memory_mib", name: "整套产品 RAM（相关进程 PSS + GPU/UMA 页）", color: "#d9488b" },
+      {
+        key: "sentrix_stack_memory_mib",
+        keys: ["sentrix_stack_pss_mib", "sentrix_auxiliary_model_uma_mib"],
+        name: "Sentrix 周边（PSS + 辅助 UMA，不含主模型）",
+        color: "#8b6de8",
+      },
       {
         key: "model_process_system_memory_used_mib",
         // 1.0 `:1074`：口径由 run 的 `memory_profile.scope` 决定，不是写死 VmRSS。
-        name: unifiedOrin ? "主模型占用（smaps Rss + GPU）" : "主模型 VmRSS",
+        name: unifiedOrin ? "主模型占用（smaps Rss + GPU/UMA 页）" : "主模型 VmRSS",
         color: "#f2b84b",
       },
     ];
@@ -86,25 +94,33 @@ function telemetrySeriesDefinitions(
     { key: "memory_used_mib", name: "整卡 GPU 显存", color: "#4f7cff" },
     { key: "system_memory_used_mib", name: "整机 RAM", color: "#20a36a" },
     { key: "benchmark_process_gpu_memory_mib", name: "测评系统 GPU 显存", color: "#d9488b" },
-    { key: "product_stack_memory_mib", name: "整套产品 RAM（相关进程 PSS + 主模型 UMA 补偿）", color: "#8b6de8" },
-    { key: "sentrix_stack_pss_mib", name: "Sentrix 周边 PSS（不含模型）", color: "#a78bfa" },
+    { key: "product_stack_memory_mib", name: "整套产品 RAM（PSS）", color: "#8b6de8" },
+    {
+      key: "sentrix_stack_memory_mib",
+      keys: ["sentrix_stack_pss_mib"],
+      name: "Sentrix 周边 RAM（PSS，不含主模型）",
+      color: "#a78bfa",
+    },
     { key: "model_process_memory_used_mib", name: "主模型 GPU 显存（nvidia-smi 按 PID）", color: "#ef8a4b" },
-    { key: "model_process_system_memory_used_mib", name: "主模型 RAM（进程 VmRSS）", color: "#f2b84b" },
+    { key: "model_process_system_memory_used_mib", name: "主模型 RAM（PSS）", color: "#f2b84b" },
   ];
 }
 
 /** 1.0 `:1061-1065`。注意 `Number(null) === 0` 是有限数——1.0 的 null 会被当成 0 画出来。 */
 function seriesValue(item: Dict, definition: TelemetrySeriesDefinition): number | null {
-  const primary = Number(item[definition.key]);
-  if (Number.isFinite(primary)) return primary;
-  return null;
+  if (definition.keys?.length) {
+    const values = definition.keys.map((key) => telemetryNumber(item[key]));
+    return values.every((value): value is number => value !== null)
+      ? values.reduce((sum, value) => sum + value, 0) : null;
+  }
+  return telemetryNumber(item[definition.key]);
 }
 
 /** 1.0 `:1070-1096` 的 option 组装（`setOption` 之外的部分逐行照搬）。 */
 function buildTelemetryOption(run: Run | null | undefined, history: Dict[]): EChartsOption {
   const r = dict(run);
   const source =
-    telemetryLiveState(run).source || r.telemetry_source || dict(dict(r.phases).gpu_metrics).source || "";
+    telemetryPlatform(telemetryLiveState(run)) || r.telemetry_source || telemetryPlatform(dict(dict(r.phases).gpu_metrics));
   const definitions = telemetrySeriesDefinitions(source, jetsonUnifiedFromRun(run));
   const available = definitions.filter((definition) =>
     history.some((item) => seriesValue(item, definition) != null),
@@ -158,6 +174,9 @@ function buildTelemetryOption(run: Run | null | undefined, history: Dict[]): ECh
     },
     tooltip: {
       trigger: "axis",
+      triggerOn: "mousemove",
+      confine: true,
+      appendToBody: true,
       axisPointer: { type: "cross", label: { backgroundColor: "#667085" } },
       formatter(params: unknown) {
         const rows = (Array.isArray(params) ? params : [params]).map(dict).filter((item) => item.value != null);
@@ -225,10 +244,18 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
   const chartRef = useRef<EChartsType | null>(null);
   const sampleCount = telemetrySampleCount(run);
   const live = telemetryLiveState(run);
-  const rows = liveTelemetryRows(run);
+  const rows = [...liveTelemetryRows(run), ...telemetryObservationRows(run)];
   const phaseRows = liveTelemetryPhaseRows(run);
   const processes = telemetryProcessList(run);
   const chartData = useMemo(() => telemetryChart(run), [run]);
+  // 轮询会每 2 秒换一个 run 对象，但历史点可能没变。比较实际历史内容，
+  // 让相同时间点的null/数值修正同样触发重画。否则 notMerge 会重建图表，鼠标悬浮的 tooltip
+  // 会在下一次轮询时被清掉（158 上 active_count 被孤儿 run 占住时尤其明显）。
+  const chartKey = useMemo(() => {
+    if (!chartData) return "";
+    return JSON.stringify(chartData.history);
+  }, [chartData]);
+  const lastChartKeyRef = useRef<string>("");
 
   useEffect(() => {
     const element = canvasRef.current;
@@ -236,13 +263,11 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
       // 1.0 `:1029-1033`：没有容器或数据不足 2 点时销毁实例。
       chartRef.current?.dispose();
       chartRef.current = null;
+      lastChartKeyRef.current = "";
       return;
     }
     const chart = chartRef.current ?? echarts.init(element);
     chartRef.current = chart;
-    chart.setOption(buildTelemetryOption(run, chartData.history), true);
-    chart.resize();
-
     const observer =
       typeof ResizeObserver === "undefined"
         ? null
@@ -250,8 +275,16 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
             chartRef.current?.resize();
           });
     observer?.observe(element);
+    if (lastChartKeyRef.current === chartKey) {
+      // 数据没变，只保证尺寸正确；不要 setOption，否则 tooltip 会被重置。
+      chart.resize();
+      return () => observer?.disconnect();
+    }
+    chart.setOption(buildTelemetryOption(run, chartData.history), true);
+    lastChartKeyRef.current = chartKey;
+    chart.resize();
     return () => observer?.disconnect();
-  }, [chartData, run]);
+  }, [chartData, chartKey, run]);
 
   // 1.0 `onUnmounted`（`:2837`）的 `telemetryChartInstance.dispose()`。
   useEffect(
@@ -268,7 +301,7 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
     chartRef.current?.resize();
   }
 
-  if (!sampleCount) return null;
+  if (!sampleCount && !telemetryObservationRows(run).length) return null;
   return (
     <details
       open
@@ -278,13 +311,13 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
       <summary className="phase-title">
         <b>实时资源遥测</b>
         <span className={`phase-status ${live.status === "running" ? "running" : "completed"}`}>
-          {live.status === "running" ? "实时更新中" : "已停止"}
+          {live.status === "stop_pending" ? "停止未确认" : live.status === "running" ? "实时更新中" : "已停止"}
         </span>
       </summary>
       <p className="metric-calc-time">
         测评进行中持续采样；任务失败或取消时保留已采集的最后值与峰值。
         {live.source === "apple_unified"
-          ? " Mac 统一内存。五条曲线是整机内存、整套产品 phys_footprint、Sentrix 周边、主模型 phys_footprint，以及 AGXAccelerator 设备级的 GPU 在用统一内存（含其他进程，不能归因给主模型）。"
+          ? " Mac 统一内存。五条曲线是整机内存、整套产品占用（footprint+权重映射）、Sentrix 周边、主模型占用（footprint+权重映射），以及 AGXAccelerator 设备级的 GPU 在用统一内存（含其他进程，不能归因给主模型）。"
           : ["jetson_local_pss", "orin_ssh_pss"].includes(String(live.source))
             ? jetsonUnifiedFromRun(run)
               ? " Orin 无独立显存。主指标看黄线「主模型占用（smaps Rss + GPU/UMA 页）」——主机页与 GPU 页分开算、两半不重叠。"
@@ -318,8 +351,8 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
             CPU/GPU 共用的 UMA，不显示独立 GPU 显存。两者不能直接相加成“模型总占用”。
           </span>
           <span>
-            <b>判读：</b>153 主要看按模型 PID 归因的 GPU 显存；118 主要看主模型 VmRSS、PSS 和产品栈
-            RAM。任一指标无法按自身口径采集时留空，不用其它指标替代。
+            <b>判读：</b>153 主要看按模型 PID 归因的 GPU 显存；Orin（118/46）主要看主模型 smaps Rss + GPU/UMA 页、PSS 和产品栈
+            RAM；旧 run 没有拆分字段时才看 VmRSS。任一指标无法按自身口径采集时留空，不用其它指标替代。
           </span>
         </div>
         <div className="metric-definition-row">
@@ -334,23 +367,21 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
         <div className="metric-definition-row">
           <strong>主模型 RAM</strong>
           <span>
-            <b>计算式：</b>主模型服务进程的 Linux VmRSS；主模型 PSS 是独立指标，不替代 VmRSS。
+            <b>计算式：</b>新口径为主机 smaps Rss + GPU/UMA 页（GPU 侧取 max(Σ nvmap 按 PID, VmRSS − smaps Rss)）；旧 Orin run 只有 VmRSS 时按 VmRSS 显示。两部分不重叠，不能把 PSS 当替代值。
           </span>
           <span>
             <b>含义：</b>包含 Python/vLLM 或 llama.cpp runtime、tokenizer、调度结构、mmap
-            页、共享库和 CUDA 用户态开销等；不表示模型权重在 RAM 里又完整复制了一份。VmRSS
+            页、共享库和 CUDA 用户态开销等；不表示模型权重在 RAM 里又完整复制了一份。smaps Rss
             缺失时不改用 PSS 或其它字段补写。
           </span>
         </div>
         <div className="metric-definition-row">
           <strong>整套产品 RAM</strong>
           <span>
-            <b>算法：</b>所有相关进程（周边进程 + 主模型服务）的 PSS 加总，再加 max(0, 主模型 VmRSS -
-            主模型 smaps Rss) 的 UMA 补偿；任一输入缺失则不记录。
+            <b>算法：</b>所有相关进程（周边进程 + 主模型服务）的 PSS 加总，再加主模型 GPU/UMA 页（nvmap 按 PID，账本不可读时才用 VmRSS − smaps Rss 兜底）；任一输入缺失则不记录。
           </span>
           <span>
-            <b>判读：</b>PSS 用于避免共享页重复归因，补偿项只补回主模型 VmRSS 与 smaps
-            Rss 的差额；该值不是整机 RAM，也不能与整卡显存相加。只有记录 scope 为{" "}
+            <b>判读：</b>PSS 用于避免共享页重复归因；GPU/UMA 页补的是 PSS 看不见的设备侧内存，不是「VmRSS 减 smaps」的记账差额。该值不是整机 RAM，也不能与整卡显存相加。只有记录 scope 为{" "}
             <code>all_related_pss_plus_model_uma_extra</code> 时才按此公式解释；历史 run 缺少该
             scope 时必须重跑。
           </span>
@@ -375,15 +406,14 @@ export function TelemetryCard({ run }: TelemetryCardProps) {
             <b>口径：</b>Orin 的 CPU/GPU 共用物理内存，没有可与 153 VRAM 直接对应的独立显存曲线。
           </span>
           <span>
-            <b>判读：</b>页面只展示真实能采到的整机 RAM、整套产品 RAM、Sentrix 周边 PSS、主模型
-            VmRSS/PSS；不要把 Orin PSS 和 153 的 NVIDIA 显存做数值横比。
+            <b>判读：</b>页面只展示真实能采到的整机 RAM、整套产品 RAM、Sentrix 周边 PSS、主模型 smaps Rss + GPU/UMA 页（旧 run 为 VmRSS/PSS）；不要把 Orin 的统一内存和 153 的 NVIDIA 显存做数值横比。
           </span>
         </div>
         <div className="metric-definition-row">
           <strong>Mac 统一内存</strong>
           <span>
             <b>整机：</b>vm_stat 的 active + wired + compressor，不含文件缓存。<b>主模型 / Sentrix 周边 /
-            整套产品：</b>进程 phys_footprint。它是进程物理占用，不是 GPU
+            整套产品：</b>进程占用 = phys_footprint + 已映射的模型权重文件。它是进程提交占用，不是 GPU
             专属显存；整套产品是周边加主模型，不再加 UMA 补偿。
           </span>
           <span>

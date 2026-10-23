@@ -99,6 +99,10 @@ class FakeSentrixClient:
     def call_names(self) -> list[str]:
         return [name for name, _ in self.calls]
 
+    def diagnostics(self, *, timeout: int = 10) -> dict[str, Any]:
+        self._record("diagnostics", timeout=timeout)
+        return getattr(self, "runtime_diagnostics", {})
+
     def seed_person(
         self,
         *,

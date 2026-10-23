@@ -27,6 +27,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from photobench.domain.runs.analysis import judge_score_for_summary
+
 #: 判关键帧的字面量，与 ``keyframe_analysis`` 同一个（1.0 ``:6014``）。
 KEYFRAME_KIND = "video_keyframe"
 
@@ -180,7 +182,7 @@ def memory_effectiveness(
     answer_effective = sum(1 for item in items if str(item.get("agent_status") or "").lower() == "complete")
     judge_counts = {"2": 0, "1": 0, "0": 0, "unjudged": 0}
     for item in items:
-        score = (item.get("judge") or {}).get("score")
+        score = judge_score_for_summary(item.get("judge"))
         if score in {0, 1, 2}:
             judge_counts[str(score)] += 1
         else:
@@ -300,7 +302,7 @@ def memory_effectiveness(
             eligible += 1
             if hit:
                 hit_items += 1
-            score = (item.get("judge") or {}).get("score")
+            score = judge_score_for_summary(item.get("judge"))
             if score not in {0, 1, 2}:
                 matrix["unjudged"] += 1
                 continue
@@ -443,7 +445,7 @@ def memory_effectiveness(
         },
     ]
 
-    wrong_ids = {id(item) for item in items if (item.get("judge") or {}).get("score") == 0}
+    wrong_ids = {id(item) for item in items if judge_score_for_summary(item.get("judge")) == 0}
     wrong_total = len(wrong_ids)
     memory_miss_wrong = 0
     memory_hit_wrong = 0
@@ -600,7 +602,7 @@ def memory_effectiveness(
         ineffective = 0
         unjudged = 0
         for item in candidates:
-            score = (item.get("judge") or {}).get("score")
+            score = judge_score_for_summary(item.get("judge"))
             if score in {1, 2}:
                 effective += 1
             elif score == 0:
@@ -639,7 +641,7 @@ def memory_effectiveness(
         ineffective = 0
         unjudged = 0
         for item in candidates:
-            score = (item.get("judge") or {}).get("score")
+            score = judge_score_for_summary(item.get("judge"))
             if score in {1, 2}:
                 effective += 1
             elif score == 0:

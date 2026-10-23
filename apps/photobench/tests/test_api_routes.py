@@ -83,6 +83,25 @@ def test_get_run_returns_the_state_without_items(client: TestClient):
     assert body["summary"]["answer_quality_mean"] == 2.0
 
 
+def test_optional_metrics_projection_preserves_unknown_and_explicit_zero(client: TestClient):
+    path = client.app.state.container.settings.results_root / "run-a" / "run.json"
+    state = json.loads(path.read_text())
+    state["telemetry_live"] = {
+        "latest": {
+            "memory_complete": False,
+            "model_process_gpu_memory_mib": None,
+            "model_process_host_memory_mib": 0,
+            "product_stack_memory_mib": None,
+        }
+    }
+    path.write_text(json.dumps(state))
+    latest = client.get("/api/v1/runs/run-a").json()["telemetry_live"]["latest"]
+    assert latest["model_process_gpu_memory_mib"] is None
+    assert latest["model_process_host_memory_mib"] == 0
+    assert latest["product_stack_memory_mib"] is None
+    assert latest["memory_complete"] is False
+
+
 def test_an_unknown_run_is_a_404_in_the_1_0_shape(client: TestClient):
     """1.0 ``:7757``：``{"error": str(KeyError)}`` —— ``str(KeyError("nope"))`` 带引号。"""
     response = client.get("/api/v1/runs/nope")
@@ -100,6 +119,26 @@ def test_get_run_items_paginates(client: TestClient):
 def test_get_run_item_by_index(client: TestClient):
     assert client.get("/api/v1/runs/run-a/items/0").json()["item"]["qa_id"] == "q1"
     assert client.get("/api/v1/runs/run-a/items/9").status_code == 404
+
+
+def test_versioned_judge_zero_survives_both_item_projections(client: TestClient):
+    container = client.app.state.container
+    path = container.settings.results_root / "run-a" / "run.json"
+    state = json.loads(path.read_text())
+    state["items"][0]["judge"] = {
+        "score": 0,
+        "reason": "问题可回答，正确地点已知；模型未给出答案。",
+        "consistency_version": 2,
+    }
+    path.write_text(json.dumps(state))
+    for url in ["/api/v1/runs/run-a/items", "/api/v1/runs/run-a/items/0"]:
+        response = client.get(url)
+        assert response.status_code == 200
+        body = response.json()
+        item = body["items"][0] if "items" in body else body["item"]
+        assert item["judge"]["score"] == 0
+        assert item["judge"]["consistency_version"] == 2
+        assert item["judge"].get("consistency_status") != "inconsistent"
 
 
 def test_reviews_route_accepts_a_write_on_a_finished_run(client: TestClient):
@@ -228,3 +267,86 @@ def test_the_sentrix_client_has_no_arbiter_or_batch_cancel_capability():
 
     names = [name for name in dir(SentrixClient) if not name.startswith("_")]
     assert [name for name in names if "arbiter" in name or "cancel" in name] == []
+
+
+def test_explicit_historical_score_derivation_is_consistent_and_does_not_rewrite_raw(client: TestClient):
+    path = client.app.state.container.settings.results_root / "run-a" / "run.json"
+    state = json.loads(path.read_text())
+    state["items"][0]["judge"] = {"score": "1.0", "reason": "部分满足", "judge_status": "completed"}
+    path.write_text(json.dumps(state))
+    raw = path.read_bytes()
+    listing = client.get("/api/v1/runs/run-a/items?score=1").json()["items"]
+    detail = client.get("/api/v1/runs/run-a/items/0").json()["item"]
+    summary = client.get("/api/v1/runs/run-a").json()["summary"]
+    assert len(listing) == 1
+    for item in (listing[0], detail):
+        assert item["judge"]["score"] == 1
+        assert item["judge"]["score_derivation"]["original_score"] == "1.0"
+        assert item["judge"]["score_derivation"]["rule_version"] == 1
+    assert summary["answer_quality_mean"] == 1
+    assert summary["judge_valid_count"] == 1
+    assert path.read_bytes() == raw
+
+
+def test_memory_component_freshness_survives_raw_store_to_http_projection(client: TestClient):
+    container = client.app.state.container
+    directory = container.settings.results_root / "run-a"
+    path = directory / "run.json"
+    state = json.loads(path.read_text())
+    state["telemetry_live"] = {}
+    state["phases"] = {
+        "gpu_metrics": {
+            "status": "done",
+            "sampling_integrity": {
+                "callback_failures": 0,
+                "publisher_failures": 1,
+                "last_publisher_failure": "OSError: full",
+                "collection_failures": 0,
+                "stop_pending_threads": [],
+            },
+        }
+    }
+    path.write_text(json.dumps(state))
+    sample = {
+        "_t": 10,
+        "memory_observation_version": 1,
+        "memory_accounting": "jetson_pss_plus_nvmap_estimate",
+        "model_process_host_memory_mib": 10,
+        "model_process_gpu_memory_mib": 20,
+        "model_process_system_memory_used_mib": 30,
+        "product_stack_memory_mib": 40,
+        "memory_dependencies": {
+            "model_process_host_memory_mib": ["rss"],
+            "model_process_gpu_memory_mib": ["nvmap"],
+            "model_process_system_memory_used_mib": ["rss", "nvmap"],
+            "product_stack_memory_mib": ["rss", "nvmap"],
+        },
+        "memory_observations": {
+            source: {
+                "status": "available",
+                "observed_at_monotonic": at,
+                "finished_at_monotonic": at + 0.1,
+                "ttl_seconds": 3,
+                "cache_hit": True,
+            }
+            for source, at in (("rss", 9), ("nvmap", 6))
+        },
+        "sampling_diagnostics": {"collection_seconds": 0.2},
+    }
+    raw = json.dumps(sample) + "\n"
+    (directory / "gpu_samples.jsonl").write_text(raw)
+    container.run_index.refresh(container.run_store)
+    response = client.get("/api/v1/runs/run-a")
+    assert response.status_code == 200
+    body = response.json()
+    latest = body["telemetry_live"]["latest"]
+    assert latest["model_process_host_memory_mib"] == 10
+    assert latest["model_process_gpu_memory_mib"] is None
+    assert latest["product_stack_memory_mib"] is None
+    assert latest["memory_observations"]["nvmap"]["age_seconds"] == 4
+    assert latest["sampling_diagnostics"]["collection_seconds"] == 0.2
+    assert (
+        body["phases"]["gpu_metrics"]["sampling_integrity"]
+        == state["phases"]["gpu_metrics"]["sampling_integrity"]
+    )
+    assert (directory / "gpu_samples.jsonl").read_text() == raw

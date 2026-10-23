@@ -14,8 +14,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
+from starlette.concurrency import run_in_threadpool
 
 from photobench.api.deps import get_container, json_body
+from photobench.api.metrics_schema import RuntimeConfigResponse
 from photobench.domain.errors import InvalidRequestError
 from photobench.domain.runs.judge import JUDGE_PROMPT_KINDS
 
@@ -26,20 +28,25 @@ router = APIRouter(tags=["config"])
 MAX_JUDGE_PROMPT_LENGTH = 50000
 
 
-@router.get("/config")
+@router.get("/config", response_model=RuntimeConfigResponse, response_model_exclude_unset=True)
 def get_config(request: Request) -> dict[str, Any]:
     """1.0 ``:7536``。"""
-    return get_container(request).config.public_config()
+    container = get_container(request)
+    return {
+        **container.config.public_config(),
+        "build_revision": container.build_revision,
+        "metrics_contract_version": 2,
+    }
 
 
-@router.post("/config")
+@router.post("/config", response_model=RuntimeConfigResponse, response_model_exclude_unset=True)
 async def save_config(request: Request) -> dict[str, Any]:
     """1.0 ``:7822``：落非密钥的连接参数；带 ``judge_api_key`` 时同时写 ``.env.local``。
 
     成功时的响应体是 1.0 的 ``{"saved": True, "runtime_config": ...}``。
     """
     payload = await json_body(request)
-    saved = get_container(request).config.persist_runtime_connection(payload)
+    saved = await run_in_threadpool(get_container(request).config.persist_runtime_connection, payload)
     return {"saved": True, "runtime_config": saved}
 
 
@@ -58,7 +65,7 @@ async def save_answer_quality_prompt(request: Request) -> dict[str, Any]:
         raise InvalidRequestError("system_prompt is required")
     if len(prompt) > MAX_JUDGE_PROMPT_LENGTH:
         raise InvalidRequestError("system_prompt is too long")
-    get_container(request).config.save_custom_judge_prompt(prompt)
+    await run_in_threadpool(get_container(request).config.save_custom_judge_prompt, prompt)
     return {"status": "ok"}
 
 
@@ -81,5 +88,9 @@ async def save_judge_prompt(request: Request) -> dict[str, Any]:
     if len(prompt) > MAX_JUDGE_PROMPT_LENGTH:
         raise InvalidRequestError("system_prompt is too long")
     config = get_container(request).config
-    config.save_custom_judge_prompt(prompt, kind)
-    return {"status": "ok", "kind": kind, "custom": config.load_custom_judge_prompts().get(kind)}
+    await run_in_threadpool(config.save_custom_judge_prompt, prompt, kind)
+    return {
+        "status": "ok",
+        "kind": kind,
+        "custom": (await run_in_threadpool(config.load_custom_judge_prompts)).get(kind),
+    }

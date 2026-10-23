@@ -6,8 +6,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import asdict
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from sentrix.api.deps import get_container
 from sentrix.api.routes.family import TRIGGER_INGEST, run_family_graph_for_scope
@@ -20,6 +22,7 @@ from sentrix.api.schemas.timeline import (
     ImportBatchRequest,
     ImportBatchResponse,
     ImportFailure,
+    ImportProgressResponse,
     InsightCounts,
     MemoryGraphBuildResponse,
     PipelineProcessRequest,
@@ -35,6 +38,7 @@ from sentrix.application.media.import_album import (
     ImportAlbum,
     ProcessAlbumPipeline,
 )
+from sentrix.application.media.track_import import TrackImport
 from sentrix.application.memories.read_timeline import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -153,10 +157,44 @@ def import_album(
     之后「画像从来没生成过」会变成一个没人看得见的状态，而重跑一次导入的代价由去重
     兜住（``deduplicated`` 那一列）。判据与 ``RunInsights`` 自己的 docstring 一致。
     """
+    tracker = None
+    if request.operation_id is not None:
+        try:
+            tracker = TrackImport(container.import_progress, request.operation_id, request.scope_id)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except OverflowError as error:
+            raise HTTPException(status_code=429, detail=str(error)) from error
+    try:
+        return _execute_import(request, container, tracker)
+    except Exception as error:
+        if tracker:
+            tracker.update(status="failed", error=f"{type(error).__name__}: {error}")
+        raise
+
+
+@router.get("/imports/{operation_id}/progress")
+async def get_import_progress(
+    operation_id: str,
+    request: Request,
+) -> ImportProgressResponse:
+    # In-memory bounded lookup; independent of sync import workers and model inference.
+    progress = get_container(request).import_progress.get(operation_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail="import progress unavailable in this process")
+    return ImportProgressResponse(**asdict(progress), observed_at=datetime.now(UTC).isoformat())
+
+
+def _execute_import(
+    request: ImportBatchRequest,
+    container: Container,
+    tracker: TrackImport | None,
+) -> ImportBatchResponse:
     album = ImportAlbum(
         importer=build_import_assets(container, observe=True),
         summarize_event=_summarize_event(container).execute,
         workers=container.settings.album_workers,
+        progress=tracker.update if tracker else None,
     )
     try:
         result = album.execute(
@@ -168,13 +206,19 @@ def import_album(
     # 参与者投影的写入者原本只有「用户在簇审阅里确认」这一条路——于是一整册导入之后
     # ``event_participants`` 仍是 0 条，事件摘要也就写不出「王建国、张晓莉」。
     # 刷新会顺带按参与者重写摘要（``participant_summary``），人名因此进入事件。
+    if tracker:
+        tracker.update(stage="participant_refresh")
     observations = container.observation_repository.list_scope(request.scope_id, limit=100000)
     _confirmed_person_events(container).refresh_participants([item.id for item in observations])
     refresh_memory_graph(container, request.scope_id)
     # **顺序照 1.0**：``pipeline.py:733-734`` 是先 family 后 person-insights。
+    if tracker:
+        tracker.update(stage="family_graph")
     family_graph = _maybe_run_family_graph(container, request.scope_id)
+    if tracker:
+        tracker.update(stage="person_insights")
     insights = _maybe_run_insights(container, request.scope_id, result.imported)
-    return ImportBatchResponse(
+    response = ImportBatchResponse(
         scope_id=result.scope_id,
         directory=result.directory,
         imported=result.imported,
@@ -187,6 +231,10 @@ def import_album(
         insights=insights,
         family_graph=family_graph,
     )
+
+    if tracker:
+        tracker.update(status="completed", stage="completed", current_file=None)
+    return response
 
 
 @router.post("/imports/assets", status_code=201)

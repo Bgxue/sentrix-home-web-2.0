@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deliveryBreakdown,
   guardSummary,
+  judgeProgressLabel,
   openImageTarget,
   phaseErrorDetails,
   phaseErrorSummary,
@@ -249,10 +250,14 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
     ).toBe("预置 3 人 · 关系 4/5 · 2s");
     expect(phaseSummary("identity_seed", {})).toBe("预置 0 人 · -");
     expect(phaseSummary("photo_import", { accepted_count: 8, total_media: 10, failed_count: 2, upload_seconds: 1.5 })).toBe(
-      "导入 8/10 个媒体 · 失败 2 · 总计 1.5s",
+      "导入 8/10 个媒体 · 失败 2 · 阶段墙钟 1.5s",
     );
-    // total_media 缺 → 回退 total_photos → 再缺才 "?"
-    expect(phaseSummary("photo_import", {})).toBe("导入 0/? 个媒体 · 失败 0 · 总计 -");
+    // Counts are unknown until the synchronous import response returns; never display fake zeroes.
+    expect(phaseSummary("photo_import", {})).toBe("导入 ?/? 个媒体 · 失败 ? · 阶段墙钟 -");
+    // Real Mac full-run values: backend subtotal must not replace the request wall clock.
+    expect(phaseSummary("photo_import", { total_seconds: 1208, timings: { total: 738.1 } })).toBe(
+      "导入 ?/? 个媒体 · 失败 ? · 阶段墙钟 1208s · 后端计时 738.1s",
+    );
   });
 
   it("pipeline_processing：有 progress 才展开，否则落到通用「耗时」", () => {
@@ -293,9 +298,9 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
         },
         99,
       ),
-    ).toBe("Agent 3/10 · Judge 2/10 · 并发 Agent 4 / Judge 2 · 120s");
+    ).toBe("Agent 3/10 · Judge 已结束 2/10 · 并发 Agent 4 / Judge 2 · 120s");
     expect(phaseSummary("qa_eval", { progress: { in_flight: 1, judge_total: 10 } }, 0)).toBe(
-      "Agent 0/? · Judge 0/10 · -",
+      "Agent 0/? · Judge 已结束 ?/10 · -",
     );
     expect(
       phaseSummary(
@@ -303,13 +308,28 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
         { progress: { completed: 74, agent_completed: 74, agent_total: 74 }, judge_completed: 71, judge_total: 74 },
         0,
       ),
-    ).toBe("Agent 74/74 · Judge 71/74 · -");
+    ).toBe("Agent 74/74 · Judge 已结束 71/74 · -");
     expect(phaseSummary("qa_eval", { total_seconds: 9 }, 7)).toBe("7 题 · 9s");
   });
 
   it("未知阶段无墙钟 → 空串；phase 为 null → 空串", () => {
     expect(phaseSummary("unknown_key", {})).toBe("");
     expect(phaseSummary("model_deploy", null)).toBe("");
+  });
+
+  it("qa_eval：兼容历史外层 Judge 计数，未记录不能显示为零", () => {
+    expect(phaseSummary("qa_eval", {
+      judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487 },
+    })).toContain("Judge 已结束 70/487");
+    expect(phaseSummary("qa_eval", { progress: { completed: 71, total: 487 } })).toContain("Judge 已结束 ?/487");
+    expect(phaseSummary("qa_eval", {
+      judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487, judge_completed: 0, judge_total: 487 },
+    })).toContain("Judge 已结束 0/487");
+    expect(judgeProgressLabel({ progress: { judge_completed: null, judge_total: 487 } })).toBe("Judge 已结束 ?/487");
+    expect(judgeProgressLabel({ progress: { judge_concurrency: 0 } })).toBe("Judge 未配置");
+    expect(judgeProgressLabel({ progress: { judge_completed: 69, judge_total: 487, judge_skipped: 1 } })).toBe("Judge 已结束 69/487 · 跳过 1");
   });
 });
 

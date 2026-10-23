@@ -44,6 +44,7 @@ export function modelName(run: unknown): string {
   const r = dict(run);
   const profile = str(r.model_profile);
   const savedName = str(r.model_name);
+  if (savedName && savedName !== "__current__") return savedName;
   if (profile === "__current__" || savedName === "__current__") {
     const endpointModel = str(r.endpoint_model);
     if (endpointModel) return endpointModel;
@@ -253,13 +254,14 @@ export function judgeScoreLabel(item: unknown, task: unknown): string {
 export function phaseSeconds(phase: unknown, preferredKey = "total_seconds"): number | null {
   if (!phase) return null;
   const p = dict(phase);
-  const preferred = Number(p[preferredKey]);
+  const value = p[preferredKey];
+  const preferred = typeof value === "number" ? value : Number.NaN;
   if (Number.isFinite(preferred) && preferred > 0) return preferred;
   if (p.started_at && p.finished_at) {
     const elapsed = (new Date(p.finished_at as string).getTime() - new Date(p.started_at as string).getTime()) / 1000;
     if (Number.isFinite(elapsed) && elapsed >= 0) return elapsed;
   }
-  return Number.isFinite(preferred) ? preferred : null;
+  return Number.isFinite(preferred) && preferred >= 0 ? preferred : null;
 }
 
 /** 1.0 `:769-776` —— `<1ms` / `Nms` / `Ns` 三档，`0` 落 `<1ms`。 */

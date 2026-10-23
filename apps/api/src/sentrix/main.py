@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+# The ASGI factory is also launched directly, without start_api.sh. Apply the
+# process policy before route/container imports can initialize numpy/BLAS.
+from sentrix.infrastructure.thread_limits import configure_thread_environment
+
+configure_thread_environment()
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +41,7 @@ from sentrix.api.routes import (
 from sentrix.bootstrap.container import Container
 from sentrix.config import Settings, load_settings
 from sentrix.domain.errors import DomainError
+from sentrix.infrastructure.thread_limits import apply_process_thread_limits
 
 log = logging.getLogger("sentrix.main")
 
@@ -125,6 +133,9 @@ def _mount_web(app: FastAPI, settings: Settings) -> None:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    # 先限制算子线程再装配容器：人脸/视觉适配器在 build 时可能建 session，
+    # 线程上限必须在它们之前生效（见 infrastructure.thread_limits）。
+    apply_process_thread_limits()
     settings = settings or load_settings()
     settings.ensure_directories()
 

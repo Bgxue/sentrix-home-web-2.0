@@ -74,7 +74,11 @@ function firstString(...values: unknown[]): string {
 
 export function App({ initialLoading = false }: AppProps) {
   const configApi = useConfig();
-  const [selectedModels, setSelectedModels] = useState<Set<string>>(() => new Set());
+  // 默认复用当前已加载的模型：本地评测通常不该为了跑一份 10QA 再重启模型。
+  // 用户在「可用模型」里换型号、或编辑模型服务地址时，hook 会清掉这个勾选。
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(
+    () => new Set(["__current__"]),
+  );
   const modelApi = useModelEndpoint({
     vllmTargetId: configApi.vllmTargetId,
     selectedModels,
@@ -174,6 +178,10 @@ export function App({ initialLoading = false }: AppProps) {
   const autoSelected = useRef(false);
   useEffect(() => {
     if (!initDone || autoSelected.current) return;
+    if (["pending", "running"].includes(String(runs.runPage.scan?.state))) {
+      runs.startPolling();
+      return;
+    }
     autoSelected.current = true;
     const current = runs.runs.find((run) => ["running", "pending"].includes(String(run.status)));
     if (!current) return;

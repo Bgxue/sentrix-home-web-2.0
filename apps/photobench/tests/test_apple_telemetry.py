@@ -85,6 +85,32 @@ def make_dispatcher(*, ps: str = "", lsof: str = "", vm_stat: str = VM_STAT):
     return dispatch
 
 
+def test_ps_observer_excludes_only_its_own_pid(monkeypatch):
+    class Observer:
+        pid = 300
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def communicate(self, timeout=None):
+            assert timeout == 3
+            return (
+                " 100 1 python photobench\n"
+                " 200 100 ps real-product-worker\n"
+                " 300 100 ps -ax -o pid= -o ppid= -o command=\n",
+                "",
+            )
+
+    monkeypatch.setattr(apple.subprocess, "Popen", lambda *args, **kwargs: Observer())
+    rows = apple._process_rows()
+    assert [row["pid"] for row in rows] == [100, 200]
+    # Preserve a real product child even when it happens to be named ps.
+    assert rows[1]["ppid"] == 100
+
+
 # ---- 解析层（纯函数）--------------------------------------------------------------
 
 
@@ -127,6 +153,47 @@ def test_macmon_sample_maps_temperature_power_and_ratio() -> None:
     assert data["cpu_power_w"] == 1.5
     assert data["gpu_power_w"] == 0.8
     assert data["gpu_utilization_pct"] == 12.5
+
+
+def test_macmon_sample_drops_the_whole_power_set_on_one_impossible_value() -> None:
+    """325 W 是 macOS 27 上 macmon 0.8.2 的积压 flush；同组功率必须整组丢。
+
+    只丢 sys_power 会把 413 W 的 ram_power 留下，而 DRAM 计数器正是判断
+    「这个间隔的能量记账坏了」的金丝雀。
+    """
+    data = apple.parse_macmon_sample(
+        {
+            "sys_power": 325.303,
+            "cpu_power": 12.0,
+            "gpu_power": 3.0,
+            "ram_power": 413.0,
+            "temp": {"cpu_temp_avg": 41.2, "gpu_temp_avg": 38.5},
+        }
+    )
+    assert "power_draw_w" not in data
+    assert "power_scope" not in data
+    assert "cpu_power_w" not in data
+    assert "gpu_power_w" not in data
+    assert data["cpu_temperature_c"] == 41.2
+    assert data["temperature_c"] == 38.5
+
+
+def test_macmon_temperature_rejects_the_0_8_c_sensor_glitch() -> None:
+    data = apple.parse_macmon_sample({"temp": {"cpu_temp_avg": 0.8000000715255737, "gpu_temp_avg": 41.0}})
+    assert "cpu_temperature_c" not in data
+    assert data["temperature_c"] == 41.0
+    assert apple.parse_macmon_sample({"temp": {"cpu_temp_avg": -1}}) == {}
+
+
+def test_macmon_version_gate_and_power_drop() -> None:
+    assert apple.parse_macmon_version("macmon 0.8.2") == (0, 8, 2)
+    assert apple.parse_macmon_version("macmon 0.9.0") == (0, 9, 0)
+    assert apple.parse_macmon_version("junk") is None
+    assert apple.macmon_power_is_trusted(None) is True
+    assert apple.macmon_power_is_trusted((0, 8, 2)) is False
+    assert apple.macmon_power_is_trusted((0, 9, 0)) is True
+    dropped = apple._drop_power_readings({"power_draw_w": 1.0, "temperature_c": 40.0})
+    assert dropped == {"temperature_c": 40.0}
 
 
 def test_macmon_sample_ignores_non_objects() -> None:
@@ -212,26 +279,49 @@ def test_apple_keyword_set_stays_the_1_0_one() -> None:
 # ---- 提供者 -----------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_telemetry_services_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这些用例验的是主机口径；不让设备上的 telemetry_services.json 改变预期。"""
+    monkeypatch.setattr(apple, "_load_telemetry_services", lambda: None)
+
+
 @pytest.fixture
 def apple_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         apple,
         "_run_text",
         make_dispatcher(
-            ps="  100 python benchmark_orchestrator.py\n  200 llama-server --port 8100\n",
+            ps="  100 1 python benchmark_orchestrator.py\n  200 1 llama-server --port 8100\n",
             lsof="p100\nf13\nn*:8771\np200\nf8\nn*:8100\n",
         ),
     )
     monkeypatch.setattr(apple, "_MACMON", _FakeMacmon(MACMON_SAMPLE))
     monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: {100: 128 * MIB, 200: 512 * MIB}[pid])
+    # 模型进程另有 128 MiB 的 GGUF 映射：footprint 不记这半，占用必须加上。
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 128 * MIB if pid == 200 else 0)
 
 
-def test_gpu_stats_sums_related_footprints_and_reports_the_model(apple_host: None) -> None:
+def test_process_bytes_adds_the_two_non_overlapping_halves() -> None:
+    assert apple._process_bytes(512 * MIB, 128 * MIB) == 640 * MIB
+    assert apple._process_bytes(512 * MIB, 0) == 512 * MIB
+    assert apple._process_bytes(0, 128 * MIB) is None
+    assert apple._process_bytes(-1, 128 * MIB) is None
+
+
+def test_occupancy_is_footprint_plus_weight_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: 100 * MIB)
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 2573 * MIB)
+    assert apple._occupancy_bytes(42) == 2673 * MIB
+    monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: None)
+    assert apple._occupancy_bytes(42) is None
+
+
+def test_gpu_stats_sums_related_occupancy_and_reports_the_model(apple_host: None) -> None:
     data = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100").gpu_stats()["data"]
     assert data["gpus"] == [
         {
             "index": 0,
-            "memory_unit": "apple_phys_footprint_mib",
+            "memory_unit": "apple_phys_footprint_plus_mapped_weights_mib",
             "gpu_utilization_pct": 12.5,
             "gpu_allocated_unified_memory_mib": 1.0,
             "gpu_in_use_unified_memory_mib": 0.5,
@@ -246,15 +336,15 @@ def test_process_memory_attributes_model_and_sentrix_separately(apple_host: None
     provider = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100")
     data = provider.process_memory()["data"]
     assert data["root_pid"] == 200
-    assert data["model_process_system_memory_used_mib"] == 512.0
-    assert data["model_process_system_memory_scope"] == "apple_phys_footprint"
-    assert data["process_memory_used_mib"] == 512.0
+    assert data["model_process_system_memory_used_mib"] == 640.0
+    assert data["model_process_system_memory_scope"] == "apple_phys_footprint_plus_mapped_weights"
+    assert data["process_memory_used_mib"] == 640.0
     assert data["sentrix_stack_pss_mib"] == 128.0
-    assert data["sentrix_stack_pss_scope"] == "apple_phys_footprint_excluding_model"
-    assert data["product_stack_memory_mib"] == 640.0
-    assert data["benchmark_process_memory_used_mib"] == 640.0
-    assert data["memory_unit"] == "apple_phys_footprint_mib"
-    assert data["memory_profile"] == {"method": "apple_phys_footprint_v1"}
+    assert data["sentrix_stack_pss_scope"] == "apple_phys_footprint_plus_mapped_weights_excluding_model"
+    assert data["product_stack_memory_mib"] == 768.0
+    assert data["benchmark_process_memory_used_mib"] == 768.0
+    assert data["memory_unit"] == "apple_phys_footprint_plus_mapped_weights_mib"
+    assert data["memory_profile"] == {"method": "apple_phys_footprint_plus_mapped_weights_v1"}
     assert data["system_memory_scope"] == "apple_app_wired_compressed"
     # 基线就是第一次采到的已用量，所以这次 delta 为 0。
     assert data["system_memory_delta_mib"] == 0.0
@@ -267,7 +357,7 @@ def test_process_memory_without_a_model_process_writes_no_product_total(
         apple,
         "_run_text",
         make_dispatcher(
-            ps="  100 python benchmark_orchestrator.py\n",
+            ps="  100 1 python benchmark_orchestrator.py\n",
             lsof="p100\nf13\nn*:8771\n",
         ),
     )
@@ -286,9 +376,9 @@ def test_two_model_candidates_are_not_guessed_into_one(monkeypatch: pytest.Monke
         "_run_text",
         make_dispatcher(
             ps=(
-                "  100 python benchmark_orchestrator.py\n"
-                "  200 llama-server --port 8100\n"
-                "  201 llama-server --port 8100\n"
+                "  100 1 python benchmark_orchestrator.py\n"
+                "  200 1 llama-server --port 8100\n"
+                "  201 1 llama-server --port 8100\n"
             ),
             lsof="p100\nf13\nn*:8771\np200\nf8\nn*:8100\np201\nf9\nn*:8100\n",
         ),
@@ -297,6 +387,7 @@ def test_two_model_candidates_are_not_guessed_into_one(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         apple, "_phys_footprint_bytes", lambda pid: {100: 128 * MIB, 200: 512 * MIB, 201: 256 * MIB}[pid]
     )
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 0)
     data = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100").process_memory()["data"]
     assert "root_pid" not in data
     assert "benchmark_process_memory_used_mib" not in data
@@ -309,12 +400,13 @@ def test_a_missing_footprint_suppresses_the_sum(monkeypatch: pytest.MonkeyPatch)
         apple,
         "_run_text",
         make_dispatcher(
-            ps="  100 python benchmark_orchestrator.py\n  200 llama-server --port 8100\n",
+            ps="  100 1 python benchmark_orchestrator.py\n  200 1 llama-server --port 8100\n",
             lsof="p100\nf13\nn*:8771\np200\nf8\nn*:8100\n",
         ),
     )
     monkeypatch.setattr(apple, "_MACMON", _FakeMacmon({}))
     monkeypatch.setattr(apple, "_phys_footprint_bytes", lambda pid: 512 * MIB if pid == 200 else None)
+    monkeypatch.setattr(apple, "_weight_map_bytes", lambda pid: 0)
     data = apple.LocalAppleUnifiedTelemetryProvider("http://127.0.0.1:8100").process_memory()["data"]
     assert "sentrix_stack_pss_mib" not in data
     assert "product_stack_memory_mib" not in data

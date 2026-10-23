@@ -134,6 +134,9 @@ export function useRunDetail(options: RunDetailOptions) {
 
   // 1.0 用 ref 值做同步防重入（`reviewSaving.value` / `rejudgeSubmitting.value` 在
   // 同一 tick 内阻塞二次调用），state 只负责渲染。
+  const detailRequest = useRef<{ controller: AbortController; runId: string; full: boolean } | null>(null);
+  const analysisOpen = useRef(false);
+  useEffect(() => () => detailRequest.current?.controller.abort(), []);
   const reviewSavingRef = useRef(false);
   const rejudgeSubmittingRef = useRef(false);
 
@@ -213,23 +216,37 @@ export function useRunDetail(options: RunDetailOptions) {
     [activeRunIdRef],
   );
 
-  /**
-   * 1.0 `:2310`。**并发关系照搬**：
-   *   1. 先**串行** `await` run 详情（60s 超时），拿到后才继续；
-   *   2. `resetPage` 时再**串行** `await` reviews（失败会中断后续）；
-   *   3. 最后 `Promise.all([keyframe, memory, loadQaPage])` 三者**并发**。
-   * keyframe / memory 各自吞掉自己的异常，所以一个失败不影响另一个；
-   * `loadQaPage` 不吞异常，它的 rejection 会冒泡出 `loadActiveRun`（1.0 同）。
-   */
+  /** Ordinary polling reads only a checkpoint; heavy analyses follow panel expansion. */
   const loadActiveRun = useCallback(
-    async ({ resetPage = false }: { resetPage?: boolean } = {}) => {
+    async ({ resetPage = false, includeHistory = false }: { resetPage?: boolean; includeHistory?: boolean } = {}) => {
       const runId = activeRunIdRef.current;
       if (!runId) return;
-      const payload = await api<Run>(`/runs/${encodeURIComponent(runId)}`, { timeoutMs: 60000 });
-      if (activeRunIdRef.current !== runId) return;
-      setActiveRun(payload);
+      const pending = detailRequest.current;
+      if (!includeHistory && !resetPage && pending?.runId === runId && pending.full && !pending.controller.signal.aborted) return;
+      pending?.controller.abort();
+      const controller = new AbortController();
+      detailRequest.current = { controller, runId, full: includeHistory };
+      let payload: Run;
+      try {
+        payload = await api<Run>(`/runs/${encodeURIComponent(runId)}?include_history=${includeHistory}`, {
+          timeoutMs: 60000, signal: controller.signal,
+        });
+      } finally {
+        if (detailRequest.current?.controller === controller) detailRequest.current = null;
+      }
+      if (controller.signal.aborted || activeRunIdRef.current !== runId) return;
+      setActiveRun((previous) => {
+        // Same committed revision: retain the explicitly loaded full curve across cheap polls.
+        // A changed checkpoint requires a fresh full read rather than mixing revisions.
+        if (!includeHistory && previous?.run_id === runId && previous.history_mode === "full" &&
+            typeof payload.read_revision === "string" && previous.read_revision === payload.read_revision) {
+          return { ...payload, history_mode: "full", telemetry_live: previous.telemetry_live, phases: previous.phases };
+        }
+        return payload;
+      });
       updateRunSummary?.(runId, effectiveRunSummary(payload));
       if (resetPage) {
+        analysisOpen.current = false;
         setKeyframeAnalysis(null);
         setKeyframeAnalysisError("");
         setMemoryEffectiveness(null);
@@ -239,9 +256,9 @@ export function useRunDetail(options: RunDetailOptions) {
         await loadReviews(runId);
       }
       await Promise.all([
-        loadKeyframeAnalysis(runId),
-        loadMemoryEffectiveness(runId),
-        loadGraphQuality(runId),
+        ...(analysisOpen.current
+          ? [loadKeyframeAnalysis(runId), loadMemoryEffectiveness(runId), loadGraphQuality(runId)]
+          : []),
         loadQaPage ? loadQaPage(resetPage ? 1 : undefined) : Promise.resolve(),
       ]);
     },
@@ -256,6 +273,12 @@ export function useRunDetail(options: RunDetailOptions) {
       loadQaPage,
     ],
   );
+
+  const setAnalysisOpen = useCallback((open: boolean) => {
+    analysisOpen.current = open;
+    const runId = activeRunIdRef.current;
+    if (open && runId) void Promise.all([loadKeyframeAnalysis(runId), loadMemoryEffectiveness(runId)]);
+  }, [activeRunIdRef, loadKeyframeAnalysis, loadMemoryEffectiveness]);
 
   /**
    * 1.0 `:2333` 是「惰性建草稿」的副作用版本，React 里 render 不能写 state，
@@ -461,6 +484,7 @@ export function useRunDetail(options: RunDetailOptions) {
     memoryEffectiveness,
     graphQuality,
     loadActiveRun,
+    setAnalysisOpen,
     loadKeyframeAnalysis,
     loadMemoryEffectiveness,
     loadGraphQuality,

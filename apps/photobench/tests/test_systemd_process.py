@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from fakes_execution import FakeHttpClient
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.domain.deploy.ports import RestartOutcome
+from photobench.domain.runtime.ports import RunRuntimeSnapshot
 from photobench.infrastructure.deploy.systemd_process import (
     CommandResult,
     SystemdSentrixProcess,
@@ -136,6 +138,28 @@ def test_restart_exports_the_new_endpoint_into_the_unit_dropin(tmp_path: Path):
     process.restart(endpoint=ENDPOINT)
     dropin = tmp_path / "systemd" / "user" / "sentrix-api.service.d" / "10-sentrix-vlm-endpoint.conf"
     assert f'Environment="SENTRIX_VLM_BASE_URL={ENDPOINT}"' in dropin.read_text(encoding="utf-8")
+
+
+def test_systemd_restart_binds_the_frozen_startup_config(tmp_path):
+    snapshot = RunRuntimeSnapshot(
+        json.dumps({"model_base_url": ENDPOINT, "embedding": {"mode": "split_text_image"}})
+    )
+    systemctl = _Systemctl()
+    process = SystemdSentrixProcess(
+        api_url="http://127.0.0.1:8291",
+        unit="sentrix-api",
+        http=FakeHttpClient([{"status": "ok"}]),
+        systemctl=systemctl,
+        config_home=tmp_path,
+        runtime_snapshot=snapshot,
+    )
+    assert process.restart(endpoint=ENDPOINT).ok
+    root = next((tmp_path / "photobench/startup-snapshots").iterdir())
+    dropin = tmp_path / "systemd/user/sentrix-api.service.d/10-sentrix-vlm-endpoint.conf"
+    assert f'Environment="PHOTOBENCH_CONFIG_ROOT={root}"' in dropin.read_text()
+    systemctl.active = "active"
+    systemctl.environment = f'SENTRIX_VLM_BASE_URL={ENDPOINT} PHOTOBENCH_CONFIG_ROOT="{root}"'
+    assert process.running_endpoint() == ENDPOINT
 
 
 def test_running_endpoint_reads_the_units_effective_environment(tmp_path: Path):

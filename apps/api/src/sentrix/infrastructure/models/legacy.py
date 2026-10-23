@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from pathlib import Path
@@ -101,9 +102,7 @@ class _SidecarEmbedder:
             if self._tripped_at and time.monotonic() - self._tripped_at < CIRCUIT_OPEN_S:
                 return []
         try:
-            response = self._client.post(f"{self._base_url}{endpoint}", json=payload)
-            response.raise_for_status()
-            values = [float(item) for item in (response.json().get("vector") or [])]
+            values = self._request_values(endpoint, payload)
         except Exception as error:  # noqa: BLE001 - 见模块注释：降级，不抛
             self._record_failure(f"{type(error).__name__}: {error}", what)
             return []
@@ -113,8 +112,16 @@ class _SidecarEmbedder:
         if len(values) != self._dimension:
             self._record_failure(f"侧车返回 {len(values)} 维，方案声明 {self._dimension} 维", what)
             return []
+        if not all(math.isfinite(value) for value in values):
+            self._record_failure("嵌入含非有限数值", what)
+            return []
         self._record_success()
         return values
+
+    def _request_values(self, endpoint: str, payload: dict[str, str]) -> list[float]:
+        response = self._client.post(f"{self._base_url}{endpoint}", json=payload)
+        response.raise_for_status()
+        return [float(item) for item in (response.json().get("vector") or [])]
 
     def _record_failure(self, reason: str, what: str) -> None:
         with self._lock:
@@ -162,7 +169,9 @@ class ChineseClipSidecarEmbedder(_SidecarEmbedder):
 class BgeSidecarEmbedder(_SidecarEmbedder):
     """实现 ``TextEmbedder``：``embed_query``（1024 维）。
 
-    端点照 1.0 ``bge_text.py:105`` 的 ``POST /embed``（不是 ``/embed_text``）。
+    优先1.0 ``POST /embed``；仅404时协商OpenAI兼容接口。若服务明确报告
+    pooling=none，BGE-M3原生token矩阵按官方CLS + L2规则转换为dense向量。
+    协议协商有界，其他HTTP错误不触发二次请求，成功后缓存协议。
     """
 
     def __init__(
@@ -180,6 +189,50 @@ class BgeSidecarEmbedder(_SidecarEmbedder):
             timeout_s=timeout_s,
             client=client,
         )
+        self._protocol = "sidecar"
+
+    def _request_values(self, endpoint: str, payload: dict[str, str]) -> list[float]:
+        if self._protocol == "llama_cpp_cls":
+            return self._request_native_cls(payload["text"])
+        if self._protocol == "sidecar":
+            try:
+                return super()._request_values(endpoint, payload)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != 404:
+                    raise
+        response = self._client.post(f"{self._base_url}/v1/embeddings", json={"input": payload["text"]})
+        if (
+            response.status_code == 400
+            and self._model_id == scheme.LEGACY_TEXT_MODEL
+            and (response.json().get("error") or {}).get("message")
+            == "Pooling type 'none' is not OAI compatible. Please use a different pooling type"
+        ):
+            values = self._request_native_cls(payload["text"])
+            self._protocol = "llama_cpp_cls"
+            return values
+        response.raise_for_status()
+        rows = response.json().get("data") or []
+        values = [float(value) for value in (rows[0].get("embedding") or [])] if len(rows) == 1 else []
+        if len(values) == self._dimension and all(math.isfinite(value) for value in values):
+            self._protocol = "openai"
+        return values
+
+    def _request_native_cls(self, text: str) -> list[float]:
+        response = self._client.post(f"{self._base_url}/embedding", json={"content": text})
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("index") != 0:
+            raise ValueError("BGE-M3原生接口必须返回一条输入的token矩阵")
+        tokens = rows[0].get("embedding") or []
+        if not tokens or not isinstance(tokens[0], list) or len(tokens[0]) != self._dimension:
+            raise ValueError("BGE-M3原生CLS维度与方案不符")
+        # FlagEmbedding M3: last_hidden_state[:, 0], then F.normalize(dim=-1).
+        # llama.cpp explicitly ignores embd_normalize for pooling=none.
+        cls = [float(value) for value in tokens[0]]
+        norm = math.hypot(*cls)
+        if not math.isfinite(norm) or norm == 0:
+            raise ValueError("BGE-M3原生CLS必须为有限非零向量")
+        return [value / norm for value in cls]
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed("/embed", {"text": str(text or "")}, "embed_query")

@@ -52,6 +52,14 @@ function renderTable(runs: Run[], page: Partial<RunPageState> = {}, handlers?: P
 }
 
 describe("状态列（1.0 :3023-3025）", () => {
+  it("历史Judge外层计数与阶段卡采用同一读取规则", () => {
+    renderTable([run({ phases: { qa_eval: {
+      judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487 },
+    } } })]);
+    expect(screen.getByText("Judge 已结束 70/487")).not.toBeNull();
+  });
+
   it("不同 status 渲染出不同的 class 与文案", () => {
     const { container } = renderTable([
       run({ run_id: "a", status: "done" }),
@@ -112,4 +120,14 @@ describe("分页（1.0 :2992-2997）", () => {
     expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
     expect(screen.getByText("共 1 条")).not.toBeNull();
   });
+});
+
+it("初始化失败时保留未知题目数，不显示零题", () => {
+  renderTable([run({ status: "failed", qa_count: null })]);
+  expect(screen.getByText("题目数未记录")).toBeTruthy();
+});
+
+it("历史扫描未完成时明确告知列表不完整", () => {
+  renderTable([], { scan: { state: "running", scanned: 120 } });
+  expect(screen.getByText(/历史记录正在加载（已读取 120 条），当前列表尚未完整/)).toBeTruthy();
 });

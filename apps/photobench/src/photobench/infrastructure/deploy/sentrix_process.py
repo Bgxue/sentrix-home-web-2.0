@@ -26,18 +26,47 @@ config.py``）用 ``env_prefix="SENTRIX_"`` 读 ``SENTRIX_VLM_BASE_URL``，那�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from photobench.domain.deploy.ports import RestartOutcome
 from photobench.domain.http.ports import JsonHttpClient
+from photobench.domain.runtime.ports import RunRuntimeSnapshot
+
+
+def _snapshot_config_root(snapshot: RunRuntimeSnapshot, endpoint: str, directory: Path) -> Path:
+    """Content-addressed startup input; a later global config edit cannot redirect it."""
+    connection = snapshot.connection()
+    connection["model_base_url"] = endpoint
+    payload = json.dumps(connection, sort_keys=True, ensure_ascii=False)
+    root = directory / hashlib.sha256(payload.encode()).hexdigest()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "runtime_connection.json"
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=root, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(payload)
+            handle.flush()
+            temporary.chmod(0o400)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if path.read_text(encoding="utf-8") != payload:
+                    raise OSError("Frozen startup configuration was modified") from None
+        finally:
+            temporary.unlink(missing_ok=True)
+    return root
+
 
 #: 2.0 读模型端点的环境变量。名字由 ``sentrix.config.Settings`` 的
 #: ``env_prefix="SENTRIX_"`` + 字段名 ``vlm_base_url`` 决定，**不是随口起的**——
@@ -134,6 +163,7 @@ class SubprocessSentrixProcess:
         pid_file: Path,
         log_path: Path,
         http: JsonHttpClient,
+        runtime_snapshot: RunRuntimeSnapshot | None = None,
         vlm_env_var: str = VLM_BASE_URL_ENV,
         environment: Mapping[str, str] | None = None,
         startup_timeout: float = 60.0,
@@ -156,6 +186,7 @@ class SubprocessSentrixProcess:
         self._pid_file = pid_file
         self._log_path = log_path
         self._http = http
+        self._runtime_snapshot = runtime_snapshot
         self._vlm_env_var = vlm_env_var
         self._environment = dict(environment or {})
         self._startup_timeout = startup_timeout
@@ -177,6 +208,15 @@ class SubprocessSentrixProcess:
         pid, endpoint = record
         if not self._alive(pid):
             return ""
+        if self._runtime_snapshot is not None:
+            try:
+                raw = json.loads(self._pid_file.read_text())
+                observed = raw.get("runtime_connection") or {}
+                desired = self._runtime_snapshot.connection()
+                if any(observed.get(key) != desired.get(key) for key in ("embedding", "product_settings")):
+                    return ""
+            except (OSError, ValueError, AttributeError):
+                return ""
         return endpoint
 
     def restart(self, *, endpoint: str, timeout: float = 60) -> RestartOutcome:
@@ -191,10 +231,25 @@ class SubprocessSentrixProcess:
                 error="endpoint is empty",
             )
         previous = self.running_endpoint()
+        env = {**os.environ, self._vlm_env_var: target}
+        if self._runtime_snapshot is not None:
+            try:
+                config = _snapshot_config_root(
+                    self._runtime_snapshot, target, self._log_path.parent / "startup-snapshots"
+                )
+            except OSError as exc:
+                return RestartOutcome(
+                    ok=False,
+                    restarted=True,
+                    endpoint=target,
+                    reason="startup_snapshot_error",
+                    error=str(exc),
+                )
+            env["PHOTOBENCH_CONFIG_ROOT"] = str(config)
         self._stop_running()
         pid = self._spawn(
             self._command,
-            {**os.environ, **self._environment, self._vlm_env_var: target},
+            env,
             self._cwd,
             self._log_path,
         )
@@ -272,6 +327,31 @@ class SubprocessSentrixProcess:
 
     def _write_record(self, pid: int, endpoint: str) -> None:
         self._pid_file.parent.mkdir(parents=True, exist_ok=True)
-        self._pid_file.write_text(
-            json.dumps({"pid": pid, "endpoint": endpoint}, ensure_ascii=False), encoding="utf-8"
+        record: dict[str, Any] = {"pid": pid, "endpoint": endpoint}
+        if self._runtime_snapshot is not None:
+            record["runtime_connection"] = self._runtime_snapshot.connection()
+        self._pid_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+
+class ObservedSentrixProcess:
+    """Read an unregistered API's facts; never signal a local PID for its URL."""
+
+    def __init__(self, *, api_url: str, http: JsonHttpClient) -> None:
+        self._url = api_url.rstrip("/")
+        self._http = http
+
+    def running_endpoint(self) -> str:
+        try:
+            payload = self._http.request_json(f"{self._url}/api/v1/diagnostics", timeout=10)
+            return str((payload.get("runtime_configuration") or {}).get("vlm_base_url") or "")
+        except Exception:  # noqa: BLE001 — inability to verify is not permission to restart
+            return ""
+
+    def restart(self, *, endpoint: str, timeout: float = 60) -> RestartOutcome:
+        return RestartOutcome(
+            ok=False,
+            restarted=False,
+            endpoint=endpoint,
+            reason="unregistered_product_service",
+            error="Product URL is not the registered managed API; configure it externally",
         )

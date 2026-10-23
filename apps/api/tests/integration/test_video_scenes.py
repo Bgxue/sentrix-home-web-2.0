@@ -422,4 +422,6 @@ def test_a_video_scene_summary_is_not_exempt_from_the_participant_refresh(
     event = SqliteEventRepository(db).get("evt_v")
     assert event is not None
     assert event.revision == 2
-    assert event.summary == "小明在测试地点参与视频场景"
+    assert "小明" in event.summary
+    assert "0.0s~60.0s" in event.summary
+    assert event.summary != "视频场景 · 0.0s~60.0s"

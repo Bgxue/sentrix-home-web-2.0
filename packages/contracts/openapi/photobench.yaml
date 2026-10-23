@@ -274,15 +274,20 @@ paths:
         schema:
           type: string
           title: Run Id
+      - name: include_history
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+          title: Include History
       responses:
         '200':
           description: Successful Response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Run Api V1 Runs  Run Id  Get
+                $ref: '#/components/schemas/RunMetricsResponse'
         '422':
           description: Validation Error
           content:
@@ -426,9 +431,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Run Items Api V1 Runs  Run Id  Items Get
+                $ref: '#/components/schemas/RunItemsResponse'
         '422':
           description: Validation Error
           content:
@@ -461,9 +464,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Run Item Api V1 Runs  Run Id  Items  Item Index  Get
+                $ref: '#/components/schemas/RunItemResponse'
         '422':
           description: Validation Error
           content:
@@ -652,9 +653,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Get Config Api V1 Config Get
+                $ref: '#/components/schemas/RuntimeConfigResponse'
     post:
       tags:
       - config
@@ -670,9 +669,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Save Config Api V1 Config Post
+                $ref: '#/components/schemas/RuntimeConfigResponse'
   /api/v1/judge-prompts:
     get:
       tags:
@@ -1022,6 +1019,563 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    ImportObservationProjection:
+      properties:
+        operation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Operation Id
+        scope_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scope Id
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total
+        completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Completed
+        imported:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Imported
+        deduplicated:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Deduplicated
+        failed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Failed
+        stage:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stage
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+        current_file:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Current File
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        observed_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Observed At
+        sequence:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Sequence
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      additionalProperties: true
+      type: object
+      title: ImportObservationProjection
+    JudgeObservation:
+      properties:
+        score:
+          title: Score
+        score_normalization_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Score Normalization Version
+        score_normalization:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Score Normalization
+        score_derivation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Score Derivation
+        attempts:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Attempts
+        consistency_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Consistency Version
+        consistency_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Consistency Status
+      additionalProperties: true
+      type: object
+      title: JudgeObservation
+    MemoryObservation:
+      properties:
+        memory_accounting:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Memory Accounting
+        memory_complete:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Memory Complete
+        component_validity:
+          anyOf:
+          - additionalProperties:
+              type: string
+            type: object
+          - type: 'null'
+          title: Component Validity
+        memory_observation_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Memory Observation Version
+        memory_observations:
+          anyOf:
+          - additionalProperties:
+              additionalProperties: true
+              type: object
+            type: object
+          - type: 'null'
+          title: Memory Observations
+        memory_dependencies:
+          anyOf:
+          - additionalProperties:
+              items:
+                type: string
+              type: array
+            type: object
+          - type: 'null'
+          title: Memory Dependencies
+        sampling_diagnostics:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Sampling Diagnostics
+        observed_at_epoch:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Observed At Epoch
+        device_observation_age_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Device Observation Age Seconds
+        device_observed_at_monotonic:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Device Observed At Monotonic
+        device_observation_ttl_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Device Observation Ttl Seconds
+        device_freshness_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Device Freshness Version
+        model_process_system_memory_used_mib:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Model Process System Memory Used Mib
+        model_process_host_memory_mib:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Model Process Host Memory Mib
+        model_process_gpu_memory_mib:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Model Process Gpu Memory Mib
+        model_process_footprint_mib:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Model Process Footprint Mib
+        model_process_mapped_weights_mib:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Model Process Mapped Weights Mib
+        product_stack_memory_mib:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Product Stack Memory Mib
+        power_rail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Power Rail
+        power_scope:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Power Scope
+        power_rails_w:
+          anyOf:
+          - additionalProperties:
+              type: number
+            type: object
+          - type: 'null'
+          title: Power Rails W
+      additionalProperties: true
+      type: object
+      title: MemoryObservation
+    PhaseMetricsProjection:
+      properties:
+        agent_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Completed
+        agent_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Total
+        judge_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Completed
+        judge_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Total
+        sampling_integrity:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Sampling Integrity
+        progress:
+          anyOf:
+          - $ref: '#/components/schemas/PhaseProgressProjection'
+          - type: 'null'
+        scanned_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scanned Count
+      additionalProperties: true
+      type: object
+      title: PhaseMetricsProjection
+    PhaseProgressProjection:
+      properties:
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total
+        completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Completed
+        agent_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Completed
+        agent_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Total
+        judge_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Completed
+        judge_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Total
+        judge_skipped:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Skipped
+        qa_concurrency:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Qa Concurrency
+        judge_concurrency:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Concurrency
+        observation:
+          anyOf:
+          - $ref: '#/components/schemas/ImportObservationProjection'
+          - type: 'null'
+        operation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Operation Id
+        availability:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Availability
+        last_received_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Received At
+        last_checked_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Checked At
+        query_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Query Error
+        request_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Status
+        request_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Error
+        observer_stop_pending:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Observer Stop Pending
+      additionalProperties: true
+      type: object
+      title: PhaseProgressProjection
+    RunItemObservation:
+      properties:
+        judge:
+          anyOf:
+          - $ref: '#/components/schemas/JudgeObservation'
+          - type: 'null'
+      additionalProperties: true
+      type: object
+      title: RunItemObservation
+    RunItemResponse:
+      properties:
+        item:
+          anyOf:
+          - $ref: '#/components/schemas/RunItemObservation'
+          - type: 'null'
+      additionalProperties: true
+      type: object
+      title: RunItemResponse
+    RunItemsResponse:
+      properties:
+        items:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/RunItemObservation'
+            type: array
+          - type: 'null'
+          title: Items
+      additionalProperties: true
+      type: object
+      title: RunItemsResponse
+    RunMetricsResponse:
+      properties:
+        read_revision:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Read Revision
+        history_mode:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: History Mode
+        persistence:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Persistence
+        metrics_contract_version:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Metrics Contract Version
+        build_revision:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Build Revision
+        runtime_snapshot:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Runtime Snapshot
+        run_valid:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Run Valid
+        model_identity:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Model Identity
+        execution_budgets:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Execution Budgets
+        snapshot_source:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Snapshot Source
+        qa_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Qa Count
+        telemetry_live:
+          anyOf:
+          - $ref: '#/components/schemas/TelemetryProjection'
+          - type: 'null'
+        phases:
+          anyOf:
+          - additionalProperties:
+              anyOf:
+              - $ref: '#/components/schemas/PhaseMetricsProjection'
+              - type: 'null'
+            type: object
+          - type: 'null'
+          title: Phases
+      additionalProperties: true
+      type: object
+      title: RunMetricsResponse
+    RuntimeConfigResponse:
+      properties:
+        runtime_config:
+          $ref: '#/components/schemas/RuntimeConnectionResponse'
+      additionalProperties: true
+      type: object
+      required:
+      - runtime_config
+      title: RuntimeConfigResponse
+    RuntimeConnectionResponse:
+      properties:
+        sentrix_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sentrix Url
+        model_base_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Base Url
+        endpoint_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Endpoint Model
+        embedding:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Embedding
+        product:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Product
+        product_settings:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Product Settings
+      additionalProperties: true
+      type: object
+      title: RuntimeConnectionResponse
+    TelemetryProjection:
+      properties:
+        latest:
+          anyOf:
+          - $ref: '#/components/schemas/MemoryObservation'
+          - type: 'null'
+        field_stats:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Field Stats
+        rejected_samples:
+          anyOf:
+          - additionalProperties:
+              type: integer
+            type: object
+          - type: 'null'
+          title: Rejected Samples
+        sampling:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Sampling
+      additionalProperties: true
+      type: object
+      title: TelemetryProjection
     ValidationError:
       properties:
         loc:

@@ -17,6 +17,7 @@ import {
   telemetryLiveState,
   telemetryProcessList,
   telemetrySampleCount,
+  telemetryObservationRows,
   tokenDistributionCount,
   tokenDistributionRows,
 } from "./telemetry.ts";
@@ -25,6 +26,21 @@ import {
 // 让缺字段的几种回退（`-` / `0` / `未提供` / `未标注范围`）互不相同。
 
 describe("gpuMetricsView (:857-935)", () => {
+  it("降采样曲线不能覆盖完整样本统计，空值不进入均值", () => {
+    const view = gpuMetricsView({
+      status: "running",
+      telemetry_live: {
+        samples_count: 500,
+        history: [{ gpu_utilization_pct: 1 }, { gpu_utilization_pct: null }],
+        field_stats: { gpu_utilization_pct: { peak: 80, mean: 35, p95: 65, valid_count: 400 } },
+      },
+    });
+    expect(view.gpu_utilization_pct).toEqual({ peak: 80, mean: 35, p95: 65, valid_count: 400 });
+    const sparse = gpuMetricsView({ status: "running", telemetry_live: {
+      samples_count: 3, history: [{ gpu_utilization_pct: null }, { gpu_utilization_pct: 0 }, { gpu_utilization_pct: 20 }],
+    } });
+    expect(sparse.gpu_utilization_pct).toEqual({ peak: 20, mean: 10, p95: 20 });
+  });
   it("有 ≥20 个历史采样时：peak=max、mean=算术平均、p95=floor(n*0.95) 位（不是 max）", () => {
     const history = Array.from({ length: 21 }, (_, i) => ({ gpu_utilization_pct: i + 1 }));
     const run = {
@@ -49,14 +65,14 @@ describe("gpuMetricsView (:857-935)", () => {
     expect(view.gpu_utilization_pct).toEqual({ peak: 30, mean: 20, p95: 30 });
   });
 
-  it("历史为空时退回 live.latest/peak（mean 取 latest，peak/p95 取 peak）", () => {
+  it("缺少完整历史时不伪造均值和 P95", () => {
     const run = {
       status: "running",
       telemetry_source: "nvidia_smi",
       telemetry_live: { samples_count: 5, latest: { gpu_utilization_pct: 5 }, peak: { gpu_utilization_pct: 9 } },
     };
     const view = gpuMetricsView(run);
-    expect(view.gpu_utilization_pct).toEqual({ mean: 5, peak: 9, p95: 9 });
+    expect(view.gpu_utilization_pct).toEqual({});
     expect(view.samples_count).toBe(5);
     expect(view.source).toBe("nvidia_smi");
   });
@@ -79,6 +95,24 @@ describe("gpuMetricsView (:857-935)", () => {
 });
 
 describe("liveTelemetryRows (:941-991)", () => {
+  it("v2 metadata controls live formulas and power scope despite a legacy source label", () => {
+    const rows = liveTelemetryRows({ status: "running", telemetry_live: {
+      source: "nvidia_smi", latest: { memory_accounting: "jetson_pss_plus_nvmap_estimate",
+        model_process_system_memory_used_mib: null, model_process_host_memory_mib: 100,
+        model_process_gpu_memory_mib: null, product_stack_memory_mib: null,
+        power_draw_w: 4, power_scope: "rail", power_rail: "VDD_GPU_SOC" },
+    } });
+    const byLabel = new Map(rows.map((row) => [row[0], row]));
+    expect(byLabel.get("主模型占用（smaps RSS + nvmap）")?.[1]).toBe("-");
+    expect(byLabel.get("主模型 smaps RSS")?.[1]).toBe("0.10 GiB");
+    expect(byLabel.get("主模型 GPU/UMA 分量")?.[1]).toBe("-");
+    expect(byLabel.get("整套产品内存")?.[1]).toBe("-");
+    expect(byLabel.get("电源轨功耗")?.[2]).toContain("VDD_GPU_SOC");
+    expect(rows.some((row) => row[0].includes("GPU 显存"))).toBe(false);
+    const apple = liveTelemetryRows({ telemetry_live: { latest: { memory_accounting: "apple_capacity_estimate" } } });
+    expect(apple.find((row) => row[0] === "整机内存")?.[2]).toContain("active + wired + compressor");
+    expect(apple.find((row) => row[0] === "整套产品内存")?.[2]).toContain("容量估计");
+  });
   it("非 apple：缺字段回 `-`、`0` 保留为 `0.00%`、KV 缺字段各有专门文案", () => {
     const run = {
       status: "running",
@@ -127,7 +161,7 @@ describe("liveTelemetryRows (:941-991)", () => {
   it("apple_unified 走另一套行；PSS source 改标签", () => {
     const apple = liveTelemetryRows({ status: "running", telemetry_live: { source: "apple_unified", samples_count: 2, latest: { gpu_utilization_pct: 12 }, peak: {} } });
     expect(apple[0][0]).toBe("当前阶段");
-    expect(apple.some((row) => row[0] === "主模型 phys_footprint")).toBe(true);
+    expect(apple.some((row) => row[0] === "主模型占用（footprint+权重）")).toBe(true);
     const orin = liveTelemetryRows({ status: "running", telemetry_live: { source: "orin_ssh_pss", samples_count: 1, latest: {}, peak: {} } });
     expect(orin.some((row) => row[0] === "主模型 PSS（Orin UMA）")).toBe(true);
   });
@@ -178,6 +212,32 @@ describe("telemetryChart (:1011-1026)", () => {
 });
 
 describe("liveTelemetryPhaseRows (:1126-1150)", () => {
+  it("unknown phase peaks stay unavailable while observed zero remains zero", () => {
+    const run = { telemetry_live: {
+      source: "apple_unified", latest: { memory_accounting: "apple_capacity_estimate" },
+      phase_snapshots: { photo_import: { peak: {} }, qa_eval: { peak: {} } },
+      history: [
+        { phase: "photo_import", model_process_system_memory_used_mib: null },
+        { phase: "photo_import", model_process_system_memory_used_mib: false },
+        { phase: "photo_import", model_process_system_memory_used_mib: "" },
+        { phase: "qa_eval", model_process_system_memory_used_mib: 0 },
+      ],
+    } };
+    const rows = liveTelemetryPhaseRows(run);
+    expect(rows[0][1]).toBe("-");
+    expect(rows[0][2]).toContain("主模型占用（footprint+权重）");
+    expect(rows[1][1]).toBe("0.00 GiB");
+    expect(liveTelemetryPhaseRows({ telemetry_live: { ...run.telemetry_live, source: "nvidia_smi" } })).toEqual(rows);
+  });
+
+  it("downsampled phase history cannot replace a missing saved peak", () => {
+    const rows = liveTelemetryPhaseRows({ telemetry_live: { source: "nvidia_smi", samples_count: 20,
+      history: [{ phase: "qa_eval", model_process_memory_used_mib: 1024 }],
+      phase_snapshots: { qa_eval: { peak: { model_process_memory_used_mib: false, memory_used_mib: "", system_memory_used_mib: false } } },
+    } });
+    expect(rows[0][1]).toBe("-");
+    expect(rows[0][2]).toContain("整卡 - · 整机 RAM -");
+  });
   it("按 source 选模型指标键与标签；peak 缺失时从历史取该相位峰值", () => {
     const run = {
       telemetry_source: "nvidia_smi",
@@ -207,7 +267,7 @@ describe("liveTelemetryPhaseRows (:1126-1150)", () => {
     const rows = liveTelemetryPhaseRows(run);
     expect(rows[0][0]).toBe("QA 评测");
     expect(rows[0][1]).toBe("3.00 GiB");
-    expect(rows[0][2]).toContain("主模型 phys_footprint峰值");
+    expect(rows[0][2]).toContain("主模型占用（footprint+权重）峰值");
   });
 });
 
@@ -247,6 +307,40 @@ describe("comparableMemoryProfile (:1151-1165) —— 可比判据", () => {
 });
 
 describe("memoryProfileRows (:1176-1211) —— 三种 method 分道", () => {
+  it("新 Jetson 公式说明与归属估计一致，历史记录不套现行公式", () => {
+    const run = { phases: { gpu_metrics: {
+      source: "jetson_local_pss", memory_accounting: "jetson_pss_plus_nvmap_estimate",
+      model_process_system_memory_used_mib: { peak: 1024 },
+      memory_profile: { method: "orin_smaps_rss_plus_gpu_uma_v1", scope: "host_smaps_rss_plus_gpu_uma" },
+    } } };
+    const profile = comparableMemoryProfile(run);
+    expect(profile?.memory_accounting).toBe("jetson_pss_plus_nvmap_estimate");
+    const rows = memoryProfileRows(profile);
+    const notes = rows.map((row) => row[2]).join(" ");
+    expect(notes).toContain("优先按 PID 汇总 nvmap");
+    expect(notes).toContain("未知分量使合计不可用");
+    expect(notes).toContain("不保证物理去重");
+    expect(notes).not.toContain("max(");
+    const metricNote = keyMetricRows(run, {}).find((row) => row.label === "主模型内存占用")?.note;
+    expect(metricNote).toContain("优先 nvmap");
+    expect(metricNote).toContain("不保证物理去重");
+    expect(metricNote).not.toContain("两半不重叠");
+    const historical = memoryProfileRows({ ...profile, memory_accounting: undefined });
+    expect(historical.find((row) => row[0] === "数据来源")?.[2]).toContain("历史 GPU 归属公式");
+    expect(historical.find((row) => row[0] === "数据来源")?.[2]).not.toContain("优先");
+  });
+
+  it("Mac 主指标将 footprint 加映射权重标为容量估计", () => {
+    const rows = keyMetricRows({ phases: { gpu_metrics: {
+      source: "apple_unified", memory_accounting: "apple_capacity_estimate",
+      model_process_system_memory_used_mib: { peak: 1024 },
+    } } }, {});
+    const note = rows.find((row) => row.label === "主模型内存占用")?.note;
+    expect(note).toContain("容量估计");
+    expect(note).toContain("映射不保证驻留");
+    expect(note).not.toContain("进程提交占用");
+  });
+
   it("macos / orin / 默认(vLLM) 首行各不相同", () => {
     expect(memoryProfileRows({ memory_profile: { method: "macos_unified_memory_v1" } })[0][0]).toBe("内存占用峰值");
     expect(memoryProfileRows({ memory_profile: { method: "orin_process_pss_uma_v1" } })[0][0]).toBe("进程物理内存峰值（PSS）");
@@ -279,14 +373,14 @@ describe("aggregateMetricRows (:1212-1253) / keyMetricRows (:1254-1304)", () => 
     expect(typed[0][0]).toBe("媒体检索 Precision");
     const historical = aggregateMetricRows({}, {});
     expect(historical[0][0]).toBe("历史图片检索 Precision");
-    expect(historical[12][1]).toBe("未记录"); // 视频检索 P/R/F1
+    expect(historical.find((r) => r[0] === "视频检索 P / R / F1")?.[1]).toBe("未记录"); // 视频检索 P/R/F1
   });
 
   it("吞吐时延 note 区分「实测相位」与「时间线回退」", () => {
     const measured = aggregateMetricRows({ qa_concurrency: 4 }, { agent_throughput_latency_mode: "measured_agent_phase", agent_phase_completed_count: 10 });
-    expect(measured[5][2]).toContain("实际墙钟");
+    expect(measured.find((r) => r[0] === "Agent 并发吞吐折算时延")?.[2]).toContain("实际墙钟");
     const fallback = aggregateMetricRows({}, { agent_throughput_latency_sample_count: 3, agent_throughput_latency_total_count: 10 });
-    expect(fallback[5][2]).toContain("不能视为实测");
+    expect(fallback.find((r) => r[0] === "Agent 并发吞吐折算时延")?.[2]).toContain("不能视为实测");
   });
 
   it("keyMetricRows 未落盘候选顺序时不补零", () => {
@@ -367,8 +461,8 @@ describe("gpuMetricRows (:785-856)", () => {
 
   it("apple_unified / orin 分支行数与首标签不同", () => {
     const apple = gpuMetricRows({ source: "apple_unified", samples_count: 4, model_process_system_memory_used_mib: { peak: 1024, mean: 512 } });
-    expect(apple).toHaveLength(11);
-    expect(apple[0][0]).toBe("主模型 phys_footprint");
+    expect(apple).toHaveLength(13);
+    expect(apple[0][0]).toBe("主模型占用（footprint+权重）");
     const orin = gpuMetricRows({ source: "orin_ssh_pss", samples_count: 4 });
     expect(orin).toHaveLength(9);
     expect(orin[0][0]).toBe("Orin 模型进程占用（VmRSS）");
@@ -382,6 +476,10 @@ describe("jetsonUnifiedFromRun", () => {
     ).toBe(true);
     expect(jetsonUnifiedFromRun({ memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } })).toBe(true);
     expect(jetsonUnifiedFromRun({ phases: { gpu_metrics: { memory_profile: { scope: "vmrss_only" } } } })).toBe(false);
+    // 本次实测的 46 run：memory_profile 还是旧 PSS，但拆分字段已经落盘。
+    expect(
+      jetsonUnifiedFromRun({ phases: { gpu_metrics: { model_process_host_memory_mib: { peak: 1670.84 } } } }),
+    ).toBe(true);
     expect(jetsonUnifiedFromRun(null)).toBe(false);
   });
 
@@ -391,4 +489,44 @@ describe("jetsonUnifiedFromRun", () => {
     const unified = { ...legacy, memory_profile: { scope: "host_smaps_rss_plus_gpu_uma" } };
     expect(gpuMetricRows(unified)[0][0]).toBe("主模型占用（smaps Rss + GPU）");
   });
+});
+
+
+describe("telemetryObservationRows", () => {
+  it("显示真实来源值龄、过期来源及记录失败，不把未知耗时转零", () => {
+    const rows = telemetryObservationRows({
+      phases: { gpu_metrics: { sampling_integrity: {
+        callback_failures: 1, publisher_failures: 0, collection_failures: 0, stop_pending_threads: ["gpu-sampler"],
+      } } },
+      telemetry_live: { latest: {
+        memory_observation_version: 1,
+        memory_observations: {
+          nvmap: { age_seconds: 3.2, fresh: false },
+          system: { age_seconds: 0.1, fresh: true },
+        },
+        sampling_diagnostics: { collection_seconds: null, schedule_lateness_seconds: 0.25 },
+      } },
+    });
+    expect(rows.find((row) => row[0] === "内存观测值龄")?.[1]).toBe("3.200 s");
+    expect(rows.find((row) => row[0] === "内存来源有效性")?.slice(1)).toEqual(["1/2", "不可用或过期：nvmap"]);
+    expect(rows.find((row) => row[0] === "采集 / 调度延迟")?.[1]).toBe("不可用 / 0.250 s");
+    expect(rows.find((row) => row[0] === "采样记录 / 发布 / 采集异常")?.slice(1)).toEqual([
+      "1 / 0 / 0", "停止超时，线程待退出：gpu-sampler",
+    ]);
+  });
+
+  it("历史缺少来源记录时不补造；真实零耗时保留", () => {
+    expect(telemetryObservationRows({})).toEqual([]);
+    const rows = telemetryObservationRows({ telemetry_live: { latest: {
+      sampling_diagnostics: { collection_seconds: 0, schedule_lateness_seconds: 0 },
+    } } });
+    expect(rows[0][1]).toBe("0.000 s / 0.000 s");
+  });
+});
+
+
+it("取消后的partial遥测保持部分采集标记", () => {
+  expect(gpuMetricsView({ status: "cancelled", phases: { gpu_metrics: {
+    status: "partial", partial: true, samples_count: 10, collection_end_reason: "cancelled",
+  } } })).toMatchObject({ status: "partial", partial: true, collection_end_reason: "cancelled" });
 });

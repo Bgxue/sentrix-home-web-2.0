@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -115,7 +117,23 @@ def create_app(
     settings = settings or Settings.load()
     container = container or Container.build(settings)
 
-    app = FastAPI(title="PhotoBench", version=__version__, docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        container.startup_recovery.acquire_and_recover()
+        log.info("PhotoBench build revision: %s", container.build_revision)
+        if scan_in_background:
+            threading.Thread(
+                target=container.run_index.refresh,
+                args=(container.run_store,),
+                name="photobench-result-scan",
+                daemon=True,
+            ).start()
+        try:
+            yield
+        finally:
+            container.startup_recovery.close()
+
+    app = FastAPI(title="PhotoBench", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.container = container
     errors.install(app)
 
@@ -139,11 +157,4 @@ def create_app(
     # 静态挂载放最后：见 ``_mount_web`` 的注释——顺序就是「不许吃掉 API 前缀」本身。
     _mount_web(app, settings)
 
-    if scan_in_background:
-        threading.Thread(
-            target=container.run_index.refresh,
-            args=(container.run_store,),
-            name="photobench-result-scan",
-            daemon=True,
-        ).start()
     return app

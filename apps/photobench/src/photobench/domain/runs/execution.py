@@ -471,11 +471,13 @@ def traces_from_progress(
                     "stage": "model",
                     "type": "model_call",
                     "call_type": str(call.get("call_type") or "agent"),
-                    "status": "complete",
+                    "status": call.get("status", "complete"),
+                    "tool_argument_parse_facts": call.get("tool_argument_parse_facts"),
+                    "error_type": call.get("error_type"),
+                    "attempt": call.get("attempt"),
                     # ``action`` 是「这一步做了什么」：调了哪个工具，或者就是收口。
                     # ``agent_stability`` 的 ``parsed_success`` 按它判「这一步解析出了动作」。
                     "action": tools[0] if tools else "final",
-                    "parse_status": "success",
                     "prompt_tokens": call.get("prompt_tokens"),
                     "completion_tokens": call.get("completion_tokens"),
                     "duration_ms": call.get("duration_ms"),
@@ -566,3 +568,34 @@ def debug_steps_from(events: Sequence[Any]) -> list[dict[str, Any]]:
             step["duration_ms"] = payload["duration_ms"]
         steps.append(step)
     return steps
+
+
+def model_identity(payload: dict[str, Any], requested: str = "") -> dict[str, Any]:
+    """Select an unambiguous endpoint identity without guessing among multiple models."""
+    candidates: list[str] = []
+    for entry in payload.get("data") or payload.get("models") or []:
+        value = (
+            entry.get("id") or entry.get("name") or entry.get("model") if isinstance(entry, dict) else entry
+        )
+        if isinstance(value, str) and value.strip() and value.strip() not in candidates:
+            candidates.append(value.strip())
+    selected = requested if requested in candidates else candidates[0] if len(candidates) == 1 else ""
+    if requested and requested not in candidates:
+        selected = ""
+    name = selected.replace("\\", "/").rsplit("/", 1)[-1]
+    for extension in (".gguf", ".safetensors", ".onnx", ".bin", ".pt", ".pth"):
+        if name.lower().endswith(extension):
+            name = name[: -len(extension)]
+            break
+    return {
+        "raw_id": selected or None,
+        "display_name": name or None,
+        "source": "endpoint_models",
+        "status": "resolved" if selected else "unavailable",
+        "reason": None
+        if selected
+        else "requested_model_missing"
+        if requested
+        else "ambiguous_or_empty_models",
+        "candidates": candidates,
+    }

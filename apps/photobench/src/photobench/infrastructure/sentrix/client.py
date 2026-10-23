@@ -60,6 +60,10 @@ class HttpxSentrixClient:
     def _url(self, path: str) -> str:
         return f"{self._base_url().rstrip('/')}{API_PREFIX}{path}"
 
+    def diagnostics(self, *, timeout: int = 10) -> dict[str, Any]:
+        body: dict[str, Any] = self._http.request_json(self._url("/diagnostics"), timeout=timeout)
+        return body
+
     def seed_person(
         self,
         *,
@@ -147,6 +151,24 @@ class HttpxSentrixClient:
             )
         )
 
+    def import_album_tracked(
+        self,
+        *,
+        scope_id: str,
+        directory: str,
+        limit: int,
+        timeout: int,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        return dict(
+            self._http.request_json(
+                self._url("/imports"),
+                {"scope_id": scope_id, "directory": directory, "limit": limit, "operation_id": operation_id},
+                "POST",
+                timeout,
+            )
+        )
+
     def process_pipeline(self, *, scope_id: str, asset_ids: Sequence[str], timeout: int) -> dict[str, Any]:
         return dict(
             self._http.request_json(
@@ -154,6 +176,14 @@ class HttpxSentrixClient:
                 {"scope_id": scope_id, "asset_ids": list(asset_ids)},
                 "POST",
                 timeout,
+            )
+        )
+
+    def import_progress(self, *, operation_id: str, timeout: int = 3) -> dict[str, Any]:
+        return dict(
+            self._http.request_json(
+                self._url(f"/imports/{_quote(operation_id)}/progress"),
+                timeout=timeout,
             )
         )
 

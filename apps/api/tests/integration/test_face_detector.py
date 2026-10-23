@@ -34,6 +34,9 @@ from sentrix.infrastructure.models.face_detector import (
     landmark_sanity,
 )
 
+# Requires real album data, local weights or a running model; run via make test-real.
+pytestmark = pytest.mark.real_environment
+
 PHOTO_DIR = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 
 # 实测（2026-09-23，53 张真照片）：142 张脸、46 张照片有人脸、单张最多 19 张。

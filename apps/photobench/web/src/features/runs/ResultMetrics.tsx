@@ -62,6 +62,7 @@ function isOrinPssRun(run: Run | null | undefined): boolean {
     sources.includes(dict(r.telemetry_live).source) ||
     sources.includes(gpu.source) ||
     method === "orin_process_pss_uma_v1" ||
+    method === "orin_smaps_rss_plus_gpu_uma_v1" ||
     method === "apple_phys_footprint_v1" ||
     // 1.0 `:1195-1197`。漏掉这三种时，只有 `memory_profile.method` 的历史 Apple run
     // 会多显示一张「可比较显存」卡——那张卡对统一内存机器不适用，会误导对比。
@@ -97,11 +98,17 @@ export function ResultMetrics({ run }: ResultMetricsProps) {
   const gpuTime = gpu.partial
     ? "已按当前已采样数据滚动汇总；全部阶段结束后更新为全程均值/峰值。"
     : "指标计算耗时 " + fmtSeconds(phaseSeconds(run?.phases?.gpu_metrics));
+  const orinUnified =
+    dict(gpu.memory_profile).method === "orin_smaps_rss_plus_gpu_uma_v1" ||
+    dict(gpu.memory_profile).scope === "host_smaps_rss_plus_gpu_uma" ||
+    gpu.model_process_host_memory_mib != null;
   const gpuSource =
     gpu.source === "apple_unified"
-      ? "Mac：主指标是主模型 phys_footprint"
+      ? "Mac：主指标是主模型占用（footprint+权重映射）"
       : ["orin_ssh_pss", "jetson_local_pss"].includes(String(gpu.source))
-        ? "Orin：主指标是 llama-server 的 VmRSS"
+        ? orinUnified
+          ? "Orin：主指标是主机 smaps Rss + GPU/UMA 页"
+          : "Orin：主指标是 llama-server 的 VmRSS（旧口径）"
         : gpu.memory_pressure
           ? "macOS 统一内存系统级采样（含模型 Metal 分配）"
           : "模型进程显存为 NVML 按 PID 汇总的实际占用，KV Cache 为 vLLM 逻辑使用率";

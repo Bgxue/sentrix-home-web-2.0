@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import copy
 import math
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -26,13 +28,34 @@ from urllib.parse import quote
 from photobench.application.runs.index import RunIndex
 from photobench.domain.datasets.ports import QaMetadataSource
 from photobench.domain.http.ports import JsonHttpClient
-from photobench.domain.results.ports import RunStore
+from photobench.domain.results.ports import RunReadViews, RunRevisions, RunStore
 from photobench.domain.runs import analysis
 
 #: 详情/题目两条路径会各解析一次同一个 run.json。最大的一个 447 MB、解析 2.03 s，
 #: 前端翻页会把同一份反复解析成几十次。1.0 靠「全部常驻内存」绕过这件事（代价是
-#: 11 GB）；2.0 只留最近两个——翻页是顺序的，两条足够覆盖「一边看详情一边翻题目」。
+#: 11 GB）；2.0 最多保留最近两个且总对象预算64MiB，超过预算的完整状态只按需读取，不驻留缓存。
 _STATE_CACHE_SIZE = 2
+_STATE_CACHE_BYTES = 64 * 1024 * 1024
+
+
+def _object_bytes(value: Any) -> int:
+    """Account object graphs once; avoid serializing another full copy for sizing."""
+    seen: set[int] = set()
+    pending = [value]
+    size = 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        size += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+    return size
+
 
 #: **缓存只对终态的 run 生效。** 这条不是性能取舍，是正确性：还在跑的 run 每读一次
 #: 都必须重新解析——否则调用方会一直看到**第一次读到的那份快照**。
@@ -62,6 +85,11 @@ class ReadRuns:
         live_states: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
     ) -> None:
         self._store = store
+        self._versions = store if isinstance(store, RunRevisions) else None
+        self._views = store if isinstance(store, RunReadViews) else None
+        self._state_weights: dict[str, int] = {}
+        self._projections: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
+        self._state_versions: dict[str, str] = {}
         self._index = index
         self._qa_source = qa_metadata
         self._http = http
@@ -71,6 +99,8 @@ class ReadRuns:
         self._live_states = live_states
         self._lock = threading.RLock()
         self._states: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._item_locks = tuple(threading.RLock() for _ in range(64))
+        self._run_reads: dict[tuple[str, bool], Future[dict[str, Any]]] = {}
         self._qa_metadata: dict[str, dict[str, Any]] | None = None
 
     # -- 内部 ---------------------------------------------------------------
@@ -84,18 +114,35 @@ class ReadRuns:
         「这一份是终态」。用例 ``test_a_running_run_is_not_served_from_a_stale_cache``
         钉住它（把 ``not in`` 去掉，用例立刻红）。
         """
+        revision = self._versions.revision(run_id) if self._versions is not None else "legacy"
         with self._lock:
+            if self._state_versions.get(run_id) != revision:
+                self._states.pop(run_id, None)
+                self._state_weights.pop(run_id, None)
+                self._state_versions.pop(run_id, None)
             cached = self._states.get(run_id)
             if cached is not None:
                 self._states.move_to_end(run_id)
                 return cached
         state = self._store.load_state(run_id)  # 不存在 -> KeyError，HTTP 层映射成 404
-        if state.get("status") not in NON_TERMINAL_STATUSES:
+        weight = _object_bytes(state)
+        if (
+            state.get("status") not in NON_TERMINAL_STATUSES
+            and weight <= _STATE_CACHE_BYTES
+            and (self._versions is None or self._versions.revision(run_id) == revision)
+        ):
             with self._lock:
                 self._states[run_id] = state
+                self._state_weights[run_id] = weight
+                self._state_versions[run_id] = revision
                 self._states.move_to_end(run_id)
-                while len(self._states) > _STATE_CACHE_SIZE:
-                    self._states.popitem(last=False)
+                while (
+                    len(self._states) > _STATE_CACHE_SIZE
+                    or sum(self._state_weights.values()) > _STATE_CACHE_BYTES
+                ):
+                    removed, _ = self._states.popitem(last=False)
+                    self._state_versions.pop(removed, None)
+                    self._state_weights.pop(removed, None)
         return state
 
     def _qa_index(self) -> dict[str, dict[str, Any]]:
@@ -122,8 +169,9 @@ class ReadRuns:
         if not missing or not scope_id:
             return
         try:
+            sentrix_url = str(state.get("sentrix_url") or self._sentrix_url()).rstrip("/")
             data = self._http.request_json(
-                f"{self._sentrix_url().rstrip('/')}/api/assets?scope_id={quote(str(scope_id))}&limit=2000",
+                f"{sentrix_url}/api/assets?scope_id={quote(str(scope_id))}&limit=2000",
                 timeout=15,
             )
             assets_by_name: dict[str, list[dict[str, Any]]] = {}
@@ -166,7 +214,13 @@ class ReadRuns:
         if live:
             known = {str(row.get("run_id") or "") for row in rows}
             rows = [
-                analysis.run_list_entry(dict(state)) for run_id, state in live.items() if run_id not in known
+                (
+                    dict(state)
+                    if "items" not in state and "item_count" in state
+                    else analysis.run_list_entry(dict(state))
+                )
+                for run_id, state in live.items()
+                if run_id not in known
             ] + rows
             rows.sort(key=_run_sort_key, reverse=True)
         response = analysis.paginate_rows(rows, page, page_size)
@@ -181,21 +235,94 @@ class ReadRuns:
         response["scan"] = self._index.status()
         return response
 
-    def get_run(self, run_id: str) -> dict[str, Any]:
+    def get_run(self, run_id: str, *, include_history: bool = True) -> dict[str, Any]:
         """``GET /api/runs/{id}``（1.0 ``get_run`` ``:5354``）。"""
-        state = self._state(run_id)
-        result = {key: value for key, value in state.items() if key != "items"}
-        result["item_count"] = len(state.get("items") or [])
-        result["summary"] = analysis.effective_summary(state)
+        # 多个浏览器/轮询请求共享正在生成的同一份投影；不保留活跃 run 的
+        # 完成态缓存。否则每个 HTTP worker 都解析整份 JSONL，读侧内存可随
+        # 并发倍增并挤压实际执行及采样。不同 run 不互相等待。
+        key = (run_id, include_history)
+        with self._lock:
+            pending = self._run_reads.get(key)
+            leader = pending is None
+            if pending is None:
+                pending = Future()
+                self._run_reads[key] = pending
+        if not leader:
+            return pending.result()
+        try:
+            result = self._project_run(run_id, include_history=include_history)
+            entry = self._index.entry(run_id) or {}
+            persistence = entry.get("persistence") or {}
+            if persistence.get("status") in {"failed", "stop_pending"}:
+                # The failed write cannot put its own diagnosis on a full disk.
+                # Keep the checkpoint provenance, and identify the process-local overlay.
+                result = {
+                    **result,
+                    "status": entry.get("status", result.get("status")),
+                    **{
+                        key: entry[key]
+                        for key in ("finished_at", "failed_phase", "fatal_error")
+                        if key in entry
+                    },
+                    "persistence": {
+                        **persistence,
+                        "diagnostic_source": "current_process",
+                        "checkpoint_status": result.get("status"),
+                    },
+                }
+            pending.set_result(result)
+            return result
+        except BaseException as error:
+            pending.set_exception(error)
+            raise
+        finally:
+            with self._lock:
+                self._run_reads.pop(key, None)
+
+    def _project_run(self, run_id: str, *, include_history: bool = True) -> dict[str, Any]:
+        revision = self._versions.revision(run_id) if self._versions is not None else ""
+        telemetry_revision = (
+            self._views.telemetry_revision(run_id) if include_history and self._views is not None else ""
+        )
+        cache_key = (run_id, revision, telemetry_revision)
+        if include_history and revision and telemetry_revision:
+            with self._lock:
+                cached = self._projections.get(cache_key)
+                if cached is not None:
+                    self._projections.move_to_end(cache_key)
+                    return copy.deepcopy(cached)
+        if self._views is not None:
+            result = self._views.load_overview(run_id)
+        else:
+            state = self._state(run_id)
+            result = {key: value for key, value in state.items() if key != "items"}
+            result["item_count"] = len(state.get("items") or [])
+            result["summary"] = analysis.effective_summary(state)
+        result.setdefault("read_revision", revision or None)
+        result["history_mode"] = "full" if include_history else "checkpoint"
         live = result.get("telemetry_live")
         if isinstance(live, dict):
             # ``_public_run`` 故意不做深拷贝，而下面要把 JSONL 采样并进 live；
             # 直接改会把内存里那份运行状态改脏（1.0 的注释就是这个意思，``:5370``）。
             result["telemetry_live"] = copy.deepcopy(live)
         live = result.get("telemetry_live")
-        if isinstance(live, dict):
+        if include_history and isinstance(live, dict):
             analysis.attach_gpu_sample_history(live, self._store.read_gpu_sample_lines(run_id))
             analysis.publish_full_sample_phase_stats(result, live)
+        if (
+            include_history
+            and revision
+            and telemetry_revision
+            and self._versions is not None
+            and self._views is not None
+            and self._versions.revision(run_id) == revision
+            and self._views.telemetry_revision(run_id) == telemetry_revision
+            and _object_bytes(result) <= 4 * 1024 * 1024
+        ):
+            with self._lock:
+                self._projections[cache_key] = copy.deepcopy(result)
+                while len(self._projections) > 2:
+                    self._projections.popitem(last=False)
         return result
 
     def get_reviews(self, run_id: str) -> dict[str, Any]:
@@ -218,8 +345,9 @@ class ReadRuns:
         primary: str = "",
     ) -> dict[str, Any]:
         """``GET /api/runs/{id}/items``（1.0 ``get_run_items`` ``:6441``）。"""
-        with self._lock:
-            state = self._state(run_id)
+        with self._item_locks[hash(run_id) % len(self._item_locks)]:
+            cached = self._state(run_id)
+            state = {**cached, "items": [dict(item) for item in cached.get("items") or []]}
             self._hydrate_legacy_gt_images(state)
             qa_metadata = self._qa_index()
             all_items = [
@@ -270,7 +398,10 @@ class ReadRuns:
                     and search not in str(item.get("qa_id") or "").lower()
                 ):
                     continue
-                if score_filter is not None and (item.get("judge") or {}).get("score") != score_filter:
+                if (
+                    score_filter is not None
+                    and analysis.judge_score_for_summary(item.get("judge")) != score_filter
+                ):
                     continue
                 if task_type and item.get("task_type") != task_type:
                     continue
@@ -329,8 +460,9 @@ class ReadRuns:
 
     def get_run_item(self, run_id: str, item_index: int) -> dict[str, Any]:
         """``GET /api/runs/{id}/items/{index}``（1.0 ``get_run_item`` ``:6528``）。"""
-        with self._lock:
-            state = self._state(run_id)
+        with self._item_locks[hash(run_id) % len(self._item_locks)]:
+            cached = self._state(run_id)
+            state = {**cached, "items": [dict(item) for item in cached.get("items") or []]}
             self._hydrate_legacy_gt_images(state)
             items = state.get("items") or []
             if item_index < 0 or item_index >= len(items):

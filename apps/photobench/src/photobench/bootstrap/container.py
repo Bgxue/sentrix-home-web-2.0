@@ -28,12 +28,18 @@ import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from photobench.application.config.service import ConfigService
 from photobench.application.datasets.service import DatasetCatalog
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.model_profiles.service import ModelProfiles
-from photobench.application.run_execution.service import JudgeSettings, RunExecution, RunRequest
+from photobench.application.run_execution.service import (
+    JudgeSettings,
+    RunExecution,
+    RunRequest,
+    freeze_runtime_request,
+)
 from photobench.application.runs.index import RunIndex
 from photobench.application.runs.read_runs import ReadRuns
 from photobench.application.runs.reports import RunReports
@@ -44,21 +50,23 @@ from photobench.domain.config.ports import ConfigStore, SecretEnvStore
 from photobench.domain.datasets.ports import AlbumSource, QaMetadataSource
 from photobench.domain.deploy.ports import SentrixProcess
 from photobench.domain.http.ports import JsonHttpClient
-from photobench.domain.results.ports import RunResultWriter, RunStore
+from photobench.domain.results.ports import RunResultWriter, RunStartupRecovery, RunStore
 from photobench.domain.runtime.ports import (
     InferenceProvider,
     LifecycleProvider,
+    RunRuntimeSnapshot,
     RuntimeProviders,
 )
 from photobench.domain.sentrix.ports import SentrixClient
 from photobench.infrastructure.config.env import DotenvSecretStore
-from photobench.infrastructure.config.files import JsonConfigStore
+from photobench.infrastructure.config.files import JsonConfigStore, read_build_revision
 from photobench.infrastructure.datasets.albums import JsonAlbumSource
 from photobench.infrastructure.datasets.qa_metadata import JsonQaMetadataSource
-from photobench.infrastructure.deploy.sentrix_process import SubprocessSentrixProcess
+from photobench.infrastructure.deploy.sentrix_process import ObservedSentrixProcess, SubprocessSentrixProcess
 from photobench.infrastructure.deploy.systemd_process import SystemdSentrixProcess
 from photobench.infrastructure.http.client import HttpxJsonClient
 from photobench.infrastructure.http.judge_images import inline_judge_images
+from photobench.infrastructure.results.recovery import FileRunStartupRecovery
 from photobench.infrastructure.results.store import FileResultWriter, FileRunStore
 from photobench.infrastructure.runtime.providers import (
     create_runtime_providers,
@@ -66,6 +74,7 @@ from photobench.infrastructure.runtime.providers import (
     manager_telemetry,
 )
 from photobench.infrastructure.runtime.selection import detect_runtime_framework, select_runtime_providers
+from photobench.infrastructure.runtime.telemetry_scope import services_from_connection
 from photobench.infrastructure.sentrix.client import HttpxSentrixClient
 
 #: 1.0 建 provider 时用的超时：``query_current_model`` 里是 15 秒（``:5095``）。
@@ -79,6 +88,7 @@ class Container:
     config_store: ConfigStore
     secrets: SecretEnvStore
     run_store: RunStore
+    startup_recovery: RunStartupRecovery
     result_writer: RunResultWriter
     qa_metadata: QaMetadataSource
     albums: AlbumSource
@@ -91,6 +101,8 @@ class Container:
     #: ManagerTelemetry」，于是 153 上的 llama-server（没有 Manager）永远拿不到遥测。
     runtime_providers: Callable[[str, str, str], RuntimeProviders]
     config: ConfigService
+    build_revision: str
+    runtime_providers_for_run: Callable[[RunRuntimeSnapshot], RuntimeProviders]
     run_index: RunIndex
     runs: ReadRuns
     #: S10a：三份报告读侧（关键帧分析 / 记忆有效性 / trace 导出）。与 ``runs``
@@ -113,6 +125,7 @@ class Container:
         config_store: ConfigStore = JsonConfigStore(settings.config_root)
         secrets: SecretEnvStore = DotenvSecretStore(settings.config_root)
         config = ConfigService(config_store, secrets)
+        build_revision = read_build_revision(settings.sentrix_repo_root)
         run_store: RunStore = FileRunStore(settings.results_root)
         run_index = RunIndex()
         qa_metadata: QaMetadataSource = JsonQaMetadataSource(
@@ -166,6 +179,24 @@ class Container:
                 source=selection.source,
             )
 
+        def runtime_providers_for_run(snapshot: RunRuntimeSnapshot) -> RuntimeProviders:
+            connection = snapshot.connection()
+            endpoint = str(connection["model_base_url"])
+            manager = str(connection.get("vllm_manager_url") or "")
+            framework = str(connection.get("runtime_framework") or "generic")
+            selected = select_runtime_providers(
+                manager,
+                endpoint,
+                framework,
+                telemetry_services=services_from_connection(connection),
+            )
+            return RuntimeProviders(
+                inference=create_runtime_providers(endpoint, manager_url=manager).inference,
+                lifecycle=selected.lifecycle,
+                telemetry=selected.telemetry,
+                source=selected.source,
+            )
+
         def judge_images(sentrix_url: str, images: Any, assets_by_name: Any) -> list[dict[str, Any]]:
             """证据判分的图内联。**PIL 只能在 infrastructure**（``photobench-application-purity``
             的 forbidden 名单里有它，惰性 import 也照样判红）——所以这段代码住在这里，
@@ -175,9 +206,11 @@ class Container:
         album_source: AlbumSource = JsonAlbumSource(
             settings.data_root, settings.config_root / "qa_task_actions.json"
         )
-        http: JsonHttpClient = HttpxJsonClient()
+        http: JsonHttpClient = HttpxJsonClient(retry_connections=True, keep_alive=False)
+        judge_http: JsonHttpClient = HttpxJsonClient()
         sentrix: SentrixClient = HttpxSentrixClient(http, lambda: config.sentrix_url)
         result_writer: RunResultWriter = FileResultWriter(settings.results_root)
+
         # 换模型 = 重启 2.0（T923）。健康探测复用同一个 ``JsonHttpClient``——那一层
         # 本来就管「怎么打一个 HTTP 并解 JSON」，不必为部署另造一个。
         #
@@ -187,23 +220,42 @@ class Container:
         # ``make dev`` 的开发机、也有 ``systemd --user`` 的部署机，删除任何一种都是
         # 砍掉一条仍然成立的部署方式。端口类型不变，业务侧（``ensure_endpoint``）
         # 看不见这个分叉。
-        sentrix_process: SentrixProcess = (
-            SystemdSentrixProcess(
-                api_url=settings.sentrix_api_url,
-                unit=settings.sentrix_service_unit,
-                http=http,
+        def sentrix_process_for_run(snapshot: RunRuntimeSnapshot | None = None) -> SentrixProcess:
+            api_url = str(snapshot.connection()["sentrix_url"]) if snapshot else settings.sentrix_api_url
+            requested = urlparse(api_url)
+            registered = urlparse(settings.sentrix_api_url)
+            local = {"localhost", "127.0.0.1", "::1"}
+            same_host = requested.hostname == registered.hostname or (
+                requested.hostname in local and registered.hostname in local
             )
-            if settings.sentrix_service_unit
-            else SubprocessSentrixProcess(
-                api_url=settings.sentrix_api_url,
-                start_command=shlex.split(settings.sentrix_start_command),
-                cwd=settings.sentrix_repo_root,
-                pid_file=settings.sentrix_pid_file,
-                log_path=settings.sentrix_log_path,
-                http=http,
-                environment=dict(settings.sentrix_environment),
+            if not (
+                same_host
+                and requested.hostname in local
+                and registered.hostname in local
+                and requested.port == registered.port
+                and requested.scheme == registered.scheme
+            ):
+                return ObservedSentrixProcess(api_url=api_url, http=http)
+            return (
+                SystemdSentrixProcess(
+                    api_url=api_url,
+                    unit=settings.sentrix_service_unit,
+                    http=http,
+                    runtime_snapshot=snapshot,
+                )
+                if settings.sentrix_service_unit
+                else SubprocessSentrixProcess(
+                    api_url=api_url,
+                    start_command=shlex.split(settings.sentrix_start_command),
+                    cwd=settings.sentrix_repo_root,
+                    pid_file=settings.sentrix_pid_file,
+                    log_path=settings.sentrix_log_path,
+                    http=http,
+                    runtime_snapshot=snapshot,
+                )
             )
-        )
+
+        sentrix_process = sentrix_process_for_run()
 
         def run_execution(request: RunRequest) -> RunExecution:
             """一 run 一个 ``RunExecution``：它是**有状态**的（跑一轮带一份 item 表），
@@ -213,8 +265,15 @@ class Container:
             （``runtime_providers``），judge 要按请求里的覆盖项装配。**取消回收模型**
             也走这条装配出来的生命周期提供者。
             """
-            providers = runtime_providers(
-                request.manager_url, request.model_base_url, request.runtime_framework
+            if request.runtime_snapshot is None:
+                request = freeze_runtime_request(
+                    request, config.public_runtime_connection_config(), build_revision
+                )
+            snapshot = request.runtime_snapshot
+            assert snapshot is not None
+            providers = runtime_providers_for_run(snapshot)
+            run_client: SentrixClient = HttpxSentrixClient(
+                http, lambda: str(snapshot.connection()["sentrix_url"])
             )
             judge = JudgeSettings(
                 judge_url=config.judge_url,
@@ -225,18 +284,19 @@ class Container:
                 evidence_judge_prompt=None,
             )
             return RunExecution(
-                client=sentrix,
+                client=run_client,
+                runtime_snapshot=snapshot,
                 albums=album_source,
                 writer=result_writer,
                 lifecycle=providers.lifecycle,
                 inference=providers.inference,
                 telemetry=providers.telemetry,
-                http=http,
+                http=judge_http,
                 judge_settings=judge,
                 telemetry_source=providers.source,
                 inline_images=judge_images,
                 # 一 run 一个 switch：它只是 ``sentrix_process`` 的薄包装，无状态。
-                sentrix_switch=SentrixModelSwitch(sentrix_process),
+                sentrix_switch=SentrixModelSwitch(sentrix_process_for_run(snapshot)),
             )
 
         # **``run_suites`` 先建、``runs`` 后建**：列表页要叠加「还在跑的 run」，
@@ -246,10 +306,12 @@ class Container:
             store=run_store,
             writer=result_writer,
             index=run_index,
+            build_revision=build_revision,
+            budget_defaults=settings.budget_defaults(),
             albums=album_source,
             config=config,
             sentrix=sentrix,
-            http=http,
+            http=judge_http,
             new_execution=run_execution,
             lifecycle_for=lifecycle_provider,
             manager_telemetry_for=manager_telemetry,
@@ -291,6 +353,7 @@ class Container:
             config_store=config_store,
             secrets=secrets,
             run_store=run_store,
+            startup_recovery=FileRunStartupRecovery(settings.results_root),
             result_writer=result_writer,
             qa_metadata=qa_metadata,
             albums=album_source,
@@ -300,6 +363,8 @@ class Container:
             inference_provider=inference_provider,
             runtime_providers=runtime_providers,
             config=config,
+            build_revision=build_revision,
+            runtime_providers_for_run=runtime_providers_for_run,
             run_index=run_index,
             runs=runs,
             reports=reports,

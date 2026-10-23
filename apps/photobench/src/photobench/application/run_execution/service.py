@@ -45,20 +45,24 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import copy
 import json
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.gpu_sampler import PHASE_LABELS, GpuSampler
+from photobench.application.run_execution.import_progress import import_with_progress
 from photobench.application.run_execution.judge import InlineImages, JudgeRunner
 from photobench.application.run_execution.state import RunState
 from photobench.config import default_qa_concurrency
 from photobench.domain.datasets.ports import AlbumSource
+from photobench.domain.errors import RequestOutcomeUnknownError
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.results.ports import RunResultWriter
 from photobench.domain.runs.analysis import (
@@ -89,6 +93,7 @@ from photobench.domain.runs.execution import (
 from photobench.domain.runtime.ports import (
     InferenceProvider,
     LifecycleProvider,
+    RunRuntimeSnapshot,
     TelemetryProvider,
 )
 from photobench.domain.sentrix.ports import SentrixClient
@@ -222,6 +227,45 @@ class RunRequest:
     judge_api_key: str = ""
     judge_prompts: Mapping[str, str | None] = field(default_factory=dict)
     evidence_judge_enabled: bool = False
+    runtime_snapshot: RunRuntimeSnapshot | None = None
+    snapshot_source: str = "creation_config"
+
+
+def freeze_runtime_request(
+    request: RunRequest, connection: Mapping[str, Any], revision: str = "development"
+) -> RunRequest:
+    """Freeze application inputs before a run can be queued; adapters only consume them."""
+    if request.runtime_snapshot is not None:
+        return request
+    frozen = {
+        key: connection.get(key)
+        for key in (
+            "sentrix_url",
+            "model_base_url",
+            "vllm_manager_url",
+            "endpoint_model",
+            "embedding",
+            "product",
+            "product_settings",
+        )
+    }
+    if request.model_base_url and request.model_base_url.rstrip("/") != str(
+        connection.get("model_base_url") or ""
+    ).rstrip("/"):
+        frozen["endpoint_model"] = None
+    frozen.update(
+        sentrix_url=request.sentrix_url,
+        model_base_url=request.model_base_url or connection.get("model_base_url"),
+        vllm_manager_url=request.manager_url,
+        runtime_framework=request.runtime_framework,
+        execution_budgets={
+            "import_timeout": request.import_timeout,
+            "turn_timeout": request.turn_timeout,
+            "qa_concurrency": request.qa_concurrency,
+        },
+        required_build_revision=revision if revision != "development" else None,
+    )
+    return replace(request, runtime_snapshot=RunRuntimeSnapshot(json.dumps(frozen), revision))
 
 
 @dataclass(frozen=True)
@@ -260,6 +304,7 @@ class RunExecution:
     judge_settings: JudgeSettings | None = None
     #: 选中的遥测来源（``select_runtime_providers`` 的 ``source``）。写进 run.json
     #: 供读侧与运维判断这轮的数字是什么口径（1.0 ``:1977`` 的 ``telemetry_source``）。
+    runtime_snapshot: RunRuntimeSnapshot | None = None
     telemetry_source: str = ""
     #: 召回图 → data URL 的实现（要用 PIL）。由装配点注入，application 不许 import PIL。
     inline_images: InlineImages | None = None
@@ -274,6 +319,8 @@ class RunExecution:
     #: 塞进去会让每一次快照写都抛 ``TypeError``，而错误被后台写线程记成
     #: ``_persist_error`` 之后只会表现为「run.json 一直没有出现」。
     _request: RunRequest | None = field(default=None, repr=False)
+    _cancel_signal: threading.Event = field(default_factory=threading.Event, repr=False)
+    _cancel_source: str = field(default="api", repr=False)
 
     @property
     def state(self) -> RunState | None:
@@ -292,6 +339,8 @@ class RunExecution:
         T922 要处理它）。这里不假装调过——那会让 run.json 里出现一个假的
         ``batch_cancel_requested``。
         """
+        self._cancel_source = source
+        self._cancel_signal.set()
         state = self._state
         if state is None:
             return
@@ -333,10 +382,44 @@ class RunExecution:
             return self._state
         run_id = request.run_id or f"run_{uuid.uuid4().hex[:12]}"
         album_id = request.album_id
-        manifest = self.albums.manifest(album_id)
         scope_id = request.scope_id or self._default_scope_id(album_id, request.model_profile)
+        # Dataset files can disappear or become invalid after a request is accepted.
+        # Keep an explicit terminal record even when no input facts could be loaded.
+        try:
+            manifest = self.albums.manifest(album_id)
+            initial = self._initial_state(run_id, request, manifest, scope_id, album_id)
+        except Exception as exc:  # noqa: BLE001 — accepted runs must not disappear
+            initial = {
+                "metrics_contract_version": 2,
+                "build_revision": self.runtime_snapshot.build_revision
+                if self.runtime_snapshot
+                else "development",
+                "runtime_snapshot": self.runtime_snapshot.connection() if self.runtime_snapshot else None,
+                "run_id": run_id,
+                "album_id": album_id,
+                "qa_set": request.qa_set,
+                "qa_count": None,
+                "mode": request.mode,
+                "scope_id": scope_id,
+                "model_profile": request.model_profile,
+                "sentrix_url": request.sentrix_url,
+                "model_base_url": request.model_base_url,
+                "input_integrity": None,
+                "status": "failed",
+                "failed_phase": "initialization",
+                "fatal_error": str(exc),
+                "created_at": now_iso(),
+                "finished_at": now_iso(),
+                "phases": {},
+                "items": [],
+                "summary": {},
+                "run_valid": None if request.mode == "build" else False,
+            }
+            self._state = RunState(initial, run_id=run_id, writer=self.writer)
+            self._state.persist()
+            return self._state
         state = RunState(
-            self._initial_state(run_id, request, manifest, scope_id, album_id),
+            initial,
             run_id=run_id,
             writer=self.writer,
         )
@@ -344,20 +427,28 @@ class RunExecution:
         # state 里：state 要被 json.dumps 落盘，见 ``_request`` 的注释。
         self._request = request
         self._state = state
-        self._judge = self._build_judge(request, state)
+        if self._cancel_signal.is_set():
+            state.request_cancel(self._cancel_source)
+        self._judge = None if request.mode == "build" else self._build_judge(request, state)
         state.start_persist_writer()
-        state.persist(wait=True)
+        state.persist()
         return state
 
     def execute(self, request: RunRequest) -> dict[str, Any]:
         state = self.prepare(request)
+        # ``prepare`` may have already persisted a terminal initialization
+        # failure.  There is no phase to execute in that case; continuing would
+        # turn a dataset error into a misleading identity/QA failure (and could
+        # make a failed run appear completed).
+        if state.get("finished_at") and state.get("status") in {"failed", "cancelled"}:
+            return state.data
         run_id = str(state.get("run_id") or request.run_id)
-        # 采样回调要在 ``on_sample`` 里拿到采样器本身（发布滚动聚合），而采样器的构造
-        # 又要先有回调——用一个一格容器解开这个环，等价于 1.0 里 ``self._gpu_sampler``
-        # 这个属性（它的回调是方法，能随时读 self）。
-        sampler_holder: list[GpuSampler] = []
-        sampler = GpuSampler(self.telemetry, on_sample=self._sample_writer(state, sampler_holder))
-        sampler_holder.append(sampler)
+        sampler = GpuSampler(
+            self.telemetry,
+            on_sample=self._sample_writer(state),
+            on_aggregate=lambda metrics: self._publish_partial_gpu_metrics(state, metrics),
+            publish_interval=GPU_METRICS_PUBLISH_SECONDS,
+        )
         self._sampler = sampler
         sampling = self._sampling_enabled() and self.telemetry_source != "unavailable"
         # **reuse 只跑「问答与收尾」四个相位。** 那三个导入相位（``identity_seed`` /
@@ -370,6 +461,7 @@ class RunExecution:
         # 那句「这一轮绑在哪个 scope 上」正好有地方记。
         if request.mode == "reuse":
             phases: list[tuple[str, Callable[[RunState, RunRequest], None]]] = [
+                ("model_deploy", self._phase_model_deploy),
                 ("scope_setup", self._phase_scope_setup),
                 ("qa_eval", self._phase_qa_eval),
                 ("gpu_metrics", self._phase_gpu_metrics),
@@ -386,6 +478,8 @@ class RunExecution:
                 ("gpu_metrics", self._phase_gpu_metrics),
                 ("aggregate", self._phase_aggregate),
             ]
+        if request.mode == "build":
+            phases = [(name, phase) for name, phase in phases if name != "qa_eval"]
         state.set("status", "running")
         state.set("started_at", now_iso())
         state.set("hardware_snapshots", {"start": self._hardware_snapshot(), "end": None})
@@ -393,6 +487,7 @@ class RunExecution:
             self.writer.reset_gpu_samples(run_id)
             sampler.start()
         current: str | None = None
+        terminal_status = "failed"
         try:
             for name, phase in phases:
                 if state.cancelled:
@@ -400,36 +495,88 @@ class RunExecution:
                 current = name
                 state.set("current_phase", name)
                 state.phase_start(name)
+                if sampling and name in {"photo_import", "pipeline_processing", "qa_eval"}:
+                    sampler.sample_once()
                 phase(state, request)
                 state.persist()
             partial = any(
                 bucket.get("status") == "partial" for bucket in (state.get("phases") or {}).values()
             )
-            state.set("status", "completed_with_errors" if partial else "completed")
+            terminal_status = "completed_with_errors" if partial else "completed"
         except RunCancelledError as exc:
             # **取消与失败必须分开**：一次主动取消落到 ``failed`` 会让读侧把它当成
             # 「这轮评测炸了」，而事实是有人叫停了它（1.0 ``:2417`` 的同一条区分）。
             if current:
                 state.record_phase(current, "status", "cancelled")
                 state.record_phase(current, "error", str(exc))
-            state.set("status", "cancelled")
+            terminal_status = "cancelled"
             state.set("cancelled_phase", current)
         except Exception as exc:  # noqa: BLE001 —— 1.0 ``:2404``：任何相位异常都收成 failed
             if current:
                 state.phase_failed(current, str(exc))
-            state.set("status", "failed")
+            terminal_status = "failed"
             state.set("failed_phase", current)
             state.set("fatal_error", str(exc))
+            if isinstance(exc, RequestOutcomeUnknownError):
+                state.set("fatal_error_details", exc.facts)
+                if current:
+                    state.record_phase(current, "request_failure", exc.facts)
         finally:
-            if sampling:
-                sampler.stop()
-            state.set("current_phase", None)
-            state.set("finished_at", now_iso())
-            snapshots = dict(state.get("hardware_snapshots") or {})
-            snapshots["end"] = self._hardware_snapshot()
-            state.set("hardware_snapshots", snapshots)
-            state.persist()
-            state.stop_persist_writer()
+            try:
+                if sampling:
+                    sampler.stop()
+                    # The last in-flight sample may finish after gpu_metrics was
+                    # aggregated. Persist statistics over the same complete raw set.
+                    if (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "done":
+                        for key, value in sampler.aggregate().items():
+                            state.record_phase("gpu_metrics", key, value)
+                    else:
+                        # Cancellation keeps the observations already collected,
+                        # including persistence failures, without claiming a full run.
+                        state.phase_done(
+                            "gpu_metrics",
+                            {
+                                **sampler.aggregate(),
+                                "status": "partial",
+                                "partial": True,
+                                "collection_end_reason": terminal_status,
+                            },
+                        )
+                if request.mode in {"full", "build"}:
+                    build_phases = state.get("phases") or {}
+                    build_ready = all(
+                        (build_phases.get(key) or {}).get("status") == "done"
+                        for key in ("identity_seed", "photo_import", "pipeline_processing")
+                    )
+                    state.set(
+                        "scope_build",
+                        {
+                            "status": "ready" if build_ready else "incomplete",
+                            "embedding": self.runtime_snapshot.connection().get("embedding")
+                            if self.runtime_snapshot
+                            else None,
+                            "source_run_id": run_id,
+                        },
+                    )
+                snapshots = dict(state.get("hardware_snapshots") or {})
+                snapshots["end"] = self._hardware_snapshot()
+                # 终态也是读侧停止轮询/归档、套件允许下一轮启动的信号。
+                # 采样与末尾观测完成前不能提前发布，否则终态raw仍会继续变化。
+                with state.lock:
+                    state.set("hardware_snapshots", snapshots)
+                    live = state.data.get("telemetry_live")
+                    if isinstance(live, dict):
+                        integrity = (state.data.get("phases", {}).get("gpu_metrics") or {}).get(
+                            "sampling_integrity", {}
+                        )
+                        live["status"] = (
+                            "stop_pending" if integrity.get("stop_pending_threads") else "stopped"
+                        )
+                    state.set("current_phase", None)
+                    state.set("finished_at", now_iso())
+                    state.set("status", terminal_status)
+            finally:
+                state.stop_persist_writer()
         return state.data
 
     # ---- 状态与落盘 ---------------------------------------------------------
@@ -455,8 +602,13 @@ class RunExecution:
         scope_id: str,
         album_id: str,
     ) -> dict[str, Any]:
-        rows = self.albums.qa_rows(album_id, request.qa_set)
+        rows = [] if request.mode == "build" else self.albums.qa_rows(album_id, request.qa_set)
         return {
+            "metrics_contract_version": 2,
+            "build_revision": self.runtime_snapshot.build_revision
+            if self.runtime_snapshot
+            else "development",
+            "runtime_snapshot": self.runtime_snapshot.connection() if self.runtime_snapshot else None,
             "run_id": run_id,
             # **这两个键以前是硬编码的**（``"full"`` / ``"created_by_import"``），
             # 所以 run.json 里的 mode 永远是 full——复用过的 run 与新建的 run
@@ -469,12 +621,13 @@ class RunExecution:
             "album_id": album_id,
             "album_name": manifest.get("album_name"),
             "model_profile": request.model_profile,
-            "model_name": (
-                request.endpoint_model
-                if request.model_profile == "__current__" and request.endpoint_model
-                else request.model_profile
-            ),
+            "model_name": None,
             "endpoint_model": request.endpoint_model or None,
+            "model_identity": {"status": "pending"},
+            "snapshot_source": request.snapshot_source,
+            "execution_budgets": (
+                self.runtime_snapshot.connection().get("execution_budgets") if self.runtime_snapshot else None
+            ),
             "qa_set": request.qa_set,
             "qa_count": len(rows),
             "scope_id": scope_id,
@@ -494,7 +647,9 @@ class RunExecution:
             or None,
             "rejudge": None,
             "memory_profile": None,
-            "input_integrity": self.albums.integrity(album_id, manifest, request.qa_set),
+            "input_integrity": self.albums.integrity(
+                album_id, manifest, "" if request.mode == "build" else request.qa_set
+            ),
             "hardware_snapshots": {"start": None, "end": None},
             "status": "pending",
             "created_at": now_iso(),
@@ -503,7 +658,7 @@ class RunExecution:
             "phases": {},
             "items": [],
             "summary": {},
-            "run_valid": False,
+            "run_valid": None if request.mode == "build" else False,
             "fatal_error": None,
         }
 
@@ -545,9 +700,7 @@ class RunExecution:
             inline_images=self.inline_images,
         )
 
-    def _sample_writer(
-        self, state: RunState, sampler_holder: list[GpuSampler] | None = None
-    ) -> Callable[[dict[str, Any]], None]:
+    def _sample_writer(self, state: RunState) -> Callable[[dict[str, Any]], None]:
         """采样回调：打相位标签、追加 JSONL、并维护 run.json 的实时视图。
 
         1.0 ``_persist_gpu_sample``（``:2110``）的三段在这里逐段对应：
@@ -556,50 +709,38 @@ class RunExecution:
            完整曲线的权威来源。
         2. **更新 ``telemetry_live``**（``domain.runs.analysis.apply_live_sample``）：
            latest/peak/history/phase_snapshots 的滚动视图，给实时 GPU 卡片看。
-        3. **发布一次滚动聚合**到 ``phases.gpu_metrics``（节流
-           ``GPU_METRICS_PUBLISH_SECONDS``，1.0 ``_refresh_gpu_metrics_phase``
-           ``:2209``）——卡片不必等到整轮结束才有数字。
-
-        ``sampler_holder`` 是那格「装着采样器自己的容器」：回调要在 ``on_sample`` 里
-        读 ``sampler.samples`` 来算滚动聚合，而采样器要先用回调构造。没有它（用例里
-        直接调这个闭包）时第 3 段跳过。
+        滚动聚合由采样器的独立发布线程回调，避免空holder绑定及采样锁内全量统计。
         """
-        sampler = sampler_holder[0] if sampler_holder else None
-        last_publish = [0.0]
 
         def on_sample(sample: dict[str, Any]) -> None:
+            if state.get("finished_at"):
+                return
             phase = str(state.get("current_phase") or "unassigned")
             label = PHASE_LABELS.get(phase, phase)
+            sample.setdefault("phase", phase)
+            sample.setdefault("phase_label", label)
             persisted = dict(sample)
-            persisted.setdefault("phase", phase)
-            persisted.setdefault("phase_label", label)
             self.writer.append_gpu_sample(state.run_id, persisted)
             live = state.mutate("telemetry_live")
             with state.lock:
+                if state.data.get("finished_at"):
+                    return
                 apply_live_sample(live, sample, phase, label, tail=LIVE_TELEMETRY_TAIL_POINTS)
                 if sample.get("llama_server_args") and not state.data.get("llama_server_args"):
                     state.data["llama_server_args"] = sample.get("llama_server_args")
-            if sampler is not None:
-                now = time.monotonic()
-                if now - last_publish[0] >= GPU_METRICS_PUBLISH_SECONDS:
-                    last_publish[0] = now
-                    self._publish_partial_gpu_metrics(state, sampler)
             state.persist()
 
         return on_sample
 
-    def _publish_partial_gpu_metrics(self, state: RunState, sampler: GpuSampler) -> None:
+    def _publish_partial_gpu_metrics(self, state: RunState, partial: dict[str, Any]) -> None:
         """1.0 ``_refresh_gpu_metrics_phase``（``:2209``）：让 GPU 卡片是活的。
 
         **已经 ``done`` / ``skipped`` 的相位不再被覆盖**——那说明聚合已经由
         ``_phase_gpu_metrics`` 写过，滚动值把它盖回去会让最终数字随机停在某一秒。
         """
         existing = (state.get("phases") or {}).get("gpu_metrics") or {}
-        if existing.get("status") in {"done", "skipped"}:
+        if existing.get("status") in {"done", "skipped"} or state.get("finished_at"):
             return
-        if not sampler.samples:
-            return
-        partial = sampler.aggregate()
         if not partial.get("samples_count"):
             return
         partial.update(
@@ -612,7 +753,10 @@ class RunExecution:
             }
         )
         with state.lock:
-            state.data.setdefault("phases", {})["gpu_metrics"] = partial
+            current = state.data.setdefault("phases", {}).get("gpu_metrics") or {}
+            if current.get("status") not in {"done", "skipped"} and not state.data.get("finished_at"):
+                state.data["phases"]["gpu_metrics"] = partial
+        state.persist()
 
     def _sampling_enabled(self) -> bool:
         return os.environ.get("PHOTOBENCH_DISABLE_GPU_SAMPLING", "0") != "1"
@@ -664,7 +808,7 @@ class RunExecution:
         占位——**两个分支都要做**：没有 Manager 的「外部端点」正是 153 上的形态，
         而 2.0 的助手用哪个模型只由它自己的 ``vlm_base_url`` 决定，与有没有 Manager 无关。
         """
-        if not request.manager_url:
+        if request.mode == "reuse" or not request.manager_url:
             state.phase_done(
                 "model_deploy",
                 {
@@ -673,6 +817,7 @@ class RunExecution:
                     "manager_status": "not_applicable",
                     "model_base_url": request.model_base_url or None,
                     "gamma_sync": self._sync_sentrix_endpoint(request),
+                    "model_identity": self._record_model_identity(state, request),
                 },
             )
             return
@@ -709,6 +854,7 @@ class RunExecution:
         state.phase_done(
             "model_deploy",
             {
+                "model_identity": self._record_model_identity(state, request),
                 "source": "managed",
                 "deployment_mode": "model_manager",
                 "manager_status": "ready",
@@ -747,15 +893,76 @@ class RunExecution:
         端点又正好对得上，是 153 上最常见的形态。
         """
         if self.sentrix_switch is None:
+            if self.runtime_snapshot is not None:
+                raise RuntimeError("Frozen run requires a wired product configuration verifier")
             return {
                 "ok": False,
                 "error": "sentrix process controller is not wired",
                 "restarted": False,
             }
         outcome = self.sentrix_switch.ensure_endpoint(request.model_base_url)
-        if outcome.restarted and not outcome.ok:
+        if not outcome.ok:
             raise RuntimeError(f"could not point Sentrix at {outcome.endpoint or '(none)'}: {outcome.error}")
-        return outcome.to_state()
+        result = outcome.to_state()
+        if self.runtime_snapshot is not None:
+            expected = self.runtime_snapshot.connection()
+            observed = self.client.diagnostics()
+            effective = observed.get("runtime_configuration")
+            if not isinstance(effective, dict):
+                raise RuntimeError("Sentrix did not report effective runtime configuration")
+            mismatches = []
+            if str(effective.get("vlm_base_url", "")).rstrip("/") != str(expected["model_base_url"]).rstrip(
+                "/"
+            ):
+                mismatches.append("vlm_base_url")
+            embedding = expected.get("embedding") or {}
+            mode = embedding.get("mode")
+            pairs = (
+                {"wemm_url": "wemm_url"}
+                if mode == "unified_multimodal"
+                else {"text_url": "text_embedder_url", "image_url": "legacy_clip_url"}
+            )
+            if mode and effective.get("embedding_scheme") != (
+                "wemm" if mode == "unified_multimodal" else "legacy"
+            ):
+                mismatches.append("embedding_scheme")
+            for source, target in pairs.items():
+                if embedding.get(source) and str(embedding[source]).rstrip("/") != str(
+                    effective.get(target, "")
+                ).rstrip("/"):
+                    mismatches.append(target)
+            for key, value in (expected.get("product_settings") or {}).items():
+                if effective.get(key) != value:
+                    mismatches.append(key)
+            if (
+                expected.get("required_build_revision")
+                and observed.get("build_revision") != expected["required_build_revision"]
+            ):
+                mismatches.append("build_revision")
+            if mismatches:
+                raise RuntimeError("Sentrix effective configuration mismatch: " + ", ".join(mismatches))
+            result["runtime_configuration"] = effective
+            result["build_revision"] = observed.get("build_revision")
+        return result
+
+    def _record_model_identity(self, state: RunState, request: RunRequest) -> dict[str, Any]:
+        from photobench.domain.runs.execution import model_identity
+
+        requested = (
+            str(self.runtime_snapshot.connection().get("endpoint_model") or "")
+            if self.runtime_snapshot
+            else ""
+        )
+        if requested == "__current__":
+            requested = ""
+        try:
+            identity = model_identity(self.inference.list_models(), requested)
+        except Exception as exc:
+            identity = {"status": "unavailable", "reason": str(exc), "source": "endpoint_models"}
+        identity["observed_at"] = now_iso()
+        state.set("model_identity", identity)
+        state.set("model_name", identity.get("display_name"))
+        return identity
 
     def _cancel_wait(self, seconds: float) -> None:
         """等一段时间；被取消就抛 ``RunCancelledError``。1.0 ``self._cancel.wait(...)``。
@@ -1012,44 +1219,88 @@ class RunExecution:
             {"processed": 0, "total": total_media, "failed": 0, "skipped": 0},
         )
         self._persist(str(state.get("run_id")), state)
+        scanned_count: int | None = 0
         for relative in directories:
             # 逐个目录检查取消（1.0 ``:2843``）：一个 7200 秒超时的导入正在跑时，
             # 取消至少要能在**下一个目录之前**生效，而不是等整段结束。
             if state.cancelled:
                 raise RunCancelledError("cancelled during photo_import")
+            state.record_phase(
+                "photo_import",
+                "progress",
+                {
+                    "directories_done": len(per_directory),
+                    "directories_total": len(directories),
+                    "current_directory": relative,
+                    "request_started_at": now_iso(),
+                    "status": "waiting_for_synchronous_import",
+                },
+            )
+            state.persist()
             absolute, entry_count = self.albums.import_target(album_id, relative)
             limit = min(1000, max(1, entry_count))
             explicit_pipeline = bool(getattr(self.client, "supports_explicit_pipeline", False))
-            if getattr(self.client, "supports_live_import_progress", False):
-                result, directory_processed = self._import_album_with_progress(
-                    state,
+            if explicit_pipeline:
+                if getattr(self.client, "supports_live_import_progress", False):
+                    result, directory_processed = self._import_album_with_progress(
+                        state,
+                        scope_id=scope_id,
+                        directory=absolute,
+                        limit=limit,
+                        timeout=request.import_timeout,
+                        total_media=total_media,
+                        processed_before=processed,
+                    )
+                else:
+                    result = self.client.import_assets(
+                        scope_id=scope_id, directory=absolute, limit=limit, timeout=request.import_timeout
+                    )
+                    directory_processed = (
+                        int(result.get("imported") or 0)
+                        + int(result.get("deduplicated") or 0)
+                        + len(result.get("failures") or [])
+                    )
+                for asset_id in result.get("asset_ids") or []:
+                    value = str(asset_id or "").strip()
+                    if value and value not in pipeline_asset_ids:
+                        pipeline_asset_ids.append(value)
+            else:
+
+                def save_progress(observed: dict[str, Any]) -> None:
+                    with state.lock:
+                        progress = dict(state.mutate("phases")["photo_import"].get("progress") or {})
+                        progress.update(observed)
+                        state.record_phase("photo_import", "progress", progress)
+                    state.persist()
+
+                result = import_with_progress(
+                    self.client,
+                    observe=save_progress,
                     scope_id=scope_id,
                     directory=absolute,
                     limit=limit,
                     timeout=request.import_timeout,
-                    total_media=total_media,
-                    processed_before=processed,
-                )
-            else:
-                # 假件和第三方 SentrixClient 仍走原来的同步端口；实时能力是适配器
-                # 的可选增强，不改变既有可插拔接口的最小调用形状。
-                import_call = self.client.import_assets if explicit_pipeline else self.client.import_album
-                result = import_call(
-                    scope_id=scope_id, directory=absolute, limit=limit, timeout=request.import_timeout
                 )
                 directory_processed = (
                     int(result.get("imported") or 0)
                     + int(result.get("deduplicated") or 0)
                     + len(result.get("failures") or [])
                 )
+                raw_counts = [result.get("imported"), result.get("deduplicated")]
+                raw_failures = result.get("failures")
+                valid_counts = [
+                    value
+                    for value in raw_counts
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                ]
+                if scanned_count is not None and len(valid_counts) == 2 and isinstance(raw_failures, list):
+                    scanned_count += sum(valid_counts) + len(raw_failures)
+                else:
+                    scanned_count = None
             # 新接口这里只返回资产导入耗时；兼容旧客户端时仍可能带 prepare/finish，
             # 所以统一累加任意后端 timing 键，历史 run 也能继续展示。
             for key, value in (result.get("timings") or {}).items():
                 timings_total[key] = timings_total.get(key, 0.0) + float(value or 0)
-            for asset_id in result.get("asset_ids") or []:
-                value = str(asset_id or "").strip()
-                if value and value not in pipeline_asset_ids:
-                    pipeline_asset_ids.append(value)
             accepted += int(result.get("imported") or 0)
             deduplicated += int(result.get("deduplicated") or 0)
             events += int(result.get("events") or 0)
@@ -1064,6 +1315,8 @@ class RunExecution:
                             "reason": str(failure.get("reason") or "Sentrix 拒绝了这张媒体"),
                         }
                     )
+            with state.lock:
+                directory_progress = copy.deepcopy(state.mutate("phases")["photo_import"].get("progress"))
             per_directory.append(
                 {
                     "directory": absolute,
@@ -1075,6 +1328,7 @@ class RunExecution:
                     "lexical_terms": result.get("lexical_terms"),
                     "summarized": result.get("summarized"),
                     "timings": result.get("timings"),
+                    "progress": directory_progress,
                 }
             )
             processed += directory_processed
@@ -1084,12 +1338,14 @@ class RunExecution:
                 "photo_import",
                 "progress",
                 {
+                    **dict(state.mutate("phases")["photo_import"].get("progress") or {}),
                     "processed": processed,
                     "total": total_media,
                     "failed": len(failures),
                     "skipped": 0,
                     "directories_done": len(per_directory),
                     "directories_total": len(directories),
+                    "request_status": "returned",
                 },
             )
             self._persist(str(state.get("run_id")), state)
@@ -1110,6 +1366,7 @@ class RunExecution:
             "total_videos": len(manifest.get("videos") or []),
             "total_media": total_media,
             "processed_count": processed,
+            "scanned_count": scanned_count,  # actual product directory scans, including the limit
             "accepted_count": accepted,
             "deduplicated_count": deduplicated,
             "event_count": events,
@@ -1577,7 +1834,8 @@ class RunExecution:
         requested = (
             max(1, request.qa_concurrency)
             if request.qa_concurrency
-            else self._env_qa_concurrency() or self._snapshot_qa_concurrency(state)
+            else (None if self.runtime_snapshot else self._env_qa_concurrency())
+            or self._snapshot_qa_concurrency(state)
         )
         if requested is None:
             requested = runtime_limit or 1
@@ -1691,29 +1949,10 @@ class RunExecution:
         state.set("judge_concurrency", judge_concurrency if judge is not None else 0)
         state.record_phase("qa_eval", "agent_total", len(rows))
         state.record_phase("qa_eval", "agent_phase_started_at", now_iso())
+        agent_phase_started = time.perf_counter()
+        judge_phase_started: float | None = None
         if judge is not None:
             state.record_phase("qa_eval", "judge_total", len(rows))
-
-        judge_done = 0
-        judge_total = len(rows) if judge is not None else None
-
-        def record_progress(done: int) -> None:
-            progress = {
-                "total": len(rows),
-                "completed": done,
-                "agent_completed": done,
-                "agent_total": len(rows),
-                "qa_concurrency": concurrency,
-            }
-            # 前端阶段卡读取的是 progress 内的 Judge 计数；阶段根上虽然也会写
-            # ``judge_completed``，但只写那里会造成历史页面显示 ``Judge 0/N``。
-            if judge_total is not None:
-                progress.update({"judge_completed": judge_done, "judge_total": judge_total})
-            state.record_phase(
-                "qa_eval",
-                "progress",
-                progress,
-            )
 
         # **resume：上一次的结果先摆回来。** 1.0 的做法是把整份旧 state 当
         # ``resume_state`` 塞进新 run（``:7560-7564``），题级跳过靠
@@ -1730,8 +1969,54 @@ class RunExecution:
             if (prior := prior_by_qa.get(str(row.get("qa_id")))) is not None
         }
         pending_rows = [(index, row) for index, row in enumerate(rows) if index not in items]
-        record_progress(len(items))
         judge_futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
+        judge_done = sum(item.get("judge_status") in {"completed", "failed"} for item in items.values())
+
+        def record_progress() -> None:
+            # One locked checkpoint for items and both counter locations. Legacy readers
+            # still use the phase-level fields; the UI consumes progress.
+            terminal_agents = sum(
+                item.get("execution_status") not in {"scheduled", "running", "pending", None}
+                for item in items.values()
+            )
+            with state.lock:
+                state.record_phase("qa_eval", "agent_completed", terminal_agents)
+                if judge is not None:
+                    state.record_phase("qa_eval", "judge_completed", judge_done)
+                state.record_phase(
+                    "qa_eval",
+                    "progress",
+                    {
+                        "total": len(rows),
+                        "completed": sum(
+                            item.get("execution_status") == "completed" for item in items.values()
+                        ),
+                        "agent_completed": terminal_agents,
+                        "agent_total": len(rows),
+                        "judge_completed": judge_done if judge is not None else None,
+                        "judge_total": len(rows) if judge is not None else None,
+                        "judge_skipped": sum(
+                            item.get("judge_status") == "skipped" for item in items.values()
+                        ),
+                        "qa_concurrency": concurrency,
+                        "judge_concurrency": judge_concurrency if judge is not None else 0,
+                    },
+                )
+                state.data["items"] = [items[i] for i in sorted(items)]
+
+        record_progress()
+        judge_bounds: list[tuple[float, float, str, str]] = []
+        judge_bounds_lock = threading.Lock()
+
+        def run_judge(item: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+            begin, begin_iso = time.perf_counter(), now_iso()
+            try:
+                assert judge is not None
+                return judge.judge_item(copy.deepcopy(item), row, assets_by_name)
+            finally:
+                with judge_bounds_lock:
+                    judge_bounds.append((begin, time.perf_counter(), begin_iso, now_iso()))
+
         judge_pool = (
             concurrent.futures.ThreadPoolExecutor(
                 max_workers=judge_concurrency, thread_name_prefix="qa-judge"
@@ -1747,66 +2032,78 @@ class RunExecution:
                     executor.submit(self._evaluate_one, row, scope_id, assets_by_name, request): index
                     for index, row in pending_rows
                 }
-                for future in concurrent.futures.as_completed(tuple(futures)):
-                    index = futures[future]
-                    try:
-                        item = future.result()
-                    except RunCancelledError as exc:
-                        # **被取消的题不是失败的题。** 1.0 的 resume 靠
-                        # ``execution_status not in {"scheduled", "running"}`` 挑出「从没
-                        # 开始过」的题（``:3414-3417``），而取消时还在排队里的题正好是从没
-                        # 开始过的。标成 failed 会让 resume 把它们当成已完成跳过——
-                        # 那正是「取消一次，155 题只能整轮重跑」的成因。
-                        item = {
-                            "error": f"cancelled while waiting: {exc}",
-                            "execution_status": "scheduled",
-                        }
-                    except Exception as exc:  # noqa: BLE001 —— 1.0 ``:3218``
-                        item = {"error": repr(exc), "failed": True}
-                    item["_index"] = index
-                    # 「没有答案可打分的题」与「还没打分的题」是两件事（1.0 ``:3220``）：
-                    # 前者标 skipped，后者标 pending。跳过判分的 item **绝不**再排进
-                    # Judge 池——它没有答案可评，送进去只会产出一个假的 0 分。
-                    if item.get("failed") or item.get("error"):
-                        item["judge_status"] = "skipped"
-                    else:
-                        item.setdefault("judge_status", "pending")
-                        if judge is not None and judge_pool is not None:
-                            judge_futures[
-                                judge_pool.submit(judge.judge_item, item, rows[index], assets_by_name)
-                            ] = index
-                    items[index] = item
-                    # 1.0 ``:3536-3538``：``completed`` 数的是**成功**的那些，不是「轮到
-                    # 了的」那些。用 ``len(items)`` 的话，取消时进度条显示 487/487 而实际
-                    # 只有 332 题有答案（2026-10-10 那轮实测）——一轮没跑完的评测在界面上
-                    # 看起来是跑完的。
-                    succeeded = sum(
-                        1 for entry in items.values() if entry.get("execution_status") == "completed"
+                # Drain both pools as work completes. Waiting only on Agent futures
+                # withholds scores for the whole album when one Agent is slow.
+                if not futures:
+                    state.record_phase("qa_eval", "agent_phase_finished_at", now_iso())
+                    state.record_phase("qa_eval", "agent_phase_wall_ms", 0.0)
+                while futures or judge_futures:
+                    done, _ = concurrent.futures.wait(
+                        (*futures, *judge_futures), return_when=concurrent.futures.FIRST_COMPLETED
                     )
-                    state.record_phase("qa_eval", "agent_completed", len(items))
-                    record_progress(succeeded)
-                    with state.lock:
-                        state.data["items"] = [items[i] for i in sorted(items)]
-                    state.persist()
-                for judge_future in concurrent.futures.as_completed(tuple(judge_futures)):
-                    index = judge_futures[judge_future]
-                    try:
-                        judge_future.result()
-                    except Exception as exc:  # noqa: BLE001 —— judge 崩了不能让整轮没有结果
-                        items[index]["judge_status"] = "failed"
-                        items[index]["judge"] = {"score": None, "reason": f"judge_error: {exc}"}
-                    judge_done += 1
-                    state.record_phase("qa_eval", "judge_completed", judge_done)
-                    succeeded = sum(
-                        1 for entry in items.values() if entry.get("execution_status") == "completed"
-                    )
-                    record_progress(succeeded)
-                    with state.lock:
-                        state.data["items"] = [items[i] for i in sorted(items)]
-                    state.persist()
+                    for completed_future in done:
+                        if completed_future in judge_futures:
+                            index = judge_futures.pop(completed_future)
+                            try:
+                                judged = completed_future.result()
+                                with state.lock:
+                                    items[index] = judged
+                            except Exception as exc:  # noqa: BLE001
+                                with state.lock:
+                                    items[index]["judge_status"] = "failed"
+                                    items[index]["judge"] = {"score": None, "reason": f"judge_error: {exc}"}
+                            judge_done += 1
+                            record_progress()
+                            state.persist()
+                            continue
+                        future = completed_future
+                        index = futures.pop(future)
+                        try:
+                            item = future.result()
+                        except RunCancelledError as exc:
+                            # **被取消的题不是失败的题。** 1.0 的 resume 靠
+                            # ``execution_status not in {"scheduled", "running"}`` 挑出「从没
+                            # 开始过」的题（``:3414-3417``），而取消时还在排队里的题正好是从没
+                            # 开始过的。标成 failed 会让 resume 把它们当成已完成跳过——
+                            # 那正是「取消一次，155 题只能整轮重跑」的成因。
+                            item = {
+                                "error": f"cancelled while waiting: {exc}",
+                                "execution_status": "scheduled",
+                            }
+                        except Exception as exc:  # noqa: BLE001 —— 1.0 ``:3218``
+                            item = {"error": repr(exc), "failed": True, "execution_status": "failed"}
+                        item["_index"] = index
+                        # 「没有答案可打分的题」与「还没打分的题」是两件事（1.0 ``:3220``）：
+                        # 前者标 skipped，后者标 pending。跳过判分的 item **绝不**再排进
+                        # Judge 池——它没有答案可评，送进去只会产出一个假的 0 分。
+                        if item.get("failed") or item.get("error"):
+                            item["judge_status"] = "skipped"
+                        else:
+                            item.setdefault("judge_status", "pending")
+                            if judge is not None and judge_pool is not None:
+                                if judge_phase_started is None:
+                                    judge_phase_started = time.perf_counter()
+                                    state.record_phase("qa_eval", "judge_phase_started_at", now_iso())
+                                judge_futures[judge_pool.submit(run_judge, item, rows[index])] = index
+                        items[index] = item
+                        if not futures:
+                            state.record_phase("qa_eval", "agent_phase_finished_at", now_iso())
+                            state.record_phase(
+                                "qa_eval",
+                                "agent_phase_wall_ms",
+                                round((time.perf_counter() - agent_phase_started) * 1000, 1),
+                            )
+                        record_progress()
+                        state.persist()
         finally:
             if judge_pool is not None:
                 judge_pool.shutdown(wait=True)
+            if judge_bounds:
+                first = min(judge_bounds, key=lambda bound: bound[0])
+                last = max(judge_bounds, key=lambda bound: bound[1])
+                state.record_phase("qa_eval", "judge_phase_started_at", first[2])
+                state.record_phase("qa_eval", "judge_phase_finished_at", last[3])
+                state.record_phase("qa_eval", "judge_phase_wall_ms", round((last[1] - first[0]) * 1000, 1))
         with state.lock:
             ordered = [items[i] for i in sorted(items)]
             for item in ordered:
@@ -1814,7 +2111,7 @@ class RunExecution:
             state.data["items"] = ordered
             executed = sum(1 for item in ordered if item.get("execution_status") == "completed")
             state.data["run_valid"] = bool(len(ordered) == len(rows) and executed == len(rows))
-            record_progress(len(ordered))
+            record_progress()
         failed = [
             item for item in state.get("items") or [] if item.get("execution_status") in {"failed", "timeout"}
         ]
@@ -2048,6 +2345,7 @@ class RunExecution:
                     "retrieval_recall": metrics["media"]["recall"],
                     "retrieval_precision": metrics["media"]["precision"],
                     "retrieval_f1": metrics["media"]["f1"],
+                    "metrics_contract_version": 2,
                     "wall_clock_ms": round((time.perf_counter() - started) * 1000, 1),
                     # judge 三个占位与 1.0 同一位置同一文案（``:3555-3557``）。
                     # 本切片不打分，所以它们**必须**是 pending 而不是 0——
@@ -2080,6 +2378,7 @@ class RunExecution:
                     "media_retrieval_precision": None,
                     "media_retrieval_f1": None,
                     "judge": {"score": None, "reason": "error"},
+                    "metrics_contract_version": 2,
                     "wall_clock_ms": round((time.perf_counter() - started) * 1000, 1),
                 }
             )

@@ -53,6 +53,18 @@ function emptyRun(): Run {
 }
 
 describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）", () => {
+  it("缺失内存保持曲线缺口，不转零或连接缺口", () => {
+    render(<TelemetryCard run={run({ telemetry_live: {
+      source: "host_nvidia_smi", samples_count: 3,
+      history: [{ t: 0, system_memory_used_mib: 1024 }, { t: 1, system_memory_used_mib: null }, { t: 2, system_memory_used_mib: 2048 }],
+    } })} />);
+    const option = echartsMock.instance.setOption.mock.calls[0]?.[0] as {
+      series: Array<{ name: string; data: Array<number | null>; connectNulls: boolean }>;
+    };
+    const memory = option.series.find((row) => row.name === "整机 RAM");
+    expect(memory?.data).toEqual([1, null, 2]);
+    expect(memory?.connectNulls).toBe(false);
+  });
   it("挂载建一次实例；run 变化只重画，不再 init", () => {
     const view = render(<TelemetryCard run={run()} />);
 
@@ -65,9 +77,20 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
     view.rerender(<TelemetryCard run={run({ status: "completed" })} />);
     view.rerender(<TelemetryCard run={run({ status: "failed" })} />);
     expect(echartsMock.init).toHaveBeenCalledTimes(1);
+    // 只是状态变了、历史采样没变：不 setOption，避免把 tooltip 重置掉。
+    const afterStatus = echartsMock.instance.setOption.mock.calls.length;
 
-    // 每次数据变化都重画（1.0 `:2834` 的 deep watch）。
-    expect(echartsMock.instance.setOption.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // 历史采样点变化 → 必须重画（1.0 `:2834` 的 deep watch）。
+    const before = run();
+    const next = run({
+      telemetry_live: {
+        ...before.telemetry_live,
+        samples_count: 4,
+        history: [...(before.telemetry_live?.history || []), { t: 180, phase: "qa_eval", memory_used_mib: 3200 }],
+      },
+    });
+    view.rerender(<TelemetryCard run={next} />);
+    expect(echartsMock.instance.setOption.mock.calls.length).toBeGreaterThan(afterStatus);
   });
 
   it("卸载时 dispose 实例（1.0 :2837）", () => {
@@ -76,6 +99,18 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
 
     view.unmount();
     expect(echartsMock.instance.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("时间和点数相同，修正缺失读数后也重画", () => {
+    const initial = run();
+    const view = render(<TelemetryCard run={initial} />);
+    const before = echartsMock.instance.setOption.mock.calls.length;
+    view.rerender(<TelemetryCard run={run({ telemetry_live: {
+      ...initial.telemetry_live,
+      history: initial.telemetry_live!.history!.map((point, index) => index === 1
+        ? { ...point, system_memory_used_mib: null } : point),
+    } })} />);
+    expect(echartsMock.instance.setOption.mock.calls.length).toBeGreaterThan(before);
   });
 
   it("没有采样点时整张卡不渲染，也不 init", () => {
@@ -130,7 +165,7 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
       "整卡 GPU 显存",
       "整机 RAM",
       "主模型 GPU 显存（nvidia-smi 按 PID）",
-      "主模型 RAM（进程 VmRSS）",
+      "主模型 RAM（PSS）",
     ]);
     // MiB → GiB：1024/2048/3072 MiB → 1/2/3 GiB。
     expect(option.series[0]?.data).toEqual([1, 2, 3]);
@@ -153,10 +188,10 @@ describe("TelemetryCard · echarts 生命周期（1.0 :1027-1125 / :2824-2837）
     render(<TelemetryCard run={macRun} />);
     const option = echartsMock.instance.setOption.mock.calls[0]?.[0] as { series: Array<{ name: string }> };
     expect(option.series.map((series) => series.name)).toEqual([
-      "整机内存（App+Wired+Compressed）",
-      "整套产品内存（相关进程 phys_footprint）",
-      "Sentrix 周边（不含主模型，phys_footprint）",
-      "主模型进程 phys_footprint",
+      "整机内存（active+wired+compressor，平台特定）",
+      "整套产品内存（相关进程 footprint+权重）",
+      "Sentrix 周边（不含主模型，footprint+权重）",
+      "主模型进程占用（footprint+权重映射）",
     ]);
   });
 });

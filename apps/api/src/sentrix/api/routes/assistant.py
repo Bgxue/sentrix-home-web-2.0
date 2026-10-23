@@ -324,6 +324,11 @@ async def turn_events(
 
         record = turns.get(turn_id)
         if record is not None and record.status.is_terminal:
+            # The worker may have persisted every event between the first read
+            # and this terminal check. Catch up before announcing completion.
+            for stored in turns.events_after(turn_id, cursor):
+                cursor = stored.step_index
+                yield _format_progress(stored)
             yield _format_complete(record)
             return
 
@@ -339,6 +344,11 @@ async def turn_events(
             cursor = event.step_index
             yield _format_progress(event)
 
+        # A closed channel can be retired before subscription begins. Durable
+        # events bridge that handover; cursor still prevents duplicate delivery.
+        for stored in turns.events_after(turn_id, cursor):
+            cursor = stored.step_index
+            yield _format_progress(stored)
         record = turns.get(turn_id)
         if record is not None:
             yield _format_complete(record)
