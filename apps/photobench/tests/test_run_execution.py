@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from fakes_execution import (
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.service import RunExecution, RunRequest
+from photobench.application.run_execution.state import RunState
 from photobench.domain.runs.execution import RunCancelledError
 
 ALBUM = "album-x"
@@ -216,6 +218,114 @@ def _request(**overrides: Any) -> RunRequest:
     }
     base.update(overrides)
     return RunRequest(**base)
+
+
+@pytest.mark.parametrize("outcome", ["zero", "failed", "exception"])
+def test_judge_results_and_progress_are_published_while_an_agent_is_still_running(monkeypatch, outcome):
+    rows = [{"qa_id": "fast"}, {"qa_id": "slow"}]
+    execution, _, _, _, _ = _execution(albums=FakeAlbums(manifest=_manifest(), qa_rows=rows))
+    release = threading.Event()
+    published = threading.Event()
+    state = RunState({"scope_id": "s", "album_id": ALBUM})
+
+    def evaluate(row, *_):
+        if row["qa_id"] == "slow":
+            assert release.wait(5), "slow Agent was not released"
+        return {"qa_id": row["qa_id"], "execution_status": "completed"}
+
+    def judge_item(item, *_):
+        if outcome == "exception":
+            raise RuntimeError("external judge unavailable")
+        return {
+            **item,
+            "judge_status": "completed" if outcome == "zero" else "failed",
+            "judge": {"score": 0 if outcome == "zero" else None},
+        }
+
+    def persist(*_, **__):
+        with state.lock:
+            phase = state.data.get("phases", {}).get("qa_eval", {})
+            if phase.get("progress", {}).get("judge_completed") == 1:
+                published.set()
+
+    monkeypatch.setattr(execution, "_evaluate_one", evaluate)
+    monkeypatch.setattr(execution, "_judge", SimpleNamespace(judge_item=judge_item))
+    monkeypatch.setattr(state, "persist", persist)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution._phase_qa_eval, state, _request(qa_concurrency=2))
+        try:
+            assert published.wait(2), "Judge completion was withheld until all Agents finished"
+            with state.lock:
+                phase = state.data["phases"]["qa_eval"]
+                assert phase["judge_completed"] == phase["progress"]["judge_completed"] == 1
+                assert phase["progress"]["judge_total"] == 2
+                assert len(state.data["items"]) == 1
+                assert state.data["items"][0]["judge"]["score"] == (0 if outcome == "zero" else None)
+                assert state.data["items"][0]["judge_status"] == (
+                    "completed" if outcome == "zero" else "failed"
+                )
+                assert "agent_phase_finished_at" not in phase
+        finally:
+            release.set()
+        future.result(timeout=5)
+    assert state.data["phases"]["qa_eval"]["progress"]["judge_completed"] == 2
+
+
+def test_resume_judge_progress_counts_prior_terminal_results_and_new_skips(monkeypatch):
+    rows = [{"qa_id": key} for key in ("prior-zero", "prior-failed", "new-failed")]
+    execution, _, _, _, _ = _execution(albums=FakeAlbums(manifest=_manifest(), qa_rows=rows))
+    monkeypatch.setattr(
+        execution, "_judge", SimpleNamespace(judge_item=lambda *_: pytest.fail("skipped QA judged"))
+    )
+    monkeypatch.setattr(
+        execution,
+        "_evaluate_one",
+        lambda row, *_: {
+            "qa_id": row["qa_id"],
+            "execution_status": "failed",
+            "failed": True,
+            "error": "task failed",
+        },
+    )
+    prior = [
+        {
+            "qa_id": "prior-zero",
+            "execution_status": "completed",
+            "judge_status": "completed",
+            "judge": {"score": 0},
+        },
+        {
+            "qa_id": "prior-failed",
+            "execution_status": "completed",
+            "judge_status": "failed",
+            "judge": {"score": None},
+        },
+    ]
+    state = RunState({"scope_id": "s", "album_id": ALBUM})
+    execution._phase_qa_eval(state, _request(prior_items=prior))
+    phase = state.data["phases"]["qa_eval"]
+    assert phase["judge_completed"] == phase["progress"]["judge_completed"] == 2
+    assert phase["progress"]["judge_skipped"] == 1
+    assert phase["progress"]["judge_total"] == 3
+    assert len(state.data["items"]) == 3
+
+
+def test_cancelled_unscheduled_qa_is_not_reported_as_a_completed_agent_or_judge(monkeypatch):
+    execution, _, _, _, _ = _execution()
+
+    def cancelled(*_):
+        raise RunCancelledError("cancelled before starting")
+
+    monkeypatch.setattr(execution, "_evaluate_one", cancelled)
+    monkeypatch.setattr(
+        execution, "_judge", SimpleNamespace(judge_item=lambda *_: pytest.fail("cancelled QA judged"))
+    )
+    state = RunState({"scope_id": "s", "album_id": ALBUM})
+    execution._phase_qa_eval(state, _request())
+    progress = state.data["phases"]["qa_eval"]["progress"]
+    assert progress["agent_completed"] == progress["completed"] == progress["judge_completed"] == 0
+    assert progress["judge_skipped"] == 1
+    assert state.data["items"][0]["execution_status"] == "scheduled"
 
 
 def test_the_chain_runs_every_phase_in_order_and_completes():

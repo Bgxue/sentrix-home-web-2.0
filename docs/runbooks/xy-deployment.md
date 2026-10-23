@@ -210,3 +210,7 @@ NX c3dbd09实测拓扑最慢2.295秒，核心内存有效缺口6.078秒，未通
 检查GET `/api/v1/imports/{operation_id}/progress`与run.progress.observation的同operation_id/scope_id/sequence；媒体completed应等于imported+deduplicated+failed，total为实际扫描+limit后的支持文件数。processing满计数后检查事件总结、参与者、图谱、画像步骤；不要仅据无新媒体计数重启。404可能为尚未登记、旧版、重启或已淘汰，保留最后观测及查询错误。同步POST断连后的产品执行可能仍在继续，先核实产品，不另起冲突scope。
 
 共同提交指针发布后目录fsync失败属于持久性不确定，会报告错误并保留代，不用旧根文件反盖；只兼容导出失败则按已选代修复导出，滚动清理独立执行。完整日常CI覆盖故障注入与本地假产品，不需模型；后续设备空闲后再按执行与协议影响补四机full及NX/Mac build→reuse，当前未开展。
+
+### Judge进度显示排查
+
+对比`phases.qa_eval.progress.judge_completed`与兼容外层`judge_completed`，新版两者相同，且与同一items检查点提交。Judge已结束包含评分失败，跳过另列；有效评分另看`summary.judge_valid_count`，合法0分计入。前端缺少内层时读取历史外层，均无值显示?；不根据均分猜进度。旧执行体等所有Agent结束才回收Judge的行为不能靠刷新页面纠正，新协调器须随固定后端版本发布后生效；不得为修显示中断共享设备或改写旧run。本轮只本地验证，未发布。

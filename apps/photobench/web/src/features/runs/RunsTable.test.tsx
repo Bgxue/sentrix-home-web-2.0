@@ -52,6 +52,14 @@ function renderTable(runs: Run[], page: Partial<RunPageState> = {}, handlers?: P
 }
 
 describe("状态列（1.0 :3023-3025）", () => {
+  it("历史Judge外层计数与阶段卡采用同一读取规则", () => {
+    renderTable([run({ phases: { qa_eval: {
+      judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487 },
+    } } })]);
+    expect(screen.getByText("Judge 已结束 70/487")).not.toBeNull();
+  });
+
   it("不同 status 渲染出不同的 class 与文案", () => {
     const { container } = renderTable([
       run({ run_id: "a", status: "done" }),

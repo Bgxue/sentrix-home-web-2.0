@@ -77,18 +77,19 @@ export interface PhaseProgress {
   directories_done?: number;
   directories_total?: number;
 
-  total?: number;
-  completed?: number;
-  agent_completed?: number;
-  agent_total?: number;
+  total?: number | null;
+  completed?: number | null;
+  agent_completed?: number | null;
+  agent_total?: number | null;
   agent_in_flight?: number;
-  judge_completed?: number;
-  judge_total?: number;
+  /** Judge 已结束的题数（含评分失败）；有效评分数另见 summary.judge_valid_count。 */
+  judge_completed?: number | null;
+  judge_total?: number | null;
   judge_submitted?: number;
-  judge_skipped?: number;
+  judge_skipped?: number | null;
   judge_in_flight?: number;
-  qa_concurrency?: number;
-  judge_concurrency?: number;
+  qa_concurrency?: number | null;
+  judge_concurrency?: number | null;
   [key: string]: unknown;
 }
 
@@ -116,6 +117,10 @@ export interface Phase {
   /** `qa_eval` 上的计时字段，`effectiveRunSummary` 读它（`App.vue:426`）。 */
   agent_phase_wall_ms?: number | null;
   agent_completed?: number | null;
+  agent_total?: number | null;
+  /** 兼容历史存放在阶段外层的 Judge 计数。 */
+  judge_completed?: number | null;
+  judge_total?: number | null;
   judge_phase_wall_ms?: number | null;
   judge_concurrency?: number | null;
   [key: string]: unknown;

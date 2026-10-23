@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deliveryBreakdown,
   guardSummary,
+  judgeProgressLabel,
   openImageTarget,
   phaseErrorDetails,
   phaseErrorSummary,
@@ -287,9 +288,9 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
         },
         99,
       ),
-    ).toBe("Agent 3/10 · Judge 2/10 · 并发 Agent 4 / Judge 2 · 120s");
+    ).toBe("Agent 3/10 · Judge 已结束 2/10 · 并发 Agent 4 / Judge 2 · 120s");
     expect(phaseSummary("qa_eval", { progress: { in_flight: 1, judge_total: 10 } }, 0)).toBe(
-      "Agent 0/? · Judge 0/10 · -",
+      "Agent 0/? · Judge 已结束 ?/10 · -",
     );
     expect(phaseSummary("qa_eval", { total_seconds: 9 }, 7)).toBe("7 题 · 9s");
   });
@@ -297,6 +298,21 @@ describe("phaseSummary：部分阶段缺失时各走各的回退（1.0 :2153-218
   it("未知阶段无墙钟 → 空串；phase 为 null → 空串", () => {
     expect(phaseSummary("unknown_key", {})).toBe("");
     expect(phaseSummary("model_deploy", null)).toBe("");
+  });
+
+  it("qa_eval：兼容历史外层 Judge 计数，未记录不能显示为零", () => {
+    expect(phaseSummary("qa_eval", {
+      judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487 },
+    })).toContain("Judge 已结束 70/487");
+    expect(phaseSummary("qa_eval", { progress: { completed: 71, total: 487 } })).toContain("Judge 已结束 ?/487");
+    expect(phaseSummary("qa_eval", {
+      judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487, judge_completed: 0, judge_total: 487 },
+    })).toContain("Judge 已结束 0/487");
+    expect(judgeProgressLabel({ progress: { judge_completed: null, judge_total: 487 } })).toBe("Judge 已结束 ?/487");
+    expect(judgeProgressLabel({ progress: { judge_concurrency: 0 } })).toBe("Judge 未配置");
+    expect(judgeProgressLabel({ progress: { judge_completed: 69, judge_total: 487, judge_skipped: 1 } })).toBe("Judge 已结束 69/487 · 跳过 1");
   });
 });
 

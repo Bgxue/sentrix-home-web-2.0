@@ -1231,6 +1231,26 @@ components:
       title: MemoryObservation
     PhaseMetricsProjection:
       properties:
+        agent_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Completed
+        agent_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Total
+        judge_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Completed
+        judge_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Total
         sampling_integrity:
           anyOf:
           - additionalProperties: true
@@ -1251,6 +1271,51 @@ components:
       title: PhaseMetricsProjection
     PhaseProgressProjection:
       properties:
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total
+        completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Completed
+        agent_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Completed
+        agent_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Agent Total
+        judge_completed:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Completed
+        judge_total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Total
+        judge_skipped:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Skipped
+        qa_concurrency:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Qa Concurrency
+        judge_concurrency:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Judge Concurrency
         observation:
           anyOf:
           - $ref: '#/components/schemas/ImportObservationProjection'

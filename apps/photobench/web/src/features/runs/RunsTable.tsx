@@ -15,15 +15,16 @@ import type { RefObject } from "react";
 import type { Run } from "../../api/types.ts";
 import type { RunPageState } from "../../hooks/useRuns.ts";
 import { albumName, duration, fmtDate, fmtPct, modelName, statusLabel } from "../../lib/format.ts";
+import { judgeProgressLabel } from "../../lib/details.ts";
 import { modeBadgeClass, modeLabel } from "../../lib/qaBrowser.ts";
 
 /** 1.0 `App.vue:2253-2262`。 */
 function runProgressLabel(run: Run): string {
   if (run.mode === "build") return "—";
   if (run.qa_count === null) return "题目数未记录";
-  const progress = run.phases?.qa_eval?.progress;
-  if (progress && progress.judge_total != null) {
-    return `${progress.judge_completed ?? 0}/${progress.judge_total}`;
+  const phase = run.phases?.qa_eval;
+  if (phase?.progress || phase?.judge_total != null) {
+    return judgeProgressLabel(phase);
   }
   return `${run.summary?.completed || 0}/${run.summary?.total || run.qa_count || 0}`;
 }

@@ -199,6 +199,20 @@ export function retrievalChannelRows(item: unknown): RetrievalChannelRow[] {
  *
  * 第三个参数 `itemCount` 即 1.0 的 `activeRun.value?.item_count`。
  */
+/** Judge 终态计数与有效评分数是不同口径；兼容旧记录的阶段外层字段。 */
+export function judgeProgressLabel(phase: unknown): string {
+  const p = dict(phase);
+  const pr = dict(p.progress);
+  if (pr.judge_concurrency === 0) return "Judge 未配置";
+  const count = (value: unknown): string =>
+    typeof value === "number" && Number.isInteger(value) && value >= 0 ? String(value) : "?";
+  const completed = count(pr.judge_completed ?? p.judge_completed);
+  const total = count(pr.judge_total ?? p.judge_total ?? pr.total);
+  const skipped = typeof pr.judge_skipped === "number" && pr.judge_skipped > 0
+    ? ` · 跳过 ${pr.judge_skipped}` : "";
+  return `Judge 已结束 ${completed}/${total}${skipped}`;
+}
+
 export function phaseSummary(key: string, phase: unknown, itemCount: unknown = null): string {
   if (!phase) return "";
   const p = dict(phase);
@@ -254,7 +268,7 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     if (progress && (dict(progress).completed != null || dict(progress).in_flight != null)) {
       const pr = dict(progress);
       const agentText = `Agent ${pr.agent_completed ?? pr.completed ?? 0}/${pr.agent_total ?? pr.total ?? "?"}`;
-      const judgeText = `Judge ${pr.judge_completed ?? 0}/${pr.judge_total ?? pr.total ?? "?"}`;
+      const judgeText = judgeProgressLabel(p);
       const concurrencyText =
         Number(pr.qa_concurrency) > 1 || Number(pr.judge_concurrency) > 1
           ? ` · 并发 Agent ${pr.qa_concurrency ?? "-"} / Judge ${pr.judge_concurrency ?? "-"}`

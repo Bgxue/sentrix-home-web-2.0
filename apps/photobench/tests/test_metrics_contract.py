@@ -721,3 +721,26 @@ def test_additive_observation_and_integrity_contract_round_trips_without_changin
     assert live["latest"]["model_process_gpu_memory_mib"] is None
     assert live["latest"]["memory_observations"]["nvmap"]["observed_at_monotonic"] == 100
     assert live["latest"]["memory_observations"]["nvmap"]["fresh"] is False
+
+
+def test_qa_progress_projection_preserves_nested_and_legacy_counters_and_null():
+    from photobench.api.metrics_schema import RunMetricsResponse
+
+    for completed in (0, 70, None):
+        payload = {
+            "phases": {
+                "qa_eval": {
+                    "judge_completed": completed,
+                    "judge_total": 487,
+                    "progress": {
+                        "completed": 71,
+                        "agent_completed": 71,
+                        "agent_total": 487,
+                        "judge_completed": completed,
+                        "judge_total": 487,
+                        "judge_skipped": 0,
+                    },
+                }
+            }
+        }
+        assert RunMetricsResponse.model_validate(payload).model_dump(exclude_unset=True) == payload

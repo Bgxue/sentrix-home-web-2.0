@@ -642,6 +642,8 @@ T006 Judge一致性v2：新增可选`judge.consistency_version=2`，规则仍在
 当成模型回答正确。合法0分保留，真正矛盾的单次重问与None失败语义不变。
 历史无版本继续v1，不回填未保存的重问分数。数字字符串score按domain统一v1规则确定转换，拒绝bool及非有限/小数/越界/混合文本；记录score_normalization_version/score_normalization及attempts原响应。历史明确原文可生成带源哈希的score_derivation，保留原分/状态；执行、读取、汇总共用规则。接口契约、列表/详情投影及前端类型同步。
 
+Judge实时进度：`phases.qa_eval.progress`为规范计数，阶段外层同值兼容；Judge终态包含失败、跳过单列，有效评分数独立。Agent/Judge任一完成即由application提交同一检查点，不等全部Agent结束。前端缺失计数显示未知，不回写历史。详见指标契约的T006 Judge实时进度。
+
 #### 4.12.2 换推理后端
 
 实现 `InferenceProvider` + `LifecycleProvider` + `TelemetryProvider`，替换：

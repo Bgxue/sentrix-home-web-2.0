@@ -60,6 +60,15 @@ class ImportObservationProjection(BaseModel):
 
 class PhaseProgressProjection(BaseModel):
     model_config = ConfigDict(extra="allow")
+    total: int | None = None
+    completed: int | None = None
+    agent_completed: int | None = None
+    agent_total: int | None = None
+    judge_completed: int | None = None
+    judge_total: int | None = None
+    judge_skipped: int | None = None
+    qa_concurrency: int | None = None
+    judge_concurrency: int | None = None
     observation: ImportObservationProjection | None = None
     operation_id: str | None = None
     availability: str | None = None
@@ -73,6 +82,10 @@ class PhaseProgressProjection(BaseModel):
 
 class PhaseMetricsProjection(BaseModel):
     model_config = ConfigDict(extra="allow")
+    agent_completed: int | None = None
+    agent_total: int | None = None
+    judge_completed: int | None = None
+    judge_total: int | None = None
     sampling_integrity: dict[str, Any] | None = None
     progress: PhaseProgressProjection | None = None
     scanned_count: int | None = None

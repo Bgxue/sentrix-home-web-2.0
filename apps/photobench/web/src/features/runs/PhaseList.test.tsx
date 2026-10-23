@@ -14,6 +14,15 @@ function activeRun(phases: Run["phases"]): Run {
 }
 
 describe("阶段卡（1.0 :3099-3129）", () => {
+  it("历史外层已有70个Judge终态时，阶段卡不能显示0/487", () => {
+    const { container } = render(<PhaseList activeRun={activeRun({ qa_eval: {
+      status: "running", judge_completed: 70, judge_total: 487,
+      progress: { completed: 71, total: 487 },
+    } })} />);
+    expect(container.textContent).toContain("Agent 71/487 · Judge 已结束 70/487");
+    expect(container.textContent).not.toContain("Judge 已结束 0/487");
+  });
+
   it("固定渲染 6 张卡，状态文案随 phase.status 变化", () => {
     const { container } = render(
       <PhaseList activeRun={activeRun({ model_deploy: { status: "done" }, qa_eval: { status: "running" } })} />,
