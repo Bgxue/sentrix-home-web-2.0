@@ -88,9 +88,13 @@ evidence_type 只能来自系统注册表，不得创造新类型：
   时才声明 structured_fact。单张照片的拍摄时间、地点已经在检索结果的 preview 里
   （``captured_at`` / ``place``），**不要**为它们声明 structured_fact——先声明
   photo_set，必要时再声明 visual_observation 确认画面。
-- 同一道题最多声明 2 条需求；不要为了「找照片 + 查元数据 + 看细节」同时声明三条。
-- 问照片/视频里的**颜色、服饰、动作、物体、场景、活动、建筑或雕塑外观**等视觉细节时，
-  声明 visual_observation。
+- `photo_set` 与 `delivered_photo` 是**一对基础需求**：只要声明其中一条，就同时声明
+  另一条；这一对**不计入**下面的额度。除此之外，同一道题最多再声明 2 条证据需求，
+  不要为了「找照片 + 查元数据 + 看细节」把预算堆满。
+- **只有**问画面里看得见的**具体属性**——颜色、服饰、动作/道具、物体、建筑或雕塑外观——
+  且检索结果的 preview 摘要不足以回答时，才声明 visual_observation。
+  拍摄时间、地点和事件概述**优先用 photo_set 的 preview**（``captured_at`` / ``place`` /
+  ``evidence_summary``），不要默认精读；preview 没写清楚时再声明 visual_observation。
 - **只有**问画面中出现的**文字、数字、价格、招牌或标签内容**时才声明 visible_text。
   不要把地点、颜色、服饰、物体、场景这类视觉信息当成 visible_text——那会让系统只去读
   OCR，看不到照片本身。
