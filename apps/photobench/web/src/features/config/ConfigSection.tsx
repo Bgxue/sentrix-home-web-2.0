@@ -13,7 +13,7 @@
  */
 import type { useConfig } from "../../hooks/useConfig.ts";
 import type { useReuseMode } from "../../hooks/useReuseMode.ts";
-import { ModelServicePanel, type CloudModelProfile, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
+import { ModelAdvancedPanel, ModelServicePanel, type CloudModelProfile, type ModelServicePanelProps } from "./ModelServicePanel.tsx";
 import { ReuseBasePicker } from "./ReuseBasePicker.tsx";
 import { StartActions, type StartActionsProps } from "./StartActions.tsx";
 import { albumCountLabel, qaOptionsFor, RUN_MODES_UI, runModeMeta } from "./rules.ts";
@@ -113,10 +113,24 @@ export function ConfigSection({
     );
   };
 
+  const albumLabel =
+    connection.manifests.find((manifest) => manifest.album_id === album.selectedAlbum)?.album_name ||
+    album.selectedAlbum ||
+    "未选择";
+  const modelLabel =
+    model.selectedEndpointModel ||
+    [...model.selectedModels].filter((id) => id !== "__current__").join(" / ") ||
+    "未选择";
+  const judgeLabel = connection.judgeModel.trim() || "未配置";
+  const qaLabel = reuse.runMode === "build" ? "构建相册，不跑 QA" : album.selectedQa || "未选择";
+
   return (
     <section className="section config-section">
       <div className="section-head">
-        <h2>评测配置</h2>
+        <div className="section-title">
+          <h2>评测配置</h2>
+          <p>先选任务范围与模型，启动评测；评测服务、模型管理器和认证参数放在高级设置里。</p>
+        </div>
         <div className="section-head-actions">
           {start.hasRunning && <span className="live-badge">实时更新中</span>}
           <button
@@ -132,11 +146,20 @@ export function ConfigSection({
           </span>
         </div>
       </div>
-      <div className="config-groups">
+
+      <div className="config-overview" aria-label="本次评测摘要">
+        <span className="config-overview-item"><b>模式</b>{meta.label}</span>
+        <span className="config-overview-item"><b>{reuse.runMode === "reuse" ? "复用相册" : "照片"}</b>{reuse.runMode === "reuse" ? reuse.selectedReuseBaseId || "未选择" : albumLabel}</span>
+        <span className="config-overview-item"><b>QA</b>{qaLabel}</span>
+        <span className="config-overview-item"><b>模型</b>{modelLabel}</span>
+        <span className="config-overview-item"><b>Judge</b>{judgeLabel}</span>
+      </div>
+
+      <div className="config-core-grid">
         <div className="config-group">
           <div className="config-group-head">
             <div>
-              <strong>任务范围</strong>
+              <strong>1. 任务范围</strong>
               <span>选择本次要构建或测评的数据范围</span>
             </div>
           </div>
@@ -169,9 +192,11 @@ export function ConfigSection({
                     </option>
                   ))}
                 </select>
-                {reuse.runMode === "build" && (
-                  <span className="config-help">图片、视频与身份来源，处理后相册保留</span>
-                )}
+                <span className="config-help">
+                  {reuse.runMode === "build"
+                    ? "本次要导入的照片、视频范围；处理后相册保留。"
+                    : "本次要导入的照片、视频范围；相册越大，准备越久。"}
+                </span>
               </label>
             )}
             {reuse.runMode === "reuse" && (
@@ -196,83 +221,100 @@ export function ConfigSection({
                     </option>
                   ))}
                 </select>
-                {reuse.runMode === "reuse" && (
-                  <span className="config-help">题目与对照随所选现有相册自动匹配</span>
-                )}
+                <span className="config-help">
+                  {reuse.runMode === "reuse"
+                    ? "题目与对照随现有相册匹配；这里选择题量。"
+                    : "从当前相册的题目集中选题；10 题适合快速验证。"}
+                </span>
               </label>
             )}
           </div>
         </div>
-        <div className="config-group">
-          <div className="config-group-head">
-            <div>
-              <strong>评测服务</strong>
-              <span>配置 Sentrix 后端、Judge 评分服务及认证信息</span>
-            </div>
-          </div>
-          <div className="config-grid config-grid-judge">
-            <label>
-              Sentrix 后端
-              <input
-                type="text"
-                value={connection.sentrixUrl}
-                placeholder="例如 127.0.0.1:8091"
-                onChange={(event) => {
-                  connection.setSentrixUrl(event.target.value);
-                  connection.markConnectionConfigDirty();
-                }}
-              />
-            </label>
-            <label>
-              Judge 服务
-              <input
-                type="text"
-                value={connection.judgeUrl}
-                placeholder="例如 192.168.1.65:1234/v1"
-                onChange={(event) => {
-                  connection.setJudgeUrl(event.target.value);
-                  connection.markConnectionConfigDirty();
-                }}
-              />
-            </label>
-            <label>
-              Judge 模型
-              <input
-                type="text"
-                value={connection.judgeModel}
-                placeholder="例如 qwen3.5-4b-mlx"
-                onChange={(event) => {
-                  connection.setJudgeModel(event.target.value);
-                  connection.markConnectionConfigDirty();
-                }}
-              />
-              <span className="config-help">Judge 请求使用此 model 字段。</span>
-            </label>
-            <label>
-              Judge API key
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={connection.judgeApiKey}
-                placeholder="留空表示不使用或保留已保存值"
-                onChange={(event) => {
-                  connection.setJudgeApiKey(event.target.value);
-                  connection.setJudgeApiKeyDirty(true);
-                  connection.markConnectionConfigDirty();
-                }}
-              />
-              <span className="config-help">
-                仅保存到评测编排器本机环境变量；
-                {runtimeConfig.judge_api_key_set
-                  ? `已配置（${String(runtimeConfig.judge_api_key_hint)}）`
-                  : "当前未配置"}
-                。
-              </span>
-            </label>
-          </div>
-        </div>
+
         <ModelServicePanel {...model} cloudModelProfile={cloudModelProfile} />
       </div>
+
+      <details className="config-advanced">
+        <summary>
+          <span>
+            <strong>高级设置</strong>
+            <small>评测服务、Judge 认证、模型管理器和云端模型</small>
+          </span>
+          <span className="config-advanced-hint">默认收起</span>
+        </summary>
+        <div className="config-advanced-body">
+          <div className="config-group">
+            <div className="config-group-head">
+              <div>
+                <strong>2. 评测服务</strong>
+                <span>Sentrix 后端与 Judge 评分服务；本地评测通常保持默认</span>
+              </div>
+            </div>
+            <div className="config-grid config-grid-judge">
+              <label>
+                Sentrix 后端
+                <input
+                  type="text"
+                  value={connection.sentrixUrl}
+                  placeholder="例如 127.0.0.1:8291"
+                  onChange={(event) => {
+                    connection.setSentrixUrl(event.target.value);
+                    connection.markConnectionConfigDirty();
+                  }}
+                />
+              </label>
+              <label>
+                Judge 服务
+                <input
+                  type="text"
+                  value={connection.judgeUrl}
+                  placeholder="例如 192.168.1.65:1234/v1"
+                  onChange={(event) => {
+                    connection.setJudgeUrl(event.target.value);
+                    connection.markConnectionConfigDirty();
+                  }}
+                />
+              </label>
+              <label>
+                Judge 模型
+                <input
+                  type="text"
+                  value={connection.judgeModel}
+                  placeholder="例如 doubao-seed-2.1-lite"
+                  onChange={(event) => {
+                    connection.setJudgeModel(event.target.value);
+                    connection.markConnectionConfigDirty();
+                  }}
+                />
+                <span className="config-help">Judge 请求使用此 model 字段。</span>
+              </label>
+              <label>
+                Judge API key
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={connection.judgeApiKey}
+                  placeholder="留空表示不使用或保留已保存值"
+                  onChange={(event) => {
+                    connection.setJudgeApiKey(event.target.value);
+                    connection.setJudgeApiKeyDirty(true);
+                    connection.markConnectionConfigDirty();
+                  }}
+                />
+                <span className="config-help">
+                  仅保存到评测编排器本机环境变量；
+                  {runtimeConfig.judge_api_key_set
+                    ? `已配置（${String(runtimeConfig.judge_api_key_hint)}）`
+                    : "当前未配置"}
+                  。
+                </span>
+              </label>
+            </div>
+          </div>
+          <ModelAdvancedPanel {...model} cloudModelProfile={cloudModelProfile} />
+        </div>
+      </details>
+
       <StartActions {...start} />
       {error && <p className="error">{error}</p>}
     </section>

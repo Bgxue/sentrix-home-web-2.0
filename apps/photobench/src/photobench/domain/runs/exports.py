@@ -27,6 +27,8 @@ import ast
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from photobench.domain.runs.analysis import judge_score_for_summary
+
 #: 1.0 ``:6530`` 的 ``retrieval`` 子对象取的字段清单，顺序照抄。
 _RETRIEVAL_FIELDS = (
     "retrieval_recall",
@@ -78,7 +80,7 @@ def export_traces(
     include = set(scores) if scores else None
     items_out: list[dict[str, Any]] = []
     for item in state.get("items") or []:
-        item_score = (item.get("judge") or {}).get("score")
+        item_score = judge_score_for_summary(item.get("judge"))
         if include is not None and item_score not in include:
             continue
         if min_score is not None and (item_score is None or item_score < min_score):
@@ -142,10 +144,10 @@ def export_sft(
     samples: list[dict[str, Any]] = []
     for item in state.get("items") or []:
         if include is not None:
-            if (item.get("judge") or {}).get("score") not in include:
+            if judge_score_for_summary(item.get("judge")) not in include:
                 continue
         elif min_score is not None:
-            item_score = (item.get("judge") or {}).get("score")
+            item_score = judge_score_for_summary(item.get("judge"))
             if item_score is None or item_score < min_score:
                 continue
         qa_id = item.get("qa_id")

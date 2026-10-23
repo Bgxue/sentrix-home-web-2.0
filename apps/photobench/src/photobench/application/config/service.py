@@ -75,6 +75,14 @@ def normalize_service_url(value: str | None) -> str:
     return raw.rstrip("/")
 
 
+def _port_of(value: str) -> int | None:
+    try:
+        parsed = urlparse(str(value or ""))
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+
+
 def secret_hint(value: str | None) -> str:
     """1.0 ``:308``。给界面看的密钥指纹：首尾各两位、中间打星。"""
     secret = str(value or "")
@@ -347,6 +355,9 @@ class ConfigService:
             ),
             "endpoint_model": str(self._runtime.get("endpoint_model") or ""),
             "judge_provider_id": self.judge_provider_id,
+            "embedding": self._runtime.get("embedding") or {},
+            "product": self._runtime.get("product") or [],
+            "product_settings": dict(self._runtime.get("product_settings") or {}),
         }
 
     def public_config(self) -> dict[str, Any]:
@@ -394,7 +405,7 @@ class ConfigService:
         provider_id = str(payload.get("judge_provider_id") or self.judge_provider_id).strip()
         if provider_id not in self.judge_providers:
             raise InvalidRequestError(f"unknown judge provider: {provider_id}")
-        values = {
+        values: dict[str, Any] = {
             "sentrix_url": _validated_service_url(payload.get("sentrix_url"), "Sentrix URL"),
             "judge_url": _validated_service_url(payload.get("judge_url"), "Judge URL"),
             "judge_model": str(payload.get("judge_model") or "").strip(),
@@ -407,6 +418,23 @@ class ConfigService:
         }
         if not values["judge_model"]:
             raise InvalidRequestError("Judge model is required")
+        # 同一份 runtime_connection.json 里保留服务拓扑；遥测/API 都读它。
+        for key in ("embedding", "product", "product_settings"):
+            if key in self._runtime:
+                values[key] = self._runtime[key]
+        if "product_settings" in payload:
+            values["product_settings"] = _validated_product_settings(payload["product_settings"])
+        # product 里的 Sentrix API 端口必须跟着 sentrix_url 走，否则页面换地址后
+        # 遥测仍按旧端口找进程。
+        sentrix_port = _port_of(values["sentrix_url"])
+        product: list[dict[str, Any]] = [
+            dict(item) for item in values.get("product") or [] if isinstance(item, dict)
+        ]
+        for item in product:
+            if item.get("id") == "sentrix_api" and sentrix_port:
+                item["ports"] = [sentrix_port]
+        if "product" in values or product:
+            values["product"] = product
         self._store.write_json(RUNTIME_CONNECTION_NAME, values)
         self._runtime = dict(values)
         self.sentrix_url = values["sentrix_url"]
@@ -436,3 +464,39 @@ def _validated_service_url(value: str | None, label: str, *, optional: bool = Fa
     if not parsed.netloc:
         raise InvalidRequestError(f"{label} must be a host:port or HTTP(S) URL")
     return normalized
+
+
+def _validated_product_settings(value: Any) -> dict[str, Any]:
+    """Only non-secret, declared startup settings cross the configuration API."""
+    if not isinstance(value, dict):
+        raise InvalidRequestError("product_settings must be an object")
+    allowed = {
+        "deployment_profile",
+        "agent_wall_time_s",
+        "chat_timeout_s",
+        "face_providers",
+        "retinaface_providers",
+    }
+    if set(value) - allowed:
+        raise InvalidRequestError("unknown product_settings keys")
+    result = dict(value)
+    if "deployment_profile" in result and result["deployment_profile"] not in {"server", "mac"}:
+        raise InvalidRequestError("deployment_profile must be server or mac")
+    for key in ("agent_wall_time_s", "chat_timeout_s"):
+        if key in result:
+            raw = result[key]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 < raw <= 86400:
+                raise InvalidRequestError(f"{key} must be finite and in (0, 86400]")
+    for key in ("face_providers", "retinaface_providers"):
+        if key in result:
+            raw = result[key]
+            if not isinstance(raw, str) or not raw.strip():
+                raise InvalidRequestError(f"{key} must be a nonempty provider chain")
+            chain = [part.strip() for part in raw.split(",")]
+            if any(
+                part not in {"CUDAExecutionProvider", "CPUExecutionProvider", "CoreMLExecutionProvider"}
+                for part in chain
+            ):
+                raise InvalidRequestError(f"unsupported {key}")
+            result[key] = ",".join(chain)
+    return result

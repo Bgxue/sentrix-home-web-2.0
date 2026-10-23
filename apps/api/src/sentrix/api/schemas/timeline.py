@@ -51,6 +51,24 @@ class ImportBatchRequest(BaseModel):
     directory: str = Field(..., min_length=1, max_length=4096)
     scope_id: str = "home-default"
     limit: int = Field(200, ge=1, le=1000)
+    operation_id: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,96}$")
+
+
+class ImportProgressResponse(BaseModel):
+    operation_id: str
+    scope_id: str
+    status: str
+    stage: str
+    total: int | None
+    completed: int
+    imported: int
+    deduplicated: int
+    failed: int
+    current_file: str | None
+    updated_at: str
+    sequence: int
+    error: str | None
+    observed_at: str
 
 
 class ImportFailure(BaseModel):

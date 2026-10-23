@@ -12,7 +12,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from sentrix.application.assistant.goal_planner import GoalPlanner, PlannerResult
+from sentrix.application.assistant.goal_planner import GoalPlanner
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.intent import (
     MIN_REQUIREMENTS,
@@ -302,7 +302,10 @@ def test_a_model_error_becomes_planner_call_error():
 
     result = GoalPlanner(model).declare("给我看看海边的照片", scope_id=SCOPE)
 
-    assert result == PlannerResult(fallback_reason="planner_call_error")
+    assert result.fallback_reason == "planner_call_error"
+    assert len(result.model_calls) == 1
+    assert result.model_calls[0]["status"] == "error"
+    assert result.model_calls[0]["error"] == "connection refused"
 
 
 def test_a_missing_brace_is_repaired_without_a_second_call():

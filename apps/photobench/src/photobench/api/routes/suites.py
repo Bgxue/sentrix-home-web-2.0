@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
+from starlette.concurrency import run_in_threadpool
 
 from photobench.api.deps import get_container, json_body
 
@@ -28,7 +29,7 @@ router = APIRouter(tags=["suites"])
 async def start_suite(request: Request) -> dict[str, Any]:
     """``POST /api/runs``（1.0 ``:7854`` 分支 → ``start_suite`` ``:7306``）。"""
     payload = await json_body(request)
-    return get_container(request).run_suites.start_suite(payload)
+    return await run_in_threadpool(get_container(request).run_suites.start_suite, payload)
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -47,14 +48,14 @@ def cancel_active(request: Request) -> dict[str, Any]:
 async def start_rejudge(request: Request, run_id: str) -> dict[str, Any]:
     """``POST /api/runs/{id}/rejudge``（1.0 ``:7804``）。"""
     payload = await json_body(request)
-    return get_container(request).run_suites.start_rejudge(run_id, payload)
+    return await run_in_threadpool(get_container(request).run_suites.start_rejudge, run_id, payload)
 
 
 @router.post("/runs/{run_id}/reviews")
 async def save_reviews(request: Request, run_id: str) -> dict[str, Any]:
     """``POST /api/runs/{id}/reviews``（1.0 ``:7807``）。"""
     payload = await json_body(request)
-    return get_container(request).run_suites.save_reviews(run_id, payload)
+    return await run_in_threadpool(get_container(request).run_suites.save_reviews, run_id, payload)
 
 
 @router.get("/runs/{run_id}/judge-prompt")
@@ -67,7 +68,7 @@ def get_run_judge_prompt(request: Request, run_id: str) -> dict[str, Any]:
 async def start_memory_profile(request: Request) -> dict[str, Any]:
     """``POST /api/memory-profile``（1.0 ``:7850``）。"""
     payload = await json_body(request)
-    return get_container(request).run_suites.start_memory_profile(payload)
+    return await run_in_threadpool(get_container(request).run_suites.start_memory_profile, payload)
 
 
 @router.delete("/runs/{run_id}")

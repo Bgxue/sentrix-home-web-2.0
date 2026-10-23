@@ -45,19 +45,51 @@ export interface MediaRef {
 // ---------------------------------------------------------------------------
 
 /** `phases.<key>.progress`；键取自一次真实 run 的 `qa_eval`（`/api/v1/runs` 实测）。 */
+export interface ImportObservation {
+  operation_id?: string;
+  scope_id?: string;
+  status?: string;
+  stage?: string;
+  total?: number | null;
+  completed?: number | null;
+  imported?: number | null;
+  deduplicated?: number | null;
+  failed?: number | null;
+  current_file?: string | null;
+  updated_at?: string | null;
+  observed_at?: string | null;
+  sequence?: number;
+  error?: string | null;
+}
+
 export interface PhaseProgress {
-  total?: number;
-  completed?: number;
-  agent_completed?: number;
-  agent_total?: number;
+  operation_id?: string;
+  observation?: ImportObservation | null;
+  availability?: string;
+  query_error?: string | null;
+  last_received_at?: string;
+  last_checked_at?: string;
+  request_status?: string;
+  request_error?: string | null;
+  observer_stop_pending?: boolean;
+  current_directory?: string;
+  request_started_at?: string;
+  directories_done?: number;
+  directories_total?: number;
+
+  total?: number | null;
+  completed?: number | null;
+  agent_completed?: number | null;
+  agent_total?: number | null;
   agent_in_flight?: number;
-  judge_completed?: number;
-  judge_total?: number;
+  /** Judge 已结束的题数（含评分失败）；有效评分数另见 summary.judge_valid_count。 */
+  judge_completed?: number | null;
+  judge_total?: number | null;
   judge_submitted?: number;
-  judge_skipped?: number;
+  judge_skipped?: number | null;
   judge_in_flight?: number;
-  qa_concurrency?: number;
-  judge_concurrency?: number;
+  qa_concurrency?: number | null;
+  judge_concurrency?: number | null;
   [key: string]: unknown;
 }
 
@@ -67,6 +99,17 @@ export interface PhaseProgress {
  * 另有 `gpu_metrics` 这种非执行阶段。
  */
 export interface Phase {
+  scanned_count?: number | null;
+  sampling_integrity?: {
+    callback_failures?: number;
+    last_callback_failure?: string | null;
+    publisher_failures?: number;
+    last_publisher_failure?: string | null;
+    collection_failures?: number;
+    last_collection_failure?: string | null;
+    missed_intervals?: number;
+    stop_pending_threads?: string[];
+  };
   key?: string;
   label?: string;
   status?: string;
@@ -74,6 +117,10 @@ export interface Phase {
   /** `qa_eval` 上的计时字段，`effectiveRunSummary` 读它（`App.vue:426`）。 */
   agent_phase_wall_ms?: number | null;
   agent_completed?: number | null;
+  agent_total?: number | null;
+  /** 兼容历史存放在阶段外层的 Judge 计数。 */
+  judge_completed?: number | null;
+  judge_total?: number | null;
   judge_phase_wall_ms?: number | null;
   judge_concurrency?: number | null;
   [key: string]: unknown;
@@ -92,6 +139,18 @@ export type RunPhases = Record<string, Phase | undefined>;
  * 下存在的可空字段。
  */
 export interface TelemetryLive {
+  memory_observation_version?: number;
+  memory_observations?: Record<string, MemorySourceObservation>;
+  memory_dependencies?: Record<string, string[]>;
+  sampling_diagnostics?: Record<string, unknown>;
+  device_freshness_version?: number;
+  device_observation_ttl_seconds?: number | null;
+  metrics_contract_version?: number;
+  memory_accounting?: "nvidia_pss_and_vram" | "jetson_pss_plus_nvmap_estimate" | "apple_capacity_estimate";
+  memory_complete?: boolean;
+  field_stats?: Record<string, { peak?: number; mean?: number; p95?: number; valid_count?: number }>;
+  rejected_samples?: Record<string, number>;
+  sampling?: Record<string, unknown>;
   source?: string;
   status?: string;
   samples_count?: number;
@@ -104,12 +163,27 @@ export interface TelemetryLive {
   [key: string]: unknown;
 }
 
+export interface MemorySourceObservation {
+  source?: string;
+  status?: string;
+  reason?: string | null;
+  observed_at_monotonic?: number | null;
+  finished_at_monotonic?: number | null;
+  ttl_seconds?: number | null;
+  age_seconds?: number | null;
+  fresh?: boolean;
+  cache_hit?: boolean;
+  pid?: number;
+  start_ticks?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // 运行
 // ---------------------------------------------------------------------------
 
 /** run 指标汇总。后端 `summary` 的字段是开放的，前端 `effectiveRunSummary` 现算 60+ 项。 */
 export interface RunSummary {
+  run_valid?: boolean | null;
   completed?: number;
   total?: number;
   judge_valid_count?: number;
@@ -133,6 +207,12 @@ export interface RejudgeTask {
 
 /** 一条 run。字段来自 `/api/v1/runs` 实测响应（2026-10-06，8771）。 */
 export interface Run {
+  read_revision?: string | null;
+  history_mode?: "full" | "checkpoint" | null;
+  persistence?: { status?: string; error?: string } | null;
+  metrics_contract_version?: number;
+  build_revision?: string;
+  runtime_snapshot?: Readonly<Record<string, unknown>> | null;
   run_id: string;
   /** `full` / `reuse` / `build`（`RUN_MODES_UI` `:2540`）。 */
   mode?: string;
@@ -141,12 +221,15 @@ export interface Run {
   scope_name?: string;
   album_id?: string;
   model_profile?: string;
-  model_name?: string;
+  model_name?: string | null;
+  model_identity?: Record<string, unknown> | null;
+  execution_budgets?: Record<string, unknown> | null;
+  snapshot_source?: string;
   model_source?: string;
   model_backend?: string;
   qa_set?: string;
   qa_name?: string;
-  qa_count?: number;
+  qa_count?: number | null;
   status?: string;
   created_at?: string;
   started_at?: string;
@@ -196,6 +279,11 @@ export interface Judge {
   status?: string | null;
   rejudge_id?: string | null;
   consistency_status?: string | null;
+  consistency_version?: number | null;
+  score_normalization_version?: number | null;
+  score_normalization?: { rule_version: number; input_type: string; status: string; converted: boolean; score: number | null } | null;
+  score_derivation?: { rule_version: number; source: string; score: number | null; source_sha256?: string } | null;
+  attempts?: Array<Record<string, unknown>> | null;
   reason?: string | null;
   [key: string]: unknown;
 }

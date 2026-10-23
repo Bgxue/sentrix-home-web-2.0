@@ -162,6 +162,8 @@ class ModelReply:
     finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Per native tool envelope. Empty tuple means no parser facts were supplied.
+    tool_argument_parse_facts: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def wants_tools(self) -> bool:

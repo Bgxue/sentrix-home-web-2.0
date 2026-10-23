@@ -218,17 +218,9 @@ def _wait_until(predicate: Any, timeout: float = 5.0) -> bool:
 
 
 def test_start_suite_rejects_a_mode_2_0_does_not_implement(tmp_path: Path):
-    """``build``（只导入不问答）在 2.0 仍然没有对应能力。
-
-    **显式报错**而不是静默降级：把一个不认识的 mode 当成 ``full`` 跑，会建出一个
-    调用方想避免的新 scope、还做了一整套它没要的问答。
-
-    2026-10-15：``reuse`` 从这条断言里移出去了——它已经接上生产（``RUN_MODES`` 现在
-    是 ``("full", "reuse")``），改由 ``test_reuse_requires_an_existing_scope``
-    钉它的参数校验。
-    """
+    """Unknown modes must still be rejected after build becomes supported."""
     with pytest.raises(InvalidRequestError) as excinfo:
-        _suites(tmp_path).start_suite(_payload(mode="build"))
+        _suites(tmp_path).start_suite(_payload(mode="unknown"))
     assert "mode must be" in str(excinfo.value)
 
 
@@ -595,3 +587,97 @@ def test_resume_carries_only_the_finished_items_and_reuses_the_scope(tmp_path: P
     assert result["resumed_from"] == "run-1"
     # 三题里只有 q1 是 completed；另外两题留给这一轮。
     assert result["resumed_items"] == 1
+
+
+def test_queued_requests_freeze_topology_before_configuration_changes(tmp_path):
+    captured = []
+    gate = threading.Event()
+
+    def factory(request):
+        captured.append(request)
+        return FakeExecution(request, gate)
+
+    suites = _suites(tmp_path, new_execution=factory)
+    suites.start_suite(_payload(models=["a", "b"], model_base_url="http://127.0.0.1:8106/v1"))
+    try:
+        suites._config.persist_runtime_connection(
+            {
+                "sentrix_url": "http://127.0.0.1:8291",
+                "judge_url": "http://judge:8100/v1",
+                "judge_model": "judge",
+                "model_base_url": "http://127.0.0.1:8109/v1",
+            }
+        )
+        assert len(captured) == 2
+        for request in captured:
+            assert request.runtime_snapshot.connection()["model_base_url"] == "http://127.0.0.1:8106/v1"
+            assert request.runtime_snapshot.connection()["endpoint_model"] is None
+    finally:
+        gate.set()
+
+
+def test_build_accepts_album_without_qa_and_never_resolves_judge(tmp_path, monkeypatch):
+    suites = _suites(tmp_path, albums=FakeAlbums(manifest=dict(MANIFEST, qa_sets={})))
+    monkeypatch.setattr(suites, "_judge_settings", lambda *_: pytest.fail("build resolved Judge"))
+    assert suites.start_suite(_payload(mode="build", qa_set=""))["run_ids"]
+
+
+def test_resume_inherits_topology_and_budgets_instead_of_current_configuration(tmp_path):
+    captured = []
+    gate = threading.Event()
+    saved = _cancelled_state()
+    saved["runtime_snapshot"] = {
+        "sentrix_url": "http://original:8291",
+        "model_base_url": "http://original:8106/v1",
+        "vllm_manager_url": "",
+        "embedding": {"mode": "split_text_image", "image_url": "http://original:8103"},
+        "product_settings": {"deployment_profile": "mac"},
+        "execution_budgets": {"import_timeout": 86400, "qa_concurrency": 2, "turn_timeout": 700},
+    }
+
+    def factory(request):
+        captured.append(request)
+        return FakeExecution(request, gate)
+
+    suites = _suites(tmp_path, store=FakeRunStore({"run-1": saved}), new_execution=factory)
+    try:
+        suites.resume_run("run-1")
+        request = captured[0]
+        assert request.sentrix_url == "http://original:8291"
+        assert request.runtime_snapshot.connection()["embedding"] == saved["runtime_snapshot"]["embedding"]
+        assert (request.import_timeout, request.qa_concurrency, request.turn_timeout) == (86400, 2, 700)
+        assert request.snapshot_source == "resumed_run"
+    finally:
+        gate.set()
+
+
+def test_build_does_not_select_qa_even_when_manifest_has_qa(tmp_path):
+    captured = []
+
+    def factory(request):
+        captured.append(request)
+        return FakeExecution(request)
+
+    suites = _suites(tmp_path, new_execution=factory)
+    suites.start_suite(_payload(mode="build", qa_set="ignored"))
+    assert captured[0].qa_set == ""
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        {"status": "incomplete", "embedding": {}},
+        {"status": "ready", "embedding": {"mode": "different"}},
+    ],
+)
+def test_reuse_refuses_incomplete_build_or_changed_embedding(tmp_path, build):
+    suites = _suites(tmp_path)
+    suites._index.upsert({"run_id": "built", "scope_id": "scope-old", "scope_build": build})
+    with pytest.raises(InvalidRequestError, match="incomplete build|embedding configuration changed"):
+        suites.start_suite(_payload(mode="reuse", existing_scope_id="scope-old"))
+
+
+def test_unknown_qa_set_is_rejected_before_scheduling(tmp_path):
+    suites = _suites(tmp_path)
+    with pytest.raises(InvalidRequestError, match="unknown qa_set"):
+        suites.start_suite(_payload(qa_set="missing"))

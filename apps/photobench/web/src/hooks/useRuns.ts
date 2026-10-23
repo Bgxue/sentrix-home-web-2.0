@@ -52,6 +52,7 @@ export interface RunPageState {
   has_previous: boolean;
   has_next: boolean;
   active_count: number;
+  scan?: RunPage["scan"];
 }
 
 const INITIAL_RUN_PAGE: RunPageState = {
@@ -120,6 +121,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       has_previous: Boolean(payload.has_previous),
       has_next: Boolean(payload.has_next),
       active_count: Number(payload.active_count || 0),
+      scan: payload.scan,
     };
     runPageRef.current = next;
     setRunPage(next);
@@ -152,6 +154,12 @@ export function useRuns(options: UseRunsOptions = {}) {
     judgePromptFallback,
   });
   const { loadActiveRun, setActiveRun } = detail;
+  // App 的 QA 桥接函数可在每次渲染时重建；它们只更新下一次轮询用的
+  // loader，不能重启计时器，否则一次状态更新就会立即再发一轮请求。
+  const pollDetailLoader = useRef(loadActiveRun);
+  useEffect(() => {
+    pollDetailLoader.current = loadActiveRun;
+  }, [loadActiveRun]);
 
   /** 1.0 `:352-353`。用 ref 现算，好让轮询的异步闭包读到最新值。 */
   const hasRunningNow = useCallback(
@@ -180,9 +188,9 @@ export function useRuns(options: UseRunsOptions = {}) {
       timer = null;
       try {
         await loadRuns();
-        if (activeRunIdRef.current) await loadActiveRun();
+        if (activeRunIdRef.current) await pollDetailLoader.current();
         if (cancelled) return;
-        if (hasRunningNow()) {
+        if (hasRunningNow() || ["pending", "running"].includes(String(runPageRef.current.scan?.state))) {
           timer = window.setTimeout(poll, 2000);
         } else {
           setPolling(false);
@@ -196,7 +204,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [polling, loadRuns, loadActiveRun, hasRunningNow]);
+  }, [polling, loadRuns, hasRunningNow]);
 
   const changeRunPage = useCallback(
     async (page: number) => {
@@ -221,7 +229,7 @@ export function useRuns(options: UseRunsOptions = {}) {
       setActiveRun({ ...run });
       scrollToRunDetail();
       void loadActiveRun({ resetPage: true }).catch((err: unknown) => {
-        if (activeRunIdRef.current === run.run_id) {
+        if ((err as Error).name !== "AbortError" && activeRunIdRef.current === run.run_id) {
           setError((err as Error).message || "读取评测详情失败");
         }
       });

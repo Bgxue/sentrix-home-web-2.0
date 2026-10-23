@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sentrix.domain.retrieval.scheme import SCHEMES as EMBEDDING_SCHEMES
@@ -20,14 +20,61 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SENTRIX_", extra="forbid")
+    model_config = SettingsConfigDict(env_prefix="SENTRIX_", extra="forbid", populate_by_name=True)
 
+    face_providers: str = Field(
+        default="CUDAExecutionProvider,CPUExecutionProvider", validation_alias="FACE_PROVIDERS"
+    )
+    retinaface_providers: str = Field(
+        default="CUDAExecutionProvider,CPUExecutionProvider", validation_alias="RETINAFACE_PROVIDERS"
+    )
     data_dir: Path = Field(default=Path("data"))
     # 部署形态的**唯一开关**。只提供一组默认值，显式 env 永远优先：
     # - server：wemm / 180s / 120s
     # - mac：legacy / 600s / 180s（CPU 人脸另见 onnx_runtime 的 provider 默认）
     # 数据根、模型/侧车地址、judge 配置不归它管。
     deployment_profile: Literal["server", "mac"] = "server"
+
+    @field_validator("face_providers", "retinaface_providers")
+    @classmethod
+    def validate_provider_chain(cls, raw: str) -> str:
+        chain = [part.strip() for part in raw.split(",")]
+        allowed = {"CUDAExecutionProvider", "CPUExecutionProvider", "CoreMLExecutionProvider"}
+        if not chain or any(part not in allowed for part in chain):
+            raise ValueError("unsupported or empty ONNX provider chain")
+        return ",".join(chain)
+
+    @model_validator(mode="after")
+    def apply_deployment_profile(self) -> Settings:
+        if self.deployment_profile == "mac":
+            for key, value in {
+                "embedding_scheme": "legacy",
+                "agent_wall_time_s": 600.0,
+                "chat_timeout_s": 180.0,
+                "face_providers": "CPUExecutionProvider",
+                "retinaface_providers": "CPUExecutionProvider",
+            }.items():
+                if key not in self.model_fields_set:
+                    object.__setattr__(self, key, value)
+        return self
+
+    def runtime_configuration(self) -> dict[str, Any]:
+        """Non-secret startup facts, never a benchmark policy."""
+        return {
+            key: getattr(self, key)
+            for key in (
+                "deployment_profile",
+                "vlm_base_url",
+                "embedding_scheme",
+                "text_embedder_url",
+                "legacy_clip_url",
+                "wemm_url",
+                "agent_wall_time_s",
+                "chat_timeout_s",
+                "face_providers",
+                "retinaface_providers",
+            )
+        }
 
     # Web 的构建产物（``apps/web/dist``，``vite build`` 的产物，``.gitignore`` 里）。
     # **它是本模块里第二个可配的根，和开头那句「data_dir 是唯一可配的根」是有出入

@@ -327,3 +327,34 @@ def test_audio_is_scanned_alongside_photos_and_videos(tmp_path: Path):
 
     assert importer.finished == ["a.jpg", "b.m4a", "c.MP3", "d.flac"]
     assert result.imported == 4
+
+
+def test_progress_counts_settled_media_and_keeps_batch_summary_running(album: Path):
+    """One new, one duplicate, one bad media; summary is not a completed import."""
+    from sentrix.application.media.track_import import TrackImport
+    from sentrix.infrastructure.media.import_progress import InProcessImportProgressStore
+
+    store = InProcessImportProgressStore()
+    tracker = TrackImport(store, "op", "scope")
+    observations = []
+
+    def report(**changes):
+        tracker.update(**changes)
+        observations.append(store.get("op"))
+
+    def summarize(event_id):
+        observed = store.get("op")
+        assert observed.status == "running"
+        assert observed.stage == "event_summarization"
+        assert observed.completed == observed.total == 3
+
+    result = ImportAlbum(
+        importer=StubImporter(failing=frozenset({"c.png"}), dedup=frozenset({"a.JPG"})),
+        summarize_event=summarize,
+        workers=3,
+        progress=report,
+    ).execute(AlbumImportRequest(scope_id="scope", directory=str(album)))
+    assert (result.imported, result.deduplicated, len(result.failures)) == (1, 1, 1)
+    assert all(p.completed == p.imported + p.deduplicated + p.failed for p in observations)
+    assert [p.completed for p in observations] == sorted(p.completed for p in observations)
+    assert store.get("op").status == "running"  # route still has participants / insights to execute

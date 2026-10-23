@@ -199,6 +199,20 @@ export function retrievalChannelRows(item: unknown): RetrievalChannelRow[] {
  *
  * 第三个参数 `itemCount` 即 1.0 的 `activeRun.value?.item_count`。
  */
+/** Judge 终态计数与有效评分数是不同口径；兼容旧记录的阶段外层字段。 */
+export function judgeProgressLabel(phase: unknown): string {
+  const p = dict(phase);
+  const pr = dict(p.progress);
+  if (pr.judge_concurrency === 0) return "Judge 未配置";
+  const count = (value: unknown): string =>
+    typeof value === "number" && Number.isInteger(value) && value >= 0 ? String(value) : "?";
+  const completed = count(pr.judge_completed ?? p.judge_completed);
+  const total = count(pr.judge_total ?? p.judge_total ?? pr.total);
+  const skipped = typeof pr.judge_skipped === "number" && pr.judge_skipped > 0
+    ? ` · 跳过 ${pr.judge_skipped}` : "";
+  return `Judge 已结束 ${completed}/${total}${skipped}`;
+}
+
 export function phaseSummary(key: string, phase: unknown, itemCount: unknown = null): string {
   if (!phase) return "";
   const p = dict(phase);
@@ -223,8 +237,27 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     if (timings.summarize != null) parts.push(`总结 ${fmtSeconds(timings.summarize)}`);
     if (timings.stage != null) parts.push(`落库 ${fmtSeconds(timings.stage)}`);
     const breakdown = parts.length ? ` · ${parts.join(" · ")}` : "";
-    const total = timings.total != null ? fmtSeconds(timings.total) : fmtSeconds(phaseSeconds(phase, "upload_seconds"));
-    return `导入 ${p.accepted_count ?? 0}/${p.total_media ?? p.total_photos ?? "?"} 个媒体 · 失败 ${p.failed_count ?? 0} · 总计 ${total}${breakdown}`;
+    // Backend timings cover internal work and may exclude request waiting/queueing.
+    // Keep the measured phase wall clock authoritative and label the subtotal separately.
+    const total = fmtSeconds(phaseSeconds(phase) ?? phaseSeconds(phase, "upload_seconds"));
+    const backendTotal = timings.total != null ? ` · 后端计时 ${fmtSeconds(timings.total)}` : "";
+    // The synchronous import endpoint does not report media counts until it returns.
+    // Keep that interval visibly unknown instead of presenting missing values as zero.
+    const count = (value: unknown): string =>
+      typeof value === "number" && Number.isInteger(value) && value >= 0 ? String(value) : "?";
+    const observation = dict(dict(p.progress).observation);
+    if (p.status === "running" && Object.keys(observation).length) {
+      return `当前目录已处理 ${count(observation.completed)}/${count(observation.total)} 个媒体 · 新增 ${count(observation.imported)} · 去重 ${count(observation.deduplicated)} · 失败 ${count(observation.failed)} · 阶段墙钟 ${total}`;
+    }
+    if (typeof p.scanned_count === "number") {
+      const completed = typeof p.accepted_count === "number" && typeof p.deduplicated_count === "number" &&
+        typeof p.failed_count === "number" ? p.accepted_count + p.deduplicated_count + p.failed_count : null;
+      return `已处理 ${count(completed)}/${count(p.scanned_count)} 个媒体 · 新增 ${count(p.accepted_count)} · 去重 ${count(p.deduplicated_count)} · 失败 ${count(p.failed_count)} · 阶段墙钟 ${total}${backendTotal}${breakdown}`;
+    }
+    const accepted = count(p.accepted_count);
+    const totalMedia = count(p.total_media ?? p.total_photos);
+    const failed = count(p.failed_count);
+    return `导入 ${accepted}/${totalMedia} 个媒体 · 失败 ${failed} · 阶段墙钟 ${total}${backendTotal}${breakdown}`;
   }
   if (key === "pipeline_processing" && p.progress) {
     const progress = dict(p.progress);
@@ -235,7 +268,7 @@ export function phaseSummary(key: string, phase: unknown, itemCount: unknown = n
     if (progress && (dict(progress).completed != null || dict(progress).in_flight != null)) {
       const pr = dict(progress);
       const agentText = `Agent ${pr.agent_completed ?? pr.completed ?? 0}/${pr.agent_total ?? pr.total ?? "?"}`;
-      const judgeText = `Judge ${pr.judge_completed ?? 0}/${pr.judge_total ?? pr.total ?? "?"}`;
+      const judgeText = judgeProgressLabel(p);
       const concurrencyText =
         Number(pr.qa_concurrency) > 1 || Number(pr.judge_concurrency) > 1
           ? ` · 并发 Agent ${pr.qa_concurrency ?? "-"} / Judge ${pr.judge_concurrency ?? "-"}`

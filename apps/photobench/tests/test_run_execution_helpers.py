@@ -298,3 +298,14 @@ def test_summarize_progress_tolerates_the_shapes_2_0_actually_sends():
     assert summary["steps"] == 1
     assert summary["tools"] == {}
     assert summary["kinds"] == {"status": 2}
+
+
+def test_endpoint_identity_preserves_model_versions_and_refuses_ambiguous_selection():
+    from photobench.domain.runs.execution import model_identity
+
+    assert model_identity({"data": [{"id": "/models/Qwen3.5.gguf"}]})["display_name"] == "Qwen3.5"
+    assert model_identity({"data": [{"id": "Qwen3.5"}]})["display_name"] == "Qwen3.5"
+    payload = {"data": [{"id": "a"}, {"id": "b"}]}
+    assert model_identity(payload)["status"] == "unavailable"
+    assert model_identity(payload, "b")["raw_id"] == "b"
+    assert model_identity(payload, "missing")["status"] == "unavailable"

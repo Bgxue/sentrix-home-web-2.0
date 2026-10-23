@@ -58,7 +58,7 @@ describe("esc (:323)", () => {
 
 describe("modelName / albumName / qaName (:324-326)", () => {
   it("按优先级回退，末位是各自的固定兜底", () => {
-    expect(modelName({ model_profile: "p", model_name: "n" })).toBe("p");
+    expect(modelName({ model_profile: "p", model_name: "n" })).toBe("n");
     expect(modelName({ model_name: "n", profile: "pf" })).toBe("n");
     expect(modelName({ profile: "pf" })).toBe("pf");
     expect(modelName({})).toBe("unknown");
@@ -292,6 +292,10 @@ describe("phaseSeconds (:759-768)", () => {
     expect(phaseSeconds(null)).toBeNull();
     expect(phaseSeconds({})).toBeNull();
     expect(phaseSeconds({ total_seconds: "abc" })).toBeNull();
+    expect(phaseSeconds({ total_seconds: null })).toBeNull();
+    expect(phaseSeconds({ total_seconds: false })).toBeNull();
+    expect(phaseSeconds({ total_seconds: "" })).toBeNull();
+    expect(phaseSeconds({ total_seconds: -1 })).toBeNull();
   });
   it("正的 preferred 优先；0 也回 0（不是 null）", () => {
     expect(phaseSeconds({ total_seconds: 5 })).toBe(5);

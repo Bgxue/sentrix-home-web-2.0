@@ -77,6 +77,24 @@ describe("useQaBrowser · loadQaBrowser（1.0 App.vue:2779-2788）", () => {
   });
 });
 
+describe("useQaBrowser · 相册默认值", () => {
+  it("只装了 album3-14 时自动落到该相册及其第一个题集", () => {
+    const only14: ManifestSummary[] = [
+      {
+        album_id: "album3-14",
+        album_name: "album3 小子集",
+        face_count: 8,
+        photo_count: 14,
+        video_count: 0,
+        qa_sets: ["compact-10q", "behavior-6q"],
+      },
+    ];
+    const { result } = renderHook(() => useQaBrowser({ manifests: only14 }));
+    expect(result.current.qaBrowserAlbum).toBe("album3-14");
+    expect(result.current.qaBrowserSet).toBe("compact-10q");
+  });
+});
+
 describe("useQaBrowser · 派生值", () => {
   it("qaBrowserOptions 取自对应 album 的 qa_sets", () => {
     const { result } = renderHook(() => useQaBrowser({ manifests: MANIFESTS }));

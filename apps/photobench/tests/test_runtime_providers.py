@@ -20,7 +20,7 @@ from photobench.domain.runtime.ports import (
     RuntimeProviders,
     TelemetryProvider,
 )
-from photobench.infrastructure.runtime import providers
+from photobench.infrastructure.runtime import jetson_telemetry, providers
 from photobench.infrastructure.runtime.apple_telemetry import LocalAppleUnifiedTelemetryProvider
 from photobench.infrastructure.runtime.hardware import read_cpu_temperature_c
 from photobench.infrastructure.runtime.providers import (
@@ -40,6 +40,12 @@ from photobench.infrastructure.runtime.providers import (
 )
 
 MEMINFO = "MemTotal:       16384000 kB\nMemAvailable:    8192000 kB\n"
+
+
+@pytest.fixture(autouse=True)
+def _no_telemetry_services_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """单测默认验主机口径；设备上的 telemetry_services.json 不参与。"""
+    monkeypatch.setattr(providers, "_load_telemetry_services", lambda: None)
 
 
 @pytest.fixture
@@ -335,7 +341,7 @@ def test_host_nvidia_never_claims_every_gpu_process_is_the_model(
     provider = HostNvidiaTelemetryProvider(endpoint_url="http://127.0.0.1:8100/v1")
     result = provider.process_memory()
     assert result["status"] == "unavailable"
-    assert result["reason"] == "matching_model_process_not_found"
+    assert result["reason"] == "matching_gpu_process_not_found"
 
 
 def test_vllm_provider_separates_the_model_from_other_gpu_processes(
@@ -422,7 +428,35 @@ COMPUTE = [
 ]
 
 
-def test_attribution_sums_related_pss_plus_model_uma_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_ports_are_candidates_for_auxiliary_attribution() -> None:
+    assert providers._is_system_related_process(
+        {"identity": "python legacy_clip_sidecar.py", "listening_ports": ["8103"]}
+    )
+    assert providers._is_system_related_process(
+        {"identity": "python wemm_embedder_sidecar.py", "listening_ports": ["8102"]}
+    )
+
+
+def test_model_services_are_classified_for_auxiliary_split() -> None:
+    """llama-server/vLLM/嵌入侧车不是 Sentrix 周边，不能把模型内存算进紫线。"""
+    assert providers._is_model_service_process(
+        {"identity": "llama-server -m model.gguf", "listening_ports": []}
+    )
+    assert providers._is_model_service_process(
+        {"identity": "python -m vllm serve /model --port 8000", "listening_ports": []}
+    )
+    assert providers._is_model_service_process(
+        {"identity": "python freeret_sidecar.py", "listening_ports": ["8104"]}
+    )
+    assert providers._is_model_service_process(
+        {"identity": "python wemm_embedder_sidecar.py --port 8102", "listening_ports": []}
+    )
+    assert not providers._is_model_service_process(
+        {"identity": "python benchmark_orchestrator.py", "listening_ports": ["8771"]}
+    )
+
+
+def test_nvidia_attribution_keeps_pss_and_vram_separate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES])
     monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: 50.0, 200: 150.0}[pid])
     monkeypatch.setattr(
@@ -431,14 +465,125 @@ def test_attribution_sums_related_pss_plus_model_uma_extra(monkeypatch: pytest.M
     data = providers._augment_host_process_memory(
         {"root_pid": 200}, process_hint="vllm", model_pids={200}, compute_apps=COMPUTE
     )
-    assert data["model_process_system_memory_used_mib"] == 200.0
+    assert data["model_process_system_memory_used_mib"] == 150.0
     # 50（sentrix PSS）+ 150（模型 PSS）+ max(0, 200-200)（UMA 补偿）= 200
     assert data["benchmark_process_memory_used_mib"] == 200.0
-    assert data["benchmark_process_memory_scope"] == "all_related_pss_plus_model_uma_extra"
+    assert data["benchmark_process_memory_scope"] == "all_related_pss"
     assert data["sentrix_stack_pss_mib"] == 50.0
+    assert data["sentrix_product_pss_mib"] == 50.0
+    assert data["sentrix_auxiliary_model_pss_mib"] == 0.0
     # 只有落在「相关进程」集合里的 compute 进程才计入 GPU 归属：11 + 22 = 33，999 不算。
     assert data["benchmark_process_gpu_memory_mib"] == 33.0
     assert data["all_processes_memory_mib"] == 66.0
+
+
+def test_auxiliary_model_services_stay_in_sentrix_without_double_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主模型只排除一次；嵌入/辅助服务计入 Sentrix，但单独记一份。"""
+    rows = [
+        {
+            "pid": 100,
+            "process_name": "python",
+            "rss_mib": 100.0,
+            "listening_ports": ["8771"],
+            "identity": "python benchmark_orchestrator.py",
+        },
+        {
+            "pid": 200,
+            "process_name": "llama-server",
+            "rss_mib": 200.0,
+            "listening_ports": ["8100"],
+            "identity": "llama-server --port 8100",
+        },
+        {
+            "pid": 300,
+            "process_name": "python",
+            "rss_mib": 75.0,
+            "listening_ports": ["8104"],
+            "identity": "/home/asus/github/sentrix-home-web/freeret_sidecar.py --port 8104",
+        },
+    ]
+    monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in rows])
+    monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: 50.0, 200: 150.0, 300: 75.0}[pid])
+    monkeypatch.setattr(
+        providers, "_process_smaps_field_mib", lambda pid, field: {100: 100.0, 200: 200.0, 300: 100.0}[pid]
+    )
+    data = providers._augment_host_process_memory({"root_pid": 200}, model_pids={200}, compute_apps=[])
+    assert data["sentrix_stack_pss_mib"] == 125.0
+    assert data["sentrix_product_pss_mib"] == 50.0
+    assert data["sentrix_auxiliary_model_pss_mib"] == 75.0
+    assert data["sentrix_stack_pss_scope"] == "all_non_main_related_pss"
+
+
+def test_telemetry_services_scope_excludes_inactive_and_unrelated_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置了当前服务清单后，只算清单里的本机进程；旧栈/未启用方案不算。"""
+    rows = [
+        {
+            "pid": 100,
+            "process_name": "python",
+            "rss_mib": 100.0,
+            "listening_ports": ["8771"],
+            "identity": "photobench",
+        },
+        {
+            "pid": 200,
+            "process_name": "llama-server",
+            "rss_mib": 200.0,
+            "listening_ports": ["8100"],
+            "identity": "llama-server",
+        },
+        {
+            "pid": 300,
+            "process_name": "python",
+            "rss_mib": 75.0,
+            "listening_ports": ["8102"],
+            "identity": "wemm_embedder_sidecar",
+        },
+        {
+            "pid": 400,
+            "process_name": "python",
+            "rss_mib": 50.0,
+            "listening_ports": ["8103"],
+            "identity": "legacy_clip_sidecar",
+        },
+        {
+            "pid": 500,
+            "process_name": "python",
+            "rss_mib": 25.0,
+            "listening_ports": ["8773"],
+            "identity": "old photobench",
+        },
+    ]
+    scope = {
+        "main_model": {"local": True, "ports": [8100]},
+        "embedding": {
+            "mode": "unified_multimodal",
+            "profiles": {"unified_multimodal": {"local": True, "ports": [8102]}},
+        },
+        "product": [{"id": "photobench", "ports": [8771]}],
+    }
+    monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in rows])
+    monkeypatch.setattr(
+        providers,
+        "_process_pss_mib",
+        lambda pid: {100: 50.0, 200: 150.0, 300: 75.0, 400: 50.0, 500: 25.0}[pid],
+    )
+    monkeypatch.setattr(
+        providers,
+        "_process_smaps_field_mib",
+        lambda pid, field: {100: 100.0, 200: 200.0, 300: 100.0, 400: 100.0, 500: 100.0}[pid],
+    )
+    monkeypatch.setattr(providers, "_load_telemetry_services", lambda: scope)
+    data = providers._augment_host_process_memory({"root_pid": 200}, model_pids={200}, compute_apps=[])
+    assert data["sentrix_stack_pss_mib"] == 125.0
+    assert data["sentrix_product_pss_mib"] == 50.0
+    assert data["sentrix_auxiliary_model_pss_mib"] == 75.0
+    assert data["benchmark_processes"]  # product total 只来自 100/200/300
+    pids = {row["pid"] for row in data["benchmark_processes"]}
+    assert pids == {100, 200, 300}
 
 
 def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(
@@ -447,6 +592,9 @@ def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES[:2]])
     monkeypatch.setattr(providers, "_process_pss_mib", lambda pid: {100: None, 200: 150.0}[pid])
     monkeypatch.setattr(providers, "_process_smaps_field_mib", lambda pid, field: 100.0)
+    # 在真 Jetson 上 nvmap 账本可读时，缺失 PID 表示 0，不会走 VmRSS 残差；
+    # 这个用例验的是残差兜底，所以显式关掉账本。
+    monkeypatch.setattr(jetson_telemetry, "_nvmap_clients_mib", lambda: None)
     data = providers._augment_host_process_memory(
         {"root_pid": 200, "product_stack_memory_mib": 999.0},
         process_hint="llama-server",
@@ -455,12 +603,12 @@ def test_missing_pss_does_not_fall_back_to_rss_and_clears_stale_product_total(
         compute_apps=[],
     )
     # 传进来的旧产品总量必须先被清掉：留着它会被读成这一轮的测量值。
-    assert "product_stack_memory_mib" not in data
-    assert "benchmark_process_memory_used_mib" not in data
-    assert data["model_process_system_memory_used_mib"] == 200.0
+    assert data["product_stack_memory_mib"] is None
+    assert data["benchmark_process_memory_used_mib"] is None
+    assert data["model_process_system_memory_used_mib"] == 150.0
 
 
-def test_missing_model_smaps_rss_does_not_write_product_total(
+def test_nvidia_pss_does_not_require_jetson_smaps_rss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(providers, "_host_process_rows", lambda: [dict(row) for row in PROCESSES[:2]])
@@ -473,8 +621,8 @@ def test_missing_model_smaps_rss_does_not_write_product_total(
         model_pids={200},
         compute_apps=[],
     )
-    assert "product_stack_memory_mib" not in data
-    assert "benchmark_process_memory_used_mib" not in data
+    assert data["product_stack_memory_mib"] == 300.0
+    assert data["benchmark_process_memory_used_mib"] == 300.0
 
 
 def test_known_model_pids_win_over_the_generic_hint(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -30,8 +30,13 @@ export interface UseQaBrowserOptions {
 }
 
 export function useQaBrowser({ sentrixUrl = "", manifests = [] }: UseQaBrowserOptions = {}) {
-  const [qaBrowserAlbum, setQaBrowserAlbum] = useState("album3");
-  const [qaBrowserSet, setQaBrowserSet] = useState("full-album3-38q");
+  // 初始值从当前 manifests 里取：153 有 album3，就先选 album3；只有 album3-14 的
+  // 机器直接选 album3-14，避免先发一个必然 404 的请求。manifests 还没到时留空，
+  // 由下面的同步 effect 补。
+  const initialManifest =
+    manifests.find((manifest) => manifest.album_id === "album3") || manifests[0] || null;
+  const [qaBrowserAlbum, setQaBrowserAlbum] = useState(initialManifest?.album_id || "");
+  const [qaBrowserSet, setQaBrowserSet] = useState(initialManifest?.qa_sets?.[0] || "");
   const [qaBrowserItems, setQaBrowserItems] = useState<QaRow[]>([]);
   const [qaBrowserSearch, setQaBrowserSearch] = useState("");
   const [qaBrowserTag, setQaBrowserTag] = useState("");
@@ -46,6 +51,24 @@ export function useQaBrowser({ sentrixUrl = "", manifests = [] }: UseQaBrowserOp
       aliveRef.current = false;
     };
   }, []);
+
+  // 不同设备只装了不同相册：默认值不能再写死 album3/full-album3-38q。
+  // manifests 异步到达，或当前选择在新机器上不存在时，落到本机真实存在的第一个相册/题集。
+  useEffect(() => {
+    if (!manifests.length) return;
+    const selected = manifests.find((manifest) => manifest.album_id === qaBrowserAlbum);
+    if (!selected) {
+      const fallback = manifests.find((manifest) => manifest.album_id === "album3") || manifests[0]!;
+      setQaBrowserAlbum(fallback.album_id);
+      return;
+    }
+    const sets = selected.qa_sets || [];
+    if (sets.length && !sets.includes(qaBrowserSet)) {
+      setQaBrowserSet(sets[0]!);
+    } else if (!sets.length && qaBrowserSet) {
+      setQaBrowserSet("");
+    }
+  }, [manifests, qaBrowserAlbum, qaBrowserSet]);
 
   /** 1.0 `loadQaBrowser`（`:2779-2788`）。 */
   const loadQaBrowser = useCallback(async () => {

@@ -254,3 +254,47 @@ def test_normalize_helpers():
     assert normalize_model_base_url("http://x/v1/") == "http://x/v1"
     assert normalize_model_base_url("") == ""
     assert normalize_service_url("x:8500/") == "http://x:8500"
+
+
+def test_product_settings_persist_and_survive_old_client_save(config_root):
+    config = _service(config_root)
+    payload = {
+        "sentrix_url": "http://127.0.0.1:8291",
+        "judge_url": "http://judge/v1",
+        "judge_model": "j1",
+        "model_base_url": "http://127.0.0.1:8100/v1",
+        "product_settings": {
+            "deployment_profile": "mac",
+            "agent_wall_time_s": 600,
+            "face_providers": "CPUExecutionProvider",
+        },
+    }
+    expected = config.persist_runtime_connection(payload)["product_settings"]
+    del payload["product_settings"]
+    assert config.persist_runtime_connection(payload)["product_settings"] == expected
+    assert _service(config_root).public_runtime_connection_config()["product_settings"] == expected
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"deployment_profile": "typo"},
+        {"agent_wall_time_s": float("nan")},
+        {"chat_timeout_s": True},
+        {"face_providers": ""},
+        {"secret": "x"},
+    ],
+)
+def test_invalid_product_settings_never_replace_valid_config(config_root, settings):
+    config = _service(config_root)
+    before = (config_root / "runtime_connection.json").read_bytes()
+    with pytest.raises(InvalidRequestError):
+        config.persist_runtime_connection(
+            {
+                "sentrix_url": "http://local:8291",
+                "judge_url": "http://judge/v1",
+                "judge_model": "j1",
+                "product_settings": settings,
+            }
+        )
+    assert (config_root / "runtime_connection.json").read_bytes() == before

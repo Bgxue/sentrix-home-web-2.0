@@ -217,11 +217,13 @@ def test_jetson_gpu_stats_always_returns_one_uma_gpu_row(monkeypatch: pytest.Mon
 
     # 进程归属那一步会真的扫 /proc（要遍历每个进程的 fd）；这条用例只关心响应信封的
     # 形状，所以把它换成恒等函数——否则这条断言的速度取决于这台机器上有多少进程。
-    monkeypatch.setattr(jetson_module, "_augment_local_process_memory", lambda data, **_kw: dict(data or {}))
+    monkeypatch.setattr(
+        jetson_module,
+        "_augment_local_process_memory",
+        lambda data, **_kw: {**(data or {}), "root_pid": 4242, "process_memory_used_mib": 1234.5},
+    )
     provider = LocalJetsonLlamaCppTelemetryProvider(endpoint_url="http://127.0.0.1:8100")
     monkeypatch.setattr(provider, "_pid", lambda: 4242)
-    monkeypatch.setattr(provider, "_pss_mib", lambda _pid: 1234.5)
-    monkeypatch.setattr(provider, "_rss_mib", lambda _pid: 2000.0)
     monkeypatch.setattr(provider, "_llama_args", lambda _pid: {"cmdline": "llama-server --port 8100"})
     monkeypatch.setattr(provider, "_metrics", lambda: {})
     monkeypatch.setattr(

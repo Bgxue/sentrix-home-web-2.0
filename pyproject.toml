@@ -64,7 +64,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 # 两个 app 的测试都进默认收集：PhotoBench 的用例不能被「记得单独跑」这件事决定跑不跑。
 testpaths = ["apps/api/tests", "apps/photobench/tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+markers = [
+    "real_environment: requires real album data, model services or face weights; explicit integration gate",
+]
 
 [tool.coverage.run]
 # photobench.application 在 S9b-1 建出来了，按 sentrix 的口径加进覆盖率门禁

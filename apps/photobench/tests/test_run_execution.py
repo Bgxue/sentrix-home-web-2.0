@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +29,8 @@ from fakes_execution import (
 
 from photobench.application.deploy.service import SentrixModelSwitch
 from photobench.application.run_execution.service import RunExecution, RunRequest
+from photobench.application.run_execution.state import RunState
+from photobench.domain.runs.execution import RunCancelledError
 
 ALBUM = "album-x"
 QA_SET = "qa-1"
@@ -213,6 +218,114 @@ def _request(**overrides: Any) -> RunRequest:
     }
     base.update(overrides)
     return RunRequest(**base)
+
+
+@pytest.mark.parametrize("outcome", ["zero", "failed", "exception"])
+def test_judge_results_and_progress_are_published_while_an_agent_is_still_running(monkeypatch, outcome):
+    rows = [{"qa_id": "fast"}, {"qa_id": "slow"}]
+    execution, _, _, _, _ = _execution(albums=FakeAlbums(manifest=_manifest(), qa_rows=rows))
+    release = threading.Event()
+    published = threading.Event()
+    state = RunState({"scope_id": "s", "album_id": ALBUM})
+
+    def evaluate(row, *_):
+        if row["qa_id"] == "slow":
+            assert release.wait(5), "slow Agent was not released"
+        return {"qa_id": row["qa_id"], "execution_status": "completed"}
+
+    def judge_item(item, *_):
+        if outcome == "exception":
+            raise RuntimeError("external judge unavailable")
+        return {
+            **item,
+            "judge_status": "completed" if outcome == "zero" else "failed",
+            "judge": {"score": 0 if outcome == "zero" else None},
+        }
+
+    def persist(*_, **__):
+        with state.lock:
+            phase = state.data.get("phases", {}).get("qa_eval", {})
+            if phase.get("progress", {}).get("judge_completed") == 1:
+                published.set()
+
+    monkeypatch.setattr(execution, "_evaluate_one", evaluate)
+    monkeypatch.setattr(execution, "_judge", SimpleNamespace(judge_item=judge_item))
+    monkeypatch.setattr(state, "persist", persist)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution._phase_qa_eval, state, _request(qa_concurrency=2))
+        try:
+            assert published.wait(2), "Judge completion was withheld until all Agents finished"
+            with state.lock:
+                phase = state.data["phases"]["qa_eval"]
+                assert phase["judge_completed"] == phase["progress"]["judge_completed"] == 1
+                assert phase["progress"]["judge_total"] == 2
+                assert len(state.data["items"]) == 1
+                assert state.data["items"][0]["judge"]["score"] == (0 if outcome == "zero" else None)
+                assert state.data["items"][0]["judge_status"] == (
+                    "completed" if outcome == "zero" else "failed"
+                )
+                assert "agent_phase_finished_at" not in phase
+        finally:
+            release.set()
+        future.result(timeout=5)
+    assert state.data["phases"]["qa_eval"]["progress"]["judge_completed"] == 2
+
+
+def test_resume_judge_progress_counts_prior_terminal_results_and_new_skips(monkeypatch):
+    rows = [{"qa_id": key} for key in ("prior-zero", "prior-failed", "new-failed")]
+    execution, _, _, _, _ = _execution(albums=FakeAlbums(manifest=_manifest(), qa_rows=rows))
+    monkeypatch.setattr(
+        execution, "_judge", SimpleNamespace(judge_item=lambda *_: pytest.fail("skipped QA judged"))
+    )
+    monkeypatch.setattr(
+        execution,
+        "_evaluate_one",
+        lambda row, *_: {
+            "qa_id": row["qa_id"],
+            "execution_status": "failed",
+            "failed": True,
+            "error": "task failed",
+        },
+    )
+    prior = [
+        {
+            "qa_id": "prior-zero",
+            "execution_status": "completed",
+            "judge_status": "completed",
+            "judge": {"score": 0},
+        },
+        {
+            "qa_id": "prior-failed",
+            "execution_status": "completed",
+            "judge_status": "failed",
+            "judge": {"score": None},
+        },
+    ]
+    state = RunState({"scope_id": "s", "album_id": ALBUM})
+    execution._phase_qa_eval(state, _request(prior_items=prior))
+    phase = state.data["phases"]["qa_eval"]
+    assert phase["judge_completed"] == phase["progress"]["judge_completed"] == 2
+    assert phase["progress"]["judge_skipped"] == 1
+    assert phase["progress"]["judge_total"] == 3
+    assert len(state.data["items"]) == 3
+
+
+def test_cancelled_unscheduled_qa_is_not_reported_as_a_completed_agent_or_judge(monkeypatch):
+    execution, _, _, _, _ = _execution()
+
+    def cancelled(*_):
+        raise RunCancelledError("cancelled before starting")
+
+    monkeypatch.setattr(execution, "_evaluate_one", cancelled)
+    monkeypatch.setattr(
+        execution, "_judge", SimpleNamespace(judge_item=lambda *_: pytest.fail("cancelled QA judged"))
+    )
+    state = RunState({"scope_id": "s", "album_id": ALBUM})
+    execution._phase_qa_eval(state, _request())
+    progress = state.data["phases"]["qa_eval"]["progress"]
+    assert progress["agent_completed"] == progress["completed"] == progress["judge_completed"] == 0
+    assert progress["judge_skipped"] == 1
+    assert state.data["items"][0]["execution_status"] == "scheduled"
 
 
 def test_the_chain_runs_every_phase_in_order_and_completes():
@@ -819,6 +932,7 @@ def test_with_a_manager_the_model_is_stopped_then_started_then_probed():
     assert execution.inference.calls == [
         "chat",
         "chat",
+        "list_models",
         "chat_stream",
         "health",
         "max_concurrency",
@@ -940,11 +1054,13 @@ def test_sampling_writes_labelled_samples_and_is_stopped_at_the_end():
 
     sampler_module.GpuSampler.start = start_and_sample  # type: ignore[method-assign]
     try:
-        execution.execute(_request())
+        result = execution.execute(_request())
     finally:
         sampler_module.GpuSampler.start = original  # type: ignore[method-assign]
     assert writer.resets == ["run_test"]
-    assert len(writer.gpu_samples) == 1
+    assert len(writer.gpu_samples) == 4
+    assert {s["phase"] for _, s in writer.gpu_samples} >= {"photo_import", "pipeline_processing", "qa_eval"}
+    assert result["phases"]["gpu_metrics"]["samples_count"] == len(writer.gpu_samples)
     _run_id, sample = writer.gpu_samples[0]
     assert sample["temperature_c"] == 60.0
     assert sample["model_process_memory_used_mib"] == 1234
@@ -954,6 +1070,72 @@ def test_sampling_writes_labelled_samples_and_is_stopped_at_the_end():
     assert sample["phase"] == "unassigned"
     assert sample["phase_label"] == "未分配阶段"
     assert telemetry.calls.count("gpu_stats") >= 2  # 采样一次 + 起止硬件快照
+
+
+def test_real_execution_constructor_publishes_metrics_before_qa_finishes(monkeypatch):
+    """A late-bound callback must reach the sampler built by execute(), not an empty holder."""
+    import photobench.application.run_execution.service as service
+
+    execution, _client, _writer, _lifecycle, _albums = _execution()
+    entered, published, release = threading.Event(), threading.Event(), threading.Event()
+    original = execution._publish_partial_gpu_metrics
+
+    def publish(state, metrics):
+        original(state, metrics)
+        if entered.is_set() and (state.get("phases") or {}).get("gpu_metrics", {}).get("status") == "running":
+            published.set()
+
+    def qa(state, request):
+        entered.set()
+        assert release.wait(3)
+        state.phase_done("qa_eval", {})
+
+    monkeypatch.setattr(service, "GPU_METRICS_PUBLISH_SECONDS", 0.01)
+    monkeypatch.setattr(execution, "_publish_partial_gpu_metrics", publish)
+    monkeypatch.setattr(execution, "_phase_qa_eval", qa)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution.execute, _request())
+        try:
+            assert entered.wait(3)
+            assert published.wait(3), "metrics must be published while the run is active"
+            assert not future.done()
+        finally:
+            release.set()
+        result = future.result(timeout=3)
+    assert result["phases"]["gpu_metrics"]["status"] == "done"
+    assert result["phases"]["gpu_metrics"]["sampling_integrity"]["stop_pending_threads"] == []
+    assert result["telemetry_live"]["status"] == "stopped"
+
+
+@pytest.mark.parametrize("status", ["done", "skipped"])
+def test_partial_publication_does_not_replace_final_metrics(status):
+    from photobench.application.run_execution.state import RunState
+
+    execution, *_ = _execution()
+    state = RunState({"phases": {"gpu_metrics": {"status": status, "samples_count": 7}}}, run_id="run_test")
+    execution._publish_partial_gpu_metrics(state, {"samples_count": 2})
+    assert state.get("phases")["gpu_metrics"] == {"status": status, "samples_count": 7}
+
+
+def test_cancelled_run_keeps_partial_telemetry_and_persistence_failure(monkeypatch):
+    execution, _client, writer, *_ = _execution()
+
+    def fail_write(*args):
+        raise OSError("disk full")
+
+    def cancel(state, request):
+        raise RunCancelledError("user requested stop")
+
+    monkeypatch.setattr(writer, "append_gpu_sample", fail_write)
+    monkeypatch.setattr(execution, "_phase_qa_eval", cancel)
+    result = execution.execute(_request())
+    assert result["status"] == "cancelled"
+    metrics = result["phases"]["gpu_metrics"]
+    assert metrics["partial"] is True
+    assert metrics["status"] == "partial"
+    assert metrics["collection_end_reason"] == "cancelled"
+    assert metrics["sampling_integrity"]["callback_failures"] > 0
+    assert "disk full" in metrics["sampling_integrity"]["last_callback_failure"]
 
 
 def test_a_sample_carries_the_label_of_the_phase_that_was_running():
@@ -978,6 +1160,53 @@ def test_sampling_can_be_disabled_for_an_environment_without_telemetry(monkeypat
     execution.execute(_request())
     assert writer.resets == []
     assert writer.gpu_samples == []
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_terminal_status_is_not_published_until_final_hardware_observation_finishes(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+):
+    """读侧看到终态时，采样/末尾观测和scope收尾必须已经完成。"""
+    execution, _client, writer, _lifecycle, _albums = _execution()
+    entered, release = threading.Event(), threading.Event()
+    snapshot = execution._hardware_snapshot
+    calls = 0
+
+    def blocked_final_snapshot():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+            assert release.wait(5), "test must release final observation"
+        return snapshot()
+
+    monkeypatch.setattr(execution, "_hardware_snapshot", blocked_final_snapshot)
+    if outcome != "completed":
+
+        def fail_phase(*_args):
+            if outcome == "cancelled":
+                raise RunCancelledError("cancelled during aggregate")
+            raise RuntimeError("aggregate failed")
+
+        monkeypatch.setattr(execution, "_phase_aggregate", fail_phase)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution.execute, _request())
+        try:
+            assert entered.wait(5)
+            state = execution.state
+            assert state is not None
+            state.persist(wait=True)
+            assert state.get("status") in {"running", "cancelling"}
+            assert state.get("finished_at") is None
+            assert writer.last_state()["status"] in {"running", "cancelling"}
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+    assert result["status"] == outcome
+    assert result["finished_at"]
+    assert result["current_phase"] is None
+    assert result["hardware_snapshots"]["end"] is not None
+    assert writer.last_state() == result
 
 
 def test_hardware_snapshots_are_written_at_both_ends():
@@ -1119,3 +1348,130 @@ def test_a_full_run_still_records_mode_and_scope_source():
     assert state["scope_source"] == "created_by_import"
     assert state["existing_scope_id"] is None
     assert "photo_import" in state["phases"]
+
+
+def test_reuse_synchronizes_product_without_touching_model_lifecycle():
+    process = FakeSentrixProcess(current="http://127.0.0.1:8100/v1")
+    execution, _client, _writer, lifecycle, _albums = _execution(sentrix_switch=SentrixModelSwitch(process))
+    state = execution.execute(
+        _request(
+            mode="reuse",
+            scope_id="existing",
+            model_base_url="http://127.0.0.1:8106/v1",
+            manager_url="http://manager",
+        )
+    )
+    assert process.restarts == ["http://127.0.0.1:8106/v1"]
+    assert state["phases"]["model_deploy"]["gamma_sync"]["ok"] is True
+    assert not any(name in {"start", "stop"} for name, _ in lifecycle.calls)
+
+
+def test_build_does_not_read_qa_or_construct_judge(monkeypatch):
+    execution, client, *_ = _execution()
+    monkeypatch.setattr(execution.albums, "qa_rows", lambda *_: pytest.fail("build read QA"))
+    monkeypatch.setattr(execution, "_build_judge", lambda *_: pytest.fail("build created Judge"))
+    state = execution.execute(_request(mode="build", qa_set=""))
+    assert state["status"] == "completed"
+    assert state["qa_count"] == 0 and state["items"] == []
+    assert "qa_eval" not in state["phases"]
+    assert state["run_valid"] is None
+    assert state["summary"]["run_valid"] is None
+    assert not any(call[0] == "start_turn" for call in client.calls)
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["vlm_base_url", "legacy_clip_url", "agent_wall_time_s", "build_revision"]
+)
+def test_frozen_configuration_is_verified_before_import_or_qa(mismatch):
+    import json
+
+    from photobench.domain.runtime.ports import RunRuntimeSnapshot
+
+    execution, client, *_ = _execution()
+    connection = {
+        "model_base_url": "http://local:8100/v1",
+        "sentrix_url": "http://local:8291",
+        "embedding": {"mode": "split_text_image", "image_url": "http://local:8103"},
+        "product_settings": {"agent_wall_time_s": 600},
+        "required_build_revision": "fixed",
+    }
+    effective = {
+        "vlm_base_url": "http://local:8100/v1",
+        "embedding_scheme": "legacy",
+        "legacy_clip_url": "http://local:8103",
+        "agent_wall_time_s": 600,
+    }
+    observed = {"runtime_configuration": effective, "build_revision": "fixed"}
+    if mismatch == "build_revision":
+        observed[mismatch] = "old"
+    else:
+        effective[mismatch] = "wrong"
+    execution.runtime_snapshot = RunRuntimeSnapshot(json.dumps(connection), "fixed")
+    execution.client.runtime_diagnostics = observed
+    execution.sentrix_switch = SentrixModelSwitch(FakeSentrixProcess(current="http://local:8100/v1"))
+    state = execution.execute(_request(model_base_url="http://local:8100/v1"))
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "model_deploy"
+    assert mismatch in state["fatal_error"]
+    assert "import_album" not in execution.client.call_names()
+
+
+def test_cancel_before_execute_is_retained_and_makes_no_product_calls():
+    execution, client, *_ = _execution()
+    execution.cancel(source="queued_cancel")
+    state = execution.execute(_request())
+    assert state["status"] == "cancelled"
+    assert not client.calls
+
+
+@pytest.mark.parametrize("failure", ["manifest", "qa_rows", "integrity"])
+def test_initialization_failure_persists_a_terminal_run(failure, monkeypatch):
+    execution, client, writer, _, albums = _execution()
+
+    def broken(*args, **kwargs):
+        raise ValueError(f"invalid input: {failure}")
+
+    monkeypatch.setattr(albums, failure, broken)
+    state = execution.execute(_request(run_id="bad-input"))
+    assert state["run_id"] == "bad-input"
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "initialization"
+    assert state["fatal_error"] == f"invalid input: {failure}"
+    assert state["finished_at"]
+    assert client.calls == []
+    assert writer.snapshots[-1][1]["status"] == "failed"
+
+
+def test_late_sample_callback_does_not_reopen_or_append_to_a_finished_run():
+    from photobench.application.run_execution.state import RunState
+
+    execution, _client, writer, *_ = _execution()
+    state = RunState({"finished_at": "2026-10-22T00:00:00", "status": "cancelled"}, run_id="run_test")
+    execution._sample_writer(state)({"temperature_c": 50})
+    assert writer.gpu_samples == []
+    assert "telemetry_live" not in state.data
+
+
+def test_import_final_scan_count_uses_product_outcomes_not_manifest_expectation():
+    albums = FakeAlbums(
+        manifest=_manifest(),
+        qa_rows=_rows(),
+        files={"faces/1.jpg": b"J"},
+        directory_entries={"photos": 5},
+    )
+    client = FakeSentrixClient(
+        asset_polls=_polls(_assets()),
+        import_result={
+            "imported": 1,
+            "deduplicated": 1,
+            "events": 1,
+            "summarized": 1,
+            "failures": [{"file_name": "extra.png", "reason": "bad encoding"}],
+        },
+    )
+    execution, *_ = _execution(albums=albums, client=client)
+    phase = execution.execute(_request(mode="build"))["phases"]["photo_import"]
+    assert phase["total_media"] == 2  # immutable manifest expectation remains traceable
+    assert phase["scanned_count"] == 3  # five entries, three supported media actually settled
+    assert (phase["accepted_count"], phase["deduplicated_count"], phase["failed_count"]) == (1, 1, 1)
+    assert phase["directories"][0]["progress"]["request_status"] == "returned"

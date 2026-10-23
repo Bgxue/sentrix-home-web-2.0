@@ -38,7 +38,7 @@ afterEach(() => {
 describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
   it("run 详情**串行**在前：详情失败时 keyframe / memory 根本不发", async () => {
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/runs/r2") throw new Error("detail boom");
+      if (path === "/runs/r2?include_history=false") throw new Error("detail boom");
       throw new Error(`不该请求：${path}`);
     });
     const { result, ref } = mount("r1");
@@ -50,12 +50,12 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
 
     // 只有一条请求：串行闸门挡住了后面的并发集。若改成 Promise.all 全并发，这里会是 3 条。
     expect(apiMock).toHaveBeenCalledTimes(1);
-    expect(apiMock.mock.calls[0]?.[0]).toBe("/runs/r2");
+    expect(apiMock.mock.calls[0]?.[0]).toBe("/runs/r2?include_history=false");
   });
 
   it("keyframe 失败**不影响** memory（两者是 Promise.all，各自吞异常）", async () => {
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/runs/r1") return runDetail();
+      if (path === "/runs/r1?include_history=false") return runDetail();
       if (path.endsWith("/keyframe-analysis")) throw new Error("kf boom");
       if (path.endsWith("/memory-effectiveness")) return { status: "ready", levels: [] };
       throw new Error(`不该请求：${path}`);
@@ -63,6 +63,7 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
     const { result } = mount("r1");
 
     await act(async () => {
+      result.current.setAnalysisOpen(true);
       await result.current.loadActiveRun();
     });
 
@@ -72,7 +73,9 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
     expect(result.current.memoryEffectiveness).toEqual({ status: "ready", levels: [] });
     // 并发集确实都发了。
     expect(apiMock.mock.calls.map((call) => call[0])).toEqual([
-      "/runs/r1",
+      "/runs/r1/keyframe-analysis",
+      "/runs/r1/memory-effectiveness",
+      "/runs/r1?include_history=false",
       "/runs/r1/keyframe-analysis",
       "/runs/r1/memory-effectiveness",
     ]);
@@ -80,7 +83,7 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
 
   it("memory 失败也不影响 keyframe（反方向，且失败落成 unavailable 包体）", async () => {
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/runs/r1") return runDetail();
+      if (path === "/runs/r1?include_history=false") return runDetail();
       if (path.endsWith("/keyframe-analysis")) return { status: "ready" };
       if (path.endsWith("/memory-effectiveness")) throw new Error("mem boom");
       throw new Error(`不该请求：${path}`);
@@ -88,6 +91,7 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
     const { result } = mount("r1");
 
     await act(async () => {
+      result.current.setAnalysisOpen(true);
       await result.current.loadActiveRun();
     });
 
@@ -104,12 +108,12 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
     await act(async () => {
       await result.current.loadActiveRun();
     });
-    expect(apiMock.mock.calls[0]?.[1]).toEqual({ timeoutMs: 60000 });
+    expect(apiMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ timeoutMs: 60000 }));
   });
 
   it("resetPage 串行拉 reviews 并填充 reviewDrafts", async () => {
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/runs/r1") return runDetail();
+      if (path === "/runs/r1?include_history=false") return runDetail();
       if (path === "/runs/r1/reviews") return { reviews: { q1: { verdict: "correct" } } };
       if (path.endsWith("/keyframe-analysis")) return {};
       if (path.endsWith("/memory-effectiveness")) return {};
@@ -130,7 +134,7 @@ describe("loadActiveRun 的并发关系（1.0 :2310-2332）", () => {
 describe("resetQaState / loadQaPage 接线（1.0 :2322-2331）", () => {
   function mountWithQa() {
     apiMock.mockImplementation(async (path: string) => {
-      if (path === "/runs/r1") return runDetail();
+      if (path === "/runs/r1?include_history=false") return runDetail();
       if (path === "/runs/r1/reviews") return { reviews: {} };
       if (path.endsWith("/keyframe-analysis")) return {};
       if (path.endsWith("/memory-effectiveness")) return {};
@@ -306,4 +310,55 @@ describe("reviewFor / saveReviews（1.0 :2333-2345）", () => {
       reviews: { q1: { verdict: "correct", note: "" } },
     });
   });
+});
+
+it("普通轮询不触发分析；完整遥测只能显式请求", async () => {
+  apiMock.mockResolvedValue(runDetail());
+  const { result } = mount("r1");
+  await act(async () => { await result.current.loadActiveRun(); });
+  expect(apiMock.mock.calls.map(([path]) => path)).toEqual(["/runs/r1?include_history=false"]);
+  apiMock.mockClear();
+  await act(async () => { await result.current.loadActiveRun({ includeHistory: true }); });
+  expect(apiMock.mock.calls.map(([path]) => path)).toEqual(["/runs/r1?include_history=true"]);
+});
+
+it("后发详情覆盖先发详情，旧请求即使晚返回也不能改回页面", async () => {
+  let finishFirst!: (value: Run) => void;
+  apiMock.mockImplementationOnce(() => new Promise<Run>((resolve) => { finishFirst = resolve; }))
+    .mockResolvedValueOnce(runDetail({ status: "completed" }));
+  const { result } = mount("r1");
+  let first!: Promise<void>;
+  await act(async () => {
+    first = result.current.loadActiveRun();
+    await result.current.loadActiveRun();
+  });
+  await act(async () => {
+    finishFirst(runDetail({ status: "running" }));
+    await first;
+  });
+  expect(result.current.activeRun?.status).toBe("completed");
+});
+
+it("普通轮询不取消正在读取的整轮曲线，同一版本读完后保留曲线", async () => {
+  let finish!: (value: Run) => void;
+  apiMock.mockImplementationOnce(() => new Promise<Run>((resolve) => { finish = resolve; }));
+  const { result } = mount("r1");
+  let loading!: Promise<void>;
+  await act(async () => {
+    loading = result.current.loadActiveRun({ includeHistory: true });
+    await result.current.loadActiveRun();
+  });
+  expect(apiMock).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    finish(runDetail({ read_revision: "one", history_mode: "full", telemetry_live: { samples_count: 200 } }));
+    await loading;
+  });
+  apiMock.mockResolvedValue(runDetail({ read_revision: "one", history_mode: "checkpoint", telemetry_live: { samples_count: 20 } }));
+  await act(async () => { await result.current.loadActiveRun(); });
+  expect(result.current.activeRun?.history_mode).toBe("full");
+  expect(result.current.activeRun?.telemetry_live?.samples_count).toBe(200);
+  apiMock.mockResolvedValue(runDetail({ read_revision: "two", history_mode: "checkpoint", telemetry_live: { samples_count: 21 } }));
+  await act(async () => { await result.current.loadActiveRun(); });
+  expect(result.current.activeRun?.history_mode).toBe("checkpoint");
+  expect(result.current.activeRun?.telemetry_live?.samples_count).toBe(21);
 });

@@ -623,6 +623,7 @@ def real_photos(limit: int) -> list[tuple[str, Path]]:
     return photos
 
 
+@pytest.mark.real_environment
 def test_real_photos_yield_buffalo_embeddings(real_faces: list[tuple[str, list[Any]]]) -> None:
     """真权重下的形状：每一张脸都是 512 维、都标着 buffalo_l。
 
@@ -639,6 +640,7 @@ def test_real_photos_yield_buffalo_embeddings(real_faces: list[tuple[str, list[A
             assert face.validity in {"verified", "uncertain"}
 
 
+@pytest.mark.real_environment
 def test_scrfd_landmarks_are_what_lets_a_real_face_be_verified(
     real_faces: list[tuple[str, list[Any]]],
 ) -> None:

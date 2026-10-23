@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -74,6 +75,10 @@ _CHANNEL_CLOSE = "<channel|>"
 # 断在 **5683 个字符**（参数是 ASCII 为主的 JSON，约 1500–1700 token）——**正好卡在 1501
 # 上**。这是那批失败的直接成因。
 MAX_ANSWER_TOKENS = 2048
+# 估算器是字符数 × 系数，和端点真实 tokenizer 会有 1~几十 token 的漂移。窗口
+# 恰好 4096 时，2049 input + 2048 output 只差 1 token 也会被 vLLM 400 拒掉；
+# 留一段固定余量，宁可少生成，也不要把整轮打成 model_error。
+CONTEXT_SAFETY_TOKENS = 128
 
 # 无论上下文多满都必须留下的最小生成量。**它不是 64。**
 # 一次工具调用的 JSON（工具名 + 一到四个参数 + ``selected_image_handles`` 数组）写不完
@@ -237,6 +242,29 @@ def _read_tool_calls(raw: object) -> tuple[ToolCall, ...]:
     return tuple(calls)
 
 
+def _tool_parse_facts(raw: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(raw, list):
+        return ()
+    facts: list[Mapping[str, Any]] = []
+    for index, item in enumerate(raw):
+        function = item.get("function") if isinstance(item, dict) else None
+        arguments = function.get("arguments") if isinstance(function, dict) else None
+        valid = False
+        if isinstance(arguments, str):
+            with contextlib.suppress(ValueError):
+                valid = isinstance(json.loads(arguments), dict)
+        elif isinstance(arguments, dict):
+            valid = True
+        facts.append(
+            {
+                "index": index,
+                "json_object_valid": valid,
+                "envelope_valid": isinstance(function, dict) and bool(function.get("name")),
+            }
+        )
+    return tuple(facts)
+
+
 class OpenAIChatModel:
     """同步 HTTP 客户端。2.0 不管理 8100 的进程，只连它。
 
@@ -327,6 +355,7 @@ class OpenAIChatModel:
             thought=thought,
             tool_calls=_read_tool_calls(message.get("tool_calls")),
             finish_reason=str(choice.get("finish_reason") or ""),
+            tool_argument_parse_facts=_tool_parse_facts(message.get("tool_calls")),
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
         )
@@ -407,5 +436,7 @@ class OpenAIChatModel:
         现在剩余量不足 ``MIN_USABLE_OUTPUT_TOKENS`` 时**不发**，由 ``_post`` 抛
         ``PromptTooLongError``，调用方压缩历史再试。见 ``ports.PromptTooLongError``。
         """
-        available = self._context_tokens - self.estimate_prompt_tokens(messages, tools)
+        available = (
+            self._context_tokens - self.estimate_prompt_tokens(messages, tools) - CONTEXT_SAFETY_TOKENS
+        )
         return min(MAX_ANSWER_TOKENS, available)

@@ -35,22 +35,24 @@ import json
 import mimetypes
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 import httpx
 
+from photobench.domain.errors import RequestOutcomeUnknownError
 from photobench.domain.http.ports import HttpStream
 
-_RETRIES = 3
-_RETRY_BACKOFF_S = 0.2
 _RETRYABLE = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
     httpx.ReadError,
     httpx.WriteError,
     httpx.RemoteProtocolError,
+    httpx.ReadTimeout,
 )
+_RETRIES = 3
+_RETRY_BACKOFF_S = 0.2
 
 
 def build_multipart(fields: Mapping[str, str], files: Sequence[tuple[str, str, bytes]]) -> tuple[bytes, str]:
@@ -105,11 +107,20 @@ class HttpxJsonClient:
     ``urlopen`` 每次新建连接；这不改变任何返回值，只是少几次握手。
     """
 
-    def __init__(self, client: httpx.Client | None = None) -> None:
-        # **不保留 keep-alive 连接。** 2026-10-21 的 158 全流程里 131/487 题以
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        *,
+        retry_connections: bool = True,
+        keep_alive: bool = False,
+        sleep: Callable[[float], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        # **默认不保留 keep-alive 连接。** 2026-10-21 的 158 全流程里 131/487 题以
         # ``Server disconnected without sending a response`` / ``Bad file descriptor``
         # 失败：进程级 ``httpx.Client`` 复用了 uvicorn 已关闭的连接（默认 keep-alive 5s），
         # 而长回合让连接大段空闲。本机回环上每次重新握手几乎无成本，换掉这个失败面。
+        # 调用方仍可显式传 keep_alive=True 复用连接。
         self._client = (
             client
             if client is not None
@@ -119,11 +130,48 @@ class HttpxJsonClient:
                 timeout=120,
                 limits=httpx.Limits(
                     max_connections=32,
-                    max_keepalive_connections=0,
-                    keepalive_expiry=0.0,
+                    max_keepalive_connections=20 if keep_alive else 0,
+                    keepalive_expiry=5.0 if keep_alive else 0.0,
                 ),
             )
         )
+        self._retry_connections = retry_connections
+        self._sleep = sleep or time.sleep
+        self._clock = clock
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: int = 120,
+    ) -> httpx.Response:
+        """Only connection establishment failures are safe to retry for POST."""
+        deadline = self._clock() + timeout
+        for attempt in range(_RETRIES):
+            budget = timeout if attempt == 0 else deadline - self._clock()
+            try:
+                return self._client.request(method, url, content=content, headers=headers, timeout=budget)
+            except _RETRYABLE as exc:
+                safe = method.upper() in {"GET", "HEAD"} or isinstance(
+                    exc, (httpx.ConnectError, httpx.ConnectTimeout)
+                )
+                if self._retry_connections and not safe:
+                    raise RequestOutcomeUnknownError(
+                        method=method, cause_type=type(exc).__name__, attempts=attempt + 1
+                    ) from exc
+                remaining = deadline - self._clock()
+                if (
+                    not self._retry_connections
+                    or not safe
+                    or attempt == _RETRIES - 1
+                    or remaining <= _RETRY_BACKOFF_S * (attempt + 1)
+                ):
+                    raise
+                self._sleep(_RETRY_BACKOFF_S * (attempt + 1))
+        raise AssertionError("bounded retry exhausted")
 
     def request_json(
         self,
@@ -136,22 +184,9 @@ class HttpxJsonClient:
         content = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
         headers = {"Content-Type": "application/json"}
         headers.update(extra_headers or {})
-        # **连接错误重试。** 只重试「连接没建立/被对端提前关闭」这一类；业务 4xx/5xx
-        # 与读超时不重试（后者对 POST 可能已经处理过，重试会制造重复回合）。三次是
-        # 经验值：换连接后第一次就能恢复，剩下的只覆盖对端刚好在重启的窗口。
-        for attempt in range(_RETRIES):
-            try:
-                response = self._client.request(
-                    method, url, content=content, headers=headers, timeout=timeout
-                )
-                break
-            except _RETRYABLE:
-                if attempt == _RETRIES - 1:
-                    raise
-                time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
-        else:  # pragma: no cover - 上面的 raise/break 已覆盖
-            raise RuntimeError("unreachable")
+        # 连接错误重试统一由 _request 处理；POST 的不确定结果由 RequestOutcomeUnknownError 表达。
         try:
+            response = self._request(method, url, content=content, headers=headers, timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             response = exc.response
@@ -163,7 +198,7 @@ class HttpxJsonClient:
     def request_bytes(self, url: str, timeout: int = 120) -> bytes:
         """1.0 ``:799``。**非 2xx 不做文案转换**——1.0 这一段没有 except，``HTTPError``
         原样冒出去；这里保持同一分工，让 ``raise_for_status`` 的异常原样冒。"""
-        response = self._client.get(url, timeout=timeout)
+        response = self._request("GET", url, timeout=timeout)
         response.raise_for_status()
         return response.content
 
@@ -187,8 +222,8 @@ class HttpxJsonClient:
         """
         body, content_type = build_multipart(fields, files)
         try:
-            response = self._client.post(
-                url, content=body, headers={"Content-Type": content_type}, timeout=timeout
+            response = self._request(
+                "POST", url, content=body, headers={"Content-Type": content_type}, timeout=timeout
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

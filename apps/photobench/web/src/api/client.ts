@@ -43,6 +43,10 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
   let lastError: unknown;
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     const controller = new AbortController();
+    const external = requestOptions.signal;
+    if (external?.aborted) throw new DOMException("请求已取消", "AbortError");
+    const cancel = () => controller.abort();
+    external?.addEventListener("abort", cancel, { once: true });
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${BASE}${path}`, {
@@ -66,6 +70,7 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
       }
       return data as T;
     } catch (requestError) {
+      if (external?.aborted) throw new DOMException("请求已取消", "AbortError");
       lastError = requestError;
       const candidate = requestError as RequestError;
       const retryable =
@@ -76,6 +81,7 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
       await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
     } finally {
       window.clearTimeout(timer);
+      external?.removeEventListener("abort", cancel);
     }
   }
   const failure = lastError as RequestError | undefined;

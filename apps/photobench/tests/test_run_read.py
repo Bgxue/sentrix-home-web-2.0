@@ -8,6 +8,8 @@ HTTP 走 ``FakeJsonHttpClient``，所以用例不依赖任何服务。
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -170,6 +172,80 @@ def test_get_run_drops_items_but_keeps_the_count_and_a_recomputed_summary(result
     assert run["item_count"] == 2
     assert run["summary"]["answer_quality_mean"] == 1.0
     assert run["summary"]["judge_distribution"] == {"0": 1, "1": 0, "2": 1}
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_concurrent_run_details_share_one_observation_then_read_fresh_state(results: Path, fail_first: bool):
+    """并发详情不能按 HTTP worker 数重复解析遥测；异常也须唤醒所有读者。"""
+    entered = threading.Event()
+    release = threading.Event()
+    barrier = threading.Barrier(8)
+    calls_lock = threading.Lock()
+    calls = []
+    _write(results, "run-b", _state("run-b", status="running", telemetry_live={}))
+
+    class SlowStore(FileRunStore):
+        def read_gpu_sample_lines(self, run_id: str) -> list[str]:
+            with calls_lock:
+                calls.append(run_id)
+            entered.set()
+            assert release.wait(3), "reader was not released"
+            if fail_first:
+                raise ValueError("observed storage failure")
+            return super().read_gpu_sample_lines(run_id)
+
+    store = SlowStore(results)
+    read = ReadRuns(store, RunIndex(), _NoQaMetadata(), FakeJsonHttpClient(), lambda: "http://local")
+
+    def request():
+        barrier.wait(timeout=3)
+        return read.get_run("run-b")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(request) for _ in range(8)]
+        try:
+            assert entered.wait(3)
+            # The blocked storage read gives all eight simultaneous clients time
+            # to reach it. No result or error can complete before release.
+            assert not threading.Event().wait(0.2)
+            assert calls == ["run-b"]
+        finally:
+            release.set()
+        for future in futures:
+            if fail_first:
+                with pytest.raises(ValueError, match="observed storage failure"):
+                    future.result(timeout=3)
+            else:
+                assert future.result(timeout=3)["status"] == "running"
+    fail_first = False
+    _write(results, "run-b", _state("run-b", status="completed", qa_count=3, telemetry_live={}))
+    fresh = read.get_run("run-b")
+    assert fresh["status"] == "completed" and fresh["qa_count"] == 3
+    assert calls == ["run-b", "run-b"]
+
+
+def test_slow_run_detail_does_not_block_another_run(results: Path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowStore(FileRunStore):
+        def load_state(self, run_id: str) -> dict:
+            if run_id == "run-b":
+                entered.set()
+                assert release.wait(3)
+            return super().load_state(run_id)
+
+    read = ReadRuns(
+        SlowStore(results), RunIndex(), _NoQaMetadata(), FakeJsonHttpClient(), lambda: "http://local"
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(read.get_run, "run-b")
+        try:
+            assert entered.wait(3)
+            assert pool.submit(read.get_run, "run-a").result(timeout=1)["run_id"] == "run-a"
+        finally:
+            release.set()
+        assert first.result(timeout=3)["run_id"] == "run-b"
 
 
 def test_get_run_merges_the_gpu_sample_history(results: Path):

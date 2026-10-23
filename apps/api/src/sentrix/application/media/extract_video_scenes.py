@@ -32,7 +32,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sentrix.domain.media.models import Asset, AssetStatus, MediaType
-from sentrix.domain.media.ports import AssetRepository, VideoKeyframeExtractor, VideoRepository
+from sentrix.domain.media.ports import (
+    AssetRepository,
+    VideoKeyframeExtractor,
+    VideoRepository,
+    VideoScenePlanner,
+)
 from sentrix.domain.media.scenes import KEYFRAME_DERIVED_KIND, SceneWindow, plan_scenes
 from sentrix.domain.memories.events import EventRecord
 from sentrix.domain.memories.ports import EventRepository
@@ -87,7 +92,7 @@ class ExtractVideoScenes:
         # 这一层要的是「把一张已落库的图片走完整条链」，不是导入用例本身
         # （它还要负责去重、落盘、探测）。第二参是 ``forced_event_id``。
         process_image: Callable[[Asset, str], object],
-        scene_planner: Callable[[Path, str, float], tuple[SceneWindow, ...]] | None = None,
+        scene_planner: VideoScenePlanner | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._assets = assets

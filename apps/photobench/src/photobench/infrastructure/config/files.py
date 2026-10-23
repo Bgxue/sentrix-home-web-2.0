@@ -16,6 +16,15 @@ from pathlib import Path
 from typing import Any
 
 
+def read_build_revision(repo_root: Path) -> str:
+    """A release records its committed revision at packaging time, once at boot."""
+    try:
+        value = json.loads((repo_root / "build-info.json").read_text(encoding="utf-8"))
+        return str(value["revision"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return "development"
+
+
 class JsonConfigStore:
     def __init__(self, root: Path) -> None:
         self._root = root

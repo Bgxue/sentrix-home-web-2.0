@@ -125,7 +125,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict[str, object]:
         length = int(self.headers.get("Content-Length", 0) or 0)
-        return json.loads(self.rfile.read(length) or b"{}")
+        raw = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(raw, dict):
+            return {}
+        return {str(key): value for key, value in raw.items()}
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的约定
         if self.path == "/health":

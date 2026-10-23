@@ -29,6 +29,9 @@ from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.vector.qdrant_index import QdrantVectorIndex
 from sentrix.main import create_app
 
+# Requires real album data, local weights or a running model; run via make test-real.
+pytestmark = pytest.mark.real_environment
+
 PHOTO_FIXTURES = Path(__file__).resolve().parents[4] / "data/album3-v2-source/photos"
 SCOPE = "album1"
 
@@ -186,6 +189,9 @@ def test_locked_index_still_answers_with_the_right_photo(real_client: TestClient
         [sys.executable, "-c", _LOCK_HOLDER, str(locked_dir)],
         stdout=subprocess.PIPE,
         text=True,
+        # Permit posix_spawn: forking after BLAS/PyTorch started threads can
+        # crash the macOS child before exec. Python-created FDs are CLOEXEC.
+        close_fds=False,
     )
     try:
         assert holder.stdout is not None

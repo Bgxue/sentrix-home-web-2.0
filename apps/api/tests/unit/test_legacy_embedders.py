@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
+import pytest
 
 from sentrix.domain.retrieval import scheme
 from sentrix.infrastructure.models import legacy
@@ -82,6 +83,54 @@ def test_bge_uses_the_1_0_endpoint():
     assert embedder.dimension == 1024
     assert len(embedder.embed_query("去年夏天去了哪里")) == 1024
     assert seen[0].url.path == "/embed"
+
+
+def test_bge_negotiates_openai_once_after_sidecar_404():
+    def handler(request):
+        if request.url.path == "/embed":
+            return httpx.Response(404)
+        return httpx.Response(200, json={"data": [{"embedding": [0.1] * 1024}]})
+
+    embedder, seen = bge_with(handler)
+    assert len(embedder.embed_query("第一次")) == 1024
+    assert len(embedder.embed_query("第二次")) == 1024
+    assert [r.url.path for r in seen] == ["/embed", "/v1/embeddings", "/v1/embeddings"]
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 500])
+def test_bge_does_not_negotiate_on_other_sidecar_errors(status):
+    embedder, seen = bge_with(lambda request: httpx.Response(status))
+    assert embedder.embed_query("query") == []
+    assert len(seen) == 1
+    assert str(status) in embedder.load_error
+
+
+def test_bge_does_not_treat_arbitrary_openai_400_as_pooling_none():
+    embedder, seen = bge_with(
+        lambda request: (
+            httpx.Response(404)
+            if request.url.path == "/embed"
+            else httpx.Response(400, json={"error": {"message": "bad input"}})
+        )
+    )
+    assert embedder.embed_query("query") == []
+    assert [r.url.path for r in seen] == ["/embed", "/v1/embeddings"]
+
+
+@pytest.mark.parametrize("vector", [[1.0] * 512, [float("nan")] * 1024, [float("inf")] * 1024])
+def test_bge_rejects_invalid_openai_vectors(vector):
+    # HTTP JSON does not permit NaN/Infinity, but malformed providers still emit them.
+    import json
+
+    embedder, _ = bge_with(
+        lambda request: (
+            httpx.Response(404)
+            if request.url.path == "/embed"
+            else httpx.Response(200, content=json.dumps({"data": [{"embedding": vector}]}))
+        )
+    )
+    assert embedder.embed_query("query") == []
+    assert embedder.load_error
 
 
 def test_dimension_mismatch_is_a_failure_not_a_vector():

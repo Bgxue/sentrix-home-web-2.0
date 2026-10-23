@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
-import json
 import os
 import random
 import threading
@@ -34,6 +33,7 @@ from typing import Any
 
 from photobench.domain.http.ports import JsonHttpClient
 from photobench.domain.runs.analysis import (
+    JUDGE_CONSISTENCY_VERSION,
     judge_score_consistency,
     now_iso,
 )
@@ -42,9 +42,11 @@ from photobench.domain.runs.judge import (
     ANSWER_QUALITY_RUBRICS,
     EVIDENCE_JUDGE_PROMPT,
     JUDGE_PROMPT,
+    JUDGE_SCORE_NORMALIZATION_VERSION,
     TASK_JUDGE_PROMPT,
     execution_failure,
     judge_chat_url,
+    normalize_judge_score,
     parse_judge_json,
     thinking_kwargs,
 )
@@ -266,60 +268,74 @@ class JudgeRunner:
             **thinking_kwargs(self.judge_url),
             "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": judge_text}],
         }
+        attempts: list[dict[str, Any]] = []
+        text = ""
+        normalization = normalize_judge_score(None)
+        retry_attempts = 0
         try:
-            raw, retry_attempts = self._request(payload)
-            text = str(raw.get("choices", [{}])[0].get("message", {}).get("content") or "")
-            start, end = text.find("{"), text.rfind("}")
-            try:
-                parsed = json.loads(text[start : end + 1]) if start >= 0 and end > start else {}
-            except json.JSONDecodeError:
-                parsed = {}
-            score = parsed.get("score")
-            if score not in {0, 1, 2}:
-                score = None
-            reason = str(parsed.get("reason") or text[:200])
-            if not judge_score_consistency(score, reason):
-                retry_system = (
-                    f"{prompt}\n\n一致性保护：你刚才的评分理由与分数矛盾。"
-                    "如果理由确认回答正确、与参考答案一致、符合预期，分数不能是 0；"
-                    "请重新核对后只输出一个分数与理由一致的 JSON。"
+            score: int | None = None
+            reason = ""
+            for consistency_attempt in range(2):
+                raw, request_attempts = self._request(payload)
+                retry_attempts += request_attempts
+                text = str(raw.get("choices", [{}])[0].get("message", {}).get("content") or "")
+                parsed = parse_judge_json(text)
+                normalization = normalize_judge_score(parsed.get("score"))
+                score = normalization["score"]
+                reason = str(parsed.get("reason") or text[:200])
+                consistent = judge_score_consistency(score, reason)
+                attempts.append(
+                    {
+                        "input": payload,
+                        "raw_response": raw,
+                        "raw_text": text,
+                        "score_normalization": normalization,
+                        "consistent": consistent,
+                        "request_attempts": request_attempts,
+                    }
                 )
-                retry_payload = {
+                if consistent:
+                    break
+                if consistency_attempt == 1:
+                    score, reason = None, "judge_inconsistent_score_reason"
+                    break
+                payload = {
                     **payload,
-                    "messages": [{"role": "system", "content": retry_system}, payload["messages"][1]],
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                f"{prompt}\n\n一致性保护：你刚才的评分理由与分数矛盾。"
+                                "如果理由确认回答正确、与参考答案一致、符合预期，分数不能是 0；"
+                                "请重新核对后只输出一个分数与理由一致的 JSON。"
+                            ),
+                        },
+                        payload["messages"][1],
+                    ],
                 }
-                try:
-                    retry_raw, _ = self._request(retry_payload)
-                    retry_text = str(
-                        retry_raw.get("choices", [{}])[0].get("message", {}).get("content") or ""
-                    )
-                    retry_parsed = parse_judge_json(retry_text)
-                    retry_score = (
-                        retry_parsed.get("score") if retry_parsed.get("score") in {0, 1, 2} else None
-                    )
-                    retry_reason = str(retry_parsed.get("reason") or retry_text[:200])
-                    if judge_score_consistency(retry_score, retry_reason):
-                        score, reason, text, payload = retry_score, retry_reason, retry_text, retry_payload
-                    else:
-                        score = None
-                        reason = "judge_inconsistent_score_reason"
-                        payload = retry_payload
-                except Exception:  # noqa: BLE001 —— 重问失败仍算「一致性未通过」，不回退旧分数
-                    score = None
-                    reason = "judge_inconsistent_score_reason"
             return {
                 "score": score,
+                "score_normalization_version": JUDGE_SCORE_NORMALIZATION_VERSION,
+                "score_normalization": normalization,
+                "attempts": attempts,
+                "consistency_version": JUDGE_CONSISTENCY_VERSION,
                 "reason": reason,
                 "input": payload,
                 "raw_text": text,
                 "judge_status": "completed",
                 "judge_retry_attempts": retry_attempts,
             }
-        except Exception as exc:  # noqa: BLE001 —— 1.0 ``:4312``：判分失败不抛，落成 failed
+        except Exception as exc:  # noqa: BLE001 — preserve received observations even if retry fails
+            attempts.append({"input": payload, "error": str(exc)})
             return {
                 "score": None,
-                "reason": f"judge_error: {exc}",
+                "score_normalization_version": JUDGE_SCORE_NORMALIZATION_VERSION,
+                "score_normalization": normalization,
+                "attempts": attempts,
+                "consistency_version": JUDGE_CONSISTENCY_VERSION,
+                "reason": "judge_inconsistent_score_reason" if len(attempts) > 1 else f"judge_error: {exc}",
                 "input": payload,
+                "raw_text": text,
                 "judge_status": "failed",
             }
 
@@ -457,15 +473,28 @@ class JudgeRunner:
                 return {
                     "score": None,
                     "applicable": False,
+                    "score_normalization_version": JUDGE_SCORE_NORMALIZATION_VERSION,
+                    "attempts": [{"input": payload, "raw_response": raw, "raw_text": text}],
                     "reason": str(parsed.get("reason") or "no_visual_claims"),
                     "input": payload,
                     "raw_text": text,
                     "judge_status": "completed",
                 }
-            score = parsed.get("score") if parsed.get("score") in {0, 1, 2} else None
+            normalization = normalize_judge_score(parsed.get("score"))
+            score = normalization["score"]
             return {
                 "score": score,
                 "applicable": True,
+                "score_normalization_version": JUDGE_SCORE_NORMALIZATION_VERSION,
+                "score_normalization": normalization,
+                "attempts": [
+                    {
+                        "input": payload,
+                        "raw_response": raw,
+                        "raw_text": text,
+                        "score_normalization": normalization,
+                    }
+                ],
                 "reason": str(parsed.get("reason") or text[:200]),
                 "input": payload,
                 "raw_text": text,

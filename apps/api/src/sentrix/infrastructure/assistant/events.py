@@ -92,7 +92,7 @@ class InProcessTurnEventBroker:
             for buffered in list(channel.backlog):
                 seen = max(seen, buffered.step_index)
                 yield buffered
-            while True:
+            while not channel.closed:
                 item = await queue.get()
                 if item is None:
                     break
@@ -100,6 +100,12 @@ class InProcessTurnEventBroker:
                     continue
                 seen = item.step_index
                 yield item
+            # finish can precede delivery of scheduled queue callbacks. The
+            # closed backlog is stable and contains every published final event.
+            for buffered in list(channel.backlog):
+                if buffered.step_index > seen:
+                    seen = buffered.step_index
+                    yield buffered
         finally:
             # 清理必须在 ``yield None`` **之前**发生：订阅者收到 None 就 break，不会再去
             # 迭代一次生成器，于是 ``yield None`` 之后的代码与生成器的 ``finally`` 都要等

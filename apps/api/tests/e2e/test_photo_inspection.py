@@ -54,6 +54,9 @@ from sentrix.infrastructure.assistant.model_endpoint import ServedModel
 from sentrix.infrastructure.media.photo_inspector import OpenAIPhotoInspector
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
 
+# Requires real album data, local weights or a running model; run via make test-real.
+pytestmark = pytest.mark.real_environment
+
 # 图上真有的东西：一个红圆、一个蓝方。问题与期望都从这里来，不另立一份标注。
 SHAPE_QUESTION = "这张图里画的是什么形状？只回答形状名称。"
 SHAPE_ANSWER_MUST_MENTION = "圆"

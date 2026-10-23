@@ -36,7 +36,12 @@ export function StartActions(props: StartActionsProps) {
   return (
     <div className="actions">
       {runMode === "full" && (
-        <label className="check">
+        <label
+          className={`btn danger delete-scope-toggle${deleteScopeAfterRun ? " active" : ""}${
+            suiteRunning || hasRunning ? " disabled" : ""
+          }`}
+          title="只在完整链路测试结束后删除本次生成的相册，谨慎开启"
+        >
           <input
             type="checkbox"
             checked={deleteScopeAfterRun}

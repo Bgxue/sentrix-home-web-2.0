@@ -170,3 +170,12 @@ def test_media_file_blocks_every_traversable_segment(tmp_path: Path):
     assert source.media_file("album-x", "photos", "/etc/passwd") is None
     # 白名单之外的一级目录名也要拦住（1.0 在路由里判，2.0 两处都判）。
     assert source.media_file("album-x", "not-a-collection", "a.jpg") is None
+
+
+def test_build_integrity_without_qa_still_hashes_media_and_face_seeds(tmp_path):
+    source = _source(tmp_path)
+    manifest = dict(MANIFEST, qa_sets={})
+    integrity = source.integrity("album-x", manifest, "")
+    assert integrity["qa_sha256"] is None
+    assert integrity["files_checked"] == 4
+    assert integrity["missing_files"] == []

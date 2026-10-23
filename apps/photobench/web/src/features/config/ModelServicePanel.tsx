@@ -98,8 +98,6 @@ function setModelSelected(
 
 export function ModelServicePanel(props: ModelServicePanelProps) {
   const {
-    profiles,
-    vllmManagerUrl,
     modelEndpoint,
     selectedEndpointModel,
     endpointModels,
@@ -109,19 +107,15 @@ export function ModelServicePanel(props: ModelServicePanelProps) {
     currentModelPopoverOpen,
     modelTestState,
     modelTestMessage,
-    setVllmManagerUrl,
     setModelEndpoint,
     setSelectedEndpointModel,
     setCurrentModelPopoverOpen,
-    loadProfiles,
     loadCurrentModel,
     onEndpointModelChange,
     testEndpointModel,
-    onModelManagerInput,
     onModelEndpointInput,
     selectedModels,
     setSelectedModels,
-    cloudModelProfile,
   } = props;
 
   const state = (currentModelInfo?.state || {}) as CurrentModelState;
@@ -235,32 +229,6 @@ export function ModelServicePanel(props: ModelServicePanelProps) {
           {currentModelError && <span className="config-help error">{currentModelError}</span>}
         </label>
       </div>
-      <div className="config-model-manager">
-        <label>
-          模型管理器地址（可选）
-          <input
-            type="text"
-            value={vllmManagerUrl}
-            placeholder="例如 127.0.0.1:8500；无管理器可留空"
-            onChange={(event) => {
-              setVllmManagerUrl(event.target.value);
-              onModelManagerInput();
-            }}
-            onBlur={() => void loadProfiles()}
-          />
-          <span className="config-help">
-            填写后从 Manager 的模型注册表自动扫描；留空时不显示普通模型选择。
-          </span>
-        </label>
-        <button
-          className="btn ghost compact model-registry-refresh"
-          type="button"
-          disabled={!vllmManagerUrl.trim()}
-          onClick={() => void loadProfiles()}
-        >
-          刷新模型注册表
-        </button>
-      </div>
       <div className="model-current-choice">
         <label className="endpoint-model-select">
           可用模型
@@ -305,6 +273,58 @@ export function ModelServicePanel(props: ModelServicePanelProps) {
           复用所选模型
           {selectedEndpointModel && <span>（{selectedEndpointModel}，不启停）</span>}
         </label>
+      </div>
+    </div>
+  );
+}
+
+
+/** 高级模型设置：管理器、云端模型、注册表。由 ConfigSection 放进唯一的「高级设置」里。 */
+export function ModelAdvancedPanel(props: ModelServicePanelProps) {
+  const {
+    profiles,
+    vllmManagerUrl,
+    setVllmManagerUrl,
+    loadProfiles,
+    onModelManagerInput,
+    selectedModels,
+    setSelectedModels,
+    cloudModelProfile,
+  } = props;
+
+  return (
+    <div className="config-group config-group-model-advanced">
+      <div className="config-group-head">
+        <div>
+          <strong>3. 模型管理器与注册表</strong>
+          <span>只有需要扫描、切换或串行测试多个模型时才需要配置</span>
+        </div>
+      </div>
+      <div className="config-model-manager">
+        <label>
+          模型管理器地址（可选）
+          <input
+            type="text"
+            value={vllmManagerUrl}
+            placeholder="例如 127.0.0.1:8500；无管理器可留空"
+            onChange={(event) => {
+              setVllmManagerUrl(event.target.value);
+              onModelManagerInput();
+            }}
+            onBlur={() => void loadProfiles()}
+          />
+          <span className="config-help">
+            填写后从 Manager 的模型注册表自动扫描；留空时不显示普通模型选择。
+          </span>
+        </label>
+        <button
+          className="btn ghost compact model-registry-refresh"
+          type="button"
+          disabled={!vllmManagerUrl.trim()}
+          onClick={() => void loadProfiles()}
+        >
+          刷新模型注册表
+        </button>
       </div>
       <div className="model-picker cloud-model-picker">
         <span className="field-label">云端模型</span>

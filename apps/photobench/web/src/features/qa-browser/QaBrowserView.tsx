@@ -44,8 +44,12 @@ export function QaBrowserView({ sentrixUrl = "", manifests = [], onOpenMedia }: 
     loadQaBrowserRef.current = qa.loadQaBrowser;
   });
   useEffect(() => {
+    // 相册/题集还没落到本机真实数据时不要发请求；否则会先打出一条
+    // album not found / qa_set not found，随后才被正确的选择覆盖。
+    const qaSets = manifests.find((manifest) => manifest.album_id === qa.qaBrowserAlbum)?.qa_sets || [];
+    if (!qa.qaBrowserAlbum || !qa.qaBrowserSet || !qaSets.includes(qa.qaBrowserSet)) return;
     void loadQaBrowserRef.current();
-  }, [qa.qaBrowserAlbum, qa.qaBrowserSet]);
+  }, [manifests, qa.qaBrowserAlbum, qa.qaBrowserSet]);
 
   const { qaBrowserItems, visibleQaBrowserItems } = qa;
 

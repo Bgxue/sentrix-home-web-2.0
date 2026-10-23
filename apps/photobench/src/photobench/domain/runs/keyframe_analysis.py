@@ -30,6 +30,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from photobench.domain.runs.analysis import judge_score_for_summary
+
 #: 1.0 判关键帧的同一个字面量（``:5713``）。2.0 只有一条抽帧路径
 #: （``s8-deviations.md`` §3），所以不存在 1.0 那个 ``video_keyframe_webp`` 的第二取值
 #: ——1.0 的读侧本来就同时认两个，这里保留同一条判据的形状，实际只会命中一个。
@@ -287,7 +289,7 @@ def keyframe_analysis(
                 candidate_hit_items += 1
         if predicted_kf:
             predicted_items += 1
-        score = (item.get("judge") or {}).get("score")
+        score = judge_score_for_summary(item.get("judge"))
         if score in {0, 1, 2}:
             (quality_with if candidate_kf else quality_without).append(float(score))
         for trace in item.get("tool_trace") or []:
