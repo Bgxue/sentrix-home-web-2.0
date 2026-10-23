@@ -156,6 +156,7 @@ def _build_video_scenes(container: Container, process_image: Callable[..., objec
         video_repository=container.video_repository,
         keyframes=container.video_keyframe_extractor,
         process_image=lambda asset, event_id: process_image(asset, forced_event_id=event_id),
+        scene_planner=container.video_scene_planner,
     )
 
 
