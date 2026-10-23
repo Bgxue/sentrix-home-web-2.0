@@ -6,9 +6,15 @@ PROJ="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJ"
 mkdir -p logs
 
+# PhotoBench itself must use the Mac budget/profile. Its model-switch worker
+# inherits this environment when it restarts the product API during a run.
+export SENTRIX_DEPLOYMENT_PROFILE="${SENTRIX_DEPLOYMENT_PROFILE:-mac}"
+export FACE_PROVIDERS="${FACE_PROVIDERS:-CPUExecutionProvider}"
+export RETINAFACE_PROVIDERS="${RETINAFACE_PROVIDERS:-CPUExecutionProvider}"
+
 PORT="${PHOTOBENCH_PORT:-8772}"
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "PhotoBench 已在 :$PORT 监听"
+  echo "PhotoBench 已在 :$PORT 监听；本脚本不会重启服务或停止正在运行的测评"
   exit 0
 fi
 

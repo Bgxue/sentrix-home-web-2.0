@@ -231,7 +231,7 @@ class SubprocessSentrixProcess:
                 error="endpoint is empty",
             )
         previous = self.running_endpoint()
-        env = {**os.environ, self._vlm_env_var: target}
+        env = {**os.environ, **self._environment, self._vlm_env_var: target}
         if self._runtime_snapshot is not None:
             try:
                 config = _snapshot_config_root(
@@ -246,6 +246,32 @@ class SubprocessSentrixProcess:
                     error=str(exc),
                 )
             env["PHOTOBENCH_CONFIG_ROOT"] = str(config)
+            connection = self._runtime_snapshot.connection()
+            embedding = connection.get("embedding") or {}
+            if isinstance(embedding, dict):
+                mode = embedding.get("mode")
+                if mode == "unified_multimodal":
+                    env["SENTRIX_EMBEDDING_SCHEME"] = "wemm"
+                    if embedding.get("wemm_url"):
+                        env["SENTRIX_WEMM_URL"] = str(embedding["wemm_url"])
+                elif mode in {"split_text_image", "no_local_embedding"}:
+                    env["SENTRIX_EMBEDDING_SCHEME"] = "legacy"
+                    for key, name in (
+                        ("text_url", "SENTRIX_TEXT_EMBEDDER_URL"),
+                        ("image_url", "SENTRIX_LEGACY_CLIP_URL"),
+                    ):
+                        if embedding.get(key):
+                            env[name] = str(embedding[key])
+            for key, name in (
+                ("deployment_profile", "SENTRIX_DEPLOYMENT_PROFILE"),
+                ("agent_wall_time_s", "SENTRIX_AGENT_WALL_TIME_S"),
+                ("chat_timeout_s", "SENTRIX_CHAT_TIMEOUT_S"),
+                ("face_providers", "FACE_PROVIDERS"),
+                ("retinaface_providers", "RETINAFACE_PROVIDERS"),
+            ):
+                value = (connection.get("product_settings") or {}).get(key)
+                if value is not None:
+                    env[name] = str(value)
         self._stop_running()
         pid = self._spawn(
             self._command,

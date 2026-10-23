@@ -252,6 +252,7 @@ class Container:
                     log_path=settings.sentrix_log_path,
                     http=http,
                     runtime_snapshot=snapshot,
+                    environment=dict(settings.sentrix_environment),
                 )
             )
 

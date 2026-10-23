@@ -257,8 +257,11 @@ export function useRunDetail(options: RunDetailOptions) {
       }
       await Promise.all([
         ...(analysisOpen.current
-          ? [loadKeyframeAnalysis(runId), loadMemoryEffectiveness(runId), loadGraphQuality(runId)]
+          ? [loadKeyframeAnalysis(runId), loadMemoryEffectiveness(runId)]
           : []),
+        // 图质量面板始终展示在 run 详情中，不应依赖记忆分析面板是否展开。
+        // resetPage 表示刚切换到一条 run，此时立即读取一次；后续展开时再复用同一入口。
+        ...(resetPage || analysisOpen.current ? [loadGraphQuality(runId)] : []),
         loadQaPage ? loadQaPage(resetPage ? 1 : undefined) : Promise.resolve(),
       ]);
     },
@@ -277,8 +280,14 @@ export function useRunDetail(options: RunDetailOptions) {
   const setAnalysisOpen = useCallback((open: boolean) => {
     analysisOpen.current = open;
     const runId = activeRunIdRef.current;
-    if (open && runId) void Promise.all([loadKeyframeAnalysis(runId), loadMemoryEffectiveness(runId)]);
-  }, [activeRunIdRef, loadKeyframeAnalysis, loadMemoryEffectiveness]);
+    if (open && runId) {
+      void Promise.all([
+        loadKeyframeAnalysis(runId),
+        loadMemoryEffectiveness(runId),
+        loadGraphQuality(runId),
+      ]);
+    }
+  }, [activeRunIdRef, loadKeyframeAnalysis, loadMemoryEffectiveness, loadGraphQuality]);
 
   /**
    * 1.0 `:2333` 是「惰性建草稿」的副作用版本，React 里 render 不能写 state，
