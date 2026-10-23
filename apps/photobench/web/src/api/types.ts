@@ -47,6 +47,9 @@ export interface MediaRef {
 /** `phases.<key>.progress`；键取自一次真实 run 的 `qa_eval`（`/api/v1/runs` 实测）。 */
 export interface PhaseProgress {
   total?: number;
+  processed?: number;
+  failed?: number;
+  skipped?: number;
   completed?: number;
   agent_completed?: number;
   agent_total?: number;

@@ -57,6 +57,7 @@ from sentrix.domain.media.ports import (
     VlmObserver,
 )
 from sentrix.domain.memories.ports import (
+    CausalJudge,
     EventParticipantRepository,
     EventRepository,
     FactRepository,
@@ -93,6 +94,7 @@ from sentrix.infrastructure.media.video_keyframes import FfmpegVideoKeyframeExtr
 from sentrix.infrastructure.media.video_metadata import FfprobeVideoMetadataReader
 from sentrix.infrastructure.media.video_transcode import FfmpegVideoTranscoder
 from sentrix.infrastructure.media.vlm_observer import OpenAIVlmObserver
+from sentrix.infrastructure.memories.causal_judge import OpenAICausalJudge
 from sentrix.infrastructure.models.face_adapter import FaceAdapter
 from sentrix.infrastructure.models.legacy import (
     BgeSidecarEmbedder,
@@ -203,6 +205,7 @@ class Container:
     # 结构化记忆图是由标准记忆端口派生出的可重建投影。它与冻结的 adjacency
     # 通道分开，检索侧只通过 ``MemoryGraphRepository`` 做有限 hop 拓展。
     memory_graph: MemoryGraphRepository
+    causal_judge: CausalJudge
     # 词法投影的写侧与读侧由同一个 SQLite 适配器实现（它是同一张投影表的两个方向），
     # 这里按两个端口分别声明：调用方在类型上就看得出自己只需要其中一侧。
     lexical_index: LexicalIndex
@@ -351,6 +354,9 @@ class Container:
             event_participant_repository=SqliteEventParticipantRepository(database),
             fact_repository=SqliteFactRepository(database),
             memory_graph=SqliteMemoryGraphRepository(database),
+            causal_judge=OpenAICausalJudge(
+                settings.vlm_base_url, served_model, timeout_s=settings.vlm_timeout_s
+            ),
             lexical_index=lexical,
             lexical_search=lexical,
             structured_query_repository=SqliteStructuredQueryRepository(database, place_aliases),

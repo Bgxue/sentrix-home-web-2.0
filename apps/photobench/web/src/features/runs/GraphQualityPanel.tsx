@@ -32,6 +32,9 @@ function graphCards(graph: GraphReferenceMetrics) {
     metricCard("节点连通率", ratio(graph.node_connected_rate)),
     metricCard("边一致率", ratio(graph.edge_consistency_rate)),
     metricCard("重复边率", ratio(graph.duplicate_edge_rate)),
+    metricCard("证据支持边率", ratio(graph.edge_evidence_support_rate)),
+    metricCard("不可验边占比", ratio(graph.unverifiable_edge_ratio)),
+    metricCard("参考 / 预测可验边", `${number(graph.reference_edge_count)} / ${number(graph.evaluable_predicted_edge_count)}`),
     metricCard("节点 / 边", `${number(graph.node_count)} / ${number(graph.edge_count)}`),
   ];
 }
@@ -117,7 +120,9 @@ export function GraphQualityPanel({ quality }: { quality: GraphQuality | null })
     <section className="phase-card result-phase-card graph-quality-panel">
       <h3 className="phase-title"><b>图记忆质量</b></h3>
       <p className="metric-calc-time">
-        可验边采用当前 2.0 关系契约的 rule-reference；没有独立边 GT，因此 P/R/F1 不是独立真实世界准确率。
+        {graph.reference_mode === "source_consistency"
+          ? "可验边参考集从 2.0 记忆来源字段重建，不读取图中已生成的边。无独立人工边 GT，P/R/F1 仅表示构图投影一致性；视觉与因果推断边不计入。"
+          : "可验边采用规则参考集；无独立人工边 GT，P/R/F1 不是现实世界准确率。"}
       </p>
       {graph.available ? <div className="phase-metrics graph-quality-metrics">{graphCards(graph)}</div> : <p className="metric-calc-time">图结构：{String(graph.reason || "未构建")}</p>}
 

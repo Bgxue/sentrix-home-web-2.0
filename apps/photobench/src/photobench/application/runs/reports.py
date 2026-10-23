@@ -216,8 +216,14 @@ class RunReports:
         }
         if scope_id:
             truth = self._identity_truth(str(state.get("album_id") or ""))
+            assets, _ = self._assets(scope_id)
+            asset_names = (
+                {str(asset.get("file_name") or "") for asset in assets if asset.get("file_name")}
+                if assets is not None
+                else None
+            )
             report["face_clustering"] = graph_quality.face_clustering_quality(
-                self._face_clusters(scope_id), truth
+                self._face_clusters(scope_id), truth, asset_names=asset_names
             )
         return report
 

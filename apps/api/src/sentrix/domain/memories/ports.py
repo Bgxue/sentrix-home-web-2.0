@@ -6,7 +6,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
 
-from sentrix.domain.memories.events import EventParticipantRecord, EventRecord
+from sentrix.domain.memories.causality import CausalVerdict
+from sentrix.domain.memories.events import EventEntityRecord, EventParticipantRecord, EventRecord
 from sentrix.domain.memories.facts import Fact
 from sentrix.domain.memories.graph import (
     GraphBuildStats,
@@ -198,6 +199,10 @@ class EventParticipantRepository(Protocol):
 
     def list_participants(self, event_id: str) -> Sequence[EventParticipantRecord]: ...
 
+    def list_event_entities(self, event_id: str) -> Sequence[EventEntityRecord]:
+        """读取事件的非人物实体投影，供记忆图等派生读侧使用。"""
+        ...
+
     def cooccurrence_event_count(self, left_person_id: str, right_person_id: str) -> int:
         """两人**同时**以 ``visible_subject`` 出现在同一个事件里的**事件数**。
 
@@ -275,6 +280,8 @@ class MemoryGraphRepository(Protocol):
         scope_id: str,
         max_hops: int,
         limit: int,
+        intent: str = "general",
+        direction: str = "",
     ) -> Sequence[GraphExpansionHit]: ...
 
     def status(self, scope_id: str) -> GraphStatus: ...
@@ -282,3 +289,9 @@ class MemoryGraphRepository(Protocol):
     def quality(self, scope_id: str) -> Mapping[str, object]:
         """返回不读取 benchmark GT 的图结构审计指标。"""
         ...
+
+
+class CausalJudge(Protocol):
+    """对规则筛出的帧对做文本因果判定。失败必须抛异常，不能把故障当无因果边。"""
+
+    def judge(self, prompt: str, *, expected_count: int) -> Sequence[CausalVerdict]: ...

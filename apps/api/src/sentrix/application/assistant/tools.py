@@ -36,6 +36,7 @@ from typing import Any
 
 from sentrix.application.assistant.query_memory_facts import QueryMemoryFacts
 from sentrix.application.retrieval.retrieve_evidence import EvidenceRequest, RetrieveEvidence
+from sentrix.application.retrieval.retrieve_graph import graph_direction, graph_intent
 from sentrix.domain.assistant.evidence_ledger import EvidenceType
 from sentrix.domain.assistant.models import Attachment
 from sentrix.domain.assistant.ports import PersonDirectory, ResultSetRepository
@@ -295,10 +296,12 @@ class AssistantToolbox:
                 # 「图前/图后」候选数量当作答案事实。
                 "retrieval_channels": channel_trace,
                 "graph_routed": graph_trace is not None,
-                "graph_enabled": graph_trace is not None and graph_trace["status"] in {"ok", "degraded"},
+                # degraded 只表示图通道被尝试但不可用；只有 ok 才能说图实际参与了检索。
+                "graph_enabled": graph_trace is not None and graph_trace["status"] == "ok",
                 "graph_candidate_asset_ids": list(result.graph_asset_ids),
                 "graph_primary_asset_ids": list(result.primary_asset_ids),
                 "graph_fused_asset_ids": list(result.fused_asset_ids),
+                "graph_policy": {"intent": graph_intent(query), "direction": graph_direction(query)},
             },
         )
 

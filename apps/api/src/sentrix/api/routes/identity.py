@@ -26,6 +26,7 @@ from fastapi.responses import Response
 
 from sentrix.api.deps import get_container
 from sentrix.api.errors import InvalidRequestError, NotFoundError, UnprocessableError
+from sentrix.api.routes.media import refresh_memory_graph
 from sentrix.api.schemas.identity import (
     BatchConfirmFailure,
     BatchConfirmOutcome,
@@ -304,9 +305,11 @@ def confirm_face_cluster(
     payload: ConfirmClusterRequest,
     container: Container = Depends(get_container),
 ) -> ConfirmClusterResponse:
+    cluster = container.face_repository.get_cluster(cluster_id)
     result = _review_cluster(container).confirm(
         cluster_id, name=payload.name, family_role=payload.family_role
     )
+    refresh_memory_graph(container, cluster.scope_id if cluster is not None else result.entity.scope_id)
     return ConfirmClusterResponse(
         entity=_person_payload(container, result.entity), merged_into=result.merged_into
     )
@@ -317,7 +320,10 @@ def reject_face_cluster(
     cluster_id: str, container: Container = Depends(get_container)
 ) -> RejectClusterResponse:
     # 用例找不到簇时抛 ClusterNotFoundError（404），由统一处理器映射；这里不做二次判断。
+    cluster = container.face_repository.get_cluster(cluster_id)
     rejected = _review_cluster(container).reject(cluster_id)
+    if cluster is not None:
+        refresh_memory_graph(container, cluster.scope_id)
     return RejectClusterResponse(cluster_id=cluster_id, rejected_entity_id=rejected)
 
 
@@ -330,8 +336,13 @@ def merge_face_clusters(
     # 报成「这个簇不存在」。
     if not payload.target_cluster_id or not payload.source_cluster_id:
         raise InvalidRequestError("target_cluster_id and source_cluster_id are required")
+    target_before = container.face_repository.get_cluster(payload.target_cluster_id)
     target = _review_cluster(container).merge(
         target_cluster_id=payload.target_cluster_id, source_cluster_id=payload.source_cluster_id
+    )
+    refresh_memory_graph(
+        container,
+        target_before.scope_id if target_before is not None else target.scope_id,
     )
     return _cluster_payload(container, target)
 
@@ -344,7 +355,12 @@ def split_face_cluster(
 ) -> FaceClusterSummary:
     if not payload.face_instance_id:
         raise InvalidRequestError("face_instance_id is required")
+    cluster_before = container.face_repository.get_cluster(cluster_id)
     created = _review_cluster(container).split(cluster_id, face_instance_id=payload.face_instance_id)
+    refresh_memory_graph(
+        container,
+        cluster_before.scope_id if cluster_before is not None else created.scope_id,
+    )
     return _cluster_payload(container, created)
 
 
@@ -821,6 +837,7 @@ def rename_person(
     result = _name_person(container).rename(person_id, payload.name)
     if result is None:
         raise NotFoundError("person not found")
+    refresh_memory_graph(container, result.entity.scope_id)
     return RenamePersonResponse(
         entity=_person_payload(container, result.entity), aliases=list(result.aliases)
     )
@@ -834,6 +851,7 @@ def batch_confirm_people(
     use_case = _name_person(container)
     confirmed: list[BatchConfirmOutcome] = []
     failed: list[BatchConfirmFailure] = []
+    scopes: set[str] = set()
     for item in payload.items:
         try:
             result = use_case.confirm_entity(item.person_id, name=item.name, family_role=item.family_role)
@@ -856,6 +874,9 @@ def batch_confirm_people(
                 merged=result.merged_into is not None,
             )
         )
+        scopes.add(result.entity.scope_id)
+    for scope_id in sorted(scopes):
+        refresh_memory_graph(container, scope_id)
     return BatchConfirmResponse(confirmed=confirmed, failed=failed, count=len(confirmed))
 
 
@@ -999,6 +1020,7 @@ async def seed_person_identity(
     except NoSeedFacesError as error:
         # 1.0 在路由上抛 422（``app.py:2345``）：请求是好的，是这几张图里没有人脸。
         raise UnprocessableError(str(error)) from error
+    refresh_memory_graph(container, scope_id)
     return SeedIdentityResponse(
         entity_id=result.entity_id,
         cluster_id=result.cluster_id,

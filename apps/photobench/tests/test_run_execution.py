@@ -390,6 +390,122 @@ def test_processing_requires_two_consecutive_zero_pending_snapshots():
     assert len(polls) == 3
 
 
+def test_explicit_pipeline_moves_memory_keyframes_and_graph_out_of_photo_import():
+    client = FakeSentrixClient(
+        explicit_pipeline=True,
+        assets=_assets(),
+        turns={"turn_1": [_completed_turn()]},
+        import_result={
+            "imported": 2,
+            "deduplicated": 0,
+            "asset_ids": ["asset_a", "asset_b"],
+            "timings": {"asset_import": 1.2, "total": 1.2},
+            "failures": [],
+        },
+        pipeline_result={
+            "processed": 2,
+            "skipped": 0,
+            "events": 1,
+            "lexical_terms": 8,
+            "video_scenes": 3,
+            "summarized": 1,
+            "timings": {
+                "source_memory_prepare": 10.0,
+                "source_memory_commit": 2.0,
+                "video_keyframe_extraction": 4.0,
+                "video_keyframe_memory": 12.0,
+                "memory_graph": 0.4,
+                "total": 20.0,
+            },
+            "failures": [],
+            "memory_graph": {"scope_id": "s", "node_count": 20, "edge_count": 30},
+        },
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+
+    state = execution.execute(_request())
+
+    assert "import_assets" in client.call_names()
+    assert "import_album" not in client.call_names()
+    assert "process_pipeline" in client.call_names()
+    photo = state["phases"]["photo_import"]
+    pipeline = state["phases"]["pipeline_processing"]
+    assert photo["pipeline_seconds"] == 0.0
+    assert photo["timings"]["asset_import"] == 1.2
+    assert pipeline["keyframe_extraction_seconds"] == 4.0
+    assert pipeline["keyframe_memory_seconds"] == 12.0
+    assert pipeline["graph_build_seconds"] == 0.4
+    assert pipeline["memory_graph"]["edge_count"] == 30
+
+
+def test_explicit_pipeline_reports_graph_projection_failure_without_losing_memory():
+    client = FakeSentrixClient(
+        explicit_pipeline=True,
+        assets=_assets(),
+        turns={"turn_1": [_completed_turn()]},
+        import_result={
+            "imported": 2,
+            "deduplicated": 0,
+            "asset_ids": ["asset_a", "asset_b"],
+            "timings": {"asset_import": 1.2},
+            "failures": [],
+        },
+        pipeline_result={
+            "processed": 2,
+            "skipped": 0,
+            "events": 1,
+            "video_scenes": 0,
+            "timings": {"source_memory_commit": 2.0, "memory_graph": 0.4, "total": 3.0},
+            "failures": [],
+            "memory_graph": None,
+        },
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+
+    state = execution.execute(_request())
+
+    phase = state["phases"]["pipeline_processing"]
+    assert phase["status"] == "partial"
+    assert phase["processed_asset_count"] == 2
+    assert phase["error_details"][0]["error_type"] == "graph_build_error"
+
+
+def test_explicit_pipeline_reports_causal_judge_degradation():
+    client = FakeSentrixClient(
+        explicit_pipeline=True,
+        assets=_assets(),
+        turns={"turn_1": [_completed_turn()]},
+        import_result={
+            "imported": 2,
+            "deduplicated": 0,
+            "asset_ids": ["asset_a", "asset_b"],
+            "timings": {"asset_import": 1.2},
+            "failures": [],
+        },
+        pipeline_result={
+            "processed": 2,
+            "skipped": 0,
+            "events": 1,
+            "timings": {"memory_graph": 2.0, "causal_graph": 1.0, "total": 3.0},
+            "failures": [],
+            "memory_graph": {
+                "scope_id": "s",
+                "node_count": 10,
+                "edge_count": 12,
+                "causal_status": "degraded",
+            },
+        },
+    )
+    execution, _client, _writer, _lifecycle, _albums = _execution(client=client)
+
+    state = execution.execute(_request())
+
+    phase = state["phases"]["pipeline_processing"]
+    assert phase["status"] == "partial"
+    assert phase["causal_graph_seconds"] == 1.0
+    assert phase["error_details"][0]["error_type"] == "causal_inference_error"
+
+
 class _TickingTime:
     """每次 ``monotonic()`` 前进一秒：让 1200 秒的停滞阈值在一个用例里跑得完。"""
 

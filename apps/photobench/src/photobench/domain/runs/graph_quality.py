@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-FACE_CLUSTERING_METRIC_VERSION = 4
+FACE_CLUSTERING_METRIC_VERSION = 5
 
 QUESTION_TYPE_LABELS = {
     "event_memory_qa": "事件记忆",
@@ -130,7 +130,7 @@ def aggregate_graph_qa_by_type(items: list[dict[str, Any]]) -> list[dict[str, An
                 ),
                 None,
             )
-            if isinstance(graph_channel, Mapping) and graph_channel.get("status") in {"ok", "degraded"}:
+            if isinstance(graph_channel, Mapping) and graph_channel.get("status") == "ok":
                 graph_enabled += 1
             policy = trace.get("graph_policy") or {}
             if isinstance(policy, Mapping):
@@ -147,7 +147,9 @@ def aggregate_graph_qa_by_type(items: list[dict[str, Any]]) -> list[dict[str, An
                 )
                 final = rerank.get("returned_head_asset_ids") or (rerank.get("reranked_asset_ids") or [])[:18]
             gt = _gt_asset_ids(item)
-            if not baseline or not final or not gt:
+            # 空的 baseline/final 也是有效观测：例如 primary 没召回、或图扩展把
+            # 条件结果全部过滤掉时，必须把它计为 0 召回，而不能静默丢掉这道题。
+            if not gt:
                 continue
             baseline = [str(asset_id) for asset_id in baseline]
             final = [str(asset_id) for asset_id in final]
@@ -227,7 +229,9 @@ def _image_link_metrics(
         if file_name in predicted_clusters_by_file:
             detected_image_count += 1
             clustered_image_count += bool(clusters)
-            samples.append(({str(value) for value in labels}, clusters))
+        # 未检测到的人脸也必须进入 pairwise 分母；否则漏检只会减少样本数，
+        # 不会产生 false negative，最终 link recall 会被系统性高估。
+        samples.append(({str(value) for value in labels}, clusters))
     tp = fp = fn = tn = 0
     for left, right in itertools.combinations(samples, 2):
         gt_same = bool(left[0] & right[0])
@@ -268,8 +272,8 @@ def _identity_gallery_metrics(
         gt_asset_count += 1
         predicted = {str(value) for value in predicted_identities_by_file.get(file_name, set()) if value}
         identified_image_count += bool(predicted)
-        if file_name in predicted_identities_by_file:
-            samples.append(({str(value) for value in labels}, predicted))
+        # 没有预测身份时保留空集合，所有 GT identity 都应计为 false negative。
+        samples.append(({str(value) for value in labels}, predicted))
     tp = sum(len(gt & predicted) for gt, predicted in samples)
     fp = sum(len(predicted - gt) for gt, predicted in samples)
     fn = sum(len(gt - predicted) for gt, predicted in samples)
@@ -287,8 +291,14 @@ def _identity_gallery_metrics(
 def face_clustering_quality(
     clusters: list[dict[str, Any]],
     image_to_face_ids: Mapping[str, object] | None,
+    asset_names: set[str] | None = None,
 ) -> dict[str, Any]:
-    """按旧版 v4 口径计算身份 gallery 与图像级 identity-link。"""
+    """按旧版 v4 口径计算身份 gallery 与图像级 identity-link，并修正漏检分母。
+
+    ``asset_names`` 是当前 scope 实际导入的文件名集合。没有它时为兼容独立纯函数
+    调用，回退到预测簇里的文件名；正式报告必须传入资产清单，否则“完全没检测到脸”
+    的 GT 图片会从分母中消失。
+    """
 
     if not image_to_face_ids:
         return {
@@ -296,12 +306,15 @@ def face_clustering_quality(
             "reason": "benchmark identity GT not found",
             "metric_definition_version": FACE_CLUSTERING_METRIC_VERSION,
         }
-    asset_names = {
-        Path(str(sample.get("file_name") or "")).name.lower()
-        for cluster in clusters
-        for sample in (cluster.get("samples") or [])
-        if sample.get("file_name")
-    }
+    if asset_names is None:
+        asset_names = {
+            Path(str(sample.get("file_name") or "")).name.lower()
+            for cluster in clusters
+            for sample in (cluster.get("samples") or [])
+            if sample.get("file_name")
+        }
+    else:
+        asset_names = {Path(str(name)).name.lower() for name in asset_names if str(name).strip()}
     raw_by_file: dict[str, list[tuple[str, str | None]]] = {}
     verified_by_file: dict[str, list[tuple[str, str | None]]] = {}
     for cluster in clusters:
@@ -344,19 +357,25 @@ def face_clustering_quality(
         for name, labels in image_to_face_ids.items()
         if isinstance(labels, list) and len(labels) == 1
     }
-    detected_single = sum(1 for name in gt_single if len(verified_by_file.get(name, [])) == 1)
+    evaluable_gt_single = {name for name in gt_single if name in asset_names}
+    detected_single = sum(1 for name in evaluable_gt_single if len(verified_by_file.get(name, [])) == 1)
     quality = {
         "available": bool(gallery.get("available") or links.get("available")),
         "metric_definition_version": FACE_CLUSTERING_METRIC_VERSION,
         "identity_gallery": gallery,
         "image_identity_links": links,
         "gt_single_image_count": len(gt_single),
-        "single_face_detection_rate": round(detected_single / len(gt_single), 4) if gt_single else None,
+        "single_face_detection_rate": (
+            round(detected_single / len(evaluable_gt_single), 4) if evaluable_gt_single else None
+        ),
         "asset_name_coverage_count": sum(1 for name in gt_single if name in asset_names),
+        "evaluable_gt_single_image_count": len(evaluable_gt_single),
         "identity_gallery_seed_count": len(seed_cluster_by_identity),
         "verified_detection_image_count": len(verified_by_file),
         "gt_multi_identity_image_count": sum(
-            1 for labels in image_to_face_ids.values() if isinstance(labels, list) and len(labels) != 1
+            1
+            for name, labels in image_to_face_ids.items()
+            if Path(str(name)).name.lower() in asset_names and isinstance(labels, list) and len(labels) != 1
         ),
     }
     return quality

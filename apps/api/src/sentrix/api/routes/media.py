@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response
 from sentrix.api.deps import get_container
 from sentrix.api.schemas.media import AssetListResponse, AssetSummary, ImportResponse
 from sentrix.application.identity.enroll_face import EnrollFace, EnrollFaces
-from sentrix.application.media.extract_video_scenes import ExtractVideoScenes
+from sentrix.application.media.extract_video_scenes import ExtractVideoScenes, VideoSceneExtraction
 from sentrix.application.media.import_assets import ImportAssets, ImportRequest
 from sentrix.application.media.index_place import IndexAssetPlace
 from sentrix.application.media.maintain_entities import MaintainObservationEntities
@@ -24,6 +24,7 @@ from sentrix.application.retrieval.index_observation_text import IndexObservatio
 from sentrix.application.retrieval.index_visual import IndexAssetVisual
 from sentrix.bootstrap.container import Container
 from sentrix.domain.media.models import Asset, MediaType, Observation
+from sentrix.domain.memories.graph import GraphBuildStats
 
 router = APIRouter(tags=["media"])
 log = logging.getLogger("sentrix.api.media")
@@ -100,15 +101,18 @@ def build_memory_graph(container: Container) -> BuildMemoryGraph:
         facts=container.fact_repository,
         relationships=container.relationship_repository,
         graph=container.memory_graph,
+        causal_judge=container.causal_judge,
+        vectors=container.vector_repository,
     )
 
 
-def refresh_memory_graph(container: Container, scope_id: str) -> None:
+def refresh_memory_graph(container: Container, scope_id: str) -> GraphBuildStats | None:
     """在写入链路结束后重建派生图；图失败不阻断权威记忆写入。"""
     try:
-        build_memory_graph(container).execute(scope_id)
+        return build_memory_graph(container).execute(scope_id)
     except Exception as error:  # noqa: BLE001 - 派生投影必须可降级
         log.warning("记忆图重建失败（scope=%s），保留主链路结果: %s", scope_id, error)
+        return None
 
 
 def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
@@ -134,7 +138,7 @@ def build_import_assets(container: Container, *, observe: bool) -> ImportAssets:
     return _build_importer(
         container,
         observe=observe,
-        video_scene_extractor=lambda asset_id: extractor.execute(asset_id).scene_count,
+        video_scene_extractor=extractor.execute,
     )
 
 
@@ -164,7 +168,7 @@ def _build_importer(
     container: Container,
     *,
     observe: bool,
-    video_scene_extractor: Callable[[str], int] | None = None,
+    video_scene_extractor: Callable[[str], VideoSceneExtraction | int] | None = None,
 ) -> ImportAssets:
     """``ImportAssets`` 的装配本体。两个调用方共用：导入本身，以及关键帧那条流水线。"""
     assigner = AssignEvents(

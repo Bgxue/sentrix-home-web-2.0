@@ -26,8 +26,7 @@ class GraphNode:
 class GraphEdge:
     """一条图边。
 
-    遍历端把边视为无向邻接关系，但仍保留 source/target 的语义方向，方便审计和
-    后续按关系类型做定向策略。
+    普通语义边可双向遍历；时序与因果边按查询意图约束方向。
     """
 
     id: str
@@ -44,6 +43,16 @@ class GraphBuildStats:
     scope_id: str
     node_count: int
     edge_count: int
+    causal_candidate_pairs: int = 0
+    causal_edges: int = 0
+    causal_status: str = "not_configured"
+    causal_seconds: float = 0.0
+    keyframe_count: int = 0
+    keyframe_temporal_edges: int = 0
+    keyframe_object_edges: int = 0
+    keyframe_relation_edges: int = 0
+    keyframe_visual_edges: int = 0
+    keyframe_visual_status: str = "no_frames"
 
 
 @dataclass(frozen=True, slots=True)

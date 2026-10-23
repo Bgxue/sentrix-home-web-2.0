@@ -38,6 +38,8 @@ class FakeSentrixClient:
         asset_polls: list[list[dict[str, Any]]] | None = None,
         asset_cycle: list[list[dict[str, Any]]] | None = None,
         import_result: dict[str, Any] | None = None,
+        pipeline_result: dict[str, Any] | None = None,
+        explicit_pipeline: bool = False,
         entity_ids: dict[str, str] | None = None,
         turns: dict[str, list[dict[str, Any]]] | None = None,
         turn_errors: dict[str, list[Exception]] | None = None,
@@ -66,6 +68,19 @@ class FakeSentrixClient:
             "summarized": 0,
             "failures": [],
         }
+        self.pipeline_result = pipeline_result or {
+            "scope_id": "",
+            "processed": 0,
+            "skipped": 0,
+            "events": 0,
+            "lexical_terms": 0,
+            "video_scenes": 0,
+            "summarized": 0,
+            "timings": {},
+            "failures": [],
+            "memory_graph": None,
+        }
+        self.supports_explicit_pipeline = explicit_pipeline
         self.entity_ids = entity_ids or {}
         #: turn_id → 该回合按次消费的 ``get_turn`` 响应队列。
         self.turns = turns or {}
@@ -135,6 +150,14 @@ class FakeSentrixClient:
     def import_album(self, *, scope_id: str, directory: str, limit: int, timeout: int) -> dict[str, Any]:
         self._record("import_album", scope_id=scope_id, directory=directory, limit=limit, timeout=timeout)
         return {**self.import_result, "scope_id": scope_id, "directory": directory}
+
+    def import_assets(self, *, scope_id: str, directory: str, limit: int, timeout: int) -> dict[str, Any]:
+        self._record("import_assets", scope_id=scope_id, directory=directory, limit=limit, timeout=timeout)
+        return {**self.import_result, "scope_id": scope_id, "directory": directory}
+
+    def process_pipeline(self, *, scope_id: str, asset_ids: Sequence[str], timeout: int) -> dict[str, Any]:
+        self._record("process_pipeline", scope_id=scope_id, asset_ids=list(asset_ids), timeout=timeout)
+        return {**self.pipeline_result, "scope_id": scope_id}
 
     def list_assets(self, *, scope_id: str, limit: int, timeout: int = 60) -> list[dict[str, Any]]:
         self._record("list_assets", scope_id=scope_id, limit=limit)

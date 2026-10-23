@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 
 from sentrix.domain.memories.graph import (
@@ -18,6 +19,7 @@ from sentrix.domain.memories.graph import (
     GraphNode,
     GraphStatus,
 )
+from sentrix.domain.memories.graph_reference import reference_edges_from_sources
 from sentrix.infrastructure.persistence.database import Database
 
 
@@ -112,10 +114,8 @@ class SqliteMemoryGraphRepository:
     def quality(self, scope_id: str) -> Mapping[str, object]:
         """图自身的结构审计。
 
-        这里不能读取 PhotoBench 的身份/QA GT；那是 evaluator 的职责。所谓「可验边」
-        在 2.0 里因此是当前关系契约的 rule-reference：检查端点是否存在、节点类型是否
-        符合关系契约、是否有重复边。响应明确带上 ``reference_mode``，前端不会把它显示
-        成独立真实世界准确率。
+        从图节点上的原始来源字段重建确定性参考边；不使用已落库的边作为参考集。
+        这仍只是 source-consistency，不是独立人工真值。视觉/因果边单列为不可验。
         """
 
         status = self.status(scope_id)
@@ -124,11 +124,12 @@ class SqliteMemoryGraphRepository:
                 "available": False,
                 "scope_id": scope_id,
                 "reason": status.reason or "graph_not_built",
-                "reference_mode": "current_2_0_relation_contract",
+                "reference_mode": "source_consistency",
             }
         with self._database.connect() as connection:
             node_rows = connection.execute(
-                "SELECT id, node_type FROM memory_graph_nodes WHERE scope_id = ?", (scope_id,)
+                "SELECT id, node_type, attributes_json FROM memory_graph_nodes WHERE scope_id = ?",
+                (scope_id,),
             ).fetchall()
             edge_rows = connection.execute(
                 "SELECT source_id, target_id, relation, attributes_json"
@@ -136,10 +137,42 @@ class SqliteMemoryGraphRepository:
                 (scope_id,),
             ).fetchall()
 
-        node_types = {str(row[0]): str(row[1]) for row in node_rows}
+        nodes: dict[str, tuple[str, dict[str, object]]] = {}
+        for row in node_rows:
+            try:
+                attributes = json.loads(row[2] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                attributes = {}
+            nodes[str(row[0])] = (str(row[1]), attributes if isinstance(attributes, dict) else {})
+        node_types = {node_id: kind for node_id, (kind, _) in nodes.items()}
+        source_reference = reference_edges_from_sources(nodes)
+        evaluable_relations = frozenset(relation for _, _, relation, _ in source_reference) | {
+            "asset_derived_from_asset",
+            "observation_of_asset",
+            "event_contains_observation",
+            "event_contains_asset",
+            "event_source_asset",
+            "event_has_entity",
+            "observation_mentions_concept",
+            "observation_mentions_entity",
+            "fact_evidence",
+            "fact_about_entity",
+            "event_temporal_next",
+            "frame_temporal_next",
+            "frame_mentions_object",
+            "frame_shares_object",
+            "frame_mentions_relation",
+            "frame_shares_relation",
+            "event_place_context",
+            "event_date_context",
+            "asset_place_context",
+            "asset_date_context",
+        }
         allowed = {
+            "asset_derived_from_asset": {("asset", "asset")},
             "event_contains_observation": {("event", "observation")},
             "event_contains_asset": {("event", "asset")},
+            "event_source_asset": {("event", "asset")},
             "event_has_entity": {("event", "entity")},
             "observation_of_asset": {("observation", "asset")},
             "observation_mentions_entity": {("observation", "entity")},
@@ -147,12 +180,35 @@ class SqliteMemoryGraphRepository:
             "fact_evidence": {("fact", "observation")},
             "fact_about_entity": {("fact", "entity")},
             "event_temporal_next": {("event", "event")},
+            "frame_temporal_next": {("asset", "asset")},
+            "frame_mentions_object": {("asset", "object_hub")},
+            "frame_shares_object": {("asset", "asset")},
+            "frame_mentions_relation": {("asset", "relation_hub")},
+            "frame_shares_relation": {("asset", "asset")},
+            "frame_visual_similar": {("asset", "asset")},
+            "event_place_context": {("event", "place_context")},
+            "event_date_context": {("event", "date_context")},
+            "asset_place_context": {("asset", "place_context")},
+            "asset_date_context": {("asset", "date_context")},
+            "asset_causes_asset:LEADS_TO": {("asset", "asset")},
+            "asset_causes_asset:ENABLES": {("asset", "asset")},
         }
         total = len(edge_rows)
+        causal_rows = [row for row in edge_rows if str(row[2]).startswith("asset_causes_asset:")]
+        causal_confidences: list[float] = []
+        for row in causal_rows:
+            try:
+                properties = json.loads(row[3] or "{}")
+                if isinstance(properties, dict):
+                    causal_confidences.append(float(properties.get("confidence") or 0.0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
         endpoint_valid = 0
         contract_valid = 0
         attribute_supported = 0
-        duplicate_counts = Counter((str(row[0]), str(row[1]), str(row[2])) for row in edge_rows)
+        evidence_supported = 0
+        predicted_reference: set[tuple[str, str, str, str]] = set()
+        predicted_counts: Counter[tuple[str, str, str, str]] = Counter()
         for row in edge_rows:
             source_id, target_id, relation = str(row[0]), str(row[1]), str(row[2])
             source_kind, target_kind = node_types.get(source_id), node_types.get(target_id)
@@ -165,11 +221,27 @@ class SqliteMemoryGraphRepository:
                     contract_valid += 1
             try:
                 attributes = json.loads(row[3] or "{}")
-            except (TypeError, json.JSONDecodeError):
+            except (TypeError, ValueError, json.JSONDecodeError):
                 attributes = {}
             if isinstance(attributes, dict) and attributes:
                 attribute_supported += 1
-        duplicate_extra = sum(max(0, count - 1) for count in duplicate_counts.values())
+            if not isinstance(attributes, dict):
+                attributes = {}
+            discriminator = str(attributes.get("label") or "") if relation.startswith("frame_") else ""
+            key = (source_id, target_id, relation, discriminator)
+            predicted_counts[key] += 1
+            if relation in evaluable_relations:
+                predicted_reference.add(key)
+            if relation == "frame_visual_similar":
+                with suppress(TypeError, ValueError):
+                    evidence_supported += float(attributes.get("similarity") or 0.0) >= 0.75
+            elif relation.startswith("asset_causes_asset:"):
+                with suppress(TypeError, ValueError):
+                    confidence = float(attributes.get("confidence") or 0.0)
+                    evidence_supported += bool(attributes.get("reason")) and confidence >= 0.5
+            elif relation in evaluable_relations:
+                evidence_supported += 1
+        duplicate_extra = sum(max(0, count - 1) for count in predicted_counts.values())
 
         def rate(numerator: int, denominator: int) -> float | None:
             return round(numerator / denominator, 4) if denominator else None
@@ -178,9 +250,10 @@ class SqliteMemoryGraphRepository:
         for row in edge_rows:
             if str(row[0]) in node_types and str(row[1]) in node_types:
                 connected_nodes.update((str(row[0]), str(row[1])))
-        reference_count = contract_valid
-        reference_precision = rate(contract_valid, total)
-        reference_recall = rate(contract_valid, reference_count)
+        true_positive = len(predicted_reference & source_reference)
+        reference_count = len(source_reference)
+        reference_precision = rate(true_positive, len(predicted_reference))
+        reference_recall = rate(true_positive, reference_count)
         reference_f1 = (
             round(
                 2 * reference_precision * reference_recall / (reference_precision + reference_recall),
@@ -197,23 +270,26 @@ class SqliteMemoryGraphRepository:
             "build_revision": status.build_revision,
             "node_count": len(node_rows),
             "edge_count": total,
-            "reference_mode": "current_2_0_relation_contract",
+            "causal_edge_count": len(causal_rows),
+            "causal_edge_mean_confidence": (
+                round(sum(causal_confidences) / len(causal_confidences), 4) if causal_confidences else None
+            ),
+            "reference_mode": "source_consistency",
             "reference_edge_count": reference_count,
-            "evaluable_predicted_edge_count": total,
-            "reference_edge_true_positive_count": contract_valid,
+            "evaluable_predicted_edge_count": len(predicted_reference),
+            "reference_edge_true_positive_count": true_positive,
             "reference_edge_precision": reference_precision,
-            # rule-reference 的分母就是当前关系契约生成的可验证边；它不是独立 GT。
             "reference_edge_recall": reference_recall,
             "reference_edge_f1": reference_f1,
             "valid_edge_rate": rate(endpoint_valid, total),
             "edge_consistency_rate": rate(contract_valid, total),
             "edge_attribute_support_rate": rate(attribute_supported, total),
-            "edge_evidence_support_rate": None,
+            "edge_evidence_support_rate": rate(evidence_supported, total),
             "duplicate_edge_rate": rate(duplicate_extra, total),
             "node_connected_rate": rate(len(connected_nodes), len(node_rows)),
-            "unverifiable_edge_ratio": rate(total - contract_valid, total),
+            "unverifiable_edge_ratio": rate(total - len(predicted_reference), total),
             "independent_ground_truth_available": False,
-            "note": "当前 2.0 图没有独立边 GT；P/R/F1 是关系契约 rule-reference，不是独立准确率。",
+            "note": "P/R/F1 按来源字段重建的确定性参考边计算，不是独立人工真值；视觉/因果边不计入。",
         }
 
     def expand_assets(
@@ -223,6 +299,8 @@ class SqliteMemoryGraphRepository:
         scope_id: str,
         max_hops: int,
         limit: int,
+        intent: str = "general",
+        direction: str = "",
     ) -> Sequence[GraphExpansionHit]:
         seeds = tuple(dict.fromkeys(f"asset:{asset_id}" for asset_id in seed_asset_ids if asset_id))
         if not seeds or max_hops < 1 or limit < 1:
@@ -268,7 +346,53 @@ class SqliteMemoryGraphRepository:
                     source_id, target_id = str(row[0]), str(row[1])
                     relation = str(row[2])
                     weight = float(row[3] or 0.0)
+                    causal = relation.startswith("asset_causes_asset:")
+                    temporal = relation in {"frame_temporal_next", "event_temporal_next"}
+                    object_edge = relation in {"frame_shares_object", "frame_mentions_object"}
+                    semantic_edge = relation in {
+                        "frame_shares_relation",
+                        "frame_mentions_relation",
+                        "frame_visual_similar",
+                    }
+                    hierarchy = relation in {
+                        "asset_derived_from_asset",
+                        "event_contains_asset",
+                        "event_contains_observation",
+                        "event_source_asset",
+                        "observation_of_asset",
+                    }
+                    # hpq: 因果边不参加普通检索，且只信 >=0.60 的推断。
+                    if causal and (weight < 0.60 or intent not in {"causal", "action", "multi_hop"}):
+                        continue
+                    if intent == "causal" and not (causal or hierarchy):
+                        continue
+                    if intent == "temporal" and not (temporal or hierarchy):
+                        continue
+                    if intent == "object" and (causal or temporal):
+                        continue
+                    if intent == "scene" and (causal or temporal or object_edge):
+                        continue
                     for current_id, neighbor_id in ((source_id, target_id), (target_id, source_id)):
+                        if causal and (
+                            (direction == "backward" and current_id != target_id)
+                            or (direction != "backward" and current_id != source_id)
+                        ):
+                            continue
+                        if (
+                            temporal
+                            and direction in {"forward", "backward"}
+                            and (
+                                (direction == "forward" and current_id != source_id)
+                                or (direction == "backward" and current_id != target_id)
+                            )
+                        ):
+                            continue
+                        if (
+                            intent == "causal"
+                            and relation == "asset_derived_from_asset"
+                            and current_id != target_id
+                        ):
+                            continue
                         current = frontier.get(current_id)
                         if current is None or neighbor_id == current_id:
                             continue
@@ -279,7 +403,20 @@ class SqliteMemoryGraphRepository:
                             continue
                         best_hops[neighbor_id] = next_hops
                         safe_weight = min(1.0, max(0.0, weight))
-                        next_score = current_score * safe_weight * (0.72 if next_hops > 1 else 1.0)
+                        intent_boost = 1.0
+                        if intent in {"causal", "action", "multi_hop"} and causal:
+                            intent_boost = 1.25
+                        elif (
+                            (intent in {"temporal", "action"} and temporal)
+                            or (intent == "object" and object_edge)
+                            or (intent == "scene" and semantic_edge)
+                        ):
+                            intent_boost = 1.15
+                        next_score = (
+                            current_score
+                            * min(1.0, safe_weight * intent_boost)
+                            * (0.72 if next_hops > 1 else 1.0)
+                        )
                         state = (
                             next_score,
                             next_hops,
