@@ -23,6 +23,7 @@ from sentrix.domain.media.models import (
     ObservationFact,
     VideoMetadata,
 )
+from sentrix.domain.media.scenes import SceneWindow
 
 SUPPORTED_IMAGE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff"}
@@ -351,6 +352,12 @@ class VideoKeyframeExtractor(Protocol):
         ``ExtractVideoScenes`` 选的是整条放弃：半套场景比没有场景更难解释。
         """
         ...
+
+
+class VideoScenePlanner(Protocol):
+    """Plan scene windows and selected keyframe timestamps for a video."""
+
+    def __call__(self, video_path: Path, video_id: str, duration_sec: float) -> Sequence[SceneWindow]: ...
 
 
 @dataclass(frozen=True, slots=True)
