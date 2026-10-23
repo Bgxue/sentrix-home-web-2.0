@@ -11,6 +11,7 @@ receive ports; only this module knows which concrete class implements them.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ from sentrix.domain.media.ports import (
     VideoKeyframeExtractor,
     VideoMetadataReader,
     VideoRepository,
+    VideoScenePlanner,
     VideoTranscoder,
     VlmObserver,
 )
@@ -88,6 +90,7 @@ from sentrix.infrastructure.media.person_vision import (
 from sentrix.infrastructure.media.person_vision_model import OpenAIPersonVision
 from sentrix.infrastructure.media.photo_inspector import OpenAIPhotoInspector
 from sentrix.infrastructure.media.storage import FileSystemMediaStorage
+from sentrix.infrastructure.media.svd_scene_planner import SVDLowRankScenePlanner
 from sentrix.infrastructure.media.video_keyframes import FfmpegVideoKeyframeExtractor
 from sentrix.infrastructure.media.video_metadata import FfprobeVideoMetadataReader
 from sentrix.infrastructure.media.video_transcode import FfmpegVideoTranscoder
@@ -172,6 +175,7 @@ class Container:
     # 关键帧抽取（S8b T511）：在给定的原片秒数上取一帧。切窗规则在 domain，解码在
     # 适配器里——子进程只能落 infrastructure（purity 契约）。
     video_keyframe_extractor: VideoKeyframeExtractor
+    video_scene_planner: VideoScenePlanner | None
     video_repository: VideoRepository
     # 音频两件（S8c T521）：ffprobe 探测 + 探测结果落库。**没有转码器**——音频不转码
     # （用户裁决②），浏览器原生放 mp3/wav/m4a/aac/flac/ogg。
@@ -254,6 +258,17 @@ class Container:
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
+        video_algorithm = os.getenv("SENTRIX_VIDEO_KEYFRAME_ALGORITHM", "window").strip().lower()
+        video_scene_planner = None
+        if video_algorithm == "svd_lowrank":
+            source_root = os.getenv("SENTRIX_SVD_SOURCE_ROOT", "").strip()
+            if not source_root:
+                raise ValueError("SENTRIX_SVD_SOURCE_ROOT is required for svd_lowrank")
+            video_scene_planner = SVDLowRankScenePlanner(
+                Path(source_root), settings.media_dir / "derived" / "svd"
+            )
+        elif video_algorithm != "window":
+            raise ValueError(f"Unsupported SENTRIX_VIDEO_KEYFRAME_ALGORITHM: {video_algorithm}")
         place_aliases = load_place_aliases()
         database = Database(settings.database_path, MIGRATIONS_DIR)
         observations = SqliteObservationRepository(database)
@@ -320,6 +335,7 @@ class Container:
             # 换数据目录就整体换（与 ``Settings`` 里 preview_dir / qdrant_dir 同一条理由）。
             video_transcoder=FfmpegVideoTranscoder(settings.media_dir),
             video_keyframe_extractor=FfmpegVideoKeyframeExtractor(settings.media_dir),
+            video_scene_planner=video_scene_planner,
             video_repository=SqliteVideoRepository(database),
             audio_metadata_reader=FfprobeAudioMetadataReader(),
             audio_repository=SqliteAudioRepository(database),

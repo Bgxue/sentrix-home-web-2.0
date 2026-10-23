@@ -260,3 +260,35 @@ def test_retry_uses_one_total_budget_and_backoff_is_bounded():
         client.request_json("http://local/read", timeout=1)
     assert observed == [1, 0.5]
     assert now[0] == pytest.approx(0.8)
+
+
+def test_a_transient_disconnect_is_retried(monkeypatch):
+    """2026-10-21 的 158 全流程里 131/487 题死在 ``Server disconnected``。
+
+    进程级 client 复用了 uvicorn 已关闭的 keep-alive 连接，且没有重试。这里钉住
+    「换一条连接后能恢复」：第一次抛 ``RemoteProtocolError``，第二次正常返回。
+    """
+    monkeypatch.setattr("photobench.infrastructure.http.client.time.sleep", lambda _: None)
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return httpx.Response(200, json={"ok": True})
+
+    assert _client(handler).request_json("http://sentrix/api/x") == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_a_persistent_disconnect_is_raised_after_the_retry_budget(monkeypatch):
+    monkeypatch.setattr("photobench.infrastructure.http.client.time.sleep", lambda _: None)
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        _client(handler).request_json("http://sentrix/api/x")
+    assert len(calls) == 3

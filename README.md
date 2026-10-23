@@ -44,10 +44,47 @@ make pb-dev         # PhotoBench 8772
 ### Mac mini / 16 GB 机器（legacy）
 
 ```bash
-./scripts/deploy/start_legacy_mac.sh
+SENTRIX_DEPLOYMENT_PROFILE=mac ./scripts/deploy/start_legacy_mac.sh
 ```
 
 详见 [`docs/runbooks/mac-mini-legacy.md`](docs/runbooks/mac-mini-legacy.md)。
+
+### 部署 profile（同一份代码，server / mac）
+
+平台差异**不写成代码里的 `if macOS`**。用 `SENTRIX_DEPLOYMENT_PROFILE=server|mac`
+提供一组默认值；**显式 env / run payload 永远优先**。
+
+| 默认项 | `server`（153） | `mac`（158） |
+|---|---|---|
+| `embedding_scheme` | `wemm` | `legacy` |
+| `agent_wall_time_s` | 180 | 600 |
+| `chat_timeout_s` | 120 | 180 |
+| QA 并发 | `None`（按端点槽位探测） | 2 |
+| `import_timeout` | 7200 | 86400 |
+| `FACE_PROVIDERS` / `RETINAFACE_PROVIDERS` | CUDA,CPU | CPU |
+
+显式覆盖示例：
+
+```bash
+# 一台 Mac 仍想用 WeMM
+SENTRIX_DEPLOYMENT_PROFILE=mac SENTRIX_EMBEDDING_SCHEME=wemm ...
+# 临时把 Mac 的 QA 并发提到 4
+PHOTOBENCH_QA_CONCURRENCY=4 ...
+# 单次 run 覆盖导入超时
+{"import_timeout": 7200}
+```
+
+**profile 不负责的部署项（仍需显式设置）：**
+
+- 数据/结果/配置/前端产物根：`SENTRIX_DATA_DIR`、`PHOTOBENCH_{DATA,RESULTS,CONFIG,WEB_DIST}_ROOT`
+- 模型与侧车地址：`SENTRIX_VLM_BASE_URL`、`SENTRIX_WEMM_URL`、
+  `SENTRIX_TEXT_EMBEDDER_URL`、`SENTRIX_LEGACY_CLIP_URL`
+- llama-server 的 `--ctx-size/--parallel`（决定每个槽的上下文窗口）
+- judge 端点/模型/密钥（`judge_providers.json` 或 run payload）
+- 数据集根（158 的 `PHOTOBENCH_DATA_ROOT` 指向 1.0 的 `services/photobench/data`）
+
+153 不设 profile（默认 `server`）；158 只需在启动时设
+`SENTRIX_DEPLOYMENT_PROFILE=mac`，再补齐上面这些部署项。
 
 ---
 

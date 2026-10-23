@@ -49,9 +49,12 @@ class SceneWindow:
     index: int
     start_sec: float
     end_sec: float
+    selected_timestamp_sec: float | None = None
 
     @property
     def keyframe_timestamp_sec(self) -> float:
+        if self.selected_timestamp_sec is not None:
+            return float(self.selected_timestamp_sec)
         return (self.start_sec + self.end_sec) / 2
 
 

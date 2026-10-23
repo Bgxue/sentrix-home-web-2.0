@@ -43,6 +43,17 @@ import httpx
 from photobench.domain.errors import RequestOutcomeUnknownError
 from photobench.domain.http.ports import HttpStream
 
+_RETRYABLE = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+    httpx.ReadTimeout,
+)
+_RETRIES = 3
+_RETRY_BACKOFF_S = 0.2
+
 
 def build_multipart(fields: Mapping[str, str], files: Sequence[tuple[str, str, bytes]]) -> tuple[bytes, str]:
     """1.0 ``build_multipart``（``:864``）逐行照搬。
@@ -100,11 +111,16 @@ class HttpxJsonClient:
         self,
         client: httpx.Client | None = None,
         *,
-        retry_connections: bool = False,
-        keep_alive: bool = True,
-        sleep: Callable[[float], None] = time.sleep,
+        retry_connections: bool = True,
+        keep_alive: bool = False,
+        sleep: Callable[[float], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        # **默认不保留 keep-alive 连接。** 2026-10-21 的 158 全流程里 131/487 题以
+        # ``Server disconnected without sending a response`` / ``Bad file descriptor``
+        # 失败：进程级 ``httpx.Client`` 复用了 uvicorn 已关闭的连接（默认 keep-alive 5s），
+        # 而长回合让连接大段空闲。本机回环上每次重新握手几乎无成本，换掉这个失败面。
+        # 调用方仍可显式传 keep_alive=True 复用连接。
         self._client = (
             client
             if client is not None
@@ -112,11 +128,15 @@ class HttpxJsonClient:
                 verify=False,
                 follow_redirects=True,
                 timeout=120,
-                limits=httpx.Limits(max_keepalive_connections=20 if keep_alive else 0),
+                limits=httpx.Limits(
+                    max_connections=32,
+                    max_keepalive_connections=20 if keep_alive else 0,
+                    keepalive_expiry=5.0 if keep_alive else 0.0,
+                ),
             )
         )
         self._retry_connections = retry_connections
-        self._sleep = sleep
+        self._sleep = sleep or time.sleep
         self._clock = clock
 
     def _request(
@@ -130,18 +150,11 @@ class HttpxJsonClient:
     ) -> httpx.Response:
         """Only connection establishment failures are safe to retry for POST."""
         deadline = self._clock() + timeout
-        for attempt in range(3):
+        for attempt in range(_RETRIES):
             budget = timeout if attempt == 0 else deadline - self._clock()
             try:
                 return self._client.request(method, url, content=content, headers=headers, timeout=budget)
-            except (
-                httpx.ConnectError,
-                httpx.ConnectTimeout,
-                httpx.ReadError,
-                httpx.WriteError,
-                httpx.RemoteProtocolError,
-                httpx.ReadTimeout,
-            ) as exc:
+            except _RETRYABLE as exc:
                 safe = method.upper() in {"GET", "HEAD"} or isinstance(
                     exc, (httpx.ConnectError, httpx.ConnectTimeout)
                 )
@@ -153,11 +166,11 @@ class HttpxJsonClient:
                 if (
                     not self._retry_connections
                     or not safe
-                    or attempt == 2
-                    or remaining <= (0.2, 0.4, 0)[attempt]
+                    or attempt == _RETRIES - 1
+                    or remaining <= _RETRY_BACKOFF_S * (attempt + 1)
                 ):
                     raise
-                self._sleep((0.2, 0.4)[attempt])
+                self._sleep(_RETRY_BACKOFF_S * (attempt + 1))
         raise AssertionError("bounded retry exhausted")
 
     def request_json(
@@ -171,6 +184,7 @@ class HttpxJsonClient:
         content = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
         headers = {"Content-Type": "application/json"}
         headers.update(extra_headers or {})
+        # 连接错误重试统一由 _request 处理；POST 的不确定结果由 RequestOutcomeUnknownError 表达。
         try:
             response = self._request(method, url, content=content, headers=headers, timeout=timeout)
             response.raise_for_status()

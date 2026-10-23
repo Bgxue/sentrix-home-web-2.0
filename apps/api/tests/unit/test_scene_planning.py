@@ -17,6 +17,14 @@ def test_a_short_video_is_a_single_scene_and_the_frame_sits_at_its_middle():
     assert scene.keyframe_timestamp_sec == 6.25
 
 
+def test_an_algorithm_selected_timestamp_overrides_the_window_middle():
+    from sentrix.domain.media.scenes import SceneWindow
+
+    scene = SceneWindow(index=0, start_sec=2.0, end_sec=8.0, selected_timestamp_sec=6.7)
+
+    assert scene.keyframe_timestamp_sec == 6.7
+
+
 def test_windows_are_back_to_back_and_cover_the_whole_video():
     scenes = plan_scenes(125.0)
 
