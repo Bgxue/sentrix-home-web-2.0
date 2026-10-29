@@ -89,7 +89,13 @@ from pathlib import Path
 
 from sentrix.application.media.extract_video_scenes import VideoSceneExtraction
 from sentrix.domain.identity.ports import FaceEnroller, PreparedFaces
-from sentrix.domain.media.models import Asset, AssetStatus, MediaType, Observation
+from sentrix.domain.media.models import (
+    Asset,
+    AssetStatus,
+    MediaType,
+    Observation,
+    normalize_captured_datetime,
+)
 from sentrix.domain.media.ports import (
     AssetObserver,
     AssetRepository,
@@ -383,6 +389,11 @@ class ImportAssets:
         )
 
         now = self._clock()
+        # ``clock`` 默认 ``datetime.now(UTC)``（aware），而 ``captured_at`` 的不变式是
+        # 「本地时间、无 tzinfo」。没有 EXIF/ffprobe 时兜底成导入时刻，也必须过同一层
+        # 归一化——否则事件时间窗比较会在 aware 减 naive 上抛 TypeError（见
+        # ``normalize_captured_datetime`` 的文档）。
+        captured_at = normalize_captured_datetime(captured_at or now)
         asset = Asset(
             id=asset_id,
             scope_id=request.scope_id,
@@ -393,7 +404,7 @@ class ImportAssets:
             size_bytes=len(request.content),
             status=AssetStatus.QUEUED if request.defer_processing else AssetStatus.PROCESSED,
             content_sha256=content_sha256,
-            captured_at=captured_at or now,
+            captured_at=captured_at,
             captured_location=gps,
             created_at=now,
             updated_at=now,
