@@ -1609,6 +1609,10 @@ class RunExecution:
         target_ids = set(asset_ids)
         poll_count = 0
         assets: list[dict[str, Any]] = []
+        # ``pipeline_metrics.image_count`` 是「评测图片数」（不含身份参考图与视频关键帧）：
+        # 只数本次流水线的目标资产里 ``media_type == "image"`` 的那些。没有它，前端那张
+        # 卡的「评测图片墙钟均值」恒显示「未记录」（``details.ts:pipelineMetricRows``）。
+        observed_image_count = 0
         state.record_phase(
             "pipeline_processing",
             "progress",
@@ -1637,6 +1641,9 @@ class RunExecution:
                     for asset in assets:
                         status = str(asset.get("status") or "unknown")
                         status_counts[status] = status_counts.get(status, 0) + 1
+                    observed_image_count = sum(
+                        1 for asset in assets if str(asset.get("media_type") or "") == "image"
+                    )
                     state.record_phase(
                         "pipeline_processing",
                         "progress",
@@ -1648,6 +1655,12 @@ class RunExecution:
                             "poll_count": poll_count,
                             "status_counts": status_counts,
                         },
+                    )
+                    # 阶段进行中也要能算墙钟均值：分母先落盘，分子是前端按已跑时长算的。
+                    state.record_phase(
+                        "pipeline_processing",
+                        "pipeline_metrics",
+                        {"image_count": observed_image_count},
                     )
                     self._persist(str(state.get("run_id")), state)
                 except Exception:  # noqa: BLE001 - 进度旁路失败不影响流水线主请求
@@ -1711,6 +1724,11 @@ class RunExecution:
                 }
             )
         final_processed = len([item for item in assets if item.get("status") == "processed"])
+        image_count = (
+            sum(1 for item in assets if str(item.get("media_type") or "") == "image")
+            if assets
+            else observed_image_count
+        )
         phase_result = {
             "total_seconds": round(float(timings.get("total") or time.perf_counter() - started), 3),
             "poll_iterations": poll_count,
@@ -1721,6 +1739,14 @@ class RunExecution:
             "event_count": int(result.get("events") or 0),
             "video_scene_count": int(result.get("video_scenes") or 0),
             "summarized_count": int(result.get("summarized") or 0),
+            # 只记**手上确实有的事实**：评测图片数、事件数/总结调用数与总结墙钟。
+            # 并发与 vLLM 上限 2.0 的流水线接口不返回，留空让前端显示「-」而不是编一个值。
+            "pipeline_metrics": {
+                "image_count": image_count,
+                "event_count": int(result.get("events") or 0),
+                "event_summary_call_count": int(result.get("summarized") or 0),
+                "event_summary_wall_seconds": timings.get("event_summarize"),
+            },
             "timings": timings,
             "keyframe_extraction_seconds": timings.get("video_keyframe_extraction", 0.0),
             "keyframe_memory_seconds": timings.get("video_keyframe_memory", 0.0),

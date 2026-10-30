@@ -74,7 +74,10 @@ export function PhaseList({ activeRun }: PhaseListProps) {
           const finishedAt = phase?.finished_at ?? (terminal ? activeRun.finished_at : null);
           const end = typeof finishedAt === "string" ? Date.parse(finishedAt) : now;
           const errors = phaseErrorDetails(phase);
-          const metrics = pipelineMetricRows(phase);
+          // 必须传 ``displayPhase``：运行中的阶段没有 ``total_seconds``/``finished_at``，
+          // 拿原始 ``phase`` 会让 ``phaseSeconds`` 回 null，于是「评测图片墙钟均值」退回
+          // 一个并不存在的 ``average_seconds_per_photo``，恒显示「未记录」。
+          const metrics = pipelineMetricRows(displayPhase);
           return (
             <article className="phase-card" key={phaseDef.key}>
               <div className="phase-title">
