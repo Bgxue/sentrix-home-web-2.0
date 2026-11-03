@@ -94,7 +94,7 @@ wait_http "http://127.0.0.1:$CLIP_PORT/health" 180 || {
 
 # 重排是可选增强：权重目录不在就跳过，API 侧传空串（= 关闭），检索照常走 RRF。
 RERANK_URL=""
-if [ -d "$RERANK_MODEL_DIR" ]; then
+if [ "${SENTRIX_ENABLE_RERANK:-0}" = "1" ] && [ -d "$RERANK_MODEL_DIR" ]; then
   if ! port_in_use "$RERANK_PORT"; then
     echo "启动 BGE Reranker :$RERANK_PORT"
     nohup .venv/bin/python scripts/maintenance/bge_reranker_sidecar.py \
@@ -107,7 +107,7 @@ if [ -d "$RERANK_MODEL_DIR" ]; then
   }
   RERANK_URL="http://127.0.0.1:$RERANK_PORT"
 else
-  echo "跳过 BGE Reranker：未找到 $RERANK_MODEL_DIR"
+  echo "跳过 BGE Reranker（默认关闭）"
 fi
 
 if ! port_in_use "$API_PORT"; then
