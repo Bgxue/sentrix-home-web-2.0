@@ -44,6 +44,7 @@ from typing import Any
 from photobench.domain.runs.analysis import (
     VIDEO_EXTENSIONS,
     infer_media_type,
+    judge_score_for_summary,
     media_key,
     metric_triplet,
 )
@@ -70,6 +71,105 @@ class RunCancelledError(RuntimeError):
     def __init__(self, message: str = "run cancelled") -> None:
         super().__init__(message)
         self.message = message
+
+
+TASK_FAILURE_REASONS = frozenset(
+    {
+        "no_tool_call_stopped",
+        "tool_budget_exhausted",
+        "step_budget_exhausted",
+        "timeout",
+        "model_error",
+        "guard_blocked",
+        "parse_failure",
+        "planner_blocked",
+    }
+)
+
+
+def agent_completion_error(item: Mapping[str, Any]) -> str | None:
+    """Assess final product turns, never intermediate model/tool recovery events."""
+    facts = [item, *(turn for turn in item.get("runtime_turns") or [] if isinstance(turn, Mapping))]
+    for fact in facts:
+        status = fact.get("turn_status") if fact is item else fact.get("agent_status") or fact.get("status")
+        if status in {"pending", "running", "started", "queued"}:
+            raise ValueError(f"QA result integrity: {item.get('qa_id')} has a nonterminal product turn")
+    for fact in facts:
+        status = fact.get("turn_status") if fact is item else fact.get("agent_status") or fact.get("status")
+        reason = fact.get("termination_reason")
+        if (
+            reason in TASK_FAILURE_REASONS
+            or reason == "cancelled"
+            or status in {"failed", "blocked", "cancelled", "error", "timeout"}
+            or fact.get("error")
+        ):
+            return str(reason or fact.get("error") or status)
+    return None
+
+
+def qa_completion_errors(
+    rows: Sequence[Mapping[str, Any]],
+    items: Sequence[Mapping[str, Any]],
+    *,
+    judge_required: bool,
+) -> list[dict[str, Any]]:
+    """Assess final QA facts without IO or changing scores/history.
+
+    Missing/duplicate IDs or nonterminal Agent results are execution integrity
+    defects and raise ValueError. Terminal task/scoring failures return one
+    existing error-detail record per sample; a legitimate zero is a valid score.
+    Deliberately disabled Judge is not a scoring failure.
+    """
+    expected = [str(row.get("qa_id") or "") for row in rows]
+    actual = [str(item.get("qa_id") or "") for item in items]
+    if (
+        not all(expected)
+        or len(set(expected)) != len(expected)
+        or len(set(actual)) != len(actual)
+        or set(actual) != set(expected)
+    ):
+        raise ValueError("QA result integrity: missing, duplicate or unexpected sample IDs")
+    errors: list[dict[str, Any]] = []
+    for item in items:
+        status = item.get("execution_status")
+        if status not in {"completed", "failed", "timeout"}:
+            raise ValueError(f"QA result integrity: {item.get('qa_id')} has no terminal Agent result")
+        agent_error = agent_completion_error(item)
+        if status in {"failed", "timeout"} or item.get("failed") or item.get("error") or agent_error:
+            errors.append(
+                {
+                    "sample_id": item["qa_id"],
+                    "status": status,
+                    "error_type": "agent_error",
+                    "reason": str(item.get("error") or agent_error or "QA execution failed"),
+                }
+            )
+            continue
+        if not judge_required:
+            continue
+        outputs = [item.get(key) for key in ("judge", "task_judge", "evidence_judge")]
+        outputs.extend(item.get("task_judges") or [])
+        for turn in item.get("runtime_turns") or []:
+            if isinstance(turn, Mapping):
+                outputs.extend(turn.get(key) for key in ("judge", "task_judge", "evidence_judge"))
+        failed_output = next(
+            (value for value in outputs if isinstance(value, dict) and value.get("judge_status") == "failed"),
+            None,
+        )
+        quality = item.get("judge")
+        score = judge_score_for_summary(quality if isinstance(quality, dict) else None)
+        if item.get("judge_status") != "completed" or score is None or failed_output is not None:
+            detail = failed_output or (quality if isinstance(quality, dict) else {})
+            errors.append(
+                {
+                    "sample_id": item["qa_id"],
+                    "status": "failed",
+                    "error_type": "judge_error",
+                    "reason": f"Judge scoring incomplete ({item.get('judge_status') or 'unrecorded'}): "
+                    f"{detail.get('reason') or 'missing valid score or final scoring result'}",
+                }
+            )
+    return errors
 
 
 def safe_slug(value: str, fallback: str = "x") -> str:
@@ -473,7 +573,14 @@ def traces_from_progress(
                     "call_type": str(call.get("call_type") or "agent"),
                     "status": call.get("status", "complete"),
                     "tool_argument_parse_facts": call.get("tool_argument_parse_facts"),
+                    "json_output": call.get("json_output"),
+                    "streamed": call.get("streamed"),
+                    "tokens_per_second": call.get("tokens_per_second"),
+                    "token_rate_basis": call.get("token_rate_basis"),
                     "error_type": call.get("error_type"),
+                    "call_id": call.get("call_id"),
+                    "diagnostics": call.get("diagnostics"),
+                    "recovered_by_call_id": call.get("recovered_by_call_id"),
                     "attempt": call.get("attempt"),
                     # ``action`` 是「这一步做了什么」：调了哪个工具，或者就是收口。
                     # ``agent_stability`` 的 ``parsed_success`` 按它判「这一步解析出了动作」。
@@ -541,12 +648,12 @@ def agent2_trace_from(trace: Mapping[str, Any] | None, *, termination_reason: st
 
 
 def debug_steps_from(events: Sequence[Any]) -> list[dict[str, Any]]:
-    """``DebugTracePanel`` 要的逐步轨迹。
+    """``DebugTracePanel`` 要的逐步轨迹（2.0 的进度事件投影）。
 
-    **2.0 给不出 ``prompt`` / ``raw``**：助手从不把提示词与原始回复放上任何一条对外通道
-    （``behaviour-baseline.md`` 的「2.0 不再暴露的轨迹」一节登记过）。这一步给的是它
-    **确实有**的那几格——步骤类型、状态、工具入参、工具产出的规模。面板上 ``prompt``
-    那一格会是空的，**那是事实，不是缺页**。
+    这里**不复制**模型的完整输入输出：它们在回合的 ``trace_bundle.debug_calls`` 里，
+    一条调用一份。本函数只保留「这条事件对应哪次模型调用」的锚点
+    （``step_id`` / ``parent_step_id`` / ``call_id``），让前端按锚点去取，
+    避免同一份 prompt 在 run.json 里出现两次。
     """
     steps: list[dict[str, Any]] = []
     for event in events or []:
@@ -558,6 +665,9 @@ def debug_steps_from(events: Sequence[Any]) -> list[dict[str, Any]]:
             "status": str(event.get("status") or ""),
             "text": str(event.get("text") or ""),
         }
+        for key in ("step_id", "parent_step_id", "call_id"):
+            if payload.get(key) is not None:
+                step[key] = payload[key]
         if payload.get("tool"):
             step["tool"] = payload["tool"]
         if payload.get("arguments") is not None:

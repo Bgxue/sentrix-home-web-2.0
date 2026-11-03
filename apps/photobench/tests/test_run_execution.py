@@ -126,6 +126,7 @@ def _completed_turn(
             # 助手的**回合级事实**。形状由 ``run_turn._turn_trace`` 组装，这里照抄一份
             # 生产上真的会出现的——三个投影都读它。
             "trace": {
+                "include_debug": True,
                 "model_calls": [
                     {
                         "step_id": "step_1",
@@ -135,6 +136,31 @@ def _completed_turn(
                         "duration_ms": 400.0,
                         "tool_calls": ["search_memories"],
                         "finish_reason": "tool_calls",
+                    }
+                ],
+                # 评测侧 include_debug=true 时的完整模型输入/输出。
+                "debug_calls": [
+                    {
+                        "seq": 0,
+                        "step_id": "step_1",
+                        "call_type": "agent",
+                        "status": "complete",
+                        "messages": [
+                            {"role": "system", "content": "你是相册助手"},
+                            {"role": "user", "content": "看海边的照片"},
+                        ],
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {"name": "search_memories", "description": "检索"},
+                            }
+                        ],
+                        "response": {
+                            "content": "",
+                            "thought": "先检索",
+                            "tool_calls": [{"id": "c1", "name": "search_memories", "arguments": "{}"}],
+                            "finish_reason": "tool_calls",
+                        },
                     }
                 ],
                 "planner": {"status": "ok", "fallback_reason": "", "goal": "看海边的照片"},
@@ -226,7 +252,12 @@ def test_judge_results_and_progress_are_published_while_an_agent_is_still_runnin
     execution, _, _, _, _ = _execution(albums=FakeAlbums(manifest=_manifest(), qa_rows=rows))
     release = threading.Event()
     published = threading.Event()
-    state = RunState({"scope_id": "s", "album_id": ALBUM})
+    state = RunState(
+        {
+            **{"scope_id": "s", "album_id": ALBUM},
+            "qa_snapshot": {"rows": execution.albums.qa_rows(ALBUM, "qa-1")},
+        }
+    )
 
     def evaluate(row, *_):
         if row["qa_id"] == "slow":
@@ -301,7 +332,12 @@ def test_resume_judge_progress_counts_prior_terminal_results_and_new_skips(monke
             "judge": {"score": None},
         },
     ]
-    state = RunState({"scope_id": "s", "album_id": ALBUM})
+    state = RunState(
+        {
+            **{"scope_id": "s", "album_id": ALBUM},
+            "qa_snapshot": {"rows": execution.albums.qa_rows(ALBUM, "qa-1")},
+        }
+    )
     execution._phase_qa_eval(state, _request(prior_items=prior))
     phase = state.data["phases"]["qa_eval"]
     assert phase["judge_completed"] == phase["progress"]["judge_completed"] == 2
@@ -314,14 +350,21 @@ def test_cancelled_unscheduled_qa_is_not_reported_as_a_completed_agent_or_judge(
     execution, _, _, _, _ = _execution()
 
     def cancelled(*_):
+        state.request_cancel()
         raise RunCancelledError("cancelled before starting")
 
     monkeypatch.setattr(execution, "_evaluate_one", cancelled)
     monkeypatch.setattr(
         execution, "_judge", SimpleNamespace(judge_item=lambda *_: pytest.fail("cancelled QA judged"))
     )
-    state = RunState({"scope_id": "s", "album_id": ALBUM})
-    execution._phase_qa_eval(state, _request())
+    state = RunState(
+        {
+            **{"scope_id": "s", "album_id": ALBUM},
+            "qa_snapshot": {"rows": execution.albums.qa_rows(ALBUM, "qa-1")},
+        }
+    )
+    with pytest.raises(RunCancelledError):
+        execution._phase_qa_eval(state, _request())
     progress = state.data["phases"]["qa_eval"]["progress"]
     assert progress["agent_completed"] == progress["completed"] == progress["judge_completed"] == 0
     assert progress["judge_skipped"] == 1
@@ -503,7 +546,8 @@ def test_processing_requires_two_consecutive_zero_pending_snapshots():
     assert len(polls) == 3
 
 
-def test_explicit_pipeline_moves_memory_keyframes_and_graph_out_of_photo_import():
+@pytest.mark.parametrize("skipped", [0, 1])
+def test_explicit_pipeline_moves_memory_keyframes_and_graph_out_of_photo_import(skipped):
     client = FakeSentrixClient(
         explicit_pipeline=True,
         assets=_assets(),
@@ -516,8 +560,8 @@ def test_explicit_pipeline_moves_memory_keyframes_and_graph_out_of_photo_import(
             "failures": [],
         },
         pipeline_result={
-            "processed": 2,
-            "skipped": 0,
+            "processed": 2 - skipped,
+            "skipped": skipped,
             "events": 1,
             "lexical_terms": 8,
             "video_scenes": 3,
@@ -544,6 +588,7 @@ def test_explicit_pipeline_moves_memory_keyframes_and_graph_out_of_photo_import(
     photo = state["phases"]["photo_import"]
     pipeline = state["phases"]["pipeline_processing"]
     assert photo["pipeline_seconds"] == 0.0
+    assert photo["scanned_count"] == 2
     assert photo["timings"]["asset_import"] == 1.2
     assert pipeline["keyframe_extraction_seconds"] == 4.0
     assert pipeline["keyframe_memory_seconds"] == 12.0
@@ -597,6 +642,9 @@ def test_pipeline_metrics_count_images_without_videos_or_derived_assets():
     metrics = state["phases"]["pipeline_processing"]["pipeline_metrics"]
     assert metrics["image_count"] == 1
     assert metrics["event_count"] == 0
+
+    pipeline = state["phases"]["pipeline_processing"]
+    assert pipeline["progress"]["processed"] + pipeline["progress"]["skipped"] == 2
 
 
 def test_explicit_pipeline_reports_graph_projection_failure_without_losing_memory():
@@ -969,6 +1017,12 @@ def test_the_turn_facts_are_projected_into_the_three_panels():
         "terminal",
     ]
 
+    # ⑤ 完整模型轨迹原样落进 ``trace_bundle``（8772 的两块面板都从这里取）。
+    debug_calls = item["runtime_turns"][0]["trace_bundle"]["debug_calls"]
+    assert debug_calls[0]["call_type"] == "agent"
+    assert debug_calls[0]["messages"][-1]["content"] == "看海边的照片"
+    assert debug_calls[0]["response"]["tool_calls"][0]["name"] == "search_memories"
+
     # ④ 稳定性卡只认 ``execution_trace`` 里 ``stage == "model"`` 的步骤——模型调用
     #    的事实本来就在手上，不补成那种步骤，那张卡恒显示「未记录」。
     model_steps = [s for s in item["execution_trace"] if s.get("stage") == "model"]
@@ -1003,6 +1057,8 @@ def test_a_multi_turn_question_reuses_one_conversation():
     assert len(conversations) == 1
     assert [turn["conversation_id"] for turn in turns] == ["conv_1", "conv_1"]
     assert [turn["message"] for turn in turns] == ["第一轮", "第二轮"]
+    # 评测每轮都显式要求完整模型轨迹（8772 的「模型看到什么」数据源）。
+    assert all(turn["include_debug"] is True for turn in turns)
     item = state["items"][0]
     assert item["question"] == "第二轮"
     assert item["conversation_context_mode"] == "shared_conversation_id"
@@ -1435,7 +1491,7 @@ def test_qa_concurrency_follows_the_endpoint_slots():
     assert state["judge_concurrency"] == 0
 
 
-def test_qa_eval_refuses_to_start_when_the_endpoint_is_unhealthy():
+def test_qa_eval_refuses_to_start_when_the_endpoint_is_unhealthy(monkeypatch):
     """入 QA 前先探一次端点；不健康就抛（1.0 ``:3394-3397``）。
 
     487 道题跑在一个不回话的端点上，产出的是一份**看起来正常**的废数据——比直接失败
@@ -1445,13 +1501,46 @@ def test_qa_eval_refuses_to_start_when_the_endpoint_is_unhealthy():
     ``execute`` 把相位异常收成 ``status=failed``（不往外抛，1.0 ``:2404``），
     所以这里钉的是终态与 ``failed_phase``。
     """
-    execution, *_ = _execution(inference=FakeInference(health_status="error"))
+    # 探活现在带重试；测试里把间隔清零，避免 5s×2 的等待。
+    monkeypatch.setattr("photobench.application.run_execution.service._ENDPOINT_HEALTH_BACKOFF_S", 0.0)
+    inference = FakeInference(health_status="error")
+    execution, *_ = _execution(inference=inference)
 
     state = execution.execute(_request())
 
     assert state["status"] == "failed"
     assert state["failed_phase"] == "qa_eval"
     assert "unhealthy before QA evaluation" in state["fatal_error"]
+    assert inference.calls.count("health") == 3
+
+
+def test_a_transient_endpoint_disconnect_is_retried(monkeypatch):
+    """一次 ``Server disconnected`` 不应该让整轮 QA 在开跑前失败。
+
+    158 实测：导入刚结束、4/4 slot 饱和时，新的 ``/v1/models`` 连接被服务端断开，
+    1167 题的 run 直接判 failed。探活重试后，第二次成功就继续。
+    """
+    monkeypatch.setattr("photobench.application.run_execution.service._ENDPOINT_HEALTH_BACKOFF_S", 0.0)
+    inference = FakeInference(health_failures=1)
+    execution, *_ = _execution(inference=inference)
+
+    state = execution.execute(_request())
+
+    assert state["status"] == "completed"
+    assert inference.calls.count("health") == 2
+
+
+def test_an_endpoint_that_stays_disconnected_still_fails_after_retries(monkeypatch):
+    monkeypatch.setattr("photobench.application.run_execution.service._ENDPOINT_HEALTH_BACKOFF_S", 0.0)
+    inference = FakeInference(health_failures=99)
+    execution, *_ = _execution(inference=inference)
+
+    state = execution.execute(_request())
+
+    assert state["status"] == "failed"
+    assert state["failed_phase"] == "qa_eval"
+    assert "Server disconnected" in state["fatal_error"]
+    assert inference.calls.count("health") == 3
 
 
 def test_a_degraded_endpoint_still_starts_the_run():
@@ -1640,7 +1729,8 @@ def test_late_sample_callback_does_not_reopen_or_append_to_a_finished_run():
     assert "telemetry_live" not in state.data
 
 
-def test_import_final_scan_count_uses_product_outcomes_not_manifest_expectation():
+@pytest.mark.parametrize("explicit_pipeline", [False, True])
+def test_import_final_scan_count_uses_product_outcomes_not_manifest_expectation(explicit_pipeline):
     albums = FakeAlbums(
         manifest=_manifest(),
         qa_rows=_rows(),
@@ -1648,6 +1738,7 @@ def test_import_final_scan_count_uses_product_outcomes_not_manifest_expectation(
         directory_entries={"photos": 5},
     )
     client = FakeSentrixClient(
+        explicit_pipeline=explicit_pipeline,
         asset_polls=_polls(_assets()),
         import_result={
             "imported": 1,
@@ -1662,4 +1753,201 @@ def test_import_final_scan_count_uses_product_outcomes_not_manifest_expectation(
     assert phase["total_media"] == 2  # immutable manifest expectation remains traceable
     assert phase["scanned_count"] == 3  # five entries, three supported media actually settled
     assert (phase["accepted_count"], phase["deduplicated_count"], phase["failed_count"]) == (1, 1, 1)
-    assert phase["directories"][0]["progress"]["request_status"] == "returned"
+    assert phase["progress"]["request_status"] == "returned"
+    if not explicit_pipeline:
+        assert phase["directories"][0]["progress"]["request_status"] == "returned"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "zero",
+        "recovered",
+        "failed",
+        "exception",
+        "missing",
+        "subjudge_failed",
+        "step_budget_exhausted",
+        "parse_failure",
+    ],
+)
+def test_final_status_includes_judge_failure_without_waiting_for_full_scores(monkeypatch, outcome):
+    rows = [{"qa_id": f"q{index}"} for index in range(10)]
+    albums = FakeAlbums(
+        manifest=_manifest(), qa_rows=rows, files={"faces/1.jpg": b"J"}, directory_entries={"photos": 2}
+    )
+    execution, _, writer, _, _ = _execution(albums=albums)
+    judged_ids = []
+
+    def evaluate(row, *_):
+        item = {"qa_id": row["qa_id"], "execution_status": "completed"}
+        if row["qa_id"] == "q0" and outcome in {"step_budget_exhausted", "parse_failure"}:
+            item.update(turn_status="partial", termination_reason=outcome)
+        return item
+
+    def judge_item(item, *_):
+        judged_ids.append(item["qa_id"])
+        if item["qa_id"] == "q0" and outcome == "exception":
+            raise RuntimeError("Judge exhausted retries")
+        bad = item["qa_id"] == "q0" and outcome in {"failed", "missing"}
+        score = None if bad else 0
+        status = "failed" if bad and outcome == "failed" else "completed"
+        result = {**item, "judge_status": status, "judge": {"score": score, "reason": "final response"}}
+        if item["qa_id"] == "q0" and outcome == "subjudge_failed":
+            result["evidence_judge"] = {"judge_status": "failed", "reason": "evidence Judge unavailable"}
+        if outcome == "recovered":
+            result["judge"]["attempts"] = [{"error": "transient failure"}, {"score": 0}]
+        return result
+
+    monkeypatch.setattr(execution, "_evaluate_one", evaluate)
+    monkeypatch.setattr(execution, "_build_judge", lambda *_: SimpleNamespace(judge_item=judge_item))
+    state = execution.execute(_request())
+    expected = "completed" if outcome in {"zero", "recovered"} else "completed_with_errors"
+    assert state["status"] == writer.last_state()["status"] == expected
+    assert state["run_valid"] is (expected == "completed")
+    assert state["finished_at"] and state["current_phase"] is None
+    assert len(state["items"]) == len(judged_ids) == 10
+    assert set(judged_ids) == {row["qa_id"] for row in rows}
+    assert state["summary"]["judge_valid_count"] == (
+        9 if outcome in {"failed", "missing", "exception"} else 10
+    )
+    assert state["phases"]["aggregate"]["status"] == "done"
+    phase = state["phases"]["qa_eval"]
+    assert phase["status"] == ("done" if expected == "completed" else "partial")
+    assert phase["progress"]["judge_completed"] == 10
+    if expected != "completed":
+        assert phase["failed_count"] == 1
+        assert phase["error_details"][0]["sample_id"] == "q0"
+        assert phase["error_details"][0]["error_type"] == (
+            "agent_error" if outcome in {"step_budget_exhausted", "parse_failure"} else "judge_error"
+        )
+
+
+def test_a_lost_qa_record_fails_the_run_and_preserves_other_records(monkeypatch):
+    execution, _, writer, _, _ = _execution()
+    monkeypatch.setattr(
+        execution, "_evaluate_one", lambda *_: {"qa_id": "wrong-id", "execution_status": "completed"}
+    )
+    state = execution.execute(_request())
+    assert state["status"] == writer.last_state()["status"] == "failed"
+    assert state["failed_phase"] == "qa_eval"
+    assert state["run_valid"] is False
+    assert "QA result integrity" in state["fatal_error"]
+    assert state["items"][0]["qa_id"] == "wrong-id"
+
+
+def test_judge_failure_is_committed_to_raw_metadata_and_list_without_filling_score(tmp_path, monkeypatch):
+    import json
+
+    from photobench.domain.runs.analysis import run_list_entry
+    from photobench.infrastructure.results.store import FileResultWriter, read_entry
+
+    execution, _, _, _, _ = _execution()
+    execution.writer = FileResultWriter(tmp_path)
+    monkeypatch.setattr(
+        execution, "_evaluate_one", lambda row, *_: {"qa_id": row["qa_id"], "execution_status": "completed"}
+    )
+    monkeypatch.setattr(
+        execution,
+        "_build_judge",
+        lambda *_: SimpleNamespace(
+            judge_item=lambda item, *_: {
+                **item,
+                "judge_status": "failed",
+                "judge": {"score": None, "reason": "Judge unavailable"},
+            },
+        ),
+    )
+    state = execution.execute(_request())
+    raw = json.loads((tmp_path / "run_test/run.json").read_text())
+    metadata = read_entry(tmp_path / "run_test")
+    entry = run_list_entry(raw)
+    assert (
+        state["status"] == raw["status"] == metadata["status"] == entry["status"] == "completed_with_errors"
+    )
+    assert raw["items"][0]["judge"]["score"] is None
+    assert raw["phases"]["qa_eval"]["error_details"][0]["error_type"] == "judge_error"
+    assert entry["summary"]["judge_valid_count"] == metadata["summary"]["judge_valid_count"] == 0
+
+
+@pytest.mark.parametrize("answerability", ["unanswerable", "insufficient_evidence"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_refusal_execution_keeps_media_facts_and_marks_metrics_inapplicable(
+    answerability, failed, monkeypatch
+):
+    row = {
+        **_rows()[0],
+        "answerability": answerability,
+        "expected_action": "refuse",
+        "diagnostic_locator_media_refs": [{"media_type": "image", "media_id": "locator.jpg"}],
+    }
+    execution, *_ = _execution()
+    if failed:
+
+        def fail(**kwargs):
+            raise TimeoutError("test timeout")
+
+        monkeypatch.setattr(execution.client, "start_conversation", fail)
+    item = execution._evaluate_one(row, "s", {}, _request())
+    assert item["execution_status"] == ("timeout" if failed else "completed")
+    assert item["retrieval_media_refs"] == [{"media_type": "image", "media_id": "a.jpg"}]
+    assert item["retrieval_metrics_applicable"] is False
+    assert item["diagnostic_locator_media_refs"] == row["diagnostic_locator_media_refs"]
+    for prefix in (
+        "retrieval",
+        "media_retrieval",
+        "image_retrieval",
+        "video_retrieval",
+        "candidate_retrieval",
+    ):
+        for metric in ("precision", "recall", "f1"):
+            assert item[f"{prefix}_{metric}"] is None
+    assert item["image_ranking"] == {}
+
+
+def test_explicit_pipeline_reports_finalization_and_retains_request_on_cancel(monkeypatch):
+    """Asset completion must not finish the pipeline or hide its outstanding HTTP request."""
+    from photobench.application.run_execution.state import RunState
+
+    release = threading.Event()
+    finalizing = threading.Event()
+
+    class BlockingPipeline(FakeSentrixClient):
+        def process_pipeline(self, **kwargs):
+            assert release.wait(3)
+            return {"processed": 2, "memory_graph": {}}
+
+    client = BlockingPipeline(explicit_pipeline=True, assets=_assets())
+    execution, *_ = _execution(client=client)
+    state = RunState(
+        {
+            "run_id": "run_test",
+            "scope_id": "s",
+            "pipeline_asset_ids": ["asset_a", "asset_b"],
+            "phases": {"pipeline_processing": {"status": "running"}},
+        }
+    )
+    execution._state = state
+
+    def observe(_run_id, current):
+        if current.get("phases")["pipeline_processing"]["progress"].get("stage") == "finalizing":
+            finalizing.set()
+
+    monkeypatch.setattr(execution, "_persist", observe)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execution._phase_processing_explicit, state, _request())
+        try:
+            assert finalizing.wait(2)
+            progress = state.get("phases")["pipeline_processing"]["progress"]
+            assert progress["processed"] == progress["total"] == 2
+            assert progress["request_status"] == "running"
+            assert not future.done()
+            state.cancel_event.set()
+            with pytest.raises(RunCancelledError):
+                future.result(timeout=1)
+            assert any(worker.is_alive() for worker in execution._background_threads)
+        finally:
+            release.set()
+            for worker in execution._background_threads:
+                worker.join(timeout=2)
+    assert not any(worker.is_alive() for worker in execution._background_threads)

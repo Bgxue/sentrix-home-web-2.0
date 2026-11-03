@@ -289,6 +289,44 @@ class OpenAIChatModel:
         self._context_tokens = context_tokens
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]) -> ModelReply:
+        return self._complete(messages, tools)
+
+    def complete_structured(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolSpec],
+        *,
+        response_format: Mapping[str, Any],
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+    ) -> ModelReply:
+        """JSON Schema 约束解码。端点不认这两个字段时退回普通请求。
+
+        llama.cpp 在「thinking 开启 + 复杂 schema」下会回 500（peg-native format），
+        vLLM 的 ``response_format`` 支持范围也不一致。规划器把 schema 当**增强**而不是
+        前提：失败一次就退回原路径，不会因为端点不支持而让整轮规划失败。
+        """
+        try:
+            return self._complete(
+                messages,
+                tools,
+                response_format=response_format,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+        except (PromptTooLongError, OutputTruncatedError):
+            # 这两条与 schema 无关，回退普通请求只会再失败一次。
+            raise
+        except ModelServiceError as error:
+            log.warning("端点不接受结构化输出，回退普通请求：%s", error)
+            return self._complete(messages, tools)
+
+    def _complete(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolSpec],
+        *,
+        response_format: Mapping[str, Any] | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+    ) -> ModelReply:
         if not messages or messages[0].role is not ChatRole.SYSTEM:
             raise ChatModelError("对话必须以一条 system 消息开头（严格 chat template 的硬要求）")
         if any(message.role is ChatRole.SYSTEM for message in messages[1:]):
@@ -296,7 +334,13 @@ class OpenAIChatModel:
 
         # 名字先拿到再请求：拿不到就在这里失败，不会带着一个空名字去问端点。
         model_name = self._model.current()
-        response = self._post(model_name, messages, tools)
+        response = self._post(
+            model_name,
+            messages,
+            tools,
+            response_format=response_format,
+            chat_template_kwargs=chat_template_kwargs,
+        )
 
         if response.status_code == 404:
             # 名字对不上时 vLLM 回的就是 404（llama.cpp 不校验名字，这条只在 vLLM 上出现），
@@ -307,7 +351,13 @@ class OpenAIChatModel:
             refreshed = self._model.current()
             if refreshed != model_name:
                 model_name = refreshed
-                response = self._post(model_name, messages, tools)
+                response = self._post(
+                    model_name,
+                    messages,
+                    tools,
+                    response_format=response_format,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
 
         if response.status_code != 200:
             # **先认「这一句是被切断的」。** llama.cpp 解析不了工具调用的参数时会回 500，
@@ -325,16 +375,33 @@ class OpenAIChatModel:
             # （压缩历史再试），而「模型服务不可用」这句话在这里不成立。
             if _is_context_overflow(response):
                 raise PromptTooLongError(
-                    f"提示词超出端点的上下文窗口（{response.status_code}）：{response.text[:200]}"
+                    f"提示词超出端点的上下文窗口（{response.status_code}）：{response.text[:200]}",
+                    diagnostics={
+                        "error_category": "context_window_exceeded",
+                        "http_status": response.status_code,
+                        "request_sent": True,
+                        **response.extensions.get("diagnostics", {}),
+                    },
                 )
             if _is_truncated_tool_call(response):
                 raise OutputTruncatedError(
                     f"模型端点 {self._base_url} 上的 {model_name} 写工具调用时被截断"
-                    f"（{response.status_code}）：{response.text[:200]}"
+                    f"（{response.status_code}）：{response.text[:200]}",
+                    diagnostics={
+                        "error_category": "output_truncated",
+                        "http_status": response.status_code,
+                        "request_sent": True,
+                        **response.extensions.get("diagnostics", {}),
+                    },
                 )
             raise ModelServiceError(
                 f"模型端点 {self._base_url} 上的 {model_name} 返回 {response.status_code}："
-                f"{response.text[:200]}"
+                f"{response.text[:200]}",
+                diagnostics={
+                    "error_category": "service_error",
+                    "http_status": response.status_code,
+                    "request_sent": True,
+                },
             )
 
         try:
@@ -342,7 +409,14 @@ class OpenAIChatModel:
             choice = body["choices"][0]
             message = choice["message"]
         except (ValueError, KeyError, IndexError) as error:
-            raise ModelServiceError(f"模型响应结构不可识别：{response.text[:200]}") from error
+            raise ModelServiceError(
+                f"模型响应结构不可识别：{response.text[:200]}",
+                diagnostics={
+                    "error_category": "response_json_invalid",
+                    "http_status": response.status_code,
+                    "request_sent": True,
+                },
+            ) from error
 
         usage = body.get("usage") or {}
         content, thought = split_thought_channel(str(message.get("content") or ""))
@@ -352,6 +426,13 @@ class OpenAIChatModel:
             log.debug("模型给出了 %d 字的思考通道内容（不展示给用户）", len(thought))
         return ModelReply(
             content=content,
+            diagnostics={
+                "request_sent": True,
+                "http_status": response.status_code,
+                "context_window_tokens": self._context_tokens,
+                "streamed": False,
+                **response.extensions.get("diagnostics", {}),
+            },
             thought=thought,
             tool_calls=_read_tool_calls(message.get("tool_calls")),
             finish_reason=str(choice.get("finish_reason") or ""),
@@ -361,7 +442,13 @@ class OpenAIChatModel:
         )
 
     def _post(
-        self, model_name: str, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
+        self,
+        model_name: str,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolSpec],
+        *,
+        response_format: Mapping[str, Any] | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
         prompt_tokens = self.estimate_prompt_tokens(messages, tools)
         budget = self._max_tokens(messages, tools)
@@ -372,14 +459,28 @@ class OpenAIChatModel:
             # 却什么毛病都没有。真因是**提示词太大**，那是调用方可以处理的（压缩历史）。
             raise PromptTooLongError(
                 f"提示词约 {prompt_tokens} token，单个并发槽的上下文上限 {self._context_tokens}，"
-                f"只剩 {budget} 不足以写完一次工具调用（至少需要 {MIN_USABLE_OUTPUT_TOKENS}）。"
+                f"只剩 {budget} 不足以写完一次工具调用（至少需要 {MIN_USABLE_OUTPUT_TOKENS}）。",
+                diagnostics={
+                    "error_category": "context_output_insufficient",
+                    "request_sent": False,
+                    "prompt_tokens_estimated": prompt_tokens,
+                    "context_window_tokens": self._context_tokens,
+                    "output_budget_tokens": budget,
+                },
             )
         if self.prompt_over_soft_limit(prompt_tokens):
             raise PromptTooLongError(
                 f"提示词约 {prompt_tokens} token，超过软上限 "
                 f"{int(self._context_tokens * PROMPT_COMPACTION_RATIO)}"
                 f"（窗口 {self._context_tokens} 的 {int(PROMPT_COMPACTION_RATIO * 100)}%）；"
-                "先压缩历史再试。"
+                "先压缩历史再试。",
+                diagnostics={
+                    "error_category": "context_soft_limit",
+                    "request_sent": False,
+                    "prompt_tokens_estimated": prompt_tokens,
+                    "context_window_tokens": self._context_tokens,
+                    "output_budget_tokens": budget,
+                },
             )
 
         payload: dict[str, Any] = {
@@ -392,12 +493,33 @@ class OpenAIChatModel:
         if tools:
             payload["tools"] = list(openai_tools(tools))
             payload["tool_choice"] = "auto"
+        if response_format is not None:
+            payload["response_format"] = dict(response_format)
+        if chat_template_kwargs is not None:
+            payload["chat_template_kwargs"] = dict(chat_template_kwargs)
 
         try:
             with httpx.Client(timeout=self._timeout_s) as client:
-                return client.post(f"{self._base_url}/chat/completions", json=payload)
+                response = client.post(f"{self._base_url}/chat/completions", json=payload)
+                response.extensions["diagnostics"] = {
+                    "prompt_tokens_estimated": prompt_tokens,
+                    "context_window_tokens": self._context_tokens,
+                    "output_budget_tokens": budget,
+                }
+                return response
         except httpx.HTTPError as error:
-            raise ModelServiceError(f"模型端点 {self._base_url} 不可达：{error}") from error
+            raise ModelServiceError(
+                f"模型端点 {self._base_url} 不可达：{error}",
+                diagnostics={
+                    "error_category": "request_timeout"
+                    if isinstance(error, httpx.TimeoutException)
+                    else "service_error",
+                    "request_sent": None,
+                    "prompt_tokens_estimated": prompt_tokens,
+                    "context_window_tokens": self._context_tokens,
+                    "output_budget_tokens": budget,
+                },
+            ) from error
 
     def prompt_over_soft_limit(self, prompt_tokens: int) -> bool:
         """估算值超过窗口的 ``PROMPT_COMPACTION_RATIO`` 就要求调用方先压历史。

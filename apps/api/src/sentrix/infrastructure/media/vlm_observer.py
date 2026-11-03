@@ -35,15 +35,20 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import re
+import time
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
+from PIL import Image, ImageOps
 
+from sentrix.domain.assistant.intent import json_output_fact
 from sentrix.domain.assistant.ports import ModelServiceError
 from sentrix.domain.media.models import MODEL_FACT_CONFIDENCE, ObservationFact
 from sentrix.domain.media.ports import ObservationSemantics
@@ -58,6 +63,21 @@ MAX_MODEL_CALLS = 3
 # 1.0 ``normalize_confidence(parsed.get("confidence"), 0.65)``——提示词不要求模型给
 # confidence，所以它是一个常数而不是模型输出。
 OBSERVATION_CONFIDENCE = 0.65
+
+#: 送进视觉模型前把长边压到这个尺寸。**只用于「看图理解」的两条调用**（导入观察与
+#: ``inspect_photo``）；人物识别保持原图，理由见 ``person_vision_model`` 的模块注释。
+#:
+#: 依据是 158 上的实测（3264×2448 的家庭照片，同一套提示词）：
+#: 观察：原图 4,260 prompt token / 48s，1280 长边 1,445 / 24s，1024 长边 1,013 / 22s；
+#: 精读：原图 ~4,100 token / 30–33s，1280 长边 ~1,295 / 7.6–8.8s，1024 长边 ~865 / 5.2–6.7s。
+#: 1024 与 1280 的观察/精读语义一致（certainty 8/8 一致），选 1280 是保守档：
+#: 多花约 1–2s/次，换小字与小物件的余量。全景图（9852×2936）原图出现过解析失败，
+#: 两档缩放都能正常输出。
+#:
+#: 8100 的视觉编码按原图分辨率出 token；服务器侧的 ``--image-max-tokens`` 只截
+#: LLM token，省不掉编码与上传。Mac 的 prefill 只有约 250 tok/s，这一项是导入与
+#: 精读的主要成本。
+IMAGE_MAX_SIDE = 1280
 
 _LANGUAGE_FIELDS = ("caption", "activity", "place", "event_type")
 _TEXT_FIELDS = ("caption", "activity", "place", "event_type", "ocr_text")
@@ -91,13 +111,48 @@ objects、clothing、ocr_text、facts（每项仍只含 subject、predicate、ob
 \n原始观察："""
 
 
-def _encode_image(path: Path) -> str | None:
+def _shrink_image(payload: bytes, mime: str, path: Path, max_side: int) -> tuple[bytes, str]:
+    """把长边压到 ``max_side`` 以内，返回（字节, mime）。
+
+    **已经装得下就原样返回**——重新编码一次只会掉画质，不会更省。
+    缩放失败（坏图、不支持的格式）时也退回原图：观察是增强，不是导入的前置条件。
+    """
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image = ImageOps.exif_transpose(image)
+            if max(image.size) <= max_side:
+                return payload, mime
+            if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+                # JPEG 没有 alpha；透明区按白底合成，而不是变成黑块。
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.split()[-1])
+                image = background
+            else:
+                image = image.convert("RGB")
+            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=85, optimize=True)
+            return out.getvalue(), "image/jpeg"
+    except Exception:  # noqa: BLE001 —— 坏图不该让导入或精读变成失败
+        log.warning("图片缩放失败，按原图发送: %s", path, exc_info=True)
+        return payload, mime
+
+
+def _encode_image(path: Path, *, max_side: int | None = None) -> str | None:
+    """把图片编码成 data URL；给了 ``max_side`` 就先把长边压到它以内。
+
+    ``max_side=None`` 保持原图字节与按后缀定的 mime——人物识别那条通道依赖这个
+    默认值（它的模块注释里写着「图像不再下采样」是照 1.0 的）。
+    """
     try:
         payload = path.read_bytes()
     except OSError as error:
         log.warning("观察用的图片读不了: %s (%s)", path, error)
         return None
     mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    if max_side is not None:
+        payload, mime = _shrink_image(payload, mime, path, max_side)
     return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
 
 
@@ -185,6 +240,7 @@ def chat_json(
     prompt: str,
     image: str | Sequence[str] | None,
     timeout_s: float,
+    observations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """一次「提示词（+ 一张或多张图）→ JSON 对象」的往返。任何失败都返回 ``None``。
 
@@ -202,19 +258,56 @@ def chat_json(
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for url in [image] if isinstance(image, str) else list(image or ()):
         content.append({"type": "image_url", "image_url": {"url": url}})
+    fact: dict[str, Any] = {
+        "call_id": uuid.uuid4().hex,
+        "status": "error",
+        "role": "tool_internal",
+        "json_output": json_output_fact(),
+        "diagnostics": {"request_sent": False},
+    }
+    started = time.perf_counter()
     try:
         body = {
             "model": model.current(),
             "messages": [{"role": "user", "content": content}],
             "max_tokens": MAX_ANSWER_TOKENS,
         }
+        fact["diagnostics"]["request_sent"] = None
         response = httpx.post(endpoint, json=body, timeout=timeout_s)
+        fact["diagnostics"].update(request_sent=True, http_status=response.status_code)
         response.raise_for_status()
         payload = response.json()
+        raw_content = _first_content(payload)
+        fact["json_output"] = json_output_fact(raw_content)
+        parsed = parse_json_object(raw_content)
+        fact.update(status="complete" if parsed is not None else "error", model=body["model"])
+        if parsed is None:
+            fact.update(error_type="ModelOutputFormatError", error="vision model output is not a JSON object")
+            fact["diagnostics"]["error_category"] = "model_output_format"
+        if isinstance(payload, dict):
+            fact.update(
+                {
+                    k: v
+                    for k, v in (payload.get("usage") or {}).items()
+                    if k in {"prompt_tokens", "completion_tokens"}
+                }
+            )
+        return parsed
     except (httpx.HTTPError, ModelServiceError, ValueError) as error:
+        fact.update(error_type=type(error).__name__, error=str(error))
+        fact["diagnostics"]["error_category"] = (
+            "request_timeout"
+            if isinstance(error, httpx.TimeoutException)
+            else "response_json_invalid"
+            if isinstance(error, ValueError)
+            else "service_error"
+        )
         log.warning("视觉调用失败，本次结果跳过: %s", error)
         return None
-    return parse_json_object(_first_content(payload))
+    finally:
+        fact["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        if observations is not None:
+            observations.append(fact)
 
 
 class OpenAIVlmObserver:
@@ -231,7 +324,7 @@ class OpenAIVlmObserver:
         return self._model.current()
 
     def observe(self, path: Path) -> ObservationSemantics | None:
-        image = _encode_image(Path(path))
+        image = _encode_image(Path(path), max_side=IMAGE_MAX_SIDE)
         if image is None:
             return None
 

@@ -16,11 +16,19 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 
+from sentrix.application.assistant.debug_trace import (
+    chat_messages_payload,
+    model_reply_payload,
+)
 from sentrix.domain.assistant.judge import JudgeVerdict, build_messages, parse_verdict, verdict_from_payload
-from sentrix.domain.assistant.models import ChatMessage, ChatRole
+from sentrix.domain.assistant.models import ChatMessage, ChatRole, ModelReply
 from sentrix.domain.assistant.ports import ChatModel
+from sentrix.domain.media.progress import OperationCancelled
 
 log = logging.getLogger("sentrix.assistant.judge")
 
@@ -35,19 +43,56 @@ class FaithfulnessJudge:
         query: str,
         answer: str,
         transcript: Sequence[ChatMessage],
+        complete: Callable[[Sequence[ChatMessage]], ModelReply] | None = None,
+        include_debug: bool = False,
+        step_id: str = "judge",
     ) -> JudgeVerdict:
-        """评审一次。任何失败都返回「忠实」——这是 1.0 的 fail-open 口径。"""
+        """评审一次。任何失败都返回「忠实」——这是 1.0 的 fail-open 口径。
+
+        ``include_debug`` 只影响**记录**，不影响裁决：即使评审调用失败，也会留下
+        「发出去的是什么」这一条，否则一次 fail-open 在轨迹里会像「从未评审过」。
+        """
         call = build_messages(
             query=query,
             answer=answer,
             transcript=[{"role": message.role.value, "content": message.content} for message in transcript],
         )
         messages = [ChatMessage(ChatRole(str(item["role"])), str(item["content"])) for item in call.messages]
+        started = time.perf_counter()
+        debug_call: dict[str, Any] | None = None
+        if include_debug:
+            debug_call = {
+                "step_id": step_id,
+                "call_type": "faithfulness_judge",
+                "attempt": 1,
+                "started_at": datetime.now(UTC).isoformat(),
+                "status": "error",
+                "messages": chat_messages_payload(messages),
+                "tools": [],
+                "response": None,
+            }
         try:
             # 评审不带工具：它要的是一段裁决 JSON，不是一次工具往返。
-            reply = self._model.complete(messages, ())
-        except Exception:
+            reply = complete(messages) if complete is not None else self._model.complete(messages, ())
+        except OperationCancelled:
+            raise
+        except Exception as error:
             log.warning("L2 评审调用失败，按忠实放行", exc_info=True)
-            return JudgeVerdict()
+            if debug_call is not None:
+                debug_call.update(
+                    error_type=type(error).__name__,
+                    error=str(error),
+                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                )
+            return JudgeVerdict(debug_call=debug_call)
+        if debug_call is not None:
+            debug_call.update(
+                status="complete",
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                finish_reason=reply.finish_reason,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                response=model_reply_payload(reply),
+            )
         payload: Mapping[str, object] | None = parse_verdict(reply.content or "")
-        return verdict_from_payload(payload)
+        return verdict_from_payload(payload, debug_call=debug_call)

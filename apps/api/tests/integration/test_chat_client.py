@@ -46,6 +46,8 @@ class _Handler(BaseHTTPRequestHandler):
     # "type":"NotFoundError","code":404}}``）。llama.cpp 不校验名字，所以它没有这一条
     # ——这里选严的那个，宽的那个（不校验）是它的子集。
     served: list[str] = ["test-model"]
+    #: 模拟「端点不认 response_format」：只拒绝带结构化字段的那次请求。
+    reject_structured: bool = False
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的接口
         payload = json.dumps(self._models()).encode()
@@ -61,6 +63,9 @@ class _Handler(BaseHTTPRequestHandler):
                 {"error": {"message": message, "type": "NotFoundError", "code": 404}}
             ).encode()
             self._send(payload, 404)
+            return
+        if body.get("response_format") and type(self).reject_structured:
+            self._send(b'{"error":"response_format is not supported"}', 400)
             return
         self._send(json.dumps(type(self).response).encode(), type(self).status)
 
@@ -97,6 +102,7 @@ def _reset_handler() -> None:
     _Handler.response = {}
     _Handler.status = 200
     _Handler.served = ["test-model"]
+    _Handler.reject_structured = False
 
 
 def chat_model(server: str) -> OpenAIChatModel:
@@ -131,12 +137,46 @@ def messages() -> list[ChatMessage]:
     ]
 
 
+def test_structured_completion_sends_schema_and_template_kwargs(server: str):
+    _Handler.response = reply('{"ok": true}')
+
+    result = chat_model(server).complete_structured(
+        messages(),
+        (),
+        response_format={"type": "json_schema", "json_schema": {"name": "x", "schema": {}}},
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    assert result.content == '{"ok": true}'
+    body = _Handler.received[-1]["body"]
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_structured_completion_falls_back_when_the_endpoint_rejects_it(server: str):
+    _Handler.response = reply("普通回答")
+    _Handler.reject_structured = True
+
+    result = chat_model(server).complete_structured(
+        messages(),
+        (),
+        response_format={"type": "json_schema", "json_schema": {"name": "x", "schema": {}}},
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    assert result.content == "普通回答"
+    assert len(_Handler.received) == 2
+    assert "response_format" in _Handler.received[0]["body"]
+    assert "response_format" not in _Handler.received[1]["body"]
+
+
 def test_a_plain_reply_is_parsed(server: str):
     _Handler.response = reply("这是你要的海边照片。")
 
     result = chat_model(server).complete(messages(), TOOL_SPECS)
 
     assert result.content == "这是你要的海边照片。"
+    assert result.diagnostics["streamed"] is False
     assert result.tool_calls == ()
     assert result.wants_tools is False
     assert (result.prompt_tokens, result.completion_tokens) == (11, 3)
@@ -636,3 +676,22 @@ def test_an_answer_without_any_channel_is_untouched(server: str):
 
     assert result.content == "  这是你要的海边照片。  "
     assert result.thought == ""
+
+
+def test_diagnostics_preserve_actual_tokens_and_preflight_does_not_send(server: str):
+    _Handler.response = reply("answer")
+    result = context_model(server).complete(messages(), ())
+    assert result.prompt_tokens == 11 and result.completion_tokens == 3
+    assert result.diagnostics["request_sent"] is True
+    assert result.diagnostics["http_status"] == 200
+    assert result.diagnostics["context_window_tokens"] == CONTEXT_TOKENS
+    assert result.diagnostics["output_budget_tokens"] > 0
+    before = len(_Handler.received)
+    with pytest.raises(PromptTooLongError) as exc:
+        context_model(server).complete(
+            [ChatMessage(ChatRole.SYSTEM, "系统"), ChatMessage(ChatRole.USER, "问" * 20000)], ()
+        )
+    assert len(_Handler.received) == before
+    assert exc.value.diagnostics["request_sent"] is False
+    assert exc.value.diagnostics["error_category"] == "context_output_insufficient"
+    assert exc.value.diagnostics["prompt_tokens_estimated"] > CONTEXT_TOKENS

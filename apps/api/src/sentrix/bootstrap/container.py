@@ -47,6 +47,7 @@ from sentrix.domain.media.ports import (
     MediaStorage,
     MetadataReader,
     ObservationRepository,
+    OperationControl,
     PhotoInspector,
     PreviewEncoder,
     VideoKeyframeExtractor,
@@ -86,6 +87,7 @@ from sentrix.infrastructure.media.audio_metadata import FfprobeAudioMetadataRead
 from sentrix.infrastructure.media.image_io import PillowPreviewEncoder
 from sentrix.infrastructure.media.import_progress import InProcessImportProgressStore
 from sentrix.infrastructure.media.metadata import PillowMetadataReader
+from sentrix.infrastructure.media.operations import InProcessOperationControl
 from sentrix.infrastructure.media.person_vision import (
     PillowPersonCropRenderer,
     PillowPersonPreviewRenderer,
@@ -169,6 +171,7 @@ class Container:
 
     spaces: SpaceRepository
 
+    operation_control: OperationControl
     import_progress: ImportProgressStore
     asset_repository: AssetRepository
     observation_repository: ObservationRepository
@@ -326,6 +329,17 @@ class Container:
             visual_embedder = wemm_embedder
             text_embedder = wemm_embedder
             embedding_health = wemm_embedder
+        # **启动时推理测试**：2026-10-29 的教训——CLIP 侧车缺 `from PIL import Image`，
+        # `/health` 返回 ok，但实际推理时 NameError。健康检查只验证服务活着，
+        # 发现不了功能 broken。现在启动时做一次真实推理，确认端到端可用。
+        # 失败则 API 启动失败，明确报错。
+        smoke_ok, smoke_error = embedding_health.smoke_test()
+        if not smoke_ok:
+            raise RuntimeError(
+                f"嵌入方案启动测试失败（embedding_scheme={settings.embedding_scheme}）: "
+                f"{smoke_error}。请检查嵌入侧车是否正常，代码是否有语法/import 错误。"
+            )
+        log.info("嵌入方案启动测试通过（%s）", settings.embedding_scheme)
         log.info(
             "嵌入方案=%s 视觉=%s/%sd 文本=%s/%sd",
             settings.embedding_scheme,
@@ -352,6 +366,7 @@ class Container:
             build_revision=read_build_revision(),
             settings=settings,
             database=database,
+            operation_control=InProcessOperationControl(),
             import_progress=InProcessImportProgressStore(),
             spaces=SqliteSpaceRepository(database),
             asset_repository=assets,
